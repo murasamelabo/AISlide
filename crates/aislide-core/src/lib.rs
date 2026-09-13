@@ -6,6 +6,17 @@ pub mod report;
 pub mod pptx;
 pub mod protocol;
 pub mod generation;
+mod charts;
+pub mod media;
+pub mod graphics;
+pub mod sources;
+pub mod data_report;
+pub mod document;
+mod canonical;
+pub mod layout;
+pub mod import;
+pub mod extraction;
+pub mod publication;
 pub use protocol::execute_request;
 
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +31,8 @@ pub enum Error {
 	Conflict(String),
 	#[error("Generation: {0}")]
 	Generation(String),
+	#[error("Generation: {0}")]
+	ModelOutput(String),
 	#[error("Archive: {0}")]
 	Zip(#[from] zip::result::ZipError),
 	#[error("I/O: {0}")]

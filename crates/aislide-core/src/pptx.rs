@@ -2,6 +2,7 @@
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use xmlwriter::{Options, Indent, XmlWriter};
+use base64::{Engine, engine::general_purpose::STANDARD};
 
 const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
 const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
@@ -9,7 +10,7 @@ const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relations
 const REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 const CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 
-fn xml(root: &str, build: impl FnOnce(&mut XmlWriter)) -> Vec<u8> {
+pub(crate) fn xml(root: &str, build: impl FnOnce(&mut XmlWriter)) -> Vec<u8> {
     let mut writer = XmlWriter::new(Options { indent: Indent::None, ..Options::default() });
     writer.start_element(root);
     writer.write_attribute("xmlns:p", P);
@@ -20,7 +21,7 @@ fn xml(root: &str, build: impl FnOnce(&mut XmlWriter)) -> Vec<u8> {
     writer.end_document().into_bytes()
 }
 
-fn empty(writer: &mut XmlWriter, name: &str, attrs: &[(&str, &str)]) {
+pub(crate) fn empty(writer: &mut XmlWriter, name: &str, attrs: &[(&str, &str)]) {
     writer.start_element(name);
     for (key, value) in attrs { writer.write_attribute(key, &quick_xml::escape::escape(*value)); }
     writer.end_element();
@@ -42,7 +43,7 @@ fn group(writer: &mut XmlWriter) {
     writer.end_element();
 }
 
-fn color(writer: &mut XmlWriter, value: &str) {
+pub(crate) fn color(writer: &mut XmlWriter, value: &str) {
     writer.start_element("a:solidFill");
     empty(writer, "a:srgbClr", &[("val", value)]);
     writer.end_element();
@@ -93,8 +94,52 @@ fn text_body(writer: &mut XmlWriter, name: &str, text: &str, size: f64, shade: &
     writer.end_element();
 }
 
-fn shape(writer: &mut XmlWriter, element: &Element, id: usize) {
+fn shape(writer: &mut XmlWriter, element: &Element, id: usize, ids: &BTreeMap<&str, usize>) {
     let (name, x, y, width, height) = element.bounds();
+    if let Element::Group { view_width, view_height, children, .. } = element {
+        writer.start_element("p:grpSp"); writer.start_element("p:nvGrpSpPr");
+        empty(writer, "p:cNvPr", &[("id", &id.to_string()), ("name", name)]); empty(writer, "p:cNvGrpSpPr", &[]); empty(writer, "p:nvPr", &[]); writer.end_element();
+        writer.start_element("p:grpSpPr"); writer.start_element("a:xfrm");
+        empty(writer, "a:off", &[("x", &emu(x)), ("y", &emu(y))]); empty(writer, "a:ext", &[("cx", &emu(width)), ("cy", &emu(height))]);
+        empty(writer, "a:chOff", &[("x", "0"), ("y", "0")]); empty(writer, "a:chExt", &[("cx", &emu(*view_width)), ("cy", &emu(*view_height))]); writer.end_element(); writer.end_element();
+        for child in children { shape(writer, child, ids[child.bounds().0], ids); }
+        writer.end_element(); return;
+    }
+    if let Element::Picture { alt, crop, .. } = element {
+        writer.start_element("p:pic"); writer.start_element("p:nvPicPr");
+        empty(writer, "p:cNvPr", &[("id", &id.to_string()), ("name", name), ("descr", alt)]);
+        writer.start_element("p:cNvPicPr"); empty(writer, "a:picLocks", &[("noChangeAspect", "1")]); writer.end_element(); empty(writer, "p:nvPr", &[]); writer.end_element();
+        writer.start_element("p:blipFill"); empty(writer, "a:blip", &[("r:embed", &format!("rIdShape{id}"))]);
+        empty(writer, "a:srcRect", &[("l", &(crop.left * 100000.0).round().to_string()), ("t", &(crop.top * 100000.0).round().to_string()), ("r", &(crop.right * 100000.0).round().to_string()), ("b", &(crop.bottom * 100000.0).round().to_string())]);
+        writer.start_element("a:stretch"); empty(writer, "a:fillRect", &[]); writer.end_element(); writer.end_element();
+        writer.start_element("p:spPr"); transform(writer, "a:xfrm", x, y, width, height);
+        writer.start_element("a:prstGeom"); writer.write_attribute("prst", "rect"); empty(writer, "a:avLst", &[]); writer.end_element(); writer.end_element(); writer.end_element(); return;
+    }
+    if let Element::Connector { color: shade, stroke_width, arrow, flip_v, start, end, .. } = element {
+        writer.start_element("p:cxnSp"); writer.start_element("p:nvCxnSpPr"); empty(writer, "p:cNvPr", &[("id", &id.to_string()), ("name", name)]);
+        writer.start_element("p:cNvCxnSpPr");
+        for (tag, connection) in [("a:stCxn", start), ("a:endCxn", end)] {
+            if let Some(connection) = connection { empty(writer, tag, &[("id", &ids[connection.element_id.as_str()].to_string()), ("idx", &connection.site.to_string())]); }
+        }
+        writer.end_element(); empty(writer, "p:nvPr", &[]); writer.end_element();
+        writer.start_element("p:spPr"); writer.start_element("a:xfrm");
+        if *flip_v { writer.write_attribute("flipV", "1"); }
+        empty(writer, "a:off", &[("x", &emu(x)), ("y", &emu(y))]); empty(writer, "a:ext", &[("cx", &emu(width)), ("cy", &emu(height))]); writer.end_element();
+        writer.start_element("a:prstGeom"); writer.write_attribute("prst", "line"); empty(writer, "a:avLst", &[]); writer.end_element();
+        writer.start_element("a:ln"); writer.write_attribute("w", &emu(*stroke_width)); color(writer, shade); empty(writer, "a:prstDash", &[("val", "solid")]);
+        if *arrow { empty(writer, "a:tailEnd", &[("type", "triangle")]); }
+        writer.end_element(); writer.end_element(); writer.end_element(); return;
+    }
+    if let Element::Chart { .. } = element {
+        writer.start_element("p:graphicFrame"); writer.start_element("p:nvGraphicFramePr");
+        empty(writer, "p:cNvPr", &[("id", &id.to_string()), ("name", name)]);
+        empty(writer, "p:cNvGraphicFramePr", &[]); empty(writer, "p:nvPr", &[]); writer.end_element();
+        transform(writer, "p:xfrm", x, y, width, height);
+        writer.start_element("a:graphic"); writer.start_element("a:graphicData"); writer.write_attribute("uri", crate::charts::CHART_NS);
+        empty(writer, "c:chart", &[("xmlns:c", crate::charts::CHART_NS), ("r:id", &format!("rIdShape{id}"))]);
+        writer.end_element(); writer.end_element(); writer.end_element();
+        return;
+    }
     if let Element::Table { rows, font_size, .. } = element {
         writer.start_element("p:graphicFrame");
         writer.start_element("p:nvGraphicFramePr");
@@ -118,7 +163,7 @@ fn shape(writer: &mut XmlWriter, element: &Element, id: usize) {
                 writer.start_element("a:tc");
                 text_body(writer, "a:txBody", cell, *font_size, if row_index == 0 { "FFFFFF" } else { "202525" }, row_index == 0);
                 writer.start_element("a:tcPr");
-                for key in ["marL", "marR", "marT", "marB"] { writer.write_attribute(key, "101600"); }
+                for key in ["marL", "marR", "marT", "marB"] { writer.write_attribute(key, "57150"); }
                 color(writer, if row_index == 0 { "087F73" } else if row_index % 2 == 0 { "EDF3F0" } else { "FFFFFF" });
                 writer.end_element();
                 writer.end_element();
@@ -243,19 +288,48 @@ pub fn export_pptx(deck: &Deck) -> Result<Vec<u8>> {
         writer.start_element("p:cSld"); writer.start_element("p:spTree"); group(writer); writer.end_element(); writer.end_element(); clr_map(writer);
     }));
     parts.insert("ppt/notesMasters/_rels/notesMaster1.xml.rels".into(), rels(&[("rId1", "theme", "../theme/theme2.xml".into())]));
+    let mut chart_number = 0;
+    let mut picture_number = 0;
+    let mut extra_types = Vec::new();
     for (index, slide) in deck.slides.iter().enumerate() {
         let number = index + 1;
+        let flat_elements = crate::model::element_list(&slide.elements);
+        let ids: BTreeMap<&str, usize> = flat_elements.iter().enumerate().map(|(position, element)| (element.bounds().0, position + 2)).collect();
         let path = format!("ppt/slides/slide{number}.xml");
         parts.insert(path.clone(), xml("p:sld", |writer| {
             writer.start_element("p:cSld"); writer.write_attribute("name", &quick_xml::escape::escape(&slide.title));
             writer.start_element("p:bg"); writer.start_element("p:bgPr"); color(writer, &slide.background); empty(writer, "a:effectLst", &[]); writer.end_element(); writer.end_element();
             writer.start_element("p:spTree"); group(writer);
-            for (element_index, element) in slide.elements.iter().enumerate() { shape(writer, element, element_index + 2); }
+            for element in &slide.elements { shape(writer, element, ids[element.bounds().0], &ids); }
             writer.end_element(); writer.end_element();
             writer.start_element("p:clrMapOvr"); empty(writer, "a:masterClrMapping", &[]); writer.end_element();
         }));
         overrides.push((path, "slide"));
-        parts.insert(format!("ppt/slides/_rels/slide{number}.xml.rels"), rels(&[("rId1", "slideLayout", "../slideLayouts/slideLayout1.xml".into()), ("rId2", "notesSlide", format!("../notesSlides/notesSlide{number}.xml"))]));
+        let mut extras = Vec::new();
+        for (element_index, element) in flat_elements.iter().enumerate() {
+            if let Element::Chart { kind, categories, series, .. } = element {
+                chart_number += 1;
+                let chart_path = format!("ppt/charts/chart{chart_number}.xml");
+                let workbook_path = format!("ppt/embeddings/chart{chart_number}.xlsx");
+                parts.insert(chart_path.clone(), crate::charts::chart(*kind, categories, series));
+                parts.insert(workbook_path.clone(), crate::charts::workbook(categories, series)?);
+                parts.insert(format!("ppt/charts/_rels/chart{chart_number}.xml.rels"), rels(&[("rIdWorkbook", "package", format!("../embeddings/chart{chart_number}.xlsx"))]));
+                extra_types.push((chart_path, "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"));
+                extra_types.push((workbook_path, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+                extras.push((format!("rIdShape{}", element_index + 2), "chart", format!("../charts/chart{chart_number}.xml")));
+            }
+            if let Element::Picture { base64, mime_type, .. } = element {
+                picture_number += 1;
+                let extension = if mime_type == "image/png" { "png" } else { "jpg" };
+                let media_path = format!("ppt/media/image{picture_number}.{extension}");
+                parts.insert(media_path.clone(), STANDARD.decode(base64).map_err(|_| Error::Invalid("invalid image base64".into()))?);
+                extra_types.push((media_path, mime_type.as_str()));
+                extras.push((format!("rIdShape{}", element_index + 2), "image", format!("../media/image{picture_number}.{extension}")));
+            }
+        }
+        let mut slide_relationships = vec![("rId1", "slideLayout", "../slideLayouts/slideLayout1.xml".into()), ("rId2", "notesSlide", format!("../notesSlides/notesSlide{number}.xml"))];
+        slide_relationships.extend(extras.iter().map(|(id, kind, target)| (id.as_str(), *kind, target.clone())));
+        parts.insert(format!("ppt/slides/_rels/slide{number}.xml.rels"), rels(&slide_relationships));
         let notes_path = format!("ppt/notesSlides/notesSlide{number}.xml");
         parts.insert(notes_path.clone(), xml("p:notes", |writer| {
             writer.start_element("p:cSld"); writer.start_element("p:spTree"); group(writer);
@@ -279,6 +353,7 @@ pub fn export_pptx(deck: &Deck) -> Result<Vec<u8>> {
     }
     empty(&mut content_types, "Override", &[("PartName", "/ppt/theme/theme1.xml"), ("ContentType", "application/vnd.openxmlformats-officedocument.theme+xml")]);
     empty(&mut content_types, "Override", &[("PartName", "/ppt/theme/theme2.xml"), ("ContentType", "application/vnd.openxmlformats-officedocument.theme+xml")]);
+    for (part, content_type) in extra_types { empty(&mut content_types, "Override", &[("PartName", &format!("/{part}")), ("ContentType", content_type)]); }
     content_types.end_element();
     parts.insert("[Content_Types].xml".into(), content_types.end_document().into_bytes());
     Package::from_parts(parts)?.save()
@@ -291,7 +366,7 @@ pub struct InspectedSlide { pub part: String, pub texts: Vec<InspectedText> }
 #[derive(Debug, Serialize)]
 pub struct InspectedText { pub shape_id: String, pub run_index: usize, pub text: String }
 
-fn parse(value: &str) -> Result<roxmltree::Document<'_>> {
+pub(crate) fn parse(value: &str) -> Result<roxmltree::Document<'_>> {
     if value.len() > 4 * 1024 * 1024 { return Err(Error::Limit("XML part > 4 MiB".into())); }
     let document = roxmltree::Document::parse_with_options(value, roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: 100_000, ..Default::default() })?;
     if document.descendants().any(|node| node.ancestors().take(66).count() > 64) { return Err(Error::Limit("XML depth > 64".into())); }
@@ -312,7 +387,7 @@ fn resolve(source: &str, target: &str) -> Result<String> {
     Ok(components.join("/"))
 }
 
-fn relationship_targets(package: &Package, source: &str, kind: &str) -> Result<BTreeMap<String, String>> {
+pub(crate) fn relationship_targets(package: &Package, source: &str, kind: &str) -> Result<BTreeMap<String, String>> {
     let path = if source.is_empty() { "_rels/.rels".into() } else if let Some((dir, name)) = source.rsplit_once('/') { format!("{dir}/_rels/{name}.rels") } else { format!("_rels/{source}.rels") };
     let document = parse(package.text(&path)?)?;
     if !document.root_element().has_tag_name((REL, "Relationships")) { return Err(Error::Invalid("relationships root".into())); }
@@ -331,7 +406,7 @@ fn relationship_targets(package: &Package, source: &str, kind: &str) -> Result<B
     Ok(targets)
 }
 
-fn slide_paths(package: &Package) -> Result<Vec<String>> {
+pub(crate) fn slide_paths(package: &Package) -> Result<Vec<String>> {
     let roots = relationship_targets(package, "", "officeDocument")?;
     if roots.len() != 1 { return Err(Error::Invalid("expected one officeDocument".into())); }
     let main = roots.values().next().ok_or_else(|| Error::Invalid("missing presentation".into()))?;

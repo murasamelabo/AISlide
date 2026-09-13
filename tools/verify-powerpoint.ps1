@@ -2,7 +2,14 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Path,
-    [int]$ExpectedSlides = 12
+    [int]$ExpectedSlides = 12,
+    [int]$ExpectedCharts = 0,
+    [int]$ExpectedPictures = 0,
+    [int]$ExpectedGroups = 0,
+    [int]$ExpectedConnectors = 0,
+    [int]$MinimumTables = 1,
+    [switch]$VerifyChartData,
+    [int[]]$CaptureSlides = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,10 +23,18 @@ $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ('AISlide-verify-' + [g
 $copy = Join-Path $temporary 'verification-copy.pptx'
 Copy-Item -LiteralPath $source -Destination $copy
 $hadPowerPoint = @(Get-Process -Name POWERPNT -ErrorAction SilentlyContinue).Count -gt 0
+$hadExcel = @(Get-Process -Name EXCEL -ErrorAction SilentlyContinue).Count -gt 0
 $application = $null
 $presentation = $null
 $priorSecurity = $null
 $stage = 'COM activation'
+function Get-VerificationShape {
+    param([object]$Shapes)
+    foreach ($item in $Shapes) {
+        Write-Output -NoEnumerate $item
+        if ($item.Type -eq 6) { Get-VerificationShape -Shapes $item.GroupItems }
+    }
+}
 try {
     $application = New-Object -ComObject PowerPoint.Application
     $stage = 'macro security configuration'
@@ -32,24 +47,73 @@ try {
     $textShapes = 0
     $tables = 0
     $notes = 0
+    $charts = 0
+    $pictures = 0
+    $groups = 0
+    $connectors = 0
+    $editedWorkbooks = 0
     foreach ($slide in $presentation.Slides) {
-        foreach ($shape in $slide.Shapes) {
+        foreach ($shape in (Get-VerificationShape -Shapes $slide.Shapes)) {
             if ($shape.HasTextFrame -eq -1) { $textShapes++ }
             if ($shape.HasTable -eq -1) { $tables++ }
+            if ($shape.Type -eq 13) { $pictures++ }
+            if ($shape.Type -eq 6) { $groups++ }
+            if ($shape.Connector -eq -1) { $connectors++ }
+            if ($shape.HasChart -eq -1) {
+                $charts++
+                if ($VerifyChartData) {
+                    $stage = 'editing a chart workbook in the disposable presentation'
+                    if ($shape.Chart.ChartData.IsLinked) { throw 'Chart data must be embedded, not externally linked' }
+                    $workbook = $null
+                    $excel = $null
+                    try {
+                        $shape.Chart.ChartData.Activate()
+                        $workbook = $shape.Chart.ChartData.Workbook
+                        $excel = $workbook.Application
+                        $cell = $workbook.Worksheets.Item(1).Range('B2')
+                        $originalValue = [double]$cell.Value2
+                        $cell.Value2 = $originalValue + 1
+                        if ([double]$cell.Value2 -ne $originalValue + 1) { throw 'Embedded chart data did not accept an edit' }
+                        $cell.Value2 = $originalValue
+                        $editedWorkbooks++
+                    } finally {
+                        if ($null -ne $workbook) { $workbook.Close($false); [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($workbook) }
+                        if ($null -ne $excel) {
+                            if (-not $hadExcel) { $excel.Quit() }
+                            [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($excel)
+                        }
+                    }
+                }
+            }
         }
         foreach ($shape in $slide.NotesPage.Shapes) {
             if ($shape.HasTextFrame -eq -1 -and $shape.TextFrame.HasText -eq -1) { $notes++ }
         }
     }
-    if ($textShapes -lt 12 -or $tables -lt 1 -or $notes -lt 12) { throw 'Native object or notes inspection failed' }
+    if ($textShapes -lt $ExpectedSlides -or $tables -lt $MinimumTables -or $notes -lt $ExpectedSlides) { throw 'Native object or notes inspection failed' }
+    if ($charts -ne $ExpectedCharts -or $pictures -ne $ExpectedPictures) { throw 'Unexpected native chart or picture count' }
+    if ($groups -ne $ExpectedGroups -or $connectors -ne $ExpectedConnectors) { throw 'Unexpected native group or connector count' }
+    if ($VerifyChartData -and $editedWorkbooks -ne $ExpectedCharts) { throw 'Chart workbook editing verification incomplete' }
     $stage = 'slide PNG export'
     $presentation.Slides.Item(1).Export((Join-Path $temporary 'cover.png'), 'PNG', 1280, 720)
     $presentation.Slides.Item(4).Export((Join-Path $temporary 'table.png'), 'PNG', 1280, 720)
+    if ($ExpectedCharts -gt 0) { $presentation.Slides.Item(5).Export((Join-Path $temporary 'chart.png'), 'PNG', 1280, 720) }
+    if ($ExpectedGroups -gt 0) { $presentation.Slides.Item(8).Export((Join-Path $temporary 'diagram.png'), 'PNG', 1280, 720) }
+    if ($ExpectedPictures -gt 0) { $presentation.Slides.Item(11).Export((Join-Path $temporary 'picture.png'), 'PNG', 1280, 720) }
+    foreach ($slideNumber in $CaptureSlides) {
+        if ($slideNumber -lt 1 -or $slideNumber -gt $presentation.Slides.Count) { throw 'Capture slide number is outside presentation' }
+        $presentation.Slides.Item($slideNumber).Export((Join-Path $temporary ('slide-{0:d2}.png' -f $slideNumber)), 'PNG', 1280, 720)
+    }
     $captureCount = @(Get-ChildItem -LiteralPath $temporary -Filter '*.png').Count
     [pscustomobject]@{
         Slides = $presentation.Slides.Count
         TextShapes = $textShapes
         Tables = $tables
+        Charts = $charts
+        Pictures = $pictures
+        Groups = $groups
+        Connectors = $connectors
+        EmbeddedWorkbooksEdited = $editedWorkbooks
         NoteTextShapes = $notes
         Captures = $captureCount
         ArtifactDirectory = $temporary
@@ -60,6 +124,7 @@ try {
     throw "PowerPoint verification failed during ${stage}: $($_.Exception.Message)"
 } finally {
     if ($null -ne $presentation) {
+        $presentation.Saved = -1
         $presentation.Close()
         [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($presentation)
     }

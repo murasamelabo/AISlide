@@ -1,8 +1,8 @@
 ﻿# AISlide Implementation
 
-## First Vertical Slice
+## Research PoC
 
-Status: first working slice implemented and exercised. The twelve-week PoC is a roadmap, not a completed feature set. See [verification evidence](testing/first-slice.md).
+The initial slice has been extended across the three research proofs. See the [PoC tracker](poc-status.md), [support matrix](support-matrix.md), [API contracts](api.md) and [acceptance evidence](testing/poc.md). Arbitrary PowerPoint feature parity and production readiness are not established.
 
 - Independently implement PresentationML with generic ZIP/XML libraries. Do not copy an existing PPTX engine.
 - Use a Rust core shared by a headless command line, MCP, and the Tauri editor.
@@ -16,11 +16,13 @@ Status: first working slice implemented and exercised. The twelve-week PoC is a 
 
 `crates/aislide-core` owns the bounded package container, strict scene/report models, deterministic layouts, native PPTX generation, simple imported text patches, and JSON operation dispatch. `crates/aislide-cli` and the Tauri shell both call that core. The official-SDK MCP server and the development HTTP adapter invoke the CLI through a bounded fixed-executable bridge.
 
-Studio supports report JSON compilation, model draft generation and review, scene checkpoints, manual text/geometry/style edits, slide ordering/duplication, Undo/Redo, PPTX export, and an imported-text inspector. Tables are native `a:tbl` objects; no charts or images are simulated as equivalent supported objects.
+Studio supports structured reports, model drafts, source mapping, source-bound project checkpoints, text/geometry/style edits, native chart data, pictures/crop, process groups, Undo/Redo, measured layout checks and bounded native import. Charts are real DrawingML chart parts with editable embedded XLSX; pictures and connectors are native objects, not slide screenshots.
 
 `generation.rs` owns the OpenAI-compatible transport, operator-only provider configuration, remote consent policy, bounded response parsing, report compilation and unverified provenance. It exposes synchronous CLI and asynchronous Tauri entry points. Studio applies a draft only after confirmation; MCP creates a separate in-memory deck. Cancellation drops the Rust HTTP future in the native app, or terminates the fixed CLI process in the development/MCP adapters. Native cancellation is scoped to the requesting window and operation ID.
 
-Generation is not an agent loop: there are no model tools, browsing, external file reads, retries, or provider fallbacks. The model produces strict report JSON, not executable source or OOXML. Source text is untrusted input. Structural validation and a source hash do not prove factual accuracy. Integration tests use synthetic HTTP fixtures; real provider qualification remains open.
+Generation is a bounded structured-output workflow, not an autonomous agent loop. It has no model tools, browsing or external file access. HTTP errors are not retried. A user may explicitly allow one report-validation repair inside the same deadline. Schema mode derives JSON Schema from Rust types and can enforce an approved outline. A pinned real local Qwen model has been exercised through MCP; fixture tests remain separate from that evidence. Content and citations are never automatically declared factual.
+
+`sources.rs` and `extraction.rs` parse bounded input without execution. `data_report.rs` binds chart/table values to exact source cells. `document.rs` seals canonical state, validates revisions and sources, applies atomic JSON Patch and produces checked inverse receipts. `packages/client` is the shared transport/session adapter, not a second document engine. Original-preserving import retains immutable input bytes in the document. Project publication is exclusive per file; racing collisions can leave a reported partial pair, and recovery does not delete public paths.
 
 Native input is intentionally restricted: classic non-ZIP64 packages, Transitional PresentationML, up to 256 inspected slides, UTF-8 XML, direct top-level text shapes only for patches. Signed-package edits and ambiguous/empty/mixed/CDATA text runs are rejected. Opaque parts are preserved, not rendered or activated.
 
@@ -36,8 +38,8 @@ Native style CSP currently permits inline styles because geometry is rendered as
 | Generated objects remain PowerPoint-native | Package structure tests and optional M365 check |
 | GUI and headless clients use one layout result | Shared core integration tests |
 
-## Not Yet Implemented
+## Remaining Boundaries
 
-Full import editing, SmartArt editing, exact Office font parity, native charts, XLSX/PDF/OCR ingestion, multi-step AI planning, OS-backed credential storage, full SDK, and a public compatibility corpus remain subsequent work. No installed Office fonts or third-party presentations will be redistributed.
+Full arbitrary import/master/theme editing, SmartArt editing, exact Office text/rendering parity, broad cloud-model quality, OS-backed credential storage, persistent history/autosave, automatic scanned-PDF rendering, signed installers and platform expansion remain outside this research checkpoint. Native blocking extractors are bounded but not process-isolated. No installed Office fonts, model binaries or third-party presentations are redistributed with source.
 
 Development uses the user-requested Private repository [murasamelabo/AISlide](https://github.com/murasamelabo/AISlide). The OSS license has not been selected and public release is not authorized. Generated files, local toolchains, environment files and test artifacts are excluded from source control.

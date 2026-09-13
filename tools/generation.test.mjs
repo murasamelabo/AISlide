@@ -60,3 +60,37 @@ test('MCP model generation returns a validated draft and never accepts endpoint 
     await fixture.close();
   }
 });
+
+test('one explicit validation repair is bounded and never becomes an implicit fallback', { timeout: 15000 }, async () => {
+  const fixture = await startProviderFixture(await requestCore({ op: 'sample' }));
+  const environment = { ...fixtureEnvironment(fixture.endpoint), AISLIDE_AI_JSON_MODE: 'schema' };
+  const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, environment);
+  try {
+    await assert.rejects(() => requestCore({ op: 'generate', input: { prompt: 'REPAIRABLE_JSON', slide_count: 3 } }), /model output is not valid/);
+    assert.equal(fixture.receivedCount(), 1);
+    const generated = await requestCore({ op: 'generate', input: { prompt: 'REPAIRABLE_JSON', slide_count: 3, max_repairs: 1 } });
+    assert.equal(generated.provenance.attempts, 2);
+    assert.equal(generated.compiled.deck.slides.length, 3);
+    assert.equal(generated.provenance.verified, false);
+    assert.equal(fixture.receivedCount(), 3);
+    await assert.rejects(() => requestCore({ op: 'generate', input: { prompt: 'FAIL_INVALID_JSON', slide_count: 3, max_repairs: 1 } }), /model output is not valid/);
+    assert.equal(fixture.receivedCount(), 5);
+    const first = await fixture.nextRequest();
+    assert.equal(first.payload.response_format.type, 'json_schema');
+    assert.equal(first.payload.response_format.json_schema.schema.properties.sections.minItems, 3);
+    assert.equal(first.payload.response_format.json_schema.schema.properties.sections.maxItems, 3);
+    const incompatible = [{ title: 'Required different title', layout: 'statement' }, { title: 'Two', layout: 'statement' }, { title: 'Three', layout: 'statement' }];
+    await assert.rejects(() => requestCore({ op: 'generate', input: { prompt: 'Outline mismatch', slide_count: 3, outline: incompatible } }), /approved outline/);
+    assert.equal(fixture.receivedCount(), 6);
+    const arraySchema = fixture.lastRequest().payload.response_format.json_schema.schema.properties.sections;
+    assert.equal(arraySchema.prefixItems[0].properties.title.const, incompatible[0].title);
+    assert.equal(arraySchema.prefixItems[0].properties.body.minItems, 1);
+    assert.ok(!('items' in arraySchema), 'items must not mask prefixItems in compatible schema converters');
+    await assert.rejects(() => requestCore({ op: 'generate', input: { prompt: 'REPAIRABLE_JSON', slide_count: 3, max_repairs: 2 } }));
+    assert.equal(fixture.receivedCount(), 6);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    await fixture.close();
+  }
+});

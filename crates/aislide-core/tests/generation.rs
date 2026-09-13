@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::{io::{Read, Write}, net::TcpListener, sync::mpsc, thread};
 
 fn input() -> GenerationInput {
-    GenerationInput { prompt: "Create a report from the supplied notes".into(), source_text: "Example notes only, not verified facts.".into(), slide_count: 12, allow_remote: false }
+    GenerationInput { prompt: "Create a report from the supplied notes".into(), source_text: "Example notes only, not verified facts.".into(), slide_count: 12, allow_remote: false, max_repairs: 0, outline: Vec::new() }
 }
 
 fn serve_once(status: &str, body: String, extra_headers: &str) -> (String, mpsc::Receiver<Value>, thread::JoinHandle<()>) {

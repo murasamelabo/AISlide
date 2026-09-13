@@ -3,6 +3,8 @@
 export async function startProviderFixture(report) {
   const waiting = [];
   const received = [];
+  let requestCount = 0;
+  let lastRequest;
   const server = createServer(async (request, response) => {
     try {
       let bytes = '';
@@ -10,10 +12,12 @@ export async function startProviderFixture(report) {
       const payload = JSON.parse(bytes);
       const input = JSON.parse(payload.messages[1].content);
       const observed = { payload, input, disconnected: new Promise((resolve) => response.on('close', resolve)) };
+      requestCount += 1;
+      lastRequest = observed;
       if (waiting.length) waiting.shift()(observed);
       else received.push(observed);
       if (input.brief.includes('WAIT_FOR_CANCELLATION')) return;
-      if (input.brief.includes('FAIL_INVALID_JSON')) {
+      if (input.brief.includes('FAIL_INVALID_JSON') || (input.brief.includes('REPAIRABLE_JSON') && !input.validation_feedback)) {
         response.writeHead(200, { 'Content-Type': 'application/json' });
         response.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'not a report' } }] }));
         return;
@@ -33,6 +37,8 @@ export async function startProviderFixture(report) {
   return {
     endpoint: `http://127.0.0.1:${server.address().port}/v1`,
     nextRequest: () => received.length ? Promise.resolve(received.shift()) : new Promise((resolve) => waiting.push(resolve)),
+    receivedCount: () => requestCount,
+    lastRequest: () => lastRequest,
     close: () => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }),
   };
 }

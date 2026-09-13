@@ -9,8 +9,10 @@
   "scripts": {
     "core:build": "node tools/cargo.mjs build -p aislide-cli",
     "core:test": "node tools/cargo.mjs test --workspace",
-    "test:bridge": "node --test tools/core-client.test.mjs tools/atomic-output.test.mjs",
-    "test:mcp": "node --test tools/mcp.test.mjs",
+    "test:bridge": "node --test tools/core-client.test.mjs tools/atomic-output.test.mjs tools/atomic-project.test.mjs",
+    "test:mcp": "node --test tools/mcp.test.mjs tools/mcp-poc.test.mjs",
+    "test:sdk": "node --test tools/client.test.mjs",
+    "test:extraction": "node --test tools/extraction.test.mjs",
     "test:generation": "node --test tools/generation.test.mjs",
     "test:generation:e2e": "playwright test --config playwright.generation.config.ts",
     "test:native": "node tools/cargo.mjs test --manifest-path apps/studio/src-tauri/Cargo.toml --bin aislide-studio",
@@ -24,6 +26,12 @@
     "tauri:dev": "node tools/cargo.mjs run --manifest-path apps/studio/src-tauri/Cargo.toml",
     "tauri:build": "node tools/cargo.mjs build --manifest-path apps/studio/src-tauri/Cargo.toml --features custom-protocol",
     "demo": "node tools/demo.mjs",
+    "demo:poc": "node tools/poc-demo.mjs",
+    "demo:benchmark": "node tools/benchmark-deck.mjs",
+    "test:corpus": "node tools/corpus.mjs",
+    "model:setup": "node tools/local-model-setup.mjs",
+    "model:qualify": "node tools/qualify-local-model.mjs --mcp",
+    "dev:local-model": "node tools/local-studio.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {

@@ -41,6 +41,10 @@ jobs:
         run: npm run test:bridge
       - name: Test MCP editing and export
         run: npm run test:mcp
+      - name: Test source-bound client and transactions
+        run: npm run test:sdk
+      - name: Test installed local OCR when available
+        run: npm run test:extraction
       - name: Test model protocol and cancellation
         run: npm run test:generation
       - name: Build Studio

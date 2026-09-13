@@ -1,34 +1,47 @@
-﻿use crate::{model::{Deck, Slide, Element, Issue, valid_text, validate_deck, validate_rows}, Error, Result};
+﻿use crate::{model::{Deck, Slide, Element, Issue, ChartKind, ChartSeries, valid_text, validate_deck, validate_rows, validate_chart}, Error, Result};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReportInput {
+    #[schemars(length(min = 1, max = 120))]
     pub title: String,
+    #[schemars(length(max = 200))]
     pub subtitle: String,
+    #[schemars(length(max = 80))]
     pub period: String,
+    #[schemars(length(max = 1200))]
     pub source: String,
+    #[schemars(length(min = 1, max = 32))]
     pub sections: Vec<Section>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Section {
+    #[schemars(length(max = 100))]
     pub title: String,
     pub layout: Layout,
     #[serde(default)]
+    #[schemars(length(max = 4))]
     pub body: Vec<String>,
     #[serde(default)]
     pub metrics: Vec<Metric>,
     #[serde(default)]
     pub rows: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart: Option<ReportChart>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Layout { Cover, Metrics, Table, Columns, Statement }
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReportChart { pub kind: ChartKind, pub categories: Vec<String>, pub series: Vec<ChartSeries> }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Layout { Cover, Metrics, Table, Columns, Statement, Chart, Process }
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Metric { pub label: String, pub value: String }
 
@@ -89,16 +102,24 @@ pub fn compile_report(report: &ReportInput) -> Result<CompiledReport> {
                 for (metric_index, metric) in section.metrics.iter().enumerate() {
                     let left = 64.0 + metric_index as f64 * column;
                     elements.push(rect(&format!("metric-rule-{metric_index}"), [left, 258.0, column - 32.0, 3.0], TEAL));
-                    elements.push(text(&format!("metric-value-{metric_index}"), [left, 288.0, column - 32.0, 106.0], &metric.value, 56.0, INK, true));
+                    let size = crate::layout::fit_metric_size(&metric.value, column - 32.0, 106.0)?;
+                    elements.push(text(&format!("metric-value-{metric_index}"), [left, 288.0, column - 32.0, 106.0], &metric.value, size, INK, true));
                     elements.push(text(&format!("metric-label-{metric_index}"), [left, 412.0, column - 32.0, 94.0], &metric.label, 23.0, MUTED, false));
                 }
                 elements.push(text("body", [64.0, 548.0, 1152.0, 87.0], &section.body.join("\n"), 20.0, MUTED, false));
             }
             Layout::Table => {
                 validate_rows(&section.rows)?;
-                elements.push(Element::Table { id: "data-table".into(), x: 64.0, y: 230.0, width: 1152.0, height: 340.0, rows: section.rows.clone(), font_size: 20.0 });
+                elements.push(Element::Table { id: "data-table".into(), x: 64.0, y: 230.0, width: 1152.0, height: 340.0, rows: section.rows.clone(), font_size: if section.rows.len() > 6 { 12.0 } else { 20.0 } });
                 elements.push(text("body", [64.0, 590.0, 1152.0, 57.0], &section.body.join("\n"), 16.0, MUTED, false));
             }
+            Layout::Chart => {
+                let chart = section.chart.as_ref().ok_or_else(|| Error::Invalid("chart layout requires chart data".into()))?;
+                validate_chart(&chart.categories, &chart.series)?;
+                elements.push(Element::Chart { id: "data-chart".into(), x: 64.0, y: 225.0, width: 1152.0, height: 352.0, kind: chart.kind, categories: chart.categories.clone(), series: chart.series.clone() });
+                elements.push(text("body", [64.0, 590.0, 1152.0, 57.0], &section.body.join("\n"), 16.0, MUTED, false));
+            }
+            Layout::Process => elements.push(crate::graphics::create_diagram("process", &section.body)?),
             Layout::Columns => {
                 if section.body.is_empty() { return Err(Error::Invalid("columns layout requires body blocks".into())); }
                 let column = 1152.0 / section.body.len() as f64;
@@ -122,7 +143,7 @@ pub fn compile_report(report: &ReportInput) -> Result<CompiledReport> {
 }
 
 pub fn sample_report() -> ReportInput {
-    let make = |title: &str, layout, body: &[&str]| Section { title: title.into(), layout, body: body.iter().map(|text| (*text).into()).collect(), metrics: Vec::new(), rows: Vec::new() };
+    let make = |title: &str, layout, body: &[&str]| Section { title: title.into(), layout, body: body.iter().map(|text| (*text).into()).collect(), metrics: Vec::new(), rows: Vec::new(), chart: None };
     let mut sections = vec![
         make("Quarterly performance\n\u{56db}\u{534a}\u{671f}\u{30ec}\u{30dd}\u{30fc}\u{30c8}", Layout::Cover, &["SYNTHETIC DATA / DESIGN STUDY"]),
         make("The quarter at a glance", Layout::Columns, &["Growth\nRevenue increased in this synthetic scenario.", "Efficiency\nOperating costs stayed within the sample budget.", "Focus\nRetention is the next experiment, not a proven conclusion."]),

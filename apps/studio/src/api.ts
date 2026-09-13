@@ -1,4 +1,5 @@
 ﻿import { invoke, isTauri } from '@tauri-apps/api/core'
+import type { AislideDocument, ProjectExport } from './types'
 
 export async function core<T>(request: unknown, { signal }: { signal?: AbortSignal } = {}): Promise<T> {
   if (signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError')
@@ -43,6 +44,16 @@ export async function downloadBytes(bytes: Uint8Array, filename: string, mime: s
   link.download = filename
   link.click()
   setTimeout(() => URL.revokeObjectURL(url), 30_000)
+  return true
+}
+
+export async function downloadProject(document: AislideDocument, result: ProjectExport) {
+  if (isTauri()) {
+    const saved = await invoke('save_project', { document, operationId: crypto.randomUUID() })
+    return Boolean(saved)
+  }
+  await downloadBytes(decodeBase64(result.base64), result.filename, 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
+  await downloadBytes(new TextEncoder().encode(JSON.stringify(result.checkpoint)), result.checkpoint_filename, 'application/json')
   return true
 }
 

@@ -9,6 +9,8 @@ export function GenerationPanel({ provider, onApply, onBusy }: { provider: Provi
   const [source, setSource] = useState('')
   const [slideCount, setSlideCount] = useState(12)
   const [consent, setConsent] = useState(false)
+  const [repair, setRepair] = useState(false)
+  const [outline, setOutline] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
@@ -26,7 +28,7 @@ export function GenerationPanel({ provider, onApply, onBusy }: { provider: Provi
     setError('')
     setMessage('Waiting for model response')
     try {
-      const result = await core<GeneratedReport>({ op: 'generate', input: { prompt, source_text: source, slide_count: slideCount, allow_remote: consent } }, { signal: controller.signal })
+      const result = await core<GeneratedReport>({ op: 'generate', input: { prompt, source_text: source, slide_count: slideCount, allow_remote: consent, max_repairs: repair ? 1 : 0, outline: outline.trim() ? JSON.parse(outline) : [] } }, { signal: controller.signal })
       if (controller.signal.aborted) { setMessage('Generation cancelled'); return }
       setDraft(result)
       setMessage('Draft ready for review')
@@ -47,6 +49,8 @@ export function GenerationPanel({ provider, onApply, onBusy }: { provider: Provi
       <label className="field generation-wide">Brief<textarea aria-label="Brief" rows={3} required maxLength={8000} value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label>
       <label className="field generation-wide">Source text<textarea aria-label="Source text" rows={5} maxLength={24000} value={source} onChange={(event) => setSource(event.target.value)} /></label>
       <label className="field generation-count">Slide count<input aria-label="Slide count" type="number" min={1} max={32} step={1} required value={slideCount} onChange={(event) => setSlideCount(event.currentTarget.valueAsNumber)} /></label>
+      <label className="checkbox"><input type="checkbox" checked={repair} onChange={(event) => setRepair(event.target.checked)} />Allow one validation repair</label>
+      <details><summary>Approved outline</summary><label className="field">Outline JSON<textarea aria-label="Outline JSON" className="code-input" rows={5} value={outline} onChange={(event) => setOutline(event.target.value)} /></label></details>
       {provider.remote && <label className="checkbox generation-wide remote-consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} /><span>I approve sending this brief and source text to the remote endpoint shown above.</span></label>}
     </fieldset>
     {message && <div className="generation-status" role="status">{busy && <LoaderCircle size={16} className="working-icon" />}{message}</div>}
