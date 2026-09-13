@@ -39,3 +39,25 @@ The initial browser test failed because generation controls did not exist. After
 Screenshots and traces are written under ignored `.artifacts/`. Full real-model qualification, broad compatibility data and coverage percentages have not been established.
 
 The native WebView test also passed on Windows 11 ARM64 using the x64 GNU development build: generation request observed at the local provider, cancellation closed that connection, retry produced a draft, Apply replaced the scene, Undo restored twelve slides, and immediate Rust IPC cancellation was acknowledged. The native screenshot was inspected. This is workflow evidence, not a native ARM64/MSVC qualification or an Office visual-parity result.
+
+## Local Checkpoint: 2026-09-13
+
+| Gate | Observed result |
+| --- | --- |
+| Rust workspace | 33 tests passed |
+| CLI bridge and atomic output | 6 tests passed |
+| Existing MCP workflow | 1 test passed |
+| CLI/MCP generation integration | 2 tests passed |
+| Studio editor browser E2E | 5 tests passed |
+| Studio generation browser E2E | 4 tests passed |
+| Native request management | 2 tests passed |
+| Native generation WebView E2E | 1 test passed |
+| Studio build and lint | Passed |
+| Embedded Tauri development build | Passed, x64 GNU on Windows ARM64 |
+| Source/config encoding | 69 files checked, zero mismatches |
+
+These are 54 local tests across distinct suites. No real provider credential or paid model endpoint was used. Coverage percentage and real-model content quality remain unmeasured.
+
+## Hosted CI Prerequisite
+
+The Private repository's first [Verify run](https://github.com/murasamelabo/AISlide/actions/runs/34727915785) stopped before any job step ran. GitHub's annotation reported an account payment/spending-limit restriction. This is neither a test result nor proof that the hosted runner configuration works. Billing and visibility were left unchanged. The owner must resolve that restriction, then dispatch the existing Verify workflow on `main`; local evidence above is the accepted checkpoint while that external prerequisite remains open.

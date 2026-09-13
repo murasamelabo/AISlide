@@ -116,7 +116,7 @@ npm run test:native
 npm run encoding:check
 ```
 
-Browser E2E uses installed Microsoft Edge through Playwright. Generation tests use an explicitly synthetic loopback provider fixture, not a real model or paid API. The Windows GitHub Actions workflow runs the core, bridge, MCP, browser and native gates without model credentials. The optional Windows PowerPoint checks operate on disposable copies outside OneDrive:
+Browser E2E uses installed Microsoft Edge through Playwright. Generation tests use an explicitly synthetic loopback provider fixture, not a real model or paid API. The Windows GitHub Actions workflow defines the core, bridge, MCP, browser and native gates without model credentials. Its first hosted run could not start because of an account billing/spending-limit restriction; hosted CI is not yet verified. The optional Windows PowerPoint checks operate on disposable copies outside OneDrive:
 
 ```powershell
 ./tools/verify-demo.ps1
@@ -127,6 +127,18 @@ After `npm run tauri:build`, `npm run test:native:e2e` runs the generation workf
 The Open XML validator downloads pinned official NuGet packages from Microsoft's public .NET mirror into `.tools/openxml`. It performs schema validation only. The PowerPoint check confirms the generated sample opens, contains native objects and notes, and exports two preview images. It does not establish universal Office compatibility, interactive edit parity, or freedom from every repair/dialog condition.
 
 See [docs/testing/first-slice.md](docs/testing/first-slice.md) for observed results and [docs/implementation.md](docs/implementation.md) for boundaries.
+
+### Private GitHub Development
+
+The source and tests are pushed to `main` in the Private repository. The [initial Actions run](https://github.com/murasamelabo/AISlide/actions/runs/34727915785) was blocked before any step ran: GitHub reported failed recent account payments or a spending limit requiring attention. No billing settings, spending limits, or repository visibility were changed. Local checks are the verified baseline for this checkpoint, not a substitute claim that hosted CI passed.
+
+After the repository owner resolves the restriction in [GitHub billing settings](https://github.com/settings/billing), open **Actions > Verify > Run workflow** on `main`, or run:
+
+```sh
+gh workflow run verify.yml --repo murasamelabo/AISlide --ref main
+```
+
+Review that run before treating a clean hosted Windows build as established. Do not make the repository public or add a self-hosted runner merely to work around the restriction.
 
 ## Remaining Work
 
