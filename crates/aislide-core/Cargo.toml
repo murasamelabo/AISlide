@@ -1,0 +1,20 @@
+﻿[package]
+name = "aislide-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zip.workspace = true
+roxmltree.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+xmlwriter = "0.1"
+quick-xml = "0.38"
+base64 = "0.22"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt", "time", "net", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }

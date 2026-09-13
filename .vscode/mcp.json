@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "aislide-local": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${workspaceFolder}/tools/mcp.mjs", "--output-dir", "${workspaceFolder}/.artifacts/mcp"]
+    }
+  }
+}

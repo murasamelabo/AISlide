@@ -1,0 +1,39 @@
+{
+  "name": "aislide-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/studio"
+  ],
+  "scripts": {
+    "core:build": "node tools/cargo.mjs build -p aislide-cli",
+    "core:test": "node tools/cargo.mjs test --workspace",
+    "test:bridge": "node --test tools/core-client.test.mjs tools/atomic-output.test.mjs",
+    "test:mcp": "node --test tools/mcp.test.mjs",
+    "test:generation": "node --test tools/generation.test.mjs",
+    "test:generation:e2e": "playwright test --config playwright.generation.config.ts",
+    "test:native": "node tools/cargo.mjs test --manifest-path apps/studio/src-tauri/Cargo.toml --bin aislide-studio",
+    "test:native:e2e": "node --test tools/native-generation.test.mjs",
+    "encoding:check": "node tools/encoding.mjs",
+    "encoding:fix": "node tools/encoding.mjs --fix",
+    "dev": "npm run dev --workspace studio -- --host 127.0.0.1",
+    "build": "npm run build --workspace studio",
+    "lint": "npm run lint --workspace studio",
+    "mcp": "node tools/mcp.mjs",
+    "tauri:dev": "node tools/cargo.mjs run --manifest-path apps/studio/src-tauri/Cargo.toml",
+    "tauri:build": "node tools/cargo.mjs build --manifest-path apps/studio/src-tauri/Cargo.toml --features custom-protocol",
+    "demo": "node tools/demo.mjs",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.11.1",
+    "@playwright/test": "^1.58.0",
+    "@tauri-apps/cli": "^2.11.4",
+    "sharp": "^0.35.4"
+  }
+}

@@ -1,0 +1,12 @@
+﻿/target/
+**/target/
+/node_modules/
+**/node_modules/
+**/dist/
+**/gen/schemas/
+/.artifacts/
+/.tools/
+*.local
+.env
+.env.*
+!.env.example

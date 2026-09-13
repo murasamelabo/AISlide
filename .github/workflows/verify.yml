@@ -1,0 +1,57 @@
+﻿name: Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    env:
+      AISLIDE_AI_API_KEY: ''
+      AISLIDE_AI_ALLOW_REMOTE: '0'
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Configure Rust
+        run: rustup default stable
+      - name: Check source encoding
+        run: npm run encoding:check
+      - name: Test shared document core
+        run: node tools/cargo.mjs test --workspace --locked
+      - name: Build headless CLI
+        run: npm run core:build -- --locked
+      - name: Test bridge and atomic output
+        run: npm run test:bridge
+      - name: Test MCP editing and export
+        run: npm run test:mcp
+      - name: Test model protocol and cancellation
+        run: npm run test:generation
+      - name: Build Studio
+        run: npm run build
+      - name: Lint Studio
+        run: npm run lint
+      - name: Test editor in Edge
+        run: npm run test:e2e
+      - name: Test generation in Edge with a local fixture
+        run: npm run test:generation:e2e
+      - name: Test native request management
+        run: npm run test:native -- --locked
+      - name: Build embedded desktop application
+        run: npm run tauri:build -- --locked
