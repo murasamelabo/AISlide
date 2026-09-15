@@ -13,10 +13,14 @@ pub struct Package {
     original: Vec<u8>,
     parts: BTreeMap<String, Vec<u8>>,
     changes: BTreeMap<String, Vec<u8>>,
+    removals: BTreeSet<String>,
 }
 
 impl Package {
     pub fn open(bytes: Vec<u8>) -> Result<Self> {
+        if bytes.starts_with(&[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]) {
+            return Err(Error::Unsupported("OLE container: encrypted/protected Office files or legacy .ppt are not standard unencrypted Open XML PPTX. AISlide does not remove protection; use an authorized unencrypted PPTX.".into()));
+        }
         if bytes.len() > MAX_ARCHIVE_BYTES {
             return Err(Error::Limit("compressed archive > 64 MiB".into()));
         }
@@ -60,7 +64,7 @@ impl Package {
             }
             parts.insert(name, data);
         }
-        Ok(Self { original: bytes, parts, changes: BTreeMap::new() })
+        Ok(Self { original: bytes, parts, changes: BTreeMap::new(), removals: BTreeSet::new() })
     }
 
     pub fn from_parts(parts: BTreeMap<String, Vec<u8>>) -> Result<Self> {
@@ -82,7 +86,7 @@ impl Package {
     }
 
     pub fn save(&self) -> Result<Vec<u8>> {
-        if self.changes.is_empty() {
+        if self.changes.is_empty() && self.removals.is_empty() {
             return Ok(self.original.clone());
         }
         let mut original = ZipArchive::new(Cursor::new(&self.original))?;
@@ -90,12 +94,17 @@ impl Package {
         writer.set_raw_comment(original.comment().to_vec().into_boxed_slice());
         for index in 0..original.len() {
             let entry = original.by_index(index)?;
+            if self.removals.contains(entry.name()) { continue; }
             if let Some(replacement) = self.changes.get(entry.name()) {
                 writer.start_file(entry.name(), entry.options())?;
                 writer.write_all(replacement)?;
             } else {
                 writer.raw_copy_file(entry)?;
             }
+        }
+        for (name, bytes) in self.changes.iter().filter(|(name, _)| !self.parts.contains_key(*name)) {
+            writer.start_file(name, options())?;
+            writer.write_all(bytes)?;
         }
         let bytes = writer.finish()?.into_inner();
         if bytes.len() > MAX_ARCHIVE_BYTES {
@@ -108,7 +117,26 @@ impl Package {
         &self.parts
     }
 
+    pub(crate) fn part_names(&self) -> BTreeSet<&str> { self.parts.keys().chain(self.changes.keys()).filter(|name| !self.removals.contains(*name)).map(String::as_str).collect() }
+
+    pub(crate) fn remove_part(&mut self, name: &str) -> Result<()> {
+        if !self.part_names().contains(name) { return Err(Error::Invalid(format!("missing part {name}"))); }
+        self.changes.remove(name);
+        if self.parts.contains_key(name) { self.removals.insert(name.to_owned()); }
+        Ok(())
+    }
+
+    pub(crate) fn add_part(&mut self, name: String, bytes: Vec<u8>) -> Result<()> {
+        validate_name(&name)?;
+        if self.part_names().iter().any(|existing| existing.eq_ignore_ascii_case(&name)) { return Err(Error::Conflict("new package part already exists".into())); }
+        if self.part_names().len() >= MAX_PARTS { return Err(Error::Limit("archive entries > 4096".into())); }
+        let total: usize = self.part_names().iter().map(|name| self.part(name).map_or(0, |bytes| bytes.len())).sum();
+        if bytes.len() > MAX_PART_BYTES || total + bytes.len() > MAX_TOTAL_BYTES { return Err(Error::Limit("new package part exceeds payload budget".into())); }
+        self.removals.remove(&name); self.changes.insert(name, bytes); Ok(())
+    }
+
     pub fn part(&self, name: &str) -> Result<&[u8]> {
+        if self.removals.contains(name) { return Err(Error::Invalid(format!("missing part {name}"))); }
         self.changes.get(name).or_else(|| self.parts.get(name))
             .map(Vec::as_slice)
             .ok_or_else(|| Error::Invalid(format!("missing part {name}")))
@@ -120,20 +148,21 @@ impl Package {
     }
 
     pub fn changed_parts(&self) -> Vec<String> {
-        self.changes.keys().cloned().collect()
+        self.changes.keys().chain(self.removals.iter()).cloned().collect()
     }
 
     pub fn replace_part(&mut self, name: &str, bytes: Vec<u8>) -> Result<()> {
-        let original = self.parts.get(name)
+        if self.removals.contains(name) { return Err(Error::Invalid(format!("missing part {name}"))); }
+        let original = self.parts.get(name).or_else(|| self.changes.get(name))
             .ok_or_else(|| Error::Invalid(format!("missing part {name}")))?;
-        let total: usize = self.parts.iter().map(|(part_name, data)| {
-            if part_name == name { bytes.len() }
-            else { self.changes.get(part_name).unwrap_or(data).len() }
+        let total: usize = self.part_names().iter().map(|part_name| {
+            if *part_name == name { bytes.len() }
+            else { self.part(part_name).map_or(0, |data| data.len()) }
         }).sum();
         if bytes.len() > MAX_PART_BYTES || total > MAX_TOTAL_BYTES {
             return Err(Error::Limit("replacement payload budget".into()));
         }
-        if original == &bytes {
+        if original == &bytes && self.parts.contains_key(name) {
             self.changes.remove(name);
         } else {
             self.changes.insert(name.to_string(), bytes);

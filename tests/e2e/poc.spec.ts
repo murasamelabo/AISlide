@@ -60,7 +60,7 @@ test('connected process groups remain editable and move as one object', async ({
   await expect(page.locator('.slide-stage').getByText('Collect', { exact: true })).toBeVisible();
 });
 
-test('source mapping preserves provenance across project save and reopen', async ({ page }, testInfo) => {
+test('source mapping preserves provenance inside one PPTX after save and reopen', async ({ page }, testInfo) => {
   await page.goto('/');
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   await expect(page.getByRole('button', { name: 'Sources', exact: true })).toBeVisible();
@@ -74,48 +74,58 @@ test('source mapping preserves provenance across project save and reopen', async
   await expect(page.locator('.slide-stage .recharts-wrapper')).toHaveCount(1);
   const downloads: import('@playwright/test').Download[] = [];
   page.on('download', (download) => downloads.push(download));
-  await page.getByRole('button', { name: 'Save project', exact: true }).click();
-  await expect.poll(() => downloads.length).toBe(2);
-  const paths: string[] = [];
-  for (const download of downloads) { const path = testInfo.outputPath(download.suggestedFilename()); await download.saveAs(path); paths.push(path); }
-  const checkpointPath = paths.find((path) => path.endsWith('.aislide.json'))!;
-  const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8'));
-  expect(checkpoint.document.sources[0].name).toBe('provided.csv');
-  expect(checkpoint.document.bindings.length).toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  await expect.poll(() => downloads.length).toBe(1);
+  const path = testInfo.outputPath('source-bound.pptx');
+  await downloads[0].saveAs(path);
+  const saved = await requestCore({ op: 'open_presentation', id: 'source-reopen-check', base64: (await readFile(path)).toString('base64') });
+  expect(saved.document.sources[0].name).toBe('provided.csv');
+  expect(saved.document.bindings.length).toBeGreaterThan(0);
   await page.getByRole('button', { name: /^Slide 1:/ }).click();
   await page.getByRole('button', { name: 'Select title', exact: true }).click();
   await page.getByLabel('Text content', { exact: true }).fill('Manual later edit');
   await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
   await expect(page.locator('.slide-stage').getByText('Manual later edit', { exact: true })).toBeVisible();
-  await page.getByLabel('Open project files', { exact: true }).setInputFiles(paths);
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles(path);
+  await page.getByRole('dialog', { name: 'Unsaved changes', exact: true }).getByRole('button', { name: 'Discard changes', exact: true }).click();
   await expect(page.locator('.slide-stage').getByText('Source-bound report', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Sources', exact: true }).click();
   await expect(page.getByText('provided.csv', { exact: true }).first()).toBeVisible();
   await page.screenshot({ path: '.artifacts/poc-sources-desktop.png' });
 });
 
-test('native import preserves no-op bytes and allows a supported text edit', async ({ page }, testInfo) => {
+test('native PPTX opens alone, preserves no-op bytes and allows direct text editing', async ({ page }, testInfo) => {
   const report = await requestCore({ op: 'sample' });
   const compiled = await requestCore({ op: 'compile', report });
   const original = await requestCore({ op: 'export', deck: compiled.deck });
   const bytes = Buffer.from(original.base64, 'base64');
   await page.goto('/');
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
-  await page.getByLabel('Open presentation file', { exact: true }).setInputFiles({ name: 'original.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: bytes });
-  await expect(page.getByRole('dialog', { name: 'Imported presentation', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: 'original.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: bytes });
+  await expect(page.locator('.status-bar')).toContainText('Opened PPTX');
   const noOp = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Export PPTX', exact: true }).click();
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
   const saved = await noOp; const path = testInfo.outputPath('no-op.pptx'); await saved.saveAs(path);
   expect(await readFile(path)).toEqual(bytes);
   await page.getByRole('button', { name: /^Slide 3:/ }).click();
-  await page.getByRole('button', { name: 'Select shape-4', exact: true }).click();
+  await page.getByRole('button', { name: 'Select title', exact: true }).click();
   await page.getByLabel('Text content', { exact: true }).fill('Imported native title');
   await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
   await expect(page.locator('.slide-stage').getByText('Imported native title', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Validate layout', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Layout validation' })).toContainText('cosmic-text');
   await page.screenshot({ path: '.artifacts/poc-import-layout.png' });
+});
+
+test('protected PPTX gives an explicit format error and keeps the current document', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: 'protected.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]) });
+  await expect(page.getByRole('alert')).toContainText('encrypted');
+  await expect(page.getByRole('alert')).not.toContainText('checkpoint');
+  await expect(page.locator('.document-name strong')).toHaveText('Quarterly performance');
+  await expect(page.getByRole('button', { name: 'Open project', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Save scene JSON', exact: true })).toHaveCount(0);
 });
 
 test('source controls are labeled and fit a small viewport', async ({ page }) => {

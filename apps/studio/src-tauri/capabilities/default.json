@@ -3,5 +3,5 @@
   "identifier": "main-window",
   "description": "Local editor with user-selected save destinations only",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-save", "fs:allow-write-file"]
+  "permissions": ["core:default", "core:window:allow-destroy", "dialog:allow-save", "fs:allow-write-file"]
 }

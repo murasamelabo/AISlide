@@ -6,6 +6,8 @@
 **/gen/schemas/
 /.artifacts/
 /.tools/
+/deliverables/
+/examples/
 *.local
 .env
 .env.*

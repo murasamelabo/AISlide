@@ -1,5 +1,5 @@
 ﻿import { invoke, isTauri } from '@tauri-apps/api/core'
-import type { AislideDocument, ProjectExport } from './types'
+import type { AislideDocument, PresentationExport, ProjectExport, AssetInput } from './types'
 
 export async function core<T>(request: unknown, { signal }: { signal?: AbortSignal } = {}): Promise<T> {
   if (signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError')
@@ -67,4 +67,28 @@ export async function fileBase64(file: File) {
   let text = ''
   for (let index = 0; index < bytes.length; index += 16384) text += String.fromCharCode(...bytes.subarray(index, index + 16384))
   return btoa(text)
+}
+
+export async function downloadPresentation(document: AislideDocument, result: PresentationExport) {
+  if (isTauri()) return Boolean(await invoke('save_presentation', { document, operationId: crypto.randomUUID(), filename: result.filename }))
+  return downloadBytes(decodeBase64(result.base64), result.filename, 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
+}
+
+export function svgAsset(svg: string, size = 96, alt = 'Imported SVG icon'): AssetInput {
+  if (new TextEncoder().encode(svg).length > 262144) throw new Error('SVG must be at most 256 KiB')
+  const bytes = new TextEncoder().encode(svg)
+  let encoded = ''
+  for (let index = 0; index < bytes.length; index += 16384) encoded += String.fromCharCode(...bytes.subarray(index, index + 16384))
+  return { id: `asset-${crypto.randomUUID().slice(0, 8)}`, base64: btoa(encoded), mime_type: 'image/svg+xml', alt, size }
+}
+
+export async function fileAssets(files: File[], size = 128): Promise<AssetInput[]> {
+  if (!files.length || files.length > 8) throw new Error('Select between 1 and 8 assets')
+  return Promise.all(files.map(async (file) => {
+    const extension = file.name.split('.').at(-1)?.toLowerCase()
+    const mime = file.type || (extension === 'svg' ? 'image/svg+xml' : extension === 'png' ? 'image/png' : ['jpg', 'jpeg'].includes(extension ?? '') ? 'image/jpeg' : '')
+    if (!['image/svg+xml', 'image/png', 'image/jpeg'].includes(mime)) throw new Error('Choose SVG, PNG or JPEG assets; export .fig assets from Figma first')
+    if (file.size > (mime === 'image/svg+xml' ? 262144 : 1048576)) throw new Error(mime === 'image/svg+xml' ? 'SVG must be at most 256 KiB' : 'Images must be at most 1 MiB')
+    return { id: `asset-${crypto.randomUUID().slice(0, 8)}`, base64: await fileBase64(file), mime_type: mime as AssetInput['mime_type'], alt: file.name.slice(0, 500), size }
+  }))
 }

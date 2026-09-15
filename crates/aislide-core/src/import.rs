@@ -89,7 +89,7 @@ fn read_element(package: &Package, part: &str, node: Node<'_, '_>, scale: (f64, 
     if node.has_tag_name((P, "cxnSp")) {
         let connection = |tag| node.descendants().find(|node| node.has_tag_name((A, tag))).and_then(|node| Some(Connection { element_id: format!("shape-{}", node.attribute("id")?), site: node.attribute("idx")?.parse().ok()? }));
         let line = shape_properties(node).and_then(|node| child(node, A, "ln"));
-        return Ok(Element::Connector { id, x, y, width, height, color: line.map_or_else(|| "586563".into(), |line| solid(line, "586563")), stroke_width: line.map_or(1.0, |line| numeric(line, "w", 9525.0) / 9525.0), arrow: line.and_then(|line| child(line, A, "tailEnd")).is_some_and(|tail| tail.attribute("type").is_some_and(|value| value != "none")), flip_v: transform(node).and_then(|node| node.attribute("flipV")) == Some("1"), start: connection("stCxn"), end: connection("endCxn") });
+        return Ok(Element::Connector { id, x, y, width, height, color: line.map_or_else(|| "586563".into(), |line| solid(line, "586563")), stroke_width: line.map_or(1.0, |line| numeric(line, "w", 9525.0) / 9525.0), arrow: line.and_then(|line| child(line, A, "tailEnd")).is_some_and(|tail| tail.attribute("type").is_some_and(|value| value != "none")), flip_v: transform(node).and_then(|node| node.attribute("flipV")) == Some("1"), start: connection("stCxn"), end: connection("endCxn"), routing: None });
     }
     if node.has_tag_name((P, "graphicFrame")) {
         if let Some(table) = node.descendants().find(|node| node.has_tag_name((A, "tbl"))) {
@@ -104,7 +104,7 @@ fn read_element(package: &Package, part: &str, node: Node<'_, '_>, scale: (f64, 
             let text = paragraph_text(body);
             if !text.is_empty() {
                 let style = run_properties(body);
-                return Ok(Element::Text { id, x, y, width, height, text, font_size: style.map_or(24.0, |node| numeric(node, "sz", 1800.0) / 75.0), color: style.map_or_else(|| "202525".into(), |node| solid(node, "202525")), bold: style.and_then(|node| node.attribute("b")) == Some("1") });
+                return Ok(Element::Text { id, x, y, width, height, text, font_size: style.map_or(24.0, |node| numeric(node, "sz", 1800.0) / 75.0), color: style.map_or_else(|| "202525".into(), |node| solid(node, "202525")), bold: style.and_then(|node| node.attribute("b")) == Some("1"), format: Default::default() });
             }
         }
         let properties = shape_properties(node).ok_or_else(|| Error::Unsupported("shape properties missing".into()))?;
@@ -145,7 +145,7 @@ pub fn import_pptx(bytes: Vec<u8>) -> Result<ImportedDeck> {
         for node in tree.children().filter(|node| node.is_element() && !["nvGrpSpPr", "grpSpPr", "extLst"].contains(&node.tag_name().name())) {
             match read_element(&package, part, node, scale) {
                 Ok(element) => {
-                    let probe = Deck { version: 1, title: "Import".into(), width: 1280, height: 720, slides: vec![Slide { id: slide_id.clone(), title: "Import".into(), background: "FFFFFF".into(), elements: vec![element.clone()], notes: String::new() }] };
+                    let probe = Deck { version: 1, title: "Import".into(), width: 1280, height: 720, slides: vec![Slide { id: slide_id.clone(), title: "Import".into(), background: "FFFFFF".into(), elements: vec![element.clone()], notes: String::new(), layout_id: None, inherit_background: false, hide_master_graphics: false, native_source_id: None }], design: None };
                     if !matches!(element, Element::Connector { .. }) && validate_deck(&probe).is_err() { warnings.push(format!("{part} / {} preserved but not previewed: geometry or content outside scene limits", element.bounds().0)); continue; }
                     let mut fields = vec!["x".into(), "y".into(), "width".into(), "height".into()];
                     if matches!(element, Element::Text { .. }) && text_is_writable(node) { fields.push("text".into()); }
@@ -159,9 +159,9 @@ pub fn import_pptx(bytes: Vec<u8>) -> Result<ImportedDeck> {
         let background = child(common, P, "bg").and_then(|node| child(node, P, "bgPr")).map_or_else(|| "FFFFFF".into(), |node| solid(node, "FFFFFF"));
         let notes = relationship_targets(&package, part, "notesSlide").ok().and_then(|targets| targets.values().next().cloned()).and_then(|path| package.text(&path).ok()).and_then(|value| parse(value).ok()).map(|document| document.descendants().filter(|node| node.has_tag_name((P, "txBody"))).map(paragraph_text).collect::<Vec<_>>().join("\n")).unwrap_or_default();
         let title = common.attribute("name").filter(|title| title.chars().count() <= 120).map(String::from).unwrap_or_else(|| format!("Imported slide {}", index + 1));
-        slides.push(Slide { id: slide_id, title, background, elements, notes });
+        slides.push(Slide { id: slide_id, title, background, elements, notes, layout_id: None, inherit_background: false, hide_master_graphics: false, native_source_id: None });
     }
-    let deck = Deck { version: 1, title: "Imported presentation".into(), width: 1280, height: 720, slides };
+    let deck = Deck { version: 1, title: "Imported presentation".into(), width: 1280, height: 720, slides, design: None };
     validate_deck(&deck)?;
     Ok(ImportedDeck { deck, source_sha256, warnings, objects })
 }
@@ -177,14 +177,14 @@ pub fn save_import(bytes: Vec<u8>, deck: &Deck) -> Result<Vec<u8>> {
     if crate::canonical::bytes(&imported.deck)? == crate::canonical::bytes(deck)? { return Ok(bytes); }
     let mut package = Package::open(bytes)?;
     if package.parts().keys().any(|path| path.to_ascii_lowercase().starts_with("_xmlsignatures/")) { return Err(Error::Unsupported("editing signed packages".into())); }
-    if deck.title != imported.deck.title || deck.slides.len() != imported.deck.slides.len() { return Err(Error::Unsupported("imported title or slide structure change".into())); }
+    if deck.title != imported.deck.title || deck.slides.len() != imported.deck.slides.len() || crate::canonical::bytes(&deck.design)? != crate::canonical::bytes(&imported.deck.design)? { return Err(Error::Unsupported("imported title, design or slide structure change".into())); }
     let main = relationship_targets(&package, "", "officeDocument")?.values().next().cloned().ok_or_else(|| Error::Invalid("presentation missing".into()))?;
     let presentation = parse(package.text(&main)?)?;
     let size = child(presentation.root_element(), P, "sldSz").ok_or_else(|| Error::Invalid("slide size missing".into()))?;
     let scale = (numeric(size, "cx", 0.0) / 1280.0, numeric(size, "cy", 0.0) / 720.0);
     let paths = slide_paths(&package)?;
     for ((before, after), part) in imported.deck.slides.iter().zip(&deck.slides).zip(paths) {
-        if before.id != after.id || before.title != after.title || before.background != after.background || before.notes != after.notes || before.elements.len() != after.elements.len() { return Err(Error::Unsupported("only supported imported object fields may be changed".into())); }
+        if before.id != after.id || before.title != after.title || before.background != after.background || before.notes != after.notes || before.elements.len() != after.elements.len() || before.layout_id != after.layout_id || before.inherit_background != after.inherit_background || before.hide_master_graphics != after.hide_master_graphics { return Err(Error::Unsupported("only supported imported object fields may be changed".into())); }
         let original = package.text(&part)?.to_string();
         let document = parse(&original)?;
         let mut edits = Vec::new();
@@ -193,7 +193,8 @@ pub fn save_import(bytes: Vec<u8>, deck: &Deck) -> Result<Vec<u8>> {
             if old.bounds().0 != new.bounds().0 { return Err(Error::Unsupported("imported object order or identity changed".into())); }
             let policy = imported.objects.iter().find(|object| object.slide_id == before.id && object.element_id == old.bounds().0).ok_or_else(|| Error::Unsupported("imported object is read-only".into()))?;
             let old_json = serde_json::to_value(old)?; let new_json = serde_json::to_value(new)?;
-            let changed: Vec<_> = old_json.as_object().into_iter().flatten().filter(|(key, value)| !crate::canonical::equal(value, new_json.get(*key).unwrap_or(&Value::Null))).map(|(key, _)| key.as_str()).collect();
+            let keys: std::collections::BTreeSet<_> = old_json.as_object().into_iter().flatten().chain(new_json.as_object().into_iter().flatten()).map(|(key, _)| key.as_str()).collect();
+            let changed: Vec<_> = keys.into_iter().filter(|key| !crate::canonical::equal(old_json.get(*key).unwrap_or(&Value::Null), new_json.get(*key).unwrap_or(&Value::Null))).collect();
             if changed.iter().any(|field| !policy.editable_fields.iter().any(|allowed| allowed == field)) { return Err(Error::Unsupported("imported shape change exceeds its writable fields".into())); }
             let mut nodes = document.descendants().filter(|node| node.is_element() && ["sp", "pic", "graphicFrame", "cxnSp", "grpSp"].contains(&node.tag_name().name()) && identity(*node).ok().as_deref() == Some(old.bounds().0));
             let node = nodes.next().ok_or_else(|| Error::Conflict("imported shape disappeared".into()))?;

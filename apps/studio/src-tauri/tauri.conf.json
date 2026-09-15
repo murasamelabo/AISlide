@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "label": "main", "title": "AISlide Studio", "width": 1440, "height": 960, "minWidth": 800, "minHeight": 600 }],
+    "windows": [{ "label": "main", "title": "AISlide Studio", "width": 1440, "height": 960, "minWidth": 800, "minHeight": 600, "dragDropEnabled": false }],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'none'",
       "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:4173 ws://127.0.0.1:4173; object-src 'none'; frame-src 'none'; base-uri 'none'"

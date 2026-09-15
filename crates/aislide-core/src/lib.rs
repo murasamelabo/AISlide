@@ -9,14 +9,23 @@ pub mod generation;
 mod charts;
 pub mod media;
 pub mod graphics;
+pub mod graphs;
 pub mod sources;
 pub mod data_report;
 pub mod document;
+pub mod editing;
 mod canonical;
 pub mod layout;
 pub mod import;
 pub mod extraction;
 pub mod publication;
+pub mod design;
+pub mod objects;
+pub mod parts;
+mod native;
+mod native_save;
+mod native_slides;
+mod provenance;
 pub use protocol::execute_request;
 
 #[derive(Debug, thiserror::Error)]

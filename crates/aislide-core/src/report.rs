@@ -54,7 +54,7 @@ const TEAL: &str = "087F73";
 const CORAL: &str = "CF5847";
 
 fn text(id: &str, bounds: [f64; 4], value: &str, size: f64, color: &str, bold: bool) -> Element {
-    Element::Text { id: id.into(), x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3], text: value.into(), font_size: size, color: color.into(), bold }
+    Element::Text { id: id.into(), x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3], text: value.into(), font_size: size, color: color.into(), bold, format: Default::default() }
 }
 
 fn rect(id: &str, bounds: [f64; 4], fill: &str) -> Element {
@@ -135,9 +135,9 @@ pub fn compile_report(report: &ReportInput) -> Result<CompiledReport> {
                 elements.push(text("body", [104.0, 244.0, 1050.0, 358.0], &section.body.join("\n\n"), 32.0, INK, false));
             }
         }
-        slides.push(Slide { id: format!("slide-{}", index + 1), title: section.title.clone(), background: "FFFFFF".into(), elements, notes: format!("{}\n\nSource: {}", section.body.join("\n"), report.source) });
+        slides.push(Slide { id: format!("slide-{}", index + 1), title: section.title.clone(), background: "FFFFFF".into(), elements, notes: format!("{}\n\nSource: {}", section.body.join("\n"), report.source), layout_id: None, inherit_background: false, hide_master_graphics: false, native_source_id: None });
     }
-    let deck = Deck { version: 1, title: report.title.clone(), width: 1280, height: 720, slides };
+    let deck = Deck { version: 1, title: report.title.clone(), width: 1280, height: 720, slides, design: None };
     validate_deck(&deck)?;
     Ok(CompiledReport { deck, issues: vec![Issue { severity: "warning".into(), code: "FONT_PARITY_UNVERIFIED".into(), message: "PowerPoint text wrapping depends on installed fonts. Native Office parity has not been established.".into() }] })
 }

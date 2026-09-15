@@ -9,6 +9,7 @@ param(
     [int]$ExpectedConnectors = 0,
     [int]$MinimumTables = 1,
     [switch]$VerifyChartData,
+    [switch]$VerifyConnections,
     [int[]]$CaptureSlides = @()
 )
 
@@ -51,6 +52,8 @@ try {
     $pictures = 0
     $groups = 0
     $connectors = 0
+    $attachedConnectors = 0
+    $connectionMoves = 0
     $editedWorkbooks = 0
     foreach ($slide in $presentation.Slides) {
         foreach ($shape in (Get-VerificationShape -Shapes $slide.Shapes)) {
@@ -58,7 +61,31 @@ try {
             if ($shape.HasTable -eq -1) { $tables++ }
             if ($shape.Type -eq 13) { $pictures++ }
             if ($shape.Type -eq 6) { $groups++ }
-            if ($shape.Connector -eq -1) { $connectors++ }
+            if ($shape.Connector -eq -1) {
+                $connectors++
+                if ($VerifyConnections) {
+                    if ($shape.ConnectorFormat.BeginConnected -ne -1 -or $shape.ConnectorFormat.EndConnected -ne -1) { throw 'Graph connector must be attached at both endpoints' }
+                    $attachedConnectors++
+                    $stage = 'moving an attached shape in the disposable presentation'
+                    $target = $shape.ConnectorFormat.BeginConnectedShape
+                    $targetId = $target.Id
+                    $endId = $shape.ConnectorFormat.EndConnectedShape.Id
+                    $originalLeft = [double]$target.Left
+                    $originalTop = [double]$target.Top
+                    $beforeGeometry = @($shape.Left, $shape.Top, $shape.Width, $shape.Height) -join ','
+                    try {
+                        $target.Left = $originalLeft + 6
+                        $target.Top = $originalTop + 6
+                        $afterGeometry = @($shape.Left, $shape.Top, $shape.Width, $shape.Height) -join ','
+                        if ($beforeGeometry -eq $afterGeometry) { throw 'Attached connector did not follow the moved shape' }
+                        if ($shape.ConnectorFormat.BeginConnectedShape.Id -ne $targetId -or $shape.ConnectorFormat.EndConnectedShape.Id -ne $endId) { throw 'Moving a shape changed connector identities' }
+                        $connectionMoves++
+                    } finally {
+                        $target.Left = $originalLeft
+                        $target.Top = $originalTop
+                    }
+                }
+            }
             if ($shape.HasChart -eq -1) {
                 $charts++
                 if ($VerifyChartData) {
@@ -94,12 +121,13 @@ try {
     if ($charts -ne $ExpectedCharts -or $pictures -ne $ExpectedPictures) { throw 'Unexpected native chart or picture count' }
     if ($groups -ne $ExpectedGroups -or $connectors -ne $ExpectedConnectors) { throw 'Unexpected native group or connector count' }
     if ($VerifyChartData -and $editedWorkbooks -ne $ExpectedCharts) { throw 'Chart workbook editing verification incomplete' }
+    if ($VerifyConnections -and $attachedConnectors -ne $ExpectedConnectors) { throw 'Connector attachment verification incomplete' }
     $stage = 'slide PNG export'
     $presentation.Slides.Item(1).Export((Join-Path $temporary 'cover.png'), 'PNG', 1280, 720)
-    $presentation.Slides.Item(4).Export((Join-Path $temporary 'table.png'), 'PNG', 1280, 720)
-    if ($ExpectedCharts -gt 0) { $presentation.Slides.Item(5).Export((Join-Path $temporary 'chart.png'), 'PNG', 1280, 720) }
-    if ($ExpectedGroups -gt 0) { $presentation.Slides.Item(8).Export((Join-Path $temporary 'diagram.png'), 'PNG', 1280, 720) }
-    if ($ExpectedPictures -gt 0) { $presentation.Slides.Item(11).Export((Join-Path $temporary 'picture.png'), 'PNG', 1280, 720) }
+    if ($ExpectedSlides -ge 4) { $presentation.Slides.Item(4).Export((Join-Path $temporary 'table.png'), 'PNG', 1280, 720) }
+    if ($ExpectedCharts -gt 0 -and $ExpectedSlides -ge 5) { $presentation.Slides.Item(5).Export((Join-Path $temporary 'chart.png'), 'PNG', 1280, 720) }
+    if ($ExpectedGroups -gt 0 -and $ExpectedSlides -ge 8) { $presentation.Slides.Item(8).Export((Join-Path $temporary 'diagram.png'), 'PNG', 1280, 720) }
+    if ($ExpectedPictures -gt 0 -and $ExpectedSlides -ge 11) { $presentation.Slides.Item(11).Export((Join-Path $temporary 'picture.png'), 'PNG', 1280, 720) }
     foreach ($slideNumber in $CaptureSlides) {
         if ($slideNumber -lt 1 -or $slideNumber -gt $presentation.Slides.Count) { throw 'Capture slide number is outside presentation' }
         $presentation.Slides.Item($slideNumber).Export((Join-Path $temporary ('slide-{0:d2}.png' -f $slideNumber)), 'PNG', 1280, 720)
@@ -113,6 +141,8 @@ try {
         Pictures = $pictures
         Groups = $groups
         Connectors = $connectors
+        AttachedConnectorsVerified = $attachedConnectors
+        ConnectionMovesVerified = $connectionMoves
         EmbeddedWorkbooksEdited = $editedWorkbooks
         NoteTextShapes = $notes
         Captures = $captureCount

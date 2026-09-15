@@ -7,6 +7,23 @@
   request(request, options) { return this.#transport(request, options); }
   ingest(input, options) { return this.request({ op: 'ingest', input }, options); }
   dataReport(source, mapping, options) { return this.request({ op: 'data_report', source, mapping }, options); }
+  designDefaults(options) { return this.request({ op: 'design_defaults' }, options); }
+  objectCatalog(options) { return this.request({ op: 'object_catalog' }, options); }
+  partCatalog(options) { return this.request({ op: 'part_catalog' }, options); }
+  graphCatalog(options) { return this.request({ op: 'graph_catalog' }, options); }
+  createGraph(input, options) { return this.request({ ...input, op: 'create_graph' }, options); }
+  transformGraph(spec, operations, options) { return this.request({ op: 'transform_graph', spec, operations }, options); }
+  createPart(input, options) { return this.request({ ...input, op: 'create_part' }, options); }
+  createObject(input, options) { return this.request({ ...input, op: 'create_object' }, options); }
+  createAsset(input, options) { return this.request({ ...input, op: 'create_asset' }, options); }
+  async createPresentation(id, title = 'Untitled presentation', options) {
+    const document = await this.request({ op: 'create_presentation', id, title }, options);
+    return new DocumentSession(this.#transport, document);
+  }
+  async openPresentation(id, base64, options) {
+    const result = await this.request({ op: 'open_presentation', id, base64 }, options);
+    return { session: new DocumentSession(this.#transport, result.document), warnings: result.warnings, objects: result.objects, format: result.format };
+  }
   async importPresentation(id, base64, options) {
     const result = await this.request({ op: 'import_document', id, base64 }, options);
     return { session: new DocumentSession(this.#transport, result.document), warnings: result.warnings, objects: result.objects };
@@ -46,15 +63,65 @@ export class DocumentSession {
     try { return await action(); } finally { this.#busy = false; }
   }
   async transact(operations, options = {}) {
+    return this.#run(() => this.#commit(operations, options), options);
+  }
+  async #commit(operations, options) {
+    const result = await this.#request({ op: 'transaction', document: this.#document, transaction: {
+      expected_revision: options.expectedRevision ?? this.#document.revision,
+      expected_hash: this.#document.hash, operations,
+    } }, { signal: options.signal });
+    return this.#accept(result, options);
+  }
+  #accept(result, options) {
+    if (options.signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError');
+    if (result.receipt) { this.#retain(this.#past, result.receipt); this.#future = []; }
+    this.#document = result.document;
+    return this.document;
+  }
+  #part(op, slideId, input, options = {}) {
     return this.#run(async () => {
-      const result = await this.#request({ op: 'transaction', document: this.#document, transaction: {
-        expected_revision: options.expectedRevision ?? this.#document.revision,
-        expected_hash: this.#document.hash, operations,
-      } }, { signal: options.signal });
+      this.#expectRevision(options);
+      const result = await this.#request({ ...input, op, document: this.#document, expected_revision: this.revision, slide_id: slideId }, { signal: options.signal });
+      return this.#accept(result, options);
+    }, options);
+  }
+  addPart(slideId, input, options) { return this.#part('insert_part', slideId, input, options); }
+  updatePart(slideId, input, options) { return this.#part('update_part', slideId, input, options); }
+  addGraph(slideId, input, options) { return this.#part('insert_graph', slideId, input, options); }
+  updateGraph(slideId, input, options) { return this.#part('update_graph', slideId, input, options); }
+  applyGraph(slideId, input, options) { return this.#part('apply_graph', slideId, input, options); }
+  editElements(slideId, operations, options) { return this.#part('edit_elements', slideId, { operations }, options); }
+  editSlides(operations, options = {}) {
+    return this.#run(async () => {
+      this.#expectRevision(options);
+      const result = await this.#request({ op: 'edit_slides', document: this.#document, expected_revision: this.revision, operations }, { signal: options.signal });
+      return this.#accept(result, options);
+    }, options);
+  }
+  #expectRevision(options) {
+    if (options.expectedRevision !== undefined && options.expectedRevision !== this.revision) throw new Error('Revision conflict');
+  }
+  #transform(op, input, options = {}) {
+    return this.#run(async () => {
+      this.#expectRevision(options);
+      const deck = await this.#request({ ...input, op, deck: this.#document.deck }, { signal: options.signal });
       if (options.signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError');
-      if (result.receipt) { this.#retain(this.#past, result.receipt); this.#future = []; }
-      this.#document = result.document;
-      return this.document;
+      return this.#commit([{ op: 'replace', path: '/deck', value: deck }], options);
+    }, options);
+  }
+  updateDesign(design, options) { return this.#transform('update_design', { design }, options); }
+  applyTheme(theme, options) { return this.#transform('apply_theme', { theme }, options); }
+  assignLayout(slideId, layoutId, options) { return this.#transform('assign_layout', { slide_id: slideId, layout_id: layoutId }, options); }
+  addObject(slideId, input, options) { return this.#insert('create_object', slideId, input, options); }
+  addAsset(slideId, input, options) { return this.#insert('create_asset', slideId, input, options); }
+  #insert(op, slideId, input, options = {}) {
+    return this.#run(async () => {
+      this.#expectRevision(options);
+      const index = this.#document.deck.slides.findIndex((slide) => slide.id === slideId);
+      if (index < 0) throw new Error('Unknown slide ID');
+      const element = await this.#request({ ...input, op }, { signal: options.signal });
+      if (options.signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError');
+      return this.#commit([{ op: 'add', path: `/deck/slides/${index}/elements/-`, value: element }], options);
     }, options);
   }
   replaceDeck(deck, { sources, bindings, report, ...options } = {}) {
@@ -77,4 +144,5 @@ export class DocumentSession {
   undo(options) { return this.#restore(this.#past, this.#future, options); }
   redo(options) { return this.#restore(this.#future, this.#past, options); }
   exportProject(options = {}) { return this.#run(() => this.#request({ op: 'export_project', document: this.#document }, options), options); }
+  exportPresentation(options = {}) { return this.#run(() => this.#request({ op: 'export_presentation', document: this.#document }, options), options); }
 }

@@ -6,7 +6,7 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror.workspace = true
 zip.workspace = true
 roxmltree.workspace = true
@@ -25,6 +25,7 @@ json-patch = "4.2.0"
 cosmic-text = "0.19.0"
 lopdf = { version = "0.45.0", default-features = false }
 schemars = "1.2.2"
+resvg = { version = "0.48.1", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Foundation", "Globalization", "Media_Ocr", "Graphics_Imaging", "Storage_Streams"] }

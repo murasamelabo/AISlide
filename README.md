@@ -4,9 +4,19 @@ A local-first slide editor with an independently implemented Rust PresentationML
 
 **Status: research PoC covering native editable generation, package-preserving import, source-bound transactions and headless automation.** A real local model, a public-data bilingual deck, and a 24-file public PPTX corpus have been exercised. This is not a full PowerPoint replacement or a production release. See the [acceptance report](docs/testing/poc.md) and [support matrix](docs/support-matrix.md).
 
+**Current file workflow: one standard, unencrypted Open XML PPTX.** Use **Open PPTX** and **Save PPTX**. External `.aislide.json` and scene JSON files are no longer required by Studio. The current slide XML is authoritative; optional source/binding and part information is retained in a standard Custom XML part inside the PPTX. See [single-file operation](docs/testing/single-file.md).
+
+**Parts library: 108 editable presets across 36 categories.** Enter labels, axes, values, relationships or schedules to create theme-linked native graphics. The [sample generator](tools/parts-demo.mjs) creates four synthetic decks; see the [parts guide](docs/testing/parts-library.md). These are deterministic design presets, not AI-generated artwork.
+
+**Architecture diagrams through Studio, SDK and MCP.** The **Architecture diagram** command opens a six-shape editor with boundaries, movement, resizing, alignment, grid, straight/right-angle routes and arrowheads. Graphs are native PPTX objects with internal metadata and Undo/Redo. See the [five-slide sample generator](tools/graphs-demo.mjs) and [graph/UI verification](docs/testing/graphs-and-dads.md).
+
+**Studio design is inspired by the Digital Agency Design System (DADS).** Local Noto fonts, blue actions, neutral surfaces, larger controls and keyboard focus are adapted for the editor. Existing slide themes are unchanged. This is not a full DADS compliance or government endorsement claim.
+
+**Workspace commands and asset insertion.** Right-click the canvas, slide thumbnails, layers, objects or graph nodes for relevant actions. Create a blank presentation, insert/duplicate/delete/reorder/rename slides, choose a save filename, and protect unsaved edits when opening or creating a file. **Insert icons** offers 36 searchable Lucide icons and SVG/PNG/JPEG import. Figma **Copy as SVG** can be pasted on the canvas or into the SVG input; SVG becomes a bounded transparent PNG, not editable vector paths. See [workspace operations](docs/testing/workspace-ux.md).
+
 The built-in example remains deterministic and explicitly synthetic. Model generation is a separate operation. Existing PPTX engine code is not used.
 
-Development repository: [murasamelabo/AISlide](https://github.com/murasamelabo/AISlide), **Private**. No public release or project license has been authorized.
+Development repository: [murasamelabo/AISlide](https://github.com/murasamelabo/AISlide), **Public**, as changed and confirmed by its owner on 2026-09-15. The project license has not been selected. Local input materials, task-specific examples and generated deliverables are not included in the source publication.
 
 ## Run
 
@@ -47,19 +57,27 @@ The final command prints a free loopback Studio URL and owns both servers. Ctrl+
 ## Available Now
 
 - Twelve-slide synthetic example plus a source-bound report compiler, with cover, metrics, table, columns, statement, chart and process recipes.
-- Editable PowerPoint text, rectangles, tables, column/bar/line charts with embedded XLSX, PNG/JPEG pictures with crop, nested groups, connected arrows, minimal master/layout/theme parts and notes.
-- Slide navigation, duplication/reordering, object selection, dragging/arrow-key movement, position/size/text/color edits, and Undo/Redo.
+- Editable PowerPoint text, 40 preset shapes, simple closed polygons, tables, ten chart kinds with embedded XLSX, PNG/JPEG pictures with crop, nested groups, connected arrows and notes. The basic object picker retains its nine original chart choices; percentage stacks are available through Parts library.
+- Thirty-six part categories with three layouts each, structured data/JSON input, actual previews, metadata updates and Undo/Redo. Native charts retain raw workbook values; diagrams and map outlines remain ordinary grouped shapes, text and connectors.
+- Direct canvas editing of multiline text, shape text, table cells and immediate group labels; IME-aware confirm/cancel, dragging, resize handles, keyboard movement, position/size/style controls and Undo/Redo.
+- Native multiple masters and layouts, common text/shapes/logos, editable placeholders, layout assignment/reset, background inheritance and twelve-slot theme colors with heading/body/script fonts. Theme and placeholder relationships remain editable in PowerPoint.
 - CSV, scalar-table JSON, bounded XLSX, UTF-8 text/Markdown, text PDF, and PNG/JPEG evidence intake. Explicit column/range mapping; optional Windows-local image OCR with word regions.
 - Source hashes, exact cell/page locators, attribution and transformations. Changing a bound value invalidates its citation until corrected or explicitly detached.
 - Shared revision/hash-checked atomic JSON Patch transactions, bounded Undo/Redo, and a portable JavaScript/TypeScript client.
 - Model-generated reports with optional approved outlines, Rust-type-derived JSON Schema, at most one explicitly enabled validation repair, cancellation and review before application.
-- PPTX-bound project checkpoints with sources and scene state. **Save project** writes a new PPTX and matching `.aislide.json`; **Open project** validates both files. Native save uses one dialog. No autosave or persisted undo stack yet.
-- Approximate native PPTX import with explicit warnings and limited non-destructive text/geometry editing; the original package is retained in imported projects.
+- Single-file PPTX opening and saving, with native text/style, theme, master/layout contents, table, picture, chart, group and connector reading. Sources and bindings travel inside the PPTX without a scene snapshot or external JSON. Legacy checkpoint APIs remain for compatibility only.
+- Part-preserving edits of reopened PPTX files, with explicit rejection of unsupported complex formatting. Supported presentations now allow slide insertion, duplication, deletion, reordering and renaming; master/layout counts remain fixed. Native sections/custom slide shows block structural editing, and deleting a referenced slide fails rather than break the link. No autosave or persisted undo stack yet.
 - Exact original bytes on a no-op round trip. A supported patch changes its slide part while preserving untouched entry payloads; edited ZIP containers are not claimed byte-identical.
 - Installed-font measurement of text/table cells, overflow and missing-glyph detection, and observable font fallback. New project export blocks measured text errors; measurement is not Office parity.
 - Strict schemas, bounded archives/rasters/PDF streams, unsafe-name/duplicate-entry rejection, and no fetching or execution of imported content.
 
-Use **Sources** for data mapping and source review, **Open presentation** for bounded native import, and **Validate layout** for font diagnostics. **Inspect PPTX** remains the independent simple-text inspector. **Report data** accepts structured report JSON, never arbitrary HTML/CSS or executable model output. Legacy scene JSON saves only the scene, not sources or the original imported package; use project checkpoints to retain those.
+Use **Sources** for data mapping and source review, **Open PPTX** to open one presentation, and **Validate layout** for font diagnostics. **Save PPTX** creates a new PPTX with optional internal source metadata and does not overwrite existing files. **Inspect PPTX** remains the independent simple-text inspector. **Report data** accepts structured report JSON, never arbitrary HTML/CSS or executable model output.
+
+Double-click text, a table or a group to edit on the canvas. Ctrl/Cmd+Enter or the check icon commits; Escape cancels outside IME composition. **Insert objects**, **Edit theme**, and **Edit masters and layouts** expose the authoring controls. Reopened PPTX files support bounded native edits while preserving the original package; unsupported changes fail before committing. See [single-file operation](docs/testing/single-file.md) and [authoring verification](docs/testing/authoring.md).
+
+Open **Parts library**, choose a category/layout, enter data and select **Insert part**. Select the resulting group and use **Edit part data** to update it. **Save PPTX** retains the metadata internally. Manual or external edits that no longer match it disable semantic replacement without discarding the native objects. Insertion does not rearrange existing slide content; choose space on the slide before inserting.
+
+Open **Architecture diagram**, choose an example or add shapes, and select **Insert graph**. Select the group and use **Edit graph** to reopen it. Canvas, Preview and JSON share Rust validation; invalid JSON retains its draft, and closing without insertion/update leaves the slide unchanged. Property forms provide alternatives to dragging and connecting. Graph-local Undo/Redo is separate from the single document revision created on application. Saving needs only the PPTX. draw.io XML interchange, self-loops, nested boundaries and automatic obstacle avoidance are not supported.
 
 ## Headless CLI
 
@@ -74,9 +92,11 @@ aislide request
 
 `request` reads one JSON document from stdin and writes one JSON result to stdout. Errors go to stderr with a nonzero exit status. `generate` uses atomic, create-new publication and never overwrites the input or an existing destination.
 
-The shared JSON API includes `sample`, `compile`, `provider_status`, `generate`, `ingest`, `data_report`, `create_picture`, `create_diagram`, `new_document`, `transaction`, `undo_transaction`, `export_project`, `open_project`, `import_document`, `import_pptx`, `save_import`, `measure_layout`, `ocr_status`, `export`, `validate`, `inspect`, `roundtrip`, `package_manifest` and `patch_text`. Its request and response limit is 4 MiB including base64; a revisioned document is limited to 2 MiB and can therefore accept less than the raw file limit. See [API contracts](docs/api.md).
+The shared JSON API includes `sample`, `compile`, `provider_status`, `generate`, `ingest`, `data_report`, `create_picture`, `create_diagram`, `object_catalog`, `create_object`, `part_catalog`, `create_part`, `insert_part`, `update_part`, `design_defaults`, `update_design`, `apply_theme`, `assign_layout`, `new_document`, `transaction`, `undo_transaction`, `open_presentation`, `export_presentation`, `export_project`, `open_project`, `import_document`, `import_pptx`, `save_import`, `measure_layout`, `ocr_status`, `export`, `validate`, `inspect`, `roundtrip`, `package_manifest` and `patch_text`. Its request and response limit is 4 MiB including base64; a revisioned document is limited to 2 MiB and can therefore accept less than the raw file limit. See [API contracts](docs/api.md).
 
 The CLI `generate` subcommand and low-level JSON `export` perform deterministic structural export. Use document/project operations for source-integrity and measured-layout gates. Model inference uses the JSON `generate` operation, not the similarly named CLI subcommand.
+
+Workspace JSON operations also include `create_presentation`, `edit_slides`, `edit_elements` and `create_asset`. Their mutations use the same document revisions and transaction history.
 
 ```sh
 npm run demo
@@ -90,9 +110,15 @@ This produces a uniquely named PPTX in `.artifacts/` without overwriting previou
 node tools/mcp.mjs --output-dir ./output
 ```
 
-The official MCP SDK exposes stdio tools for model generation, source ingestion/mapping, complete document reads, atomic edits, Undo/Redo, native picture/diagram insertion, layout measurement, original-preserving import and project export/reopen. The previous tools such as `compile_report`, `update_text` and `export_pptx` remain available. The GUI need not be running. `aislide://report/example` supplies the structured example. VS Code configuration is in [.vscode/mcp.json](.vscode/mcp.json).
+The official MCP SDK exposes stdio tools for model generation, source ingestion/mapping, complete document reads, atomic edits, Undo/Redo, object/part insertion, part metadata updates, master/theme editing, layout assignment, layout measurement and single-PPTX export/reopen. The previous tools such as `compile_report`, `update_text` and legacy project APIs remain available. The GUI need not be running. `aislide://report/example` supplies the structured example. VS Code configuration is in [.vscode/mcp.json](.vscode/mcp.json).
 
 Generation creates a new in-memory document and never automatically exports it. Up to eight documents and eight source handles are retained; each document's Undo/Redo history has count and memory caps. Export is disabled without `--output-dir`, accepts a plain filename only, and refuses existing files. A project pair is published per file, not as an atomic filesystem transaction. Concurrent collisions or process interruption can leave a partial pair, which must be checked before use; recovery never deletes published paths. No generic filesystem, shell, or network tool is exposed.
+
+Graph MCP tools are `graph_catalog`, `create_graph`, `transform_graph`, `get_graph`, `add_graph`, `update_graph` and `apply_graph`. Mutations require the current `expected_revision`. `node tools/graphs-demo.mjs` exercises creation, export, reopen, movement and byte-identical Undo through the official MCP SDK in a new artifact directory. See [the graph API](docs/api.md#architecture-graphs).
+
+Workspace MCP tools are `create_presentation`, `edit_slides`, `edit_elements`, `create_asset` and `add_asset`. They share revision checks, input limits, history and the existing output-directory restrictions. SVG is parsed/rasterized locally with `resvg`; imported scripts, external resources, embedded images/text and unsupported effects are rejected, never fetched or executed.
+
+`node tools/workspace-demo.mjs` creates a synthetic five-slide qualification in a new `.artifacts/` directory, including SVG icons, independent copied chart workbooks, native slide insertion/deletion/reordering and standalone reopen checks.
 
 ## Reusable Client
 
@@ -150,7 +176,7 @@ Browser E2E uses installed Microsoft Edge through Playwright. Generation tests u
 ./tools/verify-demo.ps1
 ```
 
-After `npm run tauri:build`, `npm run test:native:e2e` runs the generation workflow in a separately owned Windows desktop WebView using a disposable profile and loopback fixture. It closes the test application and removes its debugging profile afterward. This interactive desktop check is separate from hosted CI.
+After `npm run tauri:build`, `npm run test:native:e2e` runs direct editing, IME, object insertion, master/theme/layout editing, Undo and the generation workflow in a separately owned Windows desktop WebView using a disposable profile and loopback fixture. It closes the test application and removes its debugging profile afterward. This interactive desktop check is separate from hosted CI.
 
 Optional network/desktop qualifications are deliberately separate: `npm run test:corpus` downloads the pinned public fixture set, `npm run demo:benchmark` fetches attributed World Bank data, `npm run model:qualify` uses the prepared local model, and `tools/verify-powerpoint.ps1` checks Office on disposable copies. None is presented as a credential-free hosted CI result.
 
@@ -158,9 +184,11 @@ The Open XML validator downloads pinned official NuGet packages from Microsoft's
 
 See [docs/testing/first-slice.md](docs/testing/first-slice.md) for observed results and [docs/implementation.md](docs/implementation.md) for boundaries.
 
-### Private GitHub Development
+### GitHub Development
 
-The source and tests are pushed to `main` in the Private repository. The [initial Actions run](https://github.com/murasamelabo/AISlide/actions/runs/34727915785) was blocked before any step ran: GitHub reported failed recent account payments or a spending limit requiring attention. No billing settings, spending limits, or repository visibility were changed. Local checks are the verified baseline for this checkpoint, not a substitute claim that hosted CI passed.
+The owner authorized publishing the verified source to the existing Public repository on 2026-09-15. This checkpoint includes the dependent authoring, single-PPTX, parts, graph and workspace improvements. Source publication excludes local `deliverables/`, task-specific `examples/`, inputs, credentials, downloaded toolchains and build outputs. Reproducible synthetic examples live in `tools/*-demo.mjs`.
+
+The original PoC baseline was pushed to `main` at `33243bf87381226285b99c8897ee67af9e406df1` while the repository was Private. The [initial Actions run](https://github.com/murasamelabo/AISlide/actions/runs/34727915785) was blocked before any step ran: GitHub reported failed recent account payments or a spending limit requiring attention. That historical failure is not a result for the current revision. No billing settings, spending limits or repository visibility are changed by this publication. See the latest [workspace verification](docs/testing/workspace-ux.md) and the actual Actions run for the pushed commit.
 
 After the repository owner resolves the restriction in [GitHub billing settings](https://github.com/settings/billing), open **Actions > Verify > Run workflow** on `main`, or run:
 
@@ -172,10 +200,14 @@ Review that run before treating a clean hosted Windows build as established. Do 
 
 ## Beyond This PoC
 
-Full arbitrary-PPTX editing, slide-master/theme editing, mixed-run rich text, animations, chart types beyond bar/column/line, exact Office typography, automatic scanned-PDF rendering/OCR, persistent project history/autosave, credential-vault UI, broad cloud-model qualification, signed installers and cross-platform distribution remain outside this verified checkpoint. Imported SmartArt/OLE/media and unknown extensions are preserved, not executed or fully rendered. ZIP64, encrypted presentations, legacy `.ppt`, non-UTF-8 edited XML and signed-package edits are rejected.
+Full arbitrary-PPTX editing, unrestricted imported master/theme rewriting, mixed-run rich text, animations, chart types beyond the ten supported kinds, exact Office typography, automatic scanned-PDF rendering/OCR, persistent project history/autosave, credential-vault UI, broad cloud-model qualification, signed installers and cross-platform distribution remain outside this verified checkpoint. Imported SmartArt/OLE/media and unknown extensions are preserved, not executed or fully rendered. ZIP64, encrypted presentations, legacy `.ppt`, non-UTF-8 edited XML and signed-package edits are rejected. Parts have bounded data sizes; maps have generalized coastlines rather than country borders/geocoding, and nominal Venn layouts do not calculate area-accurate intersections.
 
 Synthetic data must not be treated as factual, template compilation must not be described as AI generation, and structural validation must not be described as Office visual parity.
 
+## Design Reference
+
+Source: [Digital Agency Design System website](https://design.digital.go.jp/dads/), adapted for AISlide. デジタル庁デザインシステムウェブサイトを参考に、AISlide向けに編集・加工。Noto Sans JP and Noto Sans Mono retain SIL Open Font License 1.1. Details and deviations are in the [graph/UI report](docs/testing/graphs-and-dads.md#design-reference).
+
 ## License
 
-The project license has **not** been selected. There is no public-release authorization or redistribution license for the project yet. Third-party dependencies retain their own licenses. No Office fonts, external slide engine source, or third-party presentations are bundled.
+The project license has **not** been selected. Public source visibility does not establish a general redistribution license for the project. Third-party dependencies retain their own licenses. No Office fonts, external slide engine source, or third-party presentations are bundled. The geographic parts include public-domain Natural Earth land outlines; origin, terms and the exact asset hash are recorded in the [parts guide](docs/testing/parts-library.md#asset-provenance).

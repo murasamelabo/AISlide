@@ -1,12 +1,106 @@
 ﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
-test('MCP completes the source-bound PoC with native graphics and shared transactions', async () => {
+test('MCP workspace commands create blank files, import icons and edit native slides', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-mcp-workspace-'));
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const client = new Client({ name: 'workspace-proof', version: '1.0.0' });
+  const call = async (name, args = {}) => { const response = await client.callTool({ name, arguments: args }); assert.ok(!response.isError, `${name}: ${JSON.stringify(response.content)}`); return JSON.parse(response.content[0].text); };
+  try {
+    await client.connect(transport);
+    const created = await call('create_presentation', { title: 'Workspace example' });
+    const deck_id = created.deck_id;
+    assert.equal((await call('get_document', { deck_id })).deck.slides[0].elements.length, 0);
+    await call('edit_slides', { deck_id, expected_revision: 0, operations: [{ op: 'insert', id: 'icons', after: 'slide-1', title: 'Icon slide' }] });
+    await call('add_asset', { deck_id, expected_revision: 1, slide_id: 'icons', id: 'symbol', size: 96, alt: 'Provided synthetic icon', mime_type: 'image/svg+xml', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#0017c1"/></svg>').toString('base64') });
+    await call('edit_elements', { deck_id, expected_revision: 2, slide_id: 'icons', operations: [{ op: 'duplicate', id: 'symbol', new_id: 'symbol-copy' }, { op: 'order', id: 'symbol-copy', index: 0 }] });
+    await call('undo', { deck_id });
+    await call('export_pptx', { deck_id, filename: 'workspace.pptx' });
+    const original = await readFile(join(directory, 'workspace.pptx'));
+    const opened = await call('open_pptx', { base64: original.toString('base64') });
+    await call('edit_slides', { deck_id: opened.deck_id, expected_revision: 0, operations: [{ op: 'duplicate', slide_id: 'icons', id: 'native-copy' }, { op: 'move', slide_id: 'native-copy', index: 0 }, { op: 'remove', slide_id: 'slide-1' }] });
+    const modified = await call('get_document', { deck_id: opened.deck_id });
+    assert.equal(modified.deck.slides[0].id, 'native-copy');
+    assert.equal(modified.deck.slides.length, 2);
+    assert.equal(modified.deck.slides[0].elements[0].mime_type, 'image/png');
+    const stale = await client.callTool({ name: 'edit_slides', arguments: { deck_id: opened.deck_id, expected_revision: 0, operations: [{ op: 'remove', slide_id: 'icons' }] } });
+    assert.equal(stale.isError, true);
+    await call('export_pptx', { deck_id: opened.deck_id, filename: 'workspace-edited.pptx' });
+    const verified = await call('open_pptx', { base64: (await readFile(join(directory, 'workspace-edited.pptx'))).toString('base64') });
+    assert.equal((await call('get_document', { deck_id: verified.deck_id })).deck.slides.length, 2);
+    assert.deepEqual(await readFile(join(directory, 'workspace.pptx')), original);
+  } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('MCP graph tools share native editing, revision guards and standalone PPTX', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-mcp-graph-'));
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const client = new Client({ name: 'graph-proof', version: '1.0.0' });
+  const call = async (name, args = {}) => { const response = await client.callTool({ name, arguments: args }); assert.ok(!response.isError, JSON.stringify(response.content)); return JSON.parse(response.content[0].text); };
+  try {
+    await client.connect(transport);
+    const catalog = await call('graph_catalog');
+    const created = await call('compile_report', { report: { title: 'Graph fixture', subtitle: '', period: '', source: 'Synthetic fixture', sections: [{ title: 'Architecture', layout: 'statement', body: [], rows: [], metrics: [] }] } });
+    const deck_id = created.deck_id;
+    await call('add_graph', { deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'network', spec: catalog.examples[2].spec });
+    await call('apply_graph', { deck_id, expected_revision: 1, slide_id: 'slide-1', id: 'network', operations: [{ op: 'move', ids: ['private'], dx: 16, dy: 16 }] });
+    const graph = await call('get_graph', { deck_id, slide_id: 'slide-1', id: 'network' });
+    assert.equal(graph.spec.nodes[1].x, 446);
+    assert.equal(graph.stale, false);
+    const stale = await client.callTool({ name: 'apply_graph', arguments: { deck_id, expected_revision: 1, slide_id: 'slide-1', id: 'network', operations: [{ op: 'remove', ids: ['client'] }] } });
+    assert.equal(stale.isError, true);
+    await call('export_pptx', { deck_id, filename: 'graph.pptx' });
+    const bytes = await readFile(join(directory, 'graph.pptx'));
+    const reopened = await call('open_pptx', { base64: bytes.toString('base64') });
+    assert.equal((await call('get_graph', { deck_id: reopened.deck_id, slide_id: 'slide-1', id: 'network' })).stale, false);
+    await call('undo', { deck_id });
+    assert.equal((await call('get_graph', { deck_id, slide_id: 'slide-1', id: 'network' })).spec.nodes[1].x, 430);
+  } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('MCP authoring tools insert objects and edit master theme with transactional undo', async () => {
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const client = new Client({ name: 'authoring-proof', version: '1.0.0' });
+  const call = async (name, args = {}) => {
+    const response = await client.callTool({ name, arguments: args });
+    assert.ok(!response.isError, JSON.stringify(response.content));
+    return JSON.parse(response.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const catalog = await call('object_catalog'); assert.equal(catalog.charts.length, 9);
+    const design = await call('design_defaults');
+    const created = await call('compile_report', { report: { title: 'Authoring', subtitle: '', period: '', source: 'Synthetic fixture', sections: [{ title: 'Master fixture', layout: 'statement', body: ['Native authoring'], rows: [], metrics: [] }] } });
+    const deck_id = created.deck_id;
+    await call('update_design', { deck_id, expected_revision: 0, design });
+    await call('assign_layout', { deck_id, expected_revision: 1, slide_id: 'slide-1', layout_id: 'title-content' });
+    await call('add_object', { deck_id, expected_revision: 2, slide_id: 'slide-1', id: 'native-shape', kind: 'shape', preset: 'ellipse' });
+    await call('update_text', { deck_id, expected_revision: 3, slide_id: 'slide-1', element_id: 'native-shape', text: 'Shape through MCP' });
+    const theme = structuredClone(design.theme); theme.colors.accent1 = 'B53055';
+    await call('apply_theme', { deck_id, expected_revision: 4, theme });
+    let deck = await call('get_deck', { deck_id });
+    assert.equal(deck.design.theme.colors.accent1, 'B53055');
+    assert.equal(deck.slides[0].elements.at(-1).text, 'Shape through MCP');
+    await call('undo', { deck_id }); deck = await call('get_deck', { deck_id });
+    assert.equal(deck.design.theme.colors.accent1, design.theme.colors.accent1);
+    const stale = await client.callTool({ name: 'assign_layout', arguments: { deck_id, expected_revision: 0, slide_id: 'slide-1', layout_id: 'blank' } });
+    assert.equal(stale.isError, true);
+    const parts = await call('part_catalog'); assert.equal(parts.presets.length, 108);
+    const spec = parts.presets.find((preset) => preset.id === 'flow/balanced').example;
+    await call('add_part', { deck_id, expected_revision: 6, slide_id: 'slide-1', id: 'mcp-part', spec });
+    await call('update_part', { deck_id, expected_revision: 7, slide_id: 'slide-1', id: 'mcp-part', spec: { ...spec, title: 'MCP part update' } });
+    assert.equal((await call('get_document', { deck_id })).parts[0].spec.title, 'MCP part update');
+    await call('undo', { deck_id });
+    assert.equal((await call('get_document', { deck_id })).parts[0].spec.title, spec.title);
+  } finally { await client.close(); }
+});
+
+test('MCP saves and reopens one source-bound PPTX with native graphics and transactions', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-mcp-poc-'));
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
   const client = new Client({ name: 'poc-proof', version: '1.0.0' });
@@ -31,14 +125,23 @@ test('MCP completes the source-bound PoC with native graphics and shared transac
     assert.equal((await call('get_document', { deck_id: result.deck_id })).deck.slides[0].elements[titleIndex].text, before.deck.slides[0].elements[titleIndex].text);
     await call('redo', { deck_id: result.deck_id });
     await call('add_diagram', { deck_id: result.deck_id, slide_id: 'slide-12', id: 'mcp-flow', steps: ['Ingest', 'Validate', 'Export'] });
-    await call('export_project', { deck_id: result.deck_id, filename: 'poc-proof.pptx' });
+    const parts = await call('part_catalog');
+    const spec = parts.presets.find((preset) => preset.id === 'pyramid/balanced').example;
+    await call('add_part', { deck_id: result.deck_id, expected_revision: 4, slide_id: 'slide-11', id: 'persisted-part', spec });
+    await call('export_pptx', { deck_id: result.deck_id, filename: 'poc-proof.pptx' });
     const pptx = await readFile(join(directory, 'poc-proof.pptx'));
-    const checkpoint = JSON.parse(await readFile(join(directory, 'poc-proof.aislide.json'), 'utf8'));
     assert.equal(pptx.subarray(0, 2).toString(), 'PK');
-    assert.ok(checkpoint.document.bindings.length > 0);
-    const restored = await call('open_project', { base64: pptx.toString('base64'), checkpoint });
-    assert.equal((await call('get_document', { deck_id: restored.deck_id })).hash, checkpoint.document.hash);
-    const duplicate = await client.callTool({ name: 'export_project', arguments: { deck_id: result.deck_id, filename: 'poc-proof.pptx' } });
+    assert.deepEqual(await readdir(directory), ['poc-proof.pptx']);
+    const restored = await call('open_pptx', { base64: pptx.toString('base64') });
+    const restoredDocument = await call('get_document', { deck_id: restored.deck_id });
+    assert.equal(restoredDocument.sources[0].sha256, before.sources[0].sha256);
+    assert.equal(restoredDocument.bindings.length, before.bindings.length);
+    assert.equal(restoredDocument.parts[0].spec.preset, 'pyramid/balanced');
+    assert.equal(restoredDocument.parts[0].stale, false);
+    assert.equal(restoredDocument.deck.slides[0].elements[titleIndex].text, 'Verified MCP edit');
+    await call('update_text', { deck_id: restored.deck_id, expected_revision: 0, slide_id: restoredDocument.deck.slides[0].id, element_id: restoredDocument.deck.slides[0].elements[titleIndex].id, text: 'Reopened PPTX edit' });
+    await call('undo', { deck_id: restored.deck_id });
+    const duplicate = await client.callTool({ name: 'export_pptx', arguments: { deck_id: result.deck_id, filename: 'poc-proof.pptx' } });
     assert.equal(duplicate.isError, true);
     assert.deepEqual(await readFile(join(directory, 'poc-proof.pptx')), pptx);
   } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }

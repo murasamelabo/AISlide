@@ -14,6 +14,8 @@ const MAX_REVISION: u64 = 9_007_199_254_740_991;
 pub struct Document {
     pub version: u32, pub id: String, pub revision: u64, pub hash: String,
     pub deck: Deck, pub sources: Vec<SourceDocument>, pub bindings: Vec<SourceBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<crate::parts::state::PartInstance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<ReportInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -22,11 +24,11 @@ pub struct Document {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ImportedOrigin { pub base64: String, pub sha256: String }
+pub struct ImportedOrigin { pub base64: String, pub sha256: String, #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub native: bool }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Content { deck: Deck, sources: Vec<SourceDocument>, bindings: Vec<SourceBinding>, #[serde(default, skip_serializing_if = "Option::is_none")] report: Option<ReportInput>, #[serde(default, skip_serializing_if = "Option::is_none")] origin: Option<ImportedOrigin> }
+struct Content { deck: Deck, sources: Vec<SourceDocument>, bindings: Vec<SourceBinding>, #[serde(default, skip_serializing_if = "Vec::is_empty")] parts: Vec<crate::parts::state::PartInstance>, #[serde(default, skip_serializing_if = "Option::is_none")] report: Option<ReportInput>, #[serde(default, skip_serializing_if = "Option::is_none")] origin: Option<ImportedOrigin> }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,17 +47,18 @@ pub struct Checkpoint { pub format: String, pub version: u32, pub pptx_sha256: S
 
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 
-fn content(document: &Document) -> Content { Content { deck: document.deck.clone(), sources: document.sources.clone(), bindings: document.bindings.clone(), report: document.report.clone(), origin: document.origin.clone() } }
+fn content(document: &Document) -> Content { Content { deck: document.deck.clone(), sources: document.sources.clone(), bindings: document.bindings.clone(), parts: document.parts.clone(), report: document.report.clone(), origin: document.origin.clone() } }
 
 fn seal(document: &mut Document) -> Result<()> {
     valid_text(&document.id, 80)?;
     if document.version != 1 || document.id.is_empty() || document.revision > MAX_REVISION || document.sources.len() > 8 || document.bindings.len() > 4096 { return Err(Error::Invalid("document version, identity, revision or resource count is invalid".into())); }
     if serde_json::to_vec(&content(document))?.len() > MAX_DOCUMENT_BYTES { return Err(Error::Limit("document content > 2 MiB".into())); }
     validate_deck(&document.deck)?;
+    crate::parts::state::refresh(&mut document.parts,&document.deck,document.origin.as_ref())?;
     if let Some(origin) = &document.origin {
         let bytes = STANDARD.decode(&origin.base64).map_err(|_| Error::Invalid("invalid imported origin base64".into()))?;
         if digest(&bytes) != origin.sha256 { return Err(Error::Conflict("import origin hash mismatch".into())); }
-        crate::import::save_import(bytes, &document.deck)?;
+        if origin.native { crate::native::save(bytes, &document.deck)?; } else { crate::import::save_import(bytes, &document.deck)?; }
     }
     if let Some(report) = &document.report { crate::report::compile_report(report)?; }
     let mut ids = BTreeSet::new();
@@ -95,16 +98,26 @@ pub fn verify(document: &Document) -> Result<()> {
 }
 
 pub fn create(id: String, deck: Deck, sources: Vec<SourceDocument>, bindings: Vec<SourceBinding>, report: Option<ReportInput>) -> Result<Document> {
-    let mut document = Document { version: 1, id, revision: 0, hash: String::new(), deck, sources, bindings, report, origin: None };
+    let mut document = Document { version: 1, id, revision: 0, hash: String::new(), deck, sources, bindings, parts: Vec::new(), report, origin: None };
     seal(&mut document)?; Ok(document)
 }
 
 pub fn import_document(id: String, bytes: Vec<u8>) -> Result<Value> {
     let imported = crate::import::import_pptx(bytes.clone())?;
-    let mut document = Document { version: 1, id, revision: 0, hash: String::new(), deck: imported.deck, sources: Vec::new(), bindings: Vec::new(), report: None,
-        origin: Some(ImportedOrigin { base64: STANDARD.encode(&bytes), sha256: digest(&bytes) }) };
+    let mut document = Document { version: 1, id, revision: 0, hash: String::new(), deck: imported.deck, sources: Vec::new(), bindings: Vec::new(), parts: Vec::new(), report: None,
+        origin: Some(ImportedOrigin { base64: STANDARD.encode(&bytes), sha256: digest(&bytes), native: false }) };
     seal(&mut document)?;
     Ok(json!({"document":document,"warnings":imported.warnings,"objects":imported.objects}))
+}
+
+pub fn open_presentation(id: String, bytes: Vec<u8>) -> Result<Value> {
+    let package = crate::package::Package::open(bytes.clone())?;
+    let imported = crate::native::read(&package)?;
+    let (sources, bindings, parts) = imported.metadata.map(|metadata| (metadata.sources, metadata.bindings, metadata.parts)).unwrap_or_default();
+    let mut document = Document { version: 1, id, revision: 0, hash: String::new(), deck: imported.deck, sources, bindings, parts, report: None,
+        origin: Some(ImportedOrigin { base64: STANDARD.encode(&bytes), sha256: digest(&bytes), native: true }) };
+    seal(&mut document)?;
+    Ok(json!({"document":document,"warnings":imported.warnings,"objects":[],"format":"open_xml_pptx"}))
 }
 
 pub fn transact(document: &Document, transaction: Transaction) -> Result<TransactionResult> {
@@ -120,8 +133,12 @@ pub fn transact(document: &Document, transaction: Transaction) -> Result<Transac
         if serde_json::to_vec(&working)?.len() > MAX_DOCUMENT_BYTES { return Err(Error::Limit("transaction would exceed the 2 MiB document budget".into())); }
     }
     let next: Content = serde_json::from_value(working)?;
-    let mut updated = Document { version: document.version, id: document.id.clone(), revision: document.revision, hash: String::new(), deck: next.deck, sources: next.sources, bindings: next.bindings, report: next.report, origin: next.origin };
+    let mut updated = Document { version: document.version, id: document.id.clone(), revision: document.revision, hash: String::new(), deck: next.deck, sources: next.sources, bindings: next.bindings, parts: next.parts, report: next.report, origin: next.origin };
     if document.origin.is_some() && crate::canonical::bytes(&document.origin)? != crate::canonical::bytes(&updated.origin)? { return Err(Error::Unsupported("import origin cannot be detached or replaced inside an edit transaction".into())); }
+    updated.parts.retain(|part| {
+        let contains = |deck: &Deck| deck.slides.iter().any(|slide| slide.id == part.slide_id && slide.elements.iter().any(|element| element.bounds().0 == part.element_id));
+        contains(&updated.deck) || !contains(&document.deck)
+    });
     seal(&mut updated)?;
     if updated.hash == document.hash { return Ok(TransactionResult { document: document.clone(), receipt: None, changes: Vec::new() }); }
     updated.revision = document.revision.checked_add(1).filter(|revision| *revision <= MAX_REVISION).ok_or_else(|| Error::Limit("document revision exhausted".into()))?;
@@ -139,7 +156,10 @@ pub fn undo(document: &Document, expected_revision: u64, receipt: UndoReceipt) -
 }
 
 fn presentation(document: &Document) -> Result<Vec<u8>> {
-    if let Some(origin) = &document.origin { crate::import::save_import(STANDARD.decode(&origin.base64).map_err(|_| Error::Invalid("invalid imported origin".into()))?, &document.deck) }
+    if let Some(origin) = &document.origin {
+        let bytes = STANDARD.decode(&origin.base64).map_err(|_| Error::Invalid("invalid imported origin".into()))?;
+        if origin.native { crate::native::save(bytes, &document.deck) } else { crate::import::save_import(bytes, &document.deck) }
+    }
     else { crate::pptx::export_pptx(&document.deck) }
 }
 
@@ -162,4 +182,12 @@ pub fn open(base64: &str, checkpoint: Checkpoint) -> Result<Document> {
     verify(&checkpoint.document)?;
     if presentation(&checkpoint.document)? != bytes { return Err(Error::Conflict("checkpoint scene does not reproduce its bound PPTX".into())); }
     Ok(checkpoint.document)
+}
+
+pub fn export_presentation(document: &Document) -> Result<Value> {
+    let mut result = export(document)?;
+    let bytes = STANDARD.decode(result["base64"].as_str().ok_or_else(|| Error::Invalid("export bytes missing".into()))?).map_err(|_| Error::Invalid("export base64".into()))?;
+    result["base64"] = json!(STANDARD.encode(crate::provenance::attach(bytes, document)?));
+    if let Some(value) = result.as_object_mut() { value.remove("checkpoint"); value.remove("checkpoint_filename"); }
+    Ok(result)
 }

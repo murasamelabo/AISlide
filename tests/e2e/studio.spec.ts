@@ -11,7 +11,7 @@ test('edit, undo and export a real twelve-slide deck', async ({ page }) => {
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
   await expect(page.locator('.slide-stage').getByText('Edited quarterly report', { exact: true })).toHaveCount(0);
   const pending = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Export PPTX', exact: true }).click();
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
   const download = await pending;
   expect(download.suggestedFilename()).toBe('report.pptx');
   await download.saveAs('.artifacts/report.pptx');
@@ -44,14 +44,16 @@ test('editor controls have no serious automated accessibility violations', async
   expect(results.violations.filter((violation) => ['serious', 'critical'].includes(violation.impact ?? ''))).toEqual([]);
 });
 
-test('a scene checkpoint can be reopened', async ({ page }) => {
+test('a standard PPTX restores its own title without a scene checkpoint', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   const response = await page.request.post('/api/core', { headers: { Origin: 'http://127.0.0.1:4173' }, data: { op: 'sample' } });
   const report = await response.json();
   const compiled = await page.request.post('/api/core', { headers: { Origin: 'http://127.0.0.1:4173' }, data: { op: 'compile', report } });
   const { deck } = await compiled.json();
-  deck.title = 'Restored checkpoint';
-  await page.getByLabel('Open scene file').setInputFiles({ name: 'saved.scene.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(deck)) });
-  await expect(page.locator('.document-name strong')).toHaveText('Restored checkpoint');
+  deck.title = 'Restored native presentation';
+  const exported = await page.request.post('/api/core', { headers: { Origin: 'http://127.0.0.1:4173' }, data: { op: 'export', deck } });
+  const { base64 } = await exported.json();
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: 'saved.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: Buffer.from(base64, 'base64') });
+  await expect(page.locator('.document-name strong')).toHaveText('Restored native presentation');
 });
