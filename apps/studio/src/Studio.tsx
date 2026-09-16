@@ -10,7 +10,7 @@ import { PartsPanel } from './PartsPanel'
 import type { AssetInput } from './types'
 import { ContextMenu } from './ContextMenu'
 import type { MenuPosition, MenuCommand } from './ContextMenu'
-import { FilePlus2, FileDown, Plus, Pencil, ArrowUpToLine, ArrowDownToLine, Menu } from 'lucide-react'
+import { FilePlus2, FileDown, Plus, Pencil, ArrowUpToLine, ArrowDownToLine, Menu, Sticker, Network } from 'lucide-react'
 import type { SlideOperation, ElementOperation } from './types'
 import './workspace.css'
 import { isTauri } from '@tauri-apps/api/core'
@@ -21,6 +21,7 @@ import type { PartCatalog, PartInstance, GraphCatalog } from './types'
 import { ThemePanel } from './ThemePanel'
 import { DesignPanel } from './DesignPanel'
 import { ColorField, TextControls } from './TextControls'
+import { Tool } from './Tool'
 import { chartNames } from './design'
 import { AislideClient, DocumentSession } from '../../../packages/client/index.mjs'
 import type { ReplaceOptions } from '../../../packages/client/index.mjs'
@@ -31,15 +32,8 @@ const AssetPanel = lazy(() => import('./AssetPanel').then((module) => ({ default
 const GraphEditor = lazy(() => import('./GraphEditor').then((module) => ({ default: module.GraphEditor })))
 let initial: Promise<AislideDocument> | undefined
 function loadInitial() {
-  initial ??= core<Report>({ op: 'sample' }).then(async (report) => {
-    const compiled = await core<Compiled>({ op: 'compile', report })
-    return (await client.createDocument({ id: crypto.randomUUID(), deck: compiled.deck, report })).document
-  })
+  initial ??= client.createPresentation(crypto.randomUUID()).then((opened) => opened.document)
   return initial
-}
-
-function Tool({ label, children, onClick, disabled = false }: { label: string; children: ReactNode; onClick: () => void; disabled?: boolean }) {
-  return <button type="button" className="tool" title={label} aria-label={label} onClick={onClick} disabled={disabled}>{children}<span className="tooltip">{label}</span></button>
 }
 
 function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
@@ -129,7 +123,7 @@ export default function Studio() {
   const [panel, setPanel] = useState<'elements' | 'notes'>('elements')
   const [zoom, setZoom] = useState('fit')
   const [showInspector, setShowInspector] = useState(true)
-  const [filename, setFilename] = useState('report.pptx')
+  const [filename, setFilename] = useState('Untitled presentation.pptx')
   const [savedHash, setSavedHash] = useState<string | null>(null)
   const [inlineDraft, setInlineDraft] = useState(false)
   const [propertiesDraft, setPropertiesDraft] = useState(false)
@@ -166,7 +160,7 @@ export default function Studio() {
       session.current = opened
       setDocumentState(opened.document)
       setSavedHash(opened.document.hash)
-      setStatus('Synthetic sample / Local core')
+      setStatus('Blank presentation / Local core')
     }).catch((reason) => { if (!disposed) setError(String(reason)) })
     return () => { disposed = true }
   }, [])
@@ -387,10 +381,10 @@ export default function Studio() {
   } else if (context?.kind === 'canvas') contextCommands = [
     { label: 'Add text', icon: Type, action: () => addElement('text') },
     { label: 'Add rectangle', icon: Square, action: () => addElement('rect') },
-    { label: 'Insert icons', icon: ImagePlus, action: () => setModal('assets'), disabled: importedMode },
+    { label: 'Insert icons', icon: Sticker, action: () => setModal('assets'), disabled: importedMode },
     { label: 'Add picture', icon: ImagePlus, action: () => { pictureTarget.current = null; pictureInput.current?.click() } },
     { label: 'Insert objects', icon: Shapes, action: () => void run(async () => { setCatalog(await client.objectCatalog()); setModal('insert') }), disabled: importedMode },
-    { label: 'Architecture diagram', icon: Workflow, action: () => void run(async () => { setGraphCatalog(await client.graphCatalog()); setPartEditing(null); setModal('graph') }), disabled: importedMode },
+    { label: 'Architecture diagram', icon: Network, action: () => void run(async () => { setGraphCatalog(await client.graphCatalog()); setPartEditing(null); setModal('graph') }), disabled: importedMode },
     { label: 'Parts library', icon: Blocks, action: () => void run(async () => { setPartCatalog(await client.partCatalog()); setPartEditing(null); setModal('parts') }), disabled: importedMode },
     { label: 'New slide', icon: Plus, action: () => newSlide(), separator: true, disabled: importedMode || (deck?.slides.length ?? 0) >= 32 },
     ...fileCommands.map((command, index) => ({ ...command, separator: index === 0 })),
@@ -406,11 +400,11 @@ export default function Studio() {
         <Tool label="File operations" disabled={disable} onClick={() => { const anchor = document.activeElement as HTMLElement; const bounds = anchor.getBoundingClientRect(); openContext('file', { x: bounds.left, y: bounds.bottom, anchor }) }}><Menu size={18} /></Tool>
         <Tool label="New presentation" disabled={disable} onClick={() => replacePresentation(newPresentation)}><FilePlus2 size={18} /></Tool>
         <Tool label="Sources" disabled={disable || importedMode} onClick={() => setModal('sources')}><Database size={18} /></Tool>
-        <button className="secondary" aria-label="Generate with AI" disabled={disable || hasOrigin} onClick={() => void run(async () => { setProvider(await core<ProviderStatus>({ op: 'provider_status' })); setModal('generate') })}><Sparkles size={17} /><span>Generate</span></button>
-        <button className="secondary" aria-label="Report data" disabled={disable || hasOrigin || !report} onClick={() => { setReportJson(JSON.stringify(report, null, 2)); setError(''); setModal('report') }}><FileJson2 size={17} /><span>Report data</span></button>
+        <Tool className="secondary" label="Generate with AI" disabled={disable || hasOrigin} onClick={() => void run(async () => { setProvider(await core<ProviderStatus>({ op: 'provider_status' })); setModal('generate') })}><Sparkles size={20} /><span>Generate</span></Tool>
+        <Tool className="secondary" label="Report data" disabled={disable || hasOrigin || !report} onClick={() => { setReportJson(JSON.stringify(report, null, 2)); setError(''); setModal('report') }}><FileJson2 size={20} /><span>Report data</span></Tool>
         <Tool label="Open PPTX" disabled={disable} onClick={() => nativeInput.current?.click()}><FolderOpen size={19} /></Tool>
         <Tool label="Inspect PPTX" disabled={disable} onClick={() => pptxInput.current?.click()}><FileInput size={19} /></Tool>
-        <button className="primary" aria-label="Save PPTX" disabled={disable} onClick={() => void run(async () => { await savePresentation() })}><Save size={17} /><span>Save .pptx</span></button>
+        <Tool className="primary" label="Save PPTX" disabled={disable} onClick={() => void run(async () => { await savePresentation() })}><Save size={20} /><span>Save .pptx</span></Tool>
         <Tool label="Save as" disabled={disable} onClick={() => setNameDialog({ kind: 'save', value: filename })}><FileDown size={18} /></Tool>
       </div>
       <input ref={pptxInput} type="file" accept=".pptx" hidden aria-label="Inspect PPTX file" onChange={(event) => {
@@ -442,8 +436,8 @@ export default function Studio() {
         <Tool label="Insert objects" disabled={disable || importedMode} onClick={() => void run(async () => { setCatalog(await core<ObjectCatalog>({ op: 'object_catalog' })); setModal('insert') })}><Shapes size={18} /></Tool>
         <Tool label="Parts library" disabled={disable || importedMode} onClick={() => void run(async () => { setPartCatalog(await client.partCatalog()); setPartEditing(null); setModal('parts') })}><Blocks size={18} /></Tool>
         <Tool label="Add picture" disabled={disable} onClick={() => { pictureTarget.current = null; pictureInput.current?.click() }}><ImagePlus size={18} /></Tool>
-        <Tool label="Insert icons" disabled={disable || importedMode} onClick={() => setModal('assets')}><Shapes size={18} /></Tool>
-        <Tool label="Architecture diagram" disabled={disable || importedMode} onClick={() => void run(async () => { setGraphCatalog(await client.graphCatalog()); setPartEditing(null); setModal('graph') })}><Workflow size={18} /></Tool>
+        <Tool label="Insert icons" disabled={disable || importedMode} onClick={() => setModal('assets')}><Sticker size={18} /></Tool>
+        <Tool label="Architecture diagram" disabled={disable || importedMode} onClick={() => void run(async () => { setGraphCatalog(await client.graphCatalog()); setPartEditing(null); setModal('graph') })}><Network size={18} /></Tool>
         <Tool label="Add process diagram" disabled={disable} onClick={() => void run(async () => {
           if (!deck || !slide) return
           const next = await core<Element>({ op: 'create_diagram', id: `process-${crypto.randomUUID().slice(0, 8)}`, steps: ['Collect', 'Verify', 'Publish'] })
@@ -476,7 +470,7 @@ export default function Studio() {
       <Tool label="Validate layout" disabled={disable} onClick={() => void run(async () => { setLayoutReport(await core<LayoutReport>({ op: 'measure_layout', deck })); setModal('layout') })}><ScanLine size={18} /></Tool>
       <Tool label="PPTX details" disabled={disable || !hasOrigin} onClick={() => setModal('import')}><AlertCircle size={18} /></Tool>
       <select aria-label="Zoom" className="zoom-select" value={zoom} onChange={(event) => setZoom(event.target.value)}><option value="fit">Fit</option><option value="0.75">75%</option><option value="1">100%</option></select>
-      <Tool label="Toggle inspector" onClick={() => setShowInspector(!showInspector)}><PanelRight size={18} /></Tool>
+      <Tool label="Toggle inspector" pressed={showInspector} onClick={() => setShowInspector(!showInspector)}><PanelRight size={18} /></Tool>
     </div>
 
     {error && !modal && !nameDialog && !pendingReplacement && <div className="error-strip" role="alert"><AlertCircle size={17} />{error}<button aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
@@ -573,7 +567,10 @@ export default function Studio() {
     {modal === 'theme' && designDefaults && deck && <Modal title="Theme" onClose={closeModal}><ThemePanel theme={designDefaults.theme} onBusy={setBusy} onApply={async (theme) => {
       await apply(await core<Deck>({ op: 'apply_theme', deck, theme })); setModal(null)
     }} /></Modal>}
-    {modal === 'design' && designDefaults && deck && <Modal title="Masters and layouts" onClose={closeModal}><DesignPanel design={designDefaults} deck={deck} preserveStructure={hasOrigin} onBusy={setBusy} onSave={async (design) => { await apply(await core<Deck>({ op: 'update_design', deck, design })); setModal(null) }} /></Modal>}
+    {modal === 'design' && designDefaults && deck && <Modal title="Masters and layouts" onClose={closeModal}><DesignPanel design={designDefaults} deck={deck} preserveStructure={hasOrigin} onBusy={setBusy} onSave={async (design) => { await apply(await core<Deck>({ op: 'update_design', deck, design })); setModal(null) }} onPreset={async (preset_id, design) => {
+      const updated = await core<Deck>({ op: 'update_design', deck, design })
+      await apply(await core<Deck>({ op: 'apply_design_preset', deck: updated, preset_id })); setModal(null)
+    }} /></Modal>}
 
     {modal === 'sources' && <Modal title="Sources" onClose={closeModal}>
       <SourcePanel sources={documentState?.sources ?? []} onBusy={setBusy} onApply={async (result, source) => {

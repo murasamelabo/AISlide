@@ -33,6 +33,10 @@ jobs:
         run: rustup default stable
       - name: Check source encoding
         run: npm run encoding:check
+      - name: Test Windows setup configuration
+        run: npm run test:setup
+      - name: Test bundled icon metadata
+        run: npm run test:icons
       - name: Test shared document core
         run: node tools/cargo.mjs test --workspace --locked
       - name: Build headless CLI

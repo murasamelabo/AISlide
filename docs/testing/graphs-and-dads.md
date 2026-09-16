@@ -1,6 +1,46 @@
 ﻿# Architecture Graphs And DADS-Inspired Studio
 
-Date: 2026-09-15. This report records the graph-authoring checkpoint through shared core, Studio, SDK and MCP. It does not implement draw.io file interchange or change existing slide themes. Current aggregate gates and publication scope are in [workspace verification](workspace-ux.md).
+Date: 2026-09-15. This report records graph authoring through shared core, Studio, SDK and MCP. The node-icon follow-up below is local and uncommitted, like the preceding [UI consistency follow-up](workspace-ux.md#ui-consistency-follow-up). Earlier checkpoint results remain separately recorded. No new commit, push or project-license selection is implied.
+
+## Node Icons
+
+Select a node in **Architecture diagram** and choose **Choose icon**. The shared library now includes all 1,818 icons in Lucide React 1.43.0 following the [2026-09-16 expansion](workspace-ux.md#icon-library-expansion); color/stroke controls and SVG/PNG/JPEG file import are available in an editor-owned selection view. **Change icon**, **Remove node icon** and context-menu equivalents use the same graph transaction path. Cancel or Escape returns to the current node form without losing typed fields. Accepting an icon applies the current node form and icon together as one graph-local edit; Undo restores the previous node. Applying the graph creates one document transaction. Local graph history is bounded to 30 entries and 4 MiB per direction.
+
+An optional `GraphNode.icon` stores PNG/JPEG data and alt text. `create_graph_icon` / `client.createGraphIcon` prepare supplied SVG/PNG/JPEG bytes at a maximum 256px longest side. SVG uses the existing inert subset and becomes transparent PNG; larger PNG/JPEG images are downsampled in their original format, while already-small rasters retain exact bytes. The icon is fitted beside the label at up to 48 graph pixels. The original native shape remains the connector target; picture, text and shape are separately editable objects within the graph root. Graph-editor movement updates all three. Moving just the shape in Office does not move its separate picture or label.
+
+Colors are fixed raster colors, not live theme references. There is no Figma account integration, external URL retrieval, raw SVG rendering in the DOM, editable SVG-path output or independent icon-shaped node mode. Existing image, graph, document, metadata and protocol limits remain enforced. Direct raw `GraphIcon` payloads can still reach those limits; the preparation helper is the recommended route. An icon-free graph retains its previous output.
+
+### Verification Evidence
+
+Final local aggregate for the node-icon follow-up: **229 distinct tests passed**.
+
+| Gate | Passed |
+| --- | --- |
+| Rust workspace | 134 |
+| Node bridge, SDK, MCP, extraction and generation | 27 |
+| Studio browser | 59 |
+| Generation browser | 4 |
+| Native unit | 4 |
+| Native WebView | 1 |
+
+The full Rust run preceded the final icon-width adjustment; all 14 graph tests passed again after it. The current CLI then passed the complete Node/browser suites and the rebuilt desktop passed its complete native workflow. Frontend/Tauri builds and lint passed. Native icon insertion, graph-local Undo/Redo, replacement, document Undo, save/cancel/reopen and close protection were verified in a dedicated WebView2 profile. The existing user window remained open throughout rebuilding.
+
+- Core regression tests cover PNG/JPEG/SVG preparation, original small raster bytes, non-overlap/aspect ratio, all six shape connection sites, movement, metadata reopen, replacement/removal, exact Undo and stale protection after external image changes.
+- SDK and official MCP tests prepare an icon, insert/move/save/reopen it, remove it and undo, while retaining revision checks and source bytes.
+- Browser tests cover node-form retention on cancel, icon addition/replacement/removal, graph and document Undo, keyboard movement, preview, standalone PPTX reopen, invalid image rejection and no fetch of an external SVG resource. The picker was checked at 1440px and 390px, including scoped axe, focus and actual rendered PNGs.
+- `node tools/graphs-demo.mjs --icons` generates five synthetic slides containing 18 PNG/JPEG icons across all six shapes, 5 root groups and 13 attached connectors. It replaces an icon after native reopen, moves the node, reopens the edited result and restores exact original PPTX bytes with Undo. No input or existing output is overwritten.
+
+Final generated original SHA-256: `fb2040fc6498364eb556edfc7ce02de5741f63e5f12a68a48280996198b696a7` (166,347 bytes). Edited SHA-256: `0380dc5f5abe4089bb7812686a4518550fc26c869281408364537760b88abad6` (189,314 bytes).
+
+The final edited deck passed official Open XML schema validation. PowerPoint opened it in a disposable copy, rendered all five slides, counted all 18 pictures, and verified both attachments plus begin-shape movement for all 13 connectors. All five captures were inspected; a default-width label initially split "Application" in Office, so icon width allocation was reduced and the final deck was regenerated/rechecked. Source SHA-256 remained unchanged. This is sample qualification, not an end-target movement test or a general Office visual-parity guarantee.
+
+### Resource Validation
+
+An initial 18-icon deck exposed repeated full decoding of identical 1024px assets: native `apply_graph` took 34.552 seconds and exceeded the unchanged 20-second CLI bridge budget. Raster validation now retains at most 64 successful `RasterInfo` records per thread, keyed by SHA-256 of the current bytes and MIME. Base64/byte limits, MIME allowance and magic-byte agreement are checked before every lookup. No image pixels, raw bytes or failed validations are cached. Changed content, wrong MIME, truncated/oversized rasters and cache eviction are tested.
+
+After that correction, retaining 1024px icons still caused a document-size rejection on reopen. The graph-specific 256px preparation fixed this without raising the 2 MiB document or 4 MiB protocol limits; ordinary `create_asset` still uses its original resolution. Final production MCP icon replacement completed in 1.860 seconds under the existing limits. This is a measured bounded sample, not a worst-case latency guarantee for arbitrary raw image payloads.
+
+Review-agent feedback was excerpt-limited. The successful-insert test explicitly checks applying the node draft together with its icon; the cancel test checks retaining it without applying. No full independent security audit, measured coverage percentage or complete accessibility conformance is claimed.
 
 ## Authoring
 
@@ -25,7 +65,7 @@ Native movement then exposed shape-specific indexing: ellipse has eight sites, c
 
 ## Verification
 
-Final executed gates: **190 distinct tests passed**. Counts do not add repeated runs twice.
+Executed gates at the original icon-free graph checkpoint: **190 distinct tests passed**. Counts do not add repeated runs twice.
 
 | Gate | Passed | Scope |
 | --- | --- | --- |
@@ -62,7 +102,7 @@ This is an adaptation, not full DADS conformity. Application-specific modal form
 
 No draw.io XML interchange, arbitrary HTML/executable input, self-loops, nested boundaries, arbitrary waypoints, curves or automatic obstacle/label collision avoidance. Grid preserves sizes and rejects layouts that cannot fit; with boundaries all nodes need membership. Insertion does not reflow other objects.
 
-Labels are separate native text: graph-editor movement moves labels and recomputes connections, but moving only a shape in Office does not move its label. Office edits may mark metadata stale on reopening. Unknown imported content is preserved, never executed or fetched.
+Labels are separate native text and node icons are separate pictures: graph-editor movement moves both and recomputes connections, but moving only a shape in Office does not move its label or icon. Office edits may mark metadata stale on reopening. Unknown imported content is preserved, never executed or fetched.
 
 ## Self-Evaluation
 

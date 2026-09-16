@@ -2,6 +2,8 @@
 
 A local-first slide editor with an independently implemented Rust PresentationML core, a Tauri desktop application, and headless CLI/MCP access.
 
+**Blank startup, icon categories and master presets.** Studio starts with one empty slide; **New report** explicitly opens the synthetic sample. The full Lucide catalog can be filtered by its 42 official categories together with keywords. **Edit masters and layouts > Browse presets** offers seven original styles with native editable layouts, theme colors, fonts, margins, gutters and content/part regions. See the [preset guide and samples](docs/testing/master-presets.md).
+
 **Status: research PoC covering native editable generation, package-preserving import, source-bound transactions and headless automation.** A real local model, a public-data bilingual deck, and a 24-file public PPTX corpus have been exercised. This is not a full PowerPoint replacement or a production release. See the [acceptance report](docs/testing/poc.md) and [support matrix](docs/support-matrix.md).
 
 **Current file workflow: one standard, unencrypted Open XML PPTX.** Use **Open PPTX** and **Save PPTX**. External `.aislide.json` and scene JSON files are no longer required by Studio. The current slide XML is authoritative; optional source/binding and part information is retained in a standard Custom XML part inside the PPTX. See [single-file operation](docs/testing/single-file.md).
@@ -10,9 +12,11 @@ A local-first slide editor with an independently implemented Rust PresentationML
 
 **Architecture diagrams through Studio, SDK and MCP.** The **Architecture diagram** command opens a six-shape editor with boundaries, movement, resizing, alignment, grid, straight/right-angle routes and arrowheads. Graphs are native PPTX objects with internal metadata and Undo/Redo. See the [five-slide sample generator](tools/graphs-demo.mjs) and [graph/UI verification](docs/testing/graphs-and-dads.md).
 
+**Icons inside architecture nodes.** Select a node and use **Choose icon** to add a library icon or supplied SVG/PNG/JPEG beside its label. Change/remove, movement, Undo and single-PPTX reopen share the graph workflow. Graph-specific image preparation caps the longest side at 256px; SVG becomes PNG. Use `node tools/graphs-demo.mjs --icons` for a reproducible synthetic example. See [node-icon behavior and verification](docs/testing/graphs-and-dads.md#node-icons).
+
 **Studio design is inspired by the Digital Agency Design System (DADS).** Local Noto fonts, blue actions, neutral surfaces, larger controls and keyboard focus are adapted for the editor. Existing slide themes are unchanged. This is not a full DADS compliance or government endorsement claim.
 
-**Workspace commands and asset insertion.** Right-click the canvas, slide thumbnails, layers, objects or graph nodes for relevant actions. Create a blank presentation, insert/duplicate/delete/reorder/rename slides, choose a save filename, and protect unsaved edits when opening or creating a file. **Insert icons** offers 36 searchable Lucide icons and SVG/PNG/JPEG import. Figma **Copy as SVG** can be pasted on the canvas or into the SVG input; SVG becomes a bounded transparent PNG, not editable vector paths. See [workspace operations](docs/testing/workspace-ux.md).
+**Workspace commands and asset insertion.** Right-click the canvas, slide thumbnails, layers, objects or graph nodes for relevant actions. Create a blank presentation, insert/duplicate/delete/reorder/rename slides, choose a save filename, and protect unsaved edits when opening or creating a file. **Insert icons** includes all **1,818 icons from Lucide React 1.43.0**, with full-catalog name search, 60-item pages, the existing English/Japanese search tags, and SVG/PNG/JPEG import. Figma **Copy as SVG** can be pasted on the canvas or into the SVG input; SVG becomes a bounded transparent PNG, not editable vector paths. See [workspace operations](docs/testing/workspace-ux.md).
 
 The built-in example remains deterministic and explicitly synthetic. Model generation is a separate operation. Existing PPTX engine code is not used.
 
@@ -40,6 +44,20 @@ npm run tauri:build
 On Windows, run `apps/studio/src-tauri/target/debug/aislide-studio.exe`. This embeds the frontend and requires no Vite server. It is an unsigned development executable, not an installer. `npm run tauri:dev` runs the native development shell while Vite is running separately.
 
 This session also verified an isolated x64 GNU Rust/LLVM-MinGW toolchain under ignored `.tools/` on Windows ARM64. `tools/cargo.mjs` uses that local installation when present and otherwise calls Cargo from PATH. Native ARM64/MSVC builds have not been verified. The local toolchain is not part of the application distribution and is not downloaded automatically on a new checkout.
+
+### Windows Setup
+
+Windows setup uses Tauri's NSIS installer. It installs for the current user without requesting administrator access and registers **Start > AISlide > AISlide Studio**. The finish page also offers a desktop shortcut. Uninstalling removes the installer's shortcuts and app registration; it does not delete presentations or unrelated files in the installation folder. Save your work and close AISlide before installing, updating or uninstalling: running instances cause setup to stop rather than terminate the app.
+
+```sh
+npm run setup:build
+```
+
+The default is a release build. Output is under `apps/studio/src-tauri/target/<Rust-host>/release/bundle/nsis/`. For the locally verified, unsigned development installer, run `npm run setup:build -- --debug --no-sign`; its output uses `debug` instead. To regenerate an installer from that same setup build, use `npm run setup:bundle -- --debug --no-sign`. `--dry-run` prints the commands without building or installing.
+
+Setup builds into a separate directory so the currently running development executable is not overwritten. `CARGO_BUILD_TARGET` and `CARGO_TARGET_DIR` overrides are rejected to avoid bundling a different output. A fresh build needs Rust/platform prerequisites; Tauri downloads and hash-checks NSIS tooling when absent. Setup uses the system WebView2 runtime and can download Microsoft's bootstrapper when needed. This does not enable login-time startup, pin to the taskbar, register PPTX associations, sign the app or publish a release.
+
+`npm run test:setup` checks configuration and build routing without installing. The opt-in `npm run test:setup:installed` installs a randomly named test application, launches its Start Menu link and uninstalls it, using temporary files and its own shortcuts. See [Windows setup verification](docs/testing/windows-setup.md) for observed results and remaining release/signing qualifications.
 
 ### Optional Local Model
 

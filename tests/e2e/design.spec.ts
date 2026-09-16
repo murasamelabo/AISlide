@@ -1,7 +1,8 @@
 ﻿import { expect, test } from '@playwright/test'
+import { openSample } from './fixtures'
 
 test.beforeEach(async ({ page }) => {
-  await page.goto('/')
+  await openSample(page)
   await expect(page.getByRole('button', { name: 'Slide 12:', exact: false })).toBeVisible()
 })
 

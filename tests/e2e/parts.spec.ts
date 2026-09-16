@@ -1,10 +1,11 @@
 ﻿import { test, expect } from '@playwright/test';
+import { openSample } from './fixtures';
 import AxeBuilder from '@axe-core/playwright';
 import sharp from 'sharp';
 import type { PartCatalog } from '../../apps/studio/src/types';
 
 test('parts library inserts, updates and reopens editable metadata from one PPTX', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await page.getByRole('button', { name: 'Parts library', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Parts library', exact: true });
   await dialog.getByLabel('Part category', { exact: true }).selectOption('vertical-bar-graph');
@@ -31,7 +32,7 @@ test('parts library inserts, updates and reopens editable metadata from one PPTX
 for (const width of [1440,390]) {
   test(`parts library fits and is labeled at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    await page.goto('/');
+    await openSample(page);
     await page.getByRole('button', { name: 'Parts library', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'Parts library', exact: true });
     await dialog.getByLabel('Part category', { exact: true }).selectOption('map');
@@ -50,7 +51,7 @@ for (const width of [1440,390]) {
 test('all 108 part previews render with visible content and fitted labels', async ({ page }) => {
   test.setTimeout(240_000);
   await page.setViewportSize({ width: 1500, height: 1000 });
-  await page.goto('/');
+  await openSample(page);
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   const catalog = await page.evaluate(async () => (await fetch('/api/core', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'part_catalog' }) })).json()) as PartCatalog;
   await page.getByRole('button', { name: 'Parts library', exact: true }).click();
@@ -73,7 +74,7 @@ test('all 108 part previews render with visible content and fitted labels', asyn
 });
 
 test('radial connectors have a visible SVG viewport', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await page.getByRole('button', { name: 'Parts library', exact: true }).click();
   const dialog=page.getByRole('dialog', { name: 'Parts library', exact: true });
   await dialog.getByLabel('Part category', { exact: true }).selectOption('radiation');
@@ -84,7 +85,7 @@ test('radial connectors have a visible SVG viewport', async ({ page }) => {
 });
 
 test('part drafts survive category browsing and JSON to fields switching', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await page.getByRole('button', { name: 'Parts library', exact: true }).click();
   const dialog=page.getByRole('dialog', { name: 'Parts library', exact: true });
   await dialog.getByLabel('Part category', { exact: true }).selectOption('vertical-bar-graph');

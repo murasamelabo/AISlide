@@ -6,6 +6,23 @@ import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
+test('MCP design presets share the native catalog and guarded application', async () => {
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const client = new Client({ name: 'preset-proof', version: '1.0.0' });
+  const call = async (name, args = {}) => { const response = await client.callTool({ name, arguments: args }); assert.ok(!response.isError, JSON.stringify(response.content)); return JSON.parse(response.content[0].text); };
+  try {
+    await client.connect(transport);
+    const { presets } = await call('design_presets');
+    assert.equal(presets.length, 7);
+    const { deck_id } = await call('create_presentation', { title: 'Preset fixture' });
+    await call('apply_design_preset', { deck_id, expected_revision: 0, preset_id: 'trust' });
+    assert.equal((await call('get_deck', { deck_id })).design.theme.name, 'Trusted report');
+    assert.equal((await client.callTool({ name: 'apply_design_preset', arguments: { deck_id, expected_revision: 0, preset_id: 'minimal' } })).isError, true);
+    await call('undo', { deck_id });
+    assert.equal((await call('get_deck', { deck_id })).design.masters.length, 1);
+  } finally { await client.close(); }
+});
+
 test('MCP workspace commands create blank files, import icons and edit native slides', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-mcp-workspace-'));
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
@@ -45,21 +62,34 @@ test('MCP graph tools share native editing, revision guards and standalone PPTX'
   try {
     await client.connect(transport);
     const catalog = await call('graph_catalog');
+    const picture = await call('create_graph_icon', { alt: 'Application icon', mime_type: 'image/svg+xml', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#007a4d"/></svg>').toString('base64') });
+    const spec = structuredClone(catalog.examples[2].spec);
+    spec.nodes[1].icon = { base64: picture.base64, mime_type: picture.mime_type, alt: picture.alt };
     const created = await call('compile_report', { report: { title: 'Graph fixture', subtitle: '', period: '', source: 'Synthetic fixture', sections: [{ title: 'Architecture', layout: 'statement', body: [], rows: [], metrics: [] }] } });
     const deck_id = created.deck_id;
-    await call('add_graph', { deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'network', spec: catalog.examples[2].spec });
+    await call('add_graph', { deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'network', spec });
     await call('apply_graph', { deck_id, expected_revision: 1, slide_id: 'slide-1', id: 'network', operations: [{ op: 'move', ids: ['private'], dx: 16, dy: 16 }] });
     const graph = await call('get_graph', { deck_id, slide_id: 'slide-1', id: 'network' });
     assert.equal(graph.spec.nodes[1].x, 446);
     assert.equal(graph.stale, false);
+    assert.deepEqual(graph.spec.nodes[1].icon, spec.nodes[1].icon);
     const stale = await client.callTool({ name: 'apply_graph', arguments: { deck_id, expected_revision: 1, slide_id: 'slide-1', id: 'network', operations: [{ op: 'remove', ids: ['client'] }] } });
     assert.equal(stale.isError, true);
     await call('export_pptx', { deck_id, filename: 'graph.pptx' });
     const bytes = await readFile(join(directory, 'graph.pptx'));
     const reopened = await call('open_pptx', { base64: bytes.toString('base64') });
-    assert.equal((await call('get_graph', { deck_id: reopened.deck_id, slide_id: 'slide-1', id: 'network' })).stale, false);
+    const restored = await call('get_graph', { deck_id: reopened.deck_id, slide_id: 'slide-1', id: 'network' });
+    assert.equal(restored.stale, false);
+    assert.deepEqual(restored.spec.nodes[1].icon, spec.nodes[1].icon);
     await call('undo', { deck_id });
     assert.equal((await call('get_graph', { deck_id, slide_id: 'slide-1', id: 'network' })).spec.nodes[1].x, 430);
+    await call('apply_graph', { deck_id, expected_revision: 3, slide_id: 'slide-1', id: 'network', operations: [{ op: 'put_node', node: { ...spec.nodes[1], icon: null } }] });
+    assert.equal((await call('get_graph', { deck_id, slide_id: 'slide-1', id: 'network' })).spec.nodes[1].icon, undefined);
+    await call('undo', { deck_id });
+    assert.deepEqual((await call('get_graph', { deck_id, slide_id: 'slide-1', id: 'network' })).spec.nodes[1].icon, spec.nodes[1].icon);
+    const unsupported = structuredClone(spec); unsupported.nodes[1].icon.mime_type = 'image/svg+xml';
+    assert.equal((await client.callTool({ name: 'create_graph', arguments: { id: 'unsupported', spec: unsupported } })).isError, true);
+    assert.deepEqual(await readFile(join(directory, 'graph.pptx')), bytes);
   } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

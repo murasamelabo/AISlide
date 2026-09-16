@@ -1,20 +1,22 @@
-﻿import { useCallback, useEffect, useRef, useState } from 'react'
+﻿import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { ReactFlow, Background, Controls, Handle, Position, ConnectionMode, NodeResizer, BaseEdge, EdgeText, MarkerType, applyNodeChanges, applyEdgeChanges, getSmoothStepPath, getStraightPath } from '@xyflow/react'
 import type { Node, Edge, NodeProps, EdgeProps, NodeChange, EdgeChange, Connection } from '@xyflow/react'
-import { Square, RectangleHorizontal, Circle, Diamond, Database, Cloud, Plus, Trash2, Undo2, Redo2, AlignLeft, AlignCenterHorizontal, AlignRight, AlignStartVertical, AlignCenterVertical, AlignEndVertical, Grid2X2, Code2, Eye, MousePointer2, Copy, Check } from 'lucide-react'
+import { Square, RectangleHorizontal, Circle, Diamond, Database, Cloud, Plus, Trash2, Undo2, Redo2, AlignLeft, AlignCenterHorizontal, AlignRight, AlignStartVertical, AlignCenterVertical, AlignEndVertical, Grid2X2, Code2, Eye, MousePointer2, Copy, Check, Sticker, ArrowLeft } from 'lucide-react'
 import { AislideClient } from '../../../packages/client/index.mjs'
 import { core } from './api'
 import { Content } from './SlideSurface'
 import { ShapeSurface } from './ShapeSurface'
 import { ColorField } from './TextControls'
+import { Tool } from './Tool'
 import { ContextMenu } from './ContextMenu'
 import type { MenuCommand, MenuPosition } from './ContextMenu'
 import { cssColor, fontFamily } from './design'
-import type { GraphCatalog, GraphSpec, GraphNode, GraphEdge, GraphGroup, GraphNodeKind, GraphOperation, Element, Theme } from './types'
+import type { AssetInput, GraphCatalog, GraphSpec, GraphNode, GraphEdge, GraphGroup, GraphNodeKind, GraphOperation, Element, Theme } from './types'
 import '@xyflow/react/dist/style.css'
 import './graph-editor.css'
 
 const client = new AislideClient(core)
+const AssetPanel = lazy(() => import('./AssetPanel').then((module) => ({ default: module.AssetPanel })))
 let previewQueue: Promise<void> = Promise.resolve()
 const kinds: Record<GraphNodeKind, { preset: string; name: string; icon: typeof Square }> = {
   rectangle: { preset: 'rect', name: 'Rectangle', icon: Square },
@@ -26,9 +28,22 @@ const kinds: Record<GraphNodeKind, { preset: string; name: string; icon: typeof 
 }
 const portPositions = { top: Position.Top, left: Position.Left, bottom: Position.Bottom, right: Position.Right }
 type Bounds = { x: number; y: number; width: number; height: number }
-type GraphFlowNode = Node<{ item: GraphNode | GraphGroup; boundary: boolean; theme?: Theme; label?: Element; resize: (id: string, bounds: Bounds) => void }>
+type GraphFlowNode = Node<{ item: GraphNode | GraphGroup; boundary: boolean; theme?: Theme; label?: Element; icon?: Element; resize: (id: string, bounds: Bounds) => void }>
 type GraphFlowEdge = Edge<{ points?: [number, number][]; elbow: boolean }>
 type View = 'edit' | 'preview' | 'json'
+
+function appendHistory(entries: GraphSpec[], entry: GraphSpec) {
+  const next = [...entries, structuredClone(entry)].slice(-30)
+  const encoder = new TextEncoder()
+  let bytes = 0
+  let start = next.length
+  while (start > 0) {
+    bytes += encoder.encode(JSON.stringify(next[start - 1])).byteLength
+    if (bytes > 4 * 1024 * 1024) break
+    start -= 1
+  }
+  return next.slice(start)
+}
 
 function GraphNodeView({ id, data, selected }: NodeProps<GraphFlowNode>) {
   const item = data.item
@@ -36,6 +51,7 @@ function GraphNodeView({ id, data, selected }: NodeProps<GraphFlowNode>) {
   return <div className={`graph-node-content ${data.boundary ? 'graph-boundary' : ''}`}>
     <NodeResizer isVisible={selected} minWidth={64} minHeight={40} maxWidth={1152} maxHeight={424} onResizeEnd={(_event, bounds) => data.resize(id, bounds)} />
     <ShapeSurface preset={data.boundary ? 'rect' : kinds[node.kind ?? 'rectangle'].preset} fill={cssColor(item.fill ?? (data.boundary ? '@lt2' : '@lt1'), data.theme)} stroke={cssColor(item.stroke ?? '@accent1', data.theme)} strokeWidth={1.5} />
+    {data.icon && <div className="graph-node-icon" style={{ left: data.icon.x - item.x, top: data.icon.y - item.y, width: data.icon.width, height: data.icon.height }}><Content element={data.icon} theme={data.theme} /></div>}
     {data.label ? <div className="graph-fitted-label" style={{ left: data.label.x - item.x, top: data.label.y - item.y, width: data.label.width, height: data.label.height }}><Content element={data.label} theme={data.theme} /></div> : <div className={`graph-node-label ${node.kind ?? 'rectangle'}`} style={{ color: cssColor(node.color ?? '@dk1', data.theme), fontFamily: fontFamily('@minor', data.theme), fontSize: data.boundary ? 18 : node.font_size ?? 18 }}>{item.label}</div>}
     {!data.boundary && Object.entries(portPositions).map(([port, position]) => <Handle key={port} id={port} type="source" position={position} style={node.kind === 'cloud' ? { top: port === 'top' ? `${1235 / 216}%` : port === 'bottom' ? `${21577 / 216}%` : '50%', bottom: 'auto', left: port === 'left' ? `${67 / 216}%` : port === 'right' ? `${21582 / 216}%` : '50%', right: 'auto', transform: 'translate(-50%, -50%)' } : undefined} title={`${item.label} ${port} connection`} aria-hidden="true" />)}
   </div>
@@ -52,16 +68,17 @@ const nodeTypes = { graphNode: GraphNodeView }
 const edgeTypes = { graphEdge: GraphEdgeView }
 
 function GraphTool({ label, Icon, onClick, disabled }: { label: string; Icon: typeof Square; onClick: () => void; disabled: boolean }) {
-  return <button type="button" className="tool" aria-label={label} title={label} onClick={onClick} disabled={disabled}><Icon size={20} /><span className="tooltip">{label}</span></button>
+  return <Tool label={label} onClick={onClick} disabled={disabled}><Icon size={20} /></Tool>
 }
 
 function GeometryFields({ item, onChange }: { item: { x: number; y: number; width?: number; height?: number }; onChange: (key: keyof Bounds, value: number) => void }) {
   return <div className="graph-geometry">{(['x', 'y', 'width', 'height'] as const).map((field) => <label className="field" key={field}>{field}<input aria-label={`Graph ${field}`} required type="number" step={1} value={Number.isFinite(item[field]) ? item[field] : item[field] === undefined ? field === 'width' ? 176 : 80 : ''} onChange={(event) => onChange(field, event.currentTarget.valueAsNumber)} /></label>)}</div>
 }
-function NodeProperties({ node, groups, theme, onApply }: { node: GraphNode; groups: GraphGroup[]; theme?: Theme; onApply: (node: GraphNode) => void }) {
+function NodeProperties({ node, groups, theme, onApply, onChooseIcon }: { node: GraphNode; groups: GraphGroup[]; theme?: Theme; onApply: (node: GraphNode) => void; onChooseIcon: (node: GraphNode) => void }) {
   const [draft, setDraft] = useState(node)
   return <form onSubmit={(event) => { event.preventDefault(); onApply(draft) }} className="graph-properties-form">
     <label className="field">Label<textarea aria-label="Node label" required rows={3} maxLength={160} value={draft.label} onChange={(event) => setDraft({ ...draft, label: event.target.value })} /></label>
+    <div className="graph-node-assets">{draft.icon && <img className="graph-icon-thumbnail" src={`data:${draft.icon.mime_type};base64,${draft.icon.base64}`} alt={draft.icon.alt || 'Node icon'} />}<button type="button" className="secondary" aria-label={draft.icon ? 'Change node icon' : 'Choose node icon'} onClick={() => onChooseIcon(draft)}><Sticker size={18} />{draft.icon ? 'Change icon' : 'Choose icon'}</button>{draft.icon && <Tool label="Remove node icon" onClick={() => onApply({ ...draft, icon: null })}><Trash2 size={20} /></Tool>}</div>
     <label className="field">Shape<select aria-label="Node shape" value={draft.kind ?? 'rectangle'} onChange={(event) => setDraft({ ...draft, kind: event.target.value as GraphNodeKind })}>{Object.entries(kinds).map(([value, entry]) => <option key={value} value={value}>{entry.name}</option>)}</select></label>
     <GeometryFields item={draft} onChange={(key, value) => setDraft({ ...draft, [key]: value })} />
     <label className="field">Group<select aria-label="Node group" value={draft.group ?? ''} onChange={(event) => setDraft({ ...draft, group: event.target.value || null })}><option value="">None</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.label}</option>)}</select></label>
@@ -118,6 +135,8 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
   const gate = useRef(false)
   const [history, setHistory] = useState<{ past: GraphSpec[]; future: GraphSpec[] }>({ past: [], future: [] })
   const [menu, setMenu] = useState<MenuPosition | null>(null)
+  const [iconTarget, setIconTarget] = useState<GraphNode | null>(null)
+  const editor = useRef<HTMLDivElement>(null)
   const closeMenu = useCallback(() => setMenu(null), [])
   const metadataBefore = useRef<GraphSpec | null>(null)
   const action = useRef<(operations: GraphOperation[]) => void>(() => {})
@@ -138,7 +157,7 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     const members: GraphFlowNode[] = (next.groups ?? []).map((item) => ({ id: item.id, type: 'graphNode', position: { x: item.x, y: item.y }, width: item.width, height: item.height, style: { width: item.width, height: item.height }, data: { item, boundary: true, theme, resize, label: nativeChildren.find((entry) => entry.id.endsWith(`-gt-${item.id}`)) }, selected: selection.current.includes(item.id), ariaLabel: `Group ${item.label}`, zIndex: -1 }))
     for (const item of next.nodes) {
       const parent = next.groups?.find((group) => group.id === item.group)
-      members.push({ id: item.id, type: 'graphNode', position: { x: item.x - (parent?.x ?? 0), y: item.y - (parent?.y ?? 0) }, parentId: parent?.id, extent: parent ? [[8, 40], [parent.width - 8, parent.height - 8]] : undefined, width: item.width ?? 176, height: item.height ?? 80, style: { width: item.width ?? 176, height: item.height ?? 80 }, data: { item, boundary: false, theme, resize, label: nativeChildren.find((entry) => entry.id.endsWith(`-nt-${item.id}`)) }, selected: selection.current.includes(item.id), ariaLabel: `Node ${item.label}` })
+      members.push({ id: item.id, type: 'graphNode', position: { x: item.x - (parent?.x ?? 0), y: item.y - (parent?.y ?? 0) }, parentId: parent?.id, extent: parent ? [[8, 40], [parent.width - 8, parent.height - 8]] : undefined, width: item.width ?? 176, height: item.height ?? 80, style: { width: item.width ?? 176, height: item.height ?? 80 }, data: { item, boundary: false, theme, resize, label: nativeChildren.find((entry) => entry.id.endsWith(`-nt-${item.id}`)), icon: nativeChildren.find((entry) => entry.type === 'picture' && entry.id.endsWith(`-ni-${item.id}`)) }, selected: selection.current.includes(item.id), ariaLabel: `Node ${item.label}` })
     }
     setNodes(members)
     setEdges((next.edges ?? []).map((item) => {
@@ -170,9 +189,9 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
   }, [install, theme])
 
   function remember(previous: GraphSpec) {
-    setHistory((state) => ({ past: [...state.past, structuredClone(previous)].slice(-30), future: [] }))
+    setHistory((state) => ({ past: appendHistory(state.past, previous), future: [] }))
   }
-  async function change(next: GraphSpec, operations?: GraphOperation[], record = true) {
+  async function change(next: GraphSpec, operations?: GraphOperation[], record = true, propagateError = false) {
     if (gate.current) return false
     gate.current = true; setBusy(true); onBusy(true); setError('')
     try {
@@ -182,10 +201,23 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
       if (record && JSON.stringify(current.current) !== JSON.stringify(candidate)) remember(current.current)
       install(candidate, rendered)
       return true
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); install(current.current); return false }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); install(current.current, preview ?? undefined); if (propagateError) throw reason; return false }
     finally { gate.current = false; setBusy(false); onBusy(false) }
   }
   function perform(operations: GraphOperation[]) { void change(current.current, operations) }
+  function chooseIcon(node: GraphNode) { setMenu(null); setIconTarget(structuredClone(node)) }
+  function closeIconPicker() {
+    setIconTarget(null)
+    requestAnimationFrame(() => editor.current?.querySelector<HTMLButtonElement>('.graph-node-assets button')?.focus())
+  }
+  async function insertIcon(assets: AssetInput[]) {
+    if (!iconTarget || assets.length !== 1) throw new Error('Choose one icon for the selected node')
+    await previewQueue
+    const { base64, mime_type, alt } = assets[0]
+    const icon = await client.createGraphIcon({ base64, mime_type, alt })
+    const node = { ...iconTarget, icon }
+    if (await change(current.current, [{ op: 'put_node', node }], true, true)) closeIconPicker()
+  }
   useEffect(() => { action.current = perform })
   function choose(id: string) {
     selection.current = [id]; setSelected([id])
@@ -230,8 +262,8 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     if (!next) return
     const previous = current.current
     if (await change(next, undefined, false)) setHistory((state) => redo
-      ? { past: [...state.past, structuredClone(previous)], future: state.future.slice(0, -1) }
-      : { past: state.past.slice(0, -1), future: [...state.future, structuredClone(previous)] })
+      ? { past: appendHistory(state.past, previous), future: state.future.slice(0, -1) }
+      : { past: state.past.slice(0, -1), future: appendHistory(state.future, previous) })
   }
   async function switchView(mode: View) {
     if (view === mode || gate.current) return
@@ -253,11 +285,13 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
   const group = selected.length === 1 ? spec.groups?.find((group) => group.id === selected[0]) : undefined
   const source = spec.nodes.some((node) => node.id === from) ? from : spec.nodes[0]?.id ?? ''
   const target = spec.nodes.some((node) => node.id === to) ? to : spec.nodes[1]?.id ?? spec.nodes[0]?.id ?? ''
-  const locked = busy || view !== 'edit'
+  const locked = busy || view !== 'edit' || Boolean(iconTarget)
   const menuCommands: MenuCommand[] = [
     { label: 'Undo diagram edit', icon: Undo2, action: () => void restore(false), disabled: locked || !history.past.length },
     { label: 'Redo diagram edit', icon: Redo2, action: () => void restore(true), disabled: locked || !history.future.length },
     { label: 'Properties', icon: Eye, action: () => menu?.anchor?.closest('dialog')?.querySelector<HTMLElement>('.graph-inspector textarea, .graph-inspector input')?.focus(), disabled: !node && !edge && !group, separator: true },
+    { label: node?.icon ? 'Change node icon' : 'Choose node icon', icon: Sticker, action: () => { if (node) chooseIcon(node) }, disabled: locked || !node },
+    { label: 'Remove node icon', icon: Trash2, action: () => { if (node) perform([{ op: 'put_node', node: { ...node, icon: null } }]) }, disabled: locked || !node?.icon },
     { label: 'Duplicate node', icon: Copy, action: () => { if (node) perform([{ op: 'put_node', node: { ...node, id: `node-${crypto.randomUUID().slice(0, 8)}`, x: node.x + 24, y: node.y + 24 } }]) }, disabled: locked || !node },
     { label: 'Delete selection', icon: Trash2, action: () => perform([{ op: 'remove', ids: selected }]), disabled: locked || !selected.length, danger: true },
     ...(['left', 'center', 'right', 'top', 'middle', 'bottom'] as const).map((alignment, index) => ({ label: `Align ${alignment}`, icon: AlignLeft, action: () => perform([{ op: 'align', ids: selected, alignment }]), disabled: locked || selected.length < 2 || selected.some((id) => !spec.nodes.some((node) => node.id === id)), separator: index === 0 })),
@@ -272,7 +306,8 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     else { selection.current = []; setSelected([]) }
     setMenu({ ...position, anchor: entry ?? position.anchor })
   }
-  return <div className="graph-editor" aria-busy={busy} onKeyDownCapture={(event) => {
+  return <div ref={editor} className="graph-editor" aria-busy={busy} onKeyDownCapture={(event) => {
+    if (iconTarget) { if (event.key === 'Escape' && !busy) { event.preventDefault(); event.stopPropagation(); closeIconPicker() } return }
     const element = event.target as HTMLElement
     if (locked || element.closest('input, textarea, select, [contenteditable=true]')) return
     if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); event.stopPropagation(); const bounds = element.getBoundingClientRect(); contextAt(element, { x: bounds.left + 12, y: bounds.top + 12, anchor: element }); return }
@@ -284,6 +319,7 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
       if (ids.length) { event.preventDefault(); event.stopPropagation(); const step = (snap ? 8 : 1) * (event.shiftKey ? 10 : 1); perform([{ op: 'move', ids, dx: movement[0] * step, dy: movement[1] * step }]) }
     } else if (event.key === 'Delete' && selected.length) { event.preventDefault(); event.stopPropagation(); perform([{ op: 'remove', ids: selected }]) }
   }}>
+    <div className="graph-main" hidden={Boolean(iconTarget)}>
     <div className="graph-topbar">{(['title', 'subtitle'] as const).map((field) => <label key={field} className="field">{field === 'title' ? 'Title' : 'Subtitle'}<input aria-label={`Graph ${field}`} maxLength={field === 'title' ? 80 : 120} value={spec[field] ?? ''} disabled={locked} onFocus={() => { metadataBefore.current = current.current }} onBlur={finishMetadata} onChange={(event) => { const next = { ...current.current, [field]: event.target.value }; current.current = next; setSpec(next); setPreview(null) }} /></label>)}</div>
     <div className="graph-toolbar" aria-label="Diagram tools">
       <GraphTool label="Undo diagram edit" Icon={Undo2} onClick={() => void restore(false)} disabled={locked || !history.past.length} /><GraphTool label="Redo diagram edit" Icon={Redo2} onClick={() => void restore(true)} disabled={locked || !history.future.length} />
@@ -303,14 +339,16 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
       <section className="graph-canvas" role="tabpanel" id={`graph-panel-${view}`} aria-labelledby={`graph-tab-${view}`} onContextMenu={(event) => { if (locked) return; event.preventDefault(); event.stopPropagation(); contextAt(event.target as HTMLElement, { x: event.clientX, y: event.clientY, anchor: event.currentTarget }) }}>
         {view === 'edit' && <ReactFlow<GraphFlowNode, GraphFlowEdge> nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodesChange={nodesChange} onEdgesChange={edgesChange} onSelectionChange={selectionChange} onNodeDragStop={dragStop} onConnect={connect} onReconnect={reconnect} fitView fitViewOptions={{ padding: 0.2 }} minZoom={0.25} maxZoom={2.5} nodeExtent={[[0, 88], [1152, 512]]} connectionMode={ConnectionMode.Loose} snapToGrid={snap} snapGrid={[8, 8]} deleteKeyCode={null} nodesDraggable={!busy} nodesConnectable={!busy} edgesReconnectable={!busy} elementsSelectable={!busy} colorMode="light"><Background gap={24} size={1} /><Controls showInteractive={false} /></ReactFlow>}
         {view === 'preview' && (preview ? <NativePreview element={preview} theme={theme} /> : <p role="status">Rendering diagram</p>)}
-        {view === 'json' && <div className="graph-json"><label className="field">Graph JSON<textarea aria-label="Graph JSON" className="code-input" maxLength={250000} rows={20} disabled={busy} value={raw} onChange={(event) => setRaw(event.target.value)} /></label><button type="button" className="secondary" disabled={busy} onClick={() => { try { void change(JSON.parse(raw)) } catch (reason) { setError(String(reason)) } }}><Check size={16} />Validate JSON</button></div>}
+        {view === 'json' && <div className="graph-json"><label className="field">Graph JSON<textarea aria-label="Graph JSON" className="code-input" maxLength={2 * 1024 * 1024} rows={20} disabled={busy} value={raw} onChange={(event) => setRaw(event.target.value)} /></label><button type="button" className="secondary" disabled={busy} onClick={() => { try { void change(JSON.parse(raw)) } catch (reason) { setError(String(reason)) } }}><Check size={16} />Validate JSON</button></div>}
       </section>
-      <fieldset className="graph-inspector" disabled={locked}><legend className="visually-hidden">Graph properties</legend>{node ? <NodeProperties key={JSON.stringify(node)} node={node} groups={spec.groups ?? []} theme={theme} onApply={(node) => perform([{ op: 'put_node', node }])} /> : edge ? <EdgeProperties key={JSON.stringify(edge)} edge={edge} nodes={spec.nodes} theme={theme} onApply={(edge) => perform([{ op: 'put_edge', edge }])} /> : group ? <GroupProperties key={JSON.stringify(group)} group={group} theme={theme} onApply={(group) => perform([{ op: 'put_group', group }])} /> : <div className="graph-empty">{selected.length ? `${selected.length} selected` : 'No selection'}</div>}
+      <fieldset className="graph-inspector" disabled={locked}><legend className="visually-hidden">Graph properties</legend>{node ? <NodeProperties key={JSON.stringify(node)} node={node} groups={spec.groups ?? []} theme={theme} onApply={(node) => perform([{ op: 'put_node', node }])} onChooseIcon={chooseIcon} /> : edge ? <EdgeProperties key={JSON.stringify(edge)} edge={edge} nodes={spec.nodes} theme={theme} onApply={(edge) => perform([{ op: 'put_edge', edge }])} /> : group ? <GroupProperties key={JSON.stringify(group)} group={group} theme={theme} onApply={(group) => perform([{ op: 'put_group', group }])} /> : <div className="graph-empty">{selected.length ? `${selected.length} selected` : 'No selection'}</div>}
         <div className="graph-new-edge"><label className="field">From<select aria-label="Connect from" value={source} onChange={(event) => setFrom(event.target.value)}>{spec.nodes.map((node) => <option value={node.id} key={node.id}>{node.label}</option>)}</select></label><label className="field">To<select aria-label="Connect to" value={target} onChange={(event) => setTo(event.target.value)}>{spec.nodes.map((node) => <option value={node.id} key={node.id}>{node.label}</option>)}</select></label><button type="button" className="secondary" disabled={source === target} onClick={() => perform([{ op: 'put_edge', edge: { id: `edge-${crypto.randomUUID().slice(0, 8)}`, source, target, route: 'elbow' } }])}><Plus size={16} />Connect nodes</button></div>
       </fieldset>
     </div>
     {error && <p className="error graph-error" role="alert">{error}</p>}
     <footer className="graph-actions"><span role="status">{busy ? 'Validating diagram' : `${spec.nodes.length} nodes / ${spec.edges?.length ?? 0} connections`}</span><button type="button" className="primary" disabled={busy} onClick={() => void save()}><Check size={18} />{editing ? 'Update graph' : 'Insert graph'}</button></footer>
     {menu && <ContextMenu position={menu} label="Diagram actions" commands={menuCommands} onClose={closeMenu} />}
+    </div>
+    {iconTarget && <section className="graph-icon-picker" aria-label="Node icon"><header><Tool label="Cancel icon selection" disabled={busy} onClick={closeIconPicker}><ArrowLeft size={20} /></Tool><h3>{iconTarget.label || iconTarget.id}</h3></header><Suspense fallback={<p role="status">Loading icons</p>}><AssetPanel maxFiles={1} showSize={false} onBusy={(value) => { setBusy(value); onBusy(value) }} onInsert={insertIcon} /></Suspense></section>}
   </div>
 }

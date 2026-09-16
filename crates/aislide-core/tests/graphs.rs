@@ -13,6 +13,147 @@ fn deck(element: Value) -> Value {
     json!({"version":1,"title":"Graph fixture","width":1280,"height":720,"slides":[{"id":"slide","title":"Graph","background":"FFFFFF","notes":"Synthetic fixture","elements":[element]}]})
 }
 
+fn node_icon(color: &str) -> Value {
+    let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><rect width="32" height="16" fill="{color}"/></svg>"#);
+    let picture = execute_request(json!({"op":"create_asset","id":"icon","base64":STANDARD.encode(svg),"mime_type":"image/svg+xml","alt":"Client icon","size":48})).unwrap();
+    json!({"base64":picture["base64"],"mime_type":picture["mime_type"],"alt":picture["alt"]})
+}
+
+#[test]
+fn graph_icon_preparation_bounds_svg_png_and_jpeg_without_upscaling_rasters() {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><path d="M0 0h32v16H0z" fill="#007a4d"/></svg>"##;
+    let prepared = execute_request(json!({"op":"create_graph_icon","base64":STANDARD.encode(svg),"mime_type":"image/svg+xml","alt":"Prepared SVG"})).unwrap();
+    assert_eq!(prepared["mime_type"], "image/png");
+    let info = aislide_core::media::inspect_raster(prepared["base64"].as_str().unwrap(), "image/png").unwrap();
+    assert_eq!((info.width, info.height), (256, 128));
+    for (format, mime) in [(image::ImageFormat::Png, "image/png"), (image::ImageFormat::Jpeg, "image/jpeg")] {
+        for width in [64, 512] {
+            let raster = image::RgbImage::from_pixel(width, width / 2, image::Rgb([0, 96, 192]));
+            let mut output = std::io::Cursor::new(Vec::new());
+            raster.write_to(&mut output, format).unwrap();
+            let encoded = STANDARD.encode(output.into_inner());
+            let icon = execute_request(json!({"op":"create_graph_icon","base64":encoded,"mime_type":mime,"alt":"Raster icon"})).unwrap();
+            assert_eq!(icon["mime_type"], mime);
+            assert_eq!(icon["alt"], "Raster icon");
+            let info = aislide_core::media::inspect_raster(icon["base64"].as_str().unwrap(), mime).unwrap();
+            assert_eq!((info.width, info.height), (width.min(256), width.min(256) / 2));
+            if width < 256 { assert_eq!(icon["base64"], encoded); }
+        }
+    }
+    assert!(execute_request(json!({"op":"create_graph_icon","base64":STANDARD.encode("<svg xmlns='http://www.w3.org/2000/svg'><script/></svg>"),"mime_type":"image/svg+xml"})).is_err());
+}
+
+#[test]
+fn graph_node_icons_render_as_native_pictures_with_separate_labels_and_connections() {
+    let mut spec = graph();
+    spec["nodes"][0]["icon"] = node_icon("#0017c1");
+    let element = execute_request(json!({"op":"create_graph","id":"icons","spec":spec})).unwrap();
+    let children = element["children"].as_array().unwrap();
+    let picture = children.iter().find(|child| child["type"] == "picture").unwrap();
+    let label = children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-nt-client")).unwrap();
+    let connector = children.iter().find(|child| child["type"] == "connector").unwrap();
+    assert_eq!(picture["base64"], spec["nodes"][0]["icon"]["base64"]);
+    assert_eq!(picture["alt"], "Client icon");
+    assert_eq!(picture["width"].as_f64().unwrap() / picture["height"].as_f64().unwrap(), 2.0);
+    assert!(picture["x"].as_f64().unwrap() >= 48.0);
+    assert!(picture["y"].as_f64().unwrap() >= 160.0);
+    assert!(picture["y"].as_f64().unwrap() + picture["height"].as_f64().unwrap() <= 256.0);
+    assert!(picture["x"].as_f64().unwrap() + picture["width"].as_f64().unwrap() < label["x"].as_f64().unwrap());
+    assert!(label["x"].as_f64().unwrap() + label["width"].as_f64().unwrap() <= 248.0);
+    assert!(connector["start"]["element_id"].as_str().unwrap().ends_with("-n-client"));
+    let saved = execute_request(json!({"op":"export","deck":deck(element)})).unwrap();
+    let bytes = STANDARD.decode(saved["base64"].as_str().unwrap()).unwrap();
+    let package = Package::open(bytes).unwrap();
+    assert!(package.text("ppt/slides/slide1.xml").unwrap().contains("<p:pic>"));
+    assert_eq!(package.parts().keys().filter(|name| name.starts_with("ppt/media/")).count(), 1);
+    let opened = execute_request(json!({"op":"open_presentation","id":"icon-open","base64":saved["base64"]})).unwrap();
+    let restored = opened["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap().iter().find(|child| child["type"] == "picture").unwrap();
+    assert_eq!(restored["base64"], spec["nodes"][0]["icon"]["base64"]);
+    let mut default_width = graph();
+    default_width["nodes"][0]["width"] = json!(176);
+    default_width["nodes"][0]["label"] = json!("Application");
+    default_width["nodes"][0]["icon"] = node_icon("#0017c1");
+    let compact = execute_request(json!({"op":"create_graph","id":"compact","spec":default_width})).unwrap();
+    let compact_label = compact["children"].as_array().unwrap().iter().find(|child| child["id"].as_str().unwrap().ends_with("-nt-client")).unwrap();
+    assert!(compact_label["width"].as_f64().unwrap() >= 97.0);
+}
+
+#[test]
+fn graph_icons_reject_invalid_images_and_preserve_icon_free_output() {
+    let icon = node_icon("#007a4d");
+    for replacement in [
+        json!({"base64":"https://example.invalid/icon.png","mime_type":"image/png","alt":"URL"}),
+        json!({"base64":STANDARD.encode("<svg/>"),"mime_type":"image/svg+xml","alt":"Raw SVG"}),
+        json!({"base64":icon["base64"],"mime_type":"image/jpeg","alt":"Wrong MIME"}),
+        json!({"base64":icon["base64"],"mime_type":"image/png","alt":"x".repeat(501)}),
+        json!({"base64":icon["base64"],"mime_type":"image/png","alt":"External","url":"https://example.invalid/icon.png"}),
+    ] {
+        let mut spec = graph(); spec["nodes"][0]["icon"] = replacement;
+        assert!(execute_request(json!({"op":"create_graph","id":"bad-icon","spec":spec})).is_err());
+        assert!(execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"move","ids":["client"],"dx":8,"dy":0}]})).is_err());
+    }
+    let mut excessive = graph();
+    excessive["nodes"] = json!((0..4).map(|index| json!({"id":format!("node-{index}"),"label":"Node","x":48,"y":160,"icon":{"base64":"A".repeat(800000),"mime_type":"image/png"}})).collect::<Vec<_>>());
+    excessive["edges"] = json!([]);
+    assert!(execute_request(json!({"op":"create_graph","id":"budget","spec":excessive})).unwrap_err().to_string().contains("3 MiB"));
+    let original = execute_request(json!({"op":"create_graph","id":"unchanged","spec":graph()})).unwrap();
+    let mut without_icon = graph(); without_icon["nodes"][0]["icon"] = Value::Null;
+    assert_eq!(original, execute_request(json!({"op":"create_graph","id":"unchanged","spec":without_icon})).unwrap());
+}
+
+#[test]
+fn graph_icons_follow_nodes_for_all_shapes_without_changing_connection_sites() {
+    let icon = node_icon("#0017c1");
+    for kind in ["rectangle", "rounded_rectangle", "ellipse", "diamond", "cylinder", "cloud"] {
+        let mut spec = graph(); spec["nodes"][0]["kind"] = json!(kind);
+        let plain = execute_request(json!({"op":"create_graph","id":"plain","spec":spec})).unwrap();
+        spec["nodes"][0]["icon"] = icon.clone();
+        let original = execute_request(json!({"op":"create_graph","id":"icon","spec":spec})).unwrap();
+        let children = original["children"].as_array().unwrap();
+        let picture = children.iter().find(|child| child["type"] == "picture").unwrap();
+        let plain_edge = plain["children"].as_array().unwrap().iter().find(|child| child["type"] == "connector").unwrap();
+        let icon_edge = children.iter().find(|child| child["type"] == "connector").unwrap();
+        assert_eq!(plain_edge["start"]["site"], icon_edge["start"]["site"], "{kind}");
+        assert_eq!(plain_edge["x"], icon_edge["x"], "{kind}");
+        let moved = execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"move","ids":["client"],"dx":24,"dy":16}]})).unwrap();
+        assert_eq!(moved["nodes"][0]["icon"], icon);
+        let rendered = execute_request(json!({"op":"create_graph","id":"moved","spec":moved})).unwrap();
+        let shifted = rendered["children"].as_array().unwrap().iter().find(|child| child["type"] == "picture").unwrap();
+        assert_eq!(shifted["x"].as_f64().unwrap(), picture["x"].as_f64().unwrap() + 24.0);
+        assert_eq!(shifted["y"].as_f64().unwrap(), picture["y"].as_f64().unwrap() + 16.0);
+    }
+}
+
+#[test]
+fn graph_icon_metadata_reopens_replaces_removes_and_undoes_with_stale_image_protection() {
+    let mut spec = graph(); spec["nodes"][0]["icon"] = node_icon("#0017c1");
+    let document = execute_request(json!({"op":"create_presentation","id":"graph-icons","title":"Icon history"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_graph","document":document,"expected_revision":0,"slide_id":"slide-1","id":"architecture","spec":spec})).unwrap();
+    let saved = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"icons-open","base64":saved["base64"]})).unwrap();
+    assert_eq!(opened["document"]["parts"][0]["stale"], false);
+    assert_eq!(opened["document"]["parts"][0]["spec"]["data"]["graph"]["nodes"][0]["icon"], spec["nodes"][0]["icon"]);
+    let changed_icon = node_icon("#007a4d");
+    let mut replacement = spec.clone(); replacement["nodes"][0]["icon"] = changed_icon.clone();
+    let updated = execute_request(json!({"op":"update_graph","document":opened["document"],"expected_revision":0,"slide_id":"slide-1","id":"architecture","spec":replacement})).unwrap();
+    let updated_saved = execute_request(json!({"op":"export_presentation","document":updated["document"]})).unwrap();
+    let updated_opened = execute_request(json!({"op":"open_presentation","id":"icons-updated","base64":updated_saved["base64"]})).unwrap();
+    assert_eq!(updated_opened["document"]["parts"][0]["stale"], false);
+    assert_eq!(updated_opened["document"]["parts"][0]["spec"]["data"]["graph"]["nodes"][0]["icon"], changed_icon);
+    replacement["nodes"][0]["icon"] = Value::Null;
+    let removed = execute_request(json!({"op":"update_graph","document":updated["document"],"expected_revision":1,"slide_id":"slide-1","id":"architecture","spec":replacement})).unwrap();
+    assert!(removed["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap().iter().all(|child| child["type"] != "picture"));
+    let undone = execute_request(json!({"op":"undo_transaction","document":removed["document"],"expected_revision":2,"receipt":removed["receipt"]})).unwrap();
+    assert_eq!(undone["document"]["hash"], updated["document"]["hash"]);
+    assert_eq!(execute_request(json!({"op":"export_presentation","document":undone["document"]})).unwrap()["base64"], updated_saved["base64"]);
+    let mut package = Package::open(STANDARD.decode(saved["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let image_path = package.parts().keys().find(|name| name.starts_with("ppt/media/")).unwrap().clone();
+    package.replace_part(&image_path, STANDARD.decode(changed_icon["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let external = execute_request(json!({"op":"open_presentation","id":"external-icon","base64":STANDARD.encode(package.save().unwrap())})).unwrap();
+    assert_eq!(external["document"]["parts"][0]["stale"], true);
+    assert!(execute_request(json!({"op":"update_graph","document":external["document"],"expected_revision":0,"slide_id":"slide-1","id":"architecture","spec":spec})).unwrap_err().to_string().contains("stale"));
+}
+
 #[test]
 fn graph_api_creates_native_attached_nodes_and_recomputes_moved_endpoints() {
     let spec = graph();

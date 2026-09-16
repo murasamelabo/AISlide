@@ -1,13 +1,18 @@
 ﻿import { useRef, useState } from 'react'
-import { Check, Copy, ImagePlus, LayoutTemplate, Plus, Square, Trash2, Type } from 'lucide-react'
+import { ArrowLeft, Check, Copy, ImagePlus, LayoutTemplate, Palette, Plus, Square, Trash2, Type } from 'lucide-react'
 import { core, fileBase64 } from './api'
 import { SlideSurface } from './SlideSurface'
 import { ColorField, TextControls } from './TextControls'
-import type { Deck, Design, Element, Placeholder, Slide } from './types'
+import { Tool } from './Tool'
+import type { Deck, Design, DesignPreset, Element, Placeholder, Slide } from './types'
 
 type Target = { kind: 'master' | 'layout'; id: string }
-export function DesignPanel({ design, deck, preserveStructure = false, onSave, onBusy }: { design: Design; deck: Deck; preserveStructure?: boolean; onSave: (design: Design) => Promise<void>; onBusy: (busy: boolean) => void }) {
+export function DesignPanel({ design, deck, preserveStructure = false, onSave, onPreset, onBusy }: { design: Design; deck: Deck; preserveStructure?: boolean; onSave: (design: Design) => Promise<void>; onPreset: (id: string, draft: Design) => Promise<void>; onBusy: (busy: boolean) => void }) {
   const [draft, setDraft] = useState(structuredClone(design))
+  const [presets, setPresets] = useState<DesignPreset[]>([])
+  const [presetMode, setPresetMode] = useState(false)
+  const [presetId, setPresetId] = useState('public')
+  const [previewLayout, setPreviewLayout] = useState('preset-cover')
   const [target, setTarget] = useState<Target>({ kind: 'master', id: design.masters[0].id })
   const [selected, setSelected] = useState<string | null>(null)
   const [placeholder, setPlaceholder] = useState<Placeholder['kind']>('body')
@@ -66,19 +71,40 @@ export function DesignPanel({ design, deck, preserveStructure = false, onSave, o
     const next = target.kind === 'master' ? { ...draft, masters: draft.masters.filter((entry) => entry.id !== target.id), layouts: draft.layouts.filter((entry) => entry.master_id !== target.id) } : { ...draft, layouts: draft.layouts.filter((entry) => entry.id !== target.id) }
     setDraft(next); choose({ kind: 'master', id: next.masters[0].id })
   }
+  async function browsePresets() {
+    await perform(async () => { if (!presets.length) setPresets(await core<DesignPreset[]>({ op: 'design_presets' })); setPresetMode(true) })
+  }
+  if (presetMode && presets.length) {
+    const preset = presets.find((entry) => entry.id === presetId) ?? presets[0]
+    const layout = preset.design.layouts.find((entry) => entry.id === previewLayout) ?? preset.design.layouts[1]
+    const slide: Slide = { id: 'preset-preview', title: layout.name, background: '@lt1', inherit_background: true, layout_id: layout.id, notes: '', elements: layout.elements }
+    const previewDesign: Design = { ...preset.design, layouts: preset.design.layouts.map((entry) => entry.id === layout.id ? { ...entry, elements: [] } : entry) }
+    const allowed = !preserveStructure || draft.masters.some((master) => master.id === 'preset-master')
+    return <div className="preset-browser">
+      <div className="preset-browser-header"><button type="button" className="secondary" disabled={busy} onClick={() => setPresetMode(false)}><ArrowLeft size={18} />Edit masters</button><strong>Master presets</strong></div>
+      <div className="master-preset-list">{presets.map((entry) => <button type="button" className="master-preset-choice" key={entry.id} aria-label={`Preset ${entry.name}`} aria-pressed={entry.id === preset.id} disabled={busy} onClick={() => setPresetId(entry.id)}><span className="preset-swatch-row" aria-hidden="true">{['dk1', 'accent1', 'accent2', 'accent3', 'lt2'].map((slot) => <i key={slot} style={{ background: `#${entry.design.theme.colors[slot]}` }} />)}</span><strong>{entry.name}</strong></button>)}</div>
+      <div className="preset-workspace"><section className="preset-preview"><label className="field">Layout<select aria-label="Preset preview layout" value={layout.id} disabled={busy} onChange={(event) => setPreviewLayout(event.target.value)}>{preset.design.layouts.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label><SlideSurface slide={slide} design={previewDesign} /></section>
+        <aside className="preset-rules"><h3>{preset.name}</h3><dl><dt>Margins</dt><dd aria-label="Preset margin">{preset.rules.margin} px</dd><dt>Column gap</dt><dd aria-label="Preset gutter">{preset.rules.gutter} px</dd><dt>Heading font</dt><dd aria-label="Preset heading font">{preset.design.theme.fonts.major}</dd><dt>Body font</dt><dd>{preset.design.theme.fonts.minor}</dd><dt>East Asian font</dt><dd>{preset.design.theme.fonts.east_asian}</dd><dt>Heading / body</dt><dd>{preset.rules.heading_size} / {preset.rules.body_size} px</dd></dl><h4>Content regions</h4>{preset.rules.regions.filter((entry) => entry.layout_id === layout.id).map((entry) => <p key={entry.name}>{entry.name}<br />{entry.x}, {entry.y} / {entry.width.toFixed(0)} x {entry.height.toFixed(0)} px</p>)}</aside>
+      </div>
+      {!allowed && <p role="status">This imported presentation has no preset master. Create a new presentation to add the preset layouts.</p>}
+      {error && <p className="error modal-error" role="alert">{error}</p>}
+      <div className="modal-actions"><span>{preset.design.layouts.length} layouts</span><button type="button" className="primary" disabled={busy || !allowed} onClick={() => void perform(() => onPreset(preset.id, draft))}><Check size={18} />Use preset</button></div>
+    </div>
+  }
   const preview: Slide = { id: target.id, title: active.name, background: active.background ?? draft.masters.find((entry) => entry.id === owner)!.background, elements: active.elements, notes: '', hide_master_graphics: target.kind === 'master', layout_id: target.kind === 'layout' ? target.id : undefined }
   const previewDesign = { ...draft, layouts: draft.layouts.map((layout) => layout.id === target.id ? { ...layout, elements: [] } : layout) }
   return <div className="design-editor">
+    <div className="preset-browser-header"><button type="button" className="secondary" disabled={busy} onClick={() => void browsePresets()}><Palette size={18} />Browse presets</button></div>
     <fieldset className="design-panel" disabled={busy}>
       <aside className="design-tree" aria-label="Masters and layouts">
-        <div className="design-tree-tools"><button type="button" className="tool" title="New master" aria-label="New master" disabled={preserveStructure} onClick={() => newMaster(false)}><Plus size={18} /></button><button type="button" className="tool" title="New layout" aria-label="New layout" disabled={preserveStructure} onClick={() => newLayout(false)}><LayoutTemplate size={18} /></button><button type="button" className="tool" title="Duplicate design" aria-label="Duplicate design" disabled={preserveStructure} onClick={() => target.kind === 'master' ? newMaster(true) : newLayout(true)}><Copy size={18} /></button><button type="button" className="tool" title={deletable ? 'Delete design' : 'Used by slides or required by master'} aria-label="Delete design" disabled={!deletable} onClick={removeTarget}><Trash2 size={18} /></button></div>
+        <div className="design-tree-tools"><Tool label="New master" disabled={busy || preserveStructure} onClick={() => newMaster(false)}><Plus size={20} /></Tool><Tool label="New layout" disabled={busy || preserveStructure} onClick={() => newLayout(false)}><LayoutTemplate size={20} /></Tool><Tool label="Duplicate design" disabled={busy || preserveStructure} onClick={() => target.kind === 'master' ? newMaster(true) : newLayout(true)}><Copy size={20} /></Tool><Tool label="Delete design" disabled={busy || !deletable} onClick={removeTarget}><Trash2 size={20} /></Tool></div>
         {draft.masters.map((master) => <div key={master.id}><button className={target.id === master.id ? 'active' : ''} aria-label={`Master ${master.name}`} onClick={() => choose({ kind: 'master', id: master.id })}><Square size={16} />{master.name}</button>
           {draft.layouts.filter((layout) => layout.master_id === master.id).map((layout) => <button key={layout.id} className={`design-layout ${target.id === layout.id ? 'active' : ''}`} aria-label={`Layout ${layout.name}`} onClick={() => choose({ kind: 'layout', id: layout.id })}><LayoutTemplate size={15} />{layout.name}</button>)}
         </div>)}
       </aside>
       <section className="design-canvas">
-        <div className="design-canvas-toolbar"><button className="tool" title="Add common text" aria-label="Add common text" onClick={() => void perform(() => add('text'))}><Type size={18} /></button><button className="tool" title="Add common shape" aria-label="Add common shape" onClick={() => void perform(() => add('shape'))}><Square size={18} /></button><button className="tool" title="Add common picture" aria-label="Add common picture" onClick={() => imageInput.current?.click()}><ImagePlus size={18} /></button>
-          {target.kind === 'layout' && <><select aria-label="Placeholder kind" value={placeholder} onChange={(event) => setPlaceholder(event.target.value as Placeholder['kind'])}>{['title', 'body', 'subtitle', 'footer', 'date', 'slide_number'].map((kind) => <option key={kind} value={kind}>{kind.replace('_', ' ')}</option>)}</select><button className="tool" title="Add placeholder" aria-label="Add placeholder" onClick={() => void perform(() => add('text', true))}><Plus size={18} /></button></>}
+        <div className="design-canvas-toolbar"><Tool label="Add common text" disabled={busy} onClick={() => void perform(() => add('text'))}><Type size={20} /></Tool><Tool label="Add common shape" disabled={busy} onClick={() => void perform(() => add('shape'))}><Square size={20} /></Tool><Tool label="Add common picture" disabled={busy} onClick={() => imageInput.current?.click()}><ImagePlus size={20} /></Tool>
+          {target.kind === 'layout' && <><select aria-label="Placeholder kind" value={placeholder} onChange={(event) => setPlaceholder(event.target.value as Placeholder['kind'])}>{['title', 'body', 'subtitle', 'footer', 'date', 'slide_number'].map((kind) => <option key={kind} value={kind}>{kind.replace('_', ' ')}</option>)}</select><Tool label="Add placeholder" disabled={busy} onClick={() => void perform(() => add('text', true))}><Plus size={20} /></Tool></>}
         </div>
         <input ref={imageInput} hidden type="file" aria-label="Design picture file" accept="image/png,image/jpeg" onChange={(event) => {
           const file = event.target.files?.[0]; event.target.value = ''; if (!file) return
@@ -92,7 +118,7 @@ export function DesignPanel({ design, deck, preserveStructure = false, onSave, o
         {target.kind === 'layout' && <label className="checkbox"><input type="checkbox" checked={active.background === null} onChange={(event) => editTarget({ background: event.target.checked ? null : '@lt1' })} />Inherit master background</label>}
         {active.background !== null && <ColorField label="Design background" value={active.background} theme={draft.theme} onChange={(background) => editTarget({ background })} />}
         {selectedElement && <>
-          <div className="selection-heading"><strong>{selectedElement.id}</strong><button type="button" className="tool" title="Delete design element" aria-label="Delete design element" onClick={() => { editTarget({ elements: active.elements.filter((entry) => entry.id !== selectedElement.id) }); setSelected(null) }}><Trash2 size={17} /></button></div>
+          <div className="selection-heading"><strong>{selectedElement.id}</strong><Tool label="Delete design element" disabled={busy} onClick={() => { editTarget({ elements: active.elements.filter((entry) => entry.id !== selectedElement.id) }); setSelected(null) }}><Trash2 size={20} /></Tool></div>
           <div className="geometry-inputs">{(['x', 'y', 'width', 'height'] as const).map((field) => <label key={field}><span>{field}</span><input aria-label={`Design element ${field}`} type="number" value={selectedElement[field]} onChange={(event) => replaceElement({ ...selectedElement, [field]: event.currentTarget.valueAsNumber })} /></label>)}</div>
           {(selectedElement.type === 'text' || selectedElement.type === 'shape') && <TextControls element={selectedElement} theme={draft.theme} textLabel="Design element text" onChange={replaceElement} />}
           {(selectedElement.type === 'shape' || selectedElement.type === 'rect') && <ColorField label="Design element fill" value={selectedElement.fill} theme={draft.theme} onChange={(fill) => replaceElement({ ...selectedElement, fill })} />}

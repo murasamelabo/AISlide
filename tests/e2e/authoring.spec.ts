@@ -1,7 +1,8 @@
 ﻿import { test, expect } from '@playwright/test';
+import { openSample } from './fixtures';
 
 test('text edits directly on the slide, supports multiline input and undo', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   await page.getByRole('button', { name: 'Edit title', exact: true }).dblclick();
   const editor = page.getByRole('textbox', { name: 'Slide text editor', exact: true });
@@ -15,7 +16,7 @@ test('text edits directly on the slide, supports multiline input and undo', asyn
 });
 
 test('escape cancels a direct edit and IME composition does not submit it', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   await page.getByRole('button', { name: 'Edit title', exact: true }).dblclick();
   const editor = page.getByRole('textbox', { name: 'Slide text editor', exact: true });
@@ -30,7 +31,7 @@ test('escape cancels a direct edit and IME composition does not submit it', asyn
 });
 
 test('escape cannot dismiss an on-slide commit that is already in flight', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await page.getByRole('button', { name: 'Edit title', exact: true }).dblclick();
   const editor = page.getByRole('textbox', { name: 'Slide text editor', exact: true });
   await editor.fill('Pending commit is not a cancellation');
@@ -54,7 +55,7 @@ test('escape cannot dismiss an on-slide commit that is already in flight', async
 });
 
 test('table cells edit on the slide without a JSON editor', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   await page.getByRole('button', { name: /^Slide 4:/ }).click();
   await page.getByRole('button', { name: 'Edit data-table', exact: true }).dblclick();
@@ -66,7 +67,7 @@ test('table cells edit on the slide without a JSON editor', async ({ page }) => 
 });
 
 test('selected objects resize on the canvas and group labels edit in place', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await page.getByRole('button', { name: 'Edit title', exact: true }).click();
   const title = page.locator('.canvas-workspace [data-element-id="title"]');
   const before = await title.evaluate((node) => parseFloat((node as HTMLElement).style.width));
@@ -83,7 +84,7 @@ test('selected objects resize on the canvas and group labels edit in place', asy
 });
 
 test('table rows and columns can be added from the canvas editor', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await page.getByRole('button', { name: /^Slide 4:/ }).click();
   await page.getByRole('button', { name: 'Edit data-table', exact: true }).dblclick();
   const rows = await page.locator('.inline-table tr').count();

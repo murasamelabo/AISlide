@@ -1,5 +1,13 @@
 ﻿.modal:has(.graph-editor) { width: min(1480px, calc(100vw - 24px)); max-width: calc(100vw - 24px); height: min(980px, calc(100dvh - 24px)); display: flex; flex-direction: column; }
 .graph-editor { --text: #1a1a1a; --surface: #fff; color: var(--text); display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.graph-main { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.graph-main[hidden] { display: none; }
+.graph-icon-picker { flex: 1; min-height: 0; overflow-y: auto; }
+.graph-icon-picker > header { display: flex; align-items: center; gap: 16px; padding: 16px 24px; border-bottom: 1px solid var(--border); }
+.graph-icon-picker h3 { margin: 0; font-size: 18px; overflow-wrap: anywhere; }
+.graph-node-assets { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.graph-node-assets .secondary { flex: 1; min-width: 0; padding: 8px; font-size: 14px; }
+.graph-icon-thumbnail { width: 48px; height: 48px; object-fit: contain; }
 .graph-topbar { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 16px 24px; border-bottom: 1px solid var(--border); }
 .graph-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 8px 16px; border-bottom: 1px solid var(--border); }
 .graph-views { margin-left: auto; display: flex; gap: 4px; }
@@ -21,6 +29,7 @@
 .graph-node-label.diamond { inset: 24%; }
 .graph-node-label.ellipse, .graph-node-label.cloud { inset: 18%; }
 .graph-fitted-label { position: absolute; pointer-events: none; overflow: hidden; }
+.graph-node-icon { position: absolute; pointer-events: none; }
 .graph-boundary .graph-node-label { inset: 8px 12px auto; height: 28px; text-align: left; justify-content: flex-start; }
 .graph-node-content .react-flow__handle { width: 16px; height: 16px; background: #0056ff; border: 2px solid #fff; }
 .graph-node-content .react-flow__resize-control.handle { width: 12px; height: 12px; background: #0056ff; border: 1px solid #fff; }

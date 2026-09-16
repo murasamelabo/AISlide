@@ -67,6 +67,18 @@ await reopened.session.editSlides([
 
 `client.createAsset()` is stateless; `session.addAsset()` inserts under revision, cancellation and Undo guards. SVG becomes an inspected transparent PNG, not an embedded SVG/vector object. Native slide copies retain original XML and independently copy chart/workbook resources. Unsupported custom shows/sections or unsafe native copies fail without changing the session. Use the [workspace API](../../docs/api.md#workspace-commands) for limits and source-preservation details.
 
+## Master Presets
+
+```js
+const presets = await client.designPresets();
+const session = await client.createPresentation('preset-example', 'Design review');
+await session.applyDesignPreset('minimal', { expectedRevision: session.revision });
+await session.assignLayout('slide-1', 'preset-two-columns');
+const exported = await session.exportPresentation();
+```
+
+The seven presets define native masters/layouts, palette and font roles, side margins, gutters and content regions. Application retains existing slide content and original masters; custom or edited template conflicts fail before commit. The normal session revision, cancellation and Undo guards apply. New blank slides inherit the selected preset master. New parts on `preset-visual-content` are fitted to the layout's visual region without moving existing content. Reopened documents must already contain a compatible preset structure. See [preset limits and definitions](../../docs/testing/master-presets.md).
+
 ## Metadata Parts
 
 The catalog contains 108 original layouts across 36 categories, each with a typed synthetic example. Given an existing session and a slide with room for a part:
@@ -111,6 +123,22 @@ await session.undo();
 ```
 
 `client.createGraph({id,spec,theme?})` previews native elements; `client.transformGraph(spec,operations)` validates a candidate without modifying a session. Use `updateGraph` for a complete specification or `applyGraph` for node/edge/boundary operations. Both preserve root placement and reject stale metadata. Limits are in the [API contract](../../docs/api.md#architecture-graphs). A full official-MCP example is [tools/graphs-demo.mjs](../../tools/graphs-demo.mjs).
+
+For an icon on an existing node, prepare the bytes using the graph-specific helper and replace the complete node specification:
+
+```js
+const icon = await client.createGraphIcon({
+  base64: svgBase64, mime_type: 'image/svg+xml', alt: 'Service icon',
+});
+const graph = session.document.parts.find((part) => part.element_id === 'architecture').spec.data.graph;
+const node = graph.nodes.find((entry) => entry.id === 'api');
+await session.applyGraph(slideId, {
+  id: 'architecture', operations: [{ op: 'put_node', node: { ...node, icon } }],
+}, { expectedRevision: session.revision });
+await session.undo();
+```
+
+The helper accepts supplied SVG/PNG/JPEG bytes and returns PNG/JPEG `GraphIcon` data fitted to 256px; it neither fetches a URL nor mutates the session. SVG is not retained as editable paths. Existing small raster bytes are preserved. Set `icon: null` on a `put_node` replacement to remove the icon. Native picture fingerprints participate in stale-metadata checks. `node tools/graphs-demo.mjs --icons` exercises all six node shapes with 18 icons across five slides, native icon replacement and byte-identical Undo.
 
 ## Design Helpers
 

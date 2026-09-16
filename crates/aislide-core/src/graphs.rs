@@ -64,6 +64,20 @@ fn arrow() -> bool { true }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct GraphIcon {
+    pub base64: String,
+    pub mime_type: String,
+    #[serde(default)] pub alt: String,
+}
+
+pub fn create_icon(base64: String, mime_type: &str, alt: &str) -> Result<GraphIcon> {
+    valid_text(alt, 500)?;
+    let (base64, mime_type) = crate::media::icon_raster(base64, mime_type)?;
+    Ok(GraphIcon { base64, mime_type, alt: alt.into() })
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GraphNode {
     pub id: String, pub label: String,
     #[serde(default)] pub kind: NodeKind,
@@ -75,6 +89,7 @@ pub struct GraphNode {
     #[serde(default = "ink")] pub color: String,
     #[serde(default = "font_size")] pub font_size: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<GraphIcon>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -118,6 +133,9 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
     if spec.version != 1 { return Err(Error::Unsupported("graph version".into())); }
     valid_text(&spec.title, 80)?; valid_text(&spec.subtitle, 120)?;
     if spec.nodes.is_empty() || spec.nodes.len() > 48 || spec.edges.len() > 64 || spec.groups.len() > 8 { return Err(Error::Limit("graph requires 1-48 nodes, at most 64 edges and 8 groups".into())); }
+    if spec.nodes.iter().filter_map(|node| node.icon.as_ref()).fold(0usize, |total, icon| total.saturating_add(icon.base64.len())) > 3 * 1024 * 1024 {
+        return Err(Error::Limit("graph icon data exceeds the 3 MiB encoded image budget".into()));
+    }
     let mut ids = BTreeSet::new();
     for region in &spec.groups {
         identity(&region.id)?; valid_text(&region.label, 64)?;
@@ -131,6 +149,10 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
         bounds(node.x, node.y, node.width, node.height)?;
         valid_color(&node.fill)?; valid_color(&node.stroke)?; valid_color(&node.color)?;
         if !node.font_size.is_finite() || !(12.0..=40.0).contains(&node.font_size) { return Err(Error::Invalid("graph font size must be 12-40".into())); }
+        if let Some(icon) = &node.icon {
+            valid_text(&icon.alt, 500)?;
+            crate::media::inspect_raster(&icon.base64, &icon.mime_type)?;
+        }
         if let Some(parent) = &node.group {
             let region = spec.groups.iter().find(|region| &region.id == parent).ok_or_else(|| Error::Invalid("unknown graph group".into()))?;
             if node.x < region.x + 8.0 || node.y < region.y + 40.0 || node.x + node.width > region.x + region.width - 8.0 || node.y + node.height > region.y + region.height - 8.0 { return Err(Error::Invalid("graph node must fit inside its group below the group label".into())); }
@@ -211,7 +233,21 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
     for node in &spec.nodes {
         children.push(shape(format!("{prefix}-n-{}", node.id), [node.x, node.y, node.width, node.height], node.kind.preset(), &node.fill, &node.stroke));
         let inset = match node.kind { NodeKind::Diamond => 0.24, NodeKind::Ellipse | NodeKind::Cloud => 0.18, _ => 0.1 };
-        children.push(text(format!("{prefix}-nt-{}", node.id), [node.x + node.width * inset, node.y + node.height * inset, node.width * (1.0 - 2.0 * inset), node.height * (1.0 - 2.0 * inset)], &node.label, node.font_size, &node.color, TextAlign::Center, true));
+        let mut content = [node.x + node.width * inset, node.y + node.height * inset, node.width * (1.0 - 2.0 * inset), node.height * (1.0 - 2.0 * inset)];
+        if let Some(icon) = &node.icon {
+            let mut picture = crate::media::create_picture(&format!("{prefix}-ni-{}", node.id), icon.base64.clone(), &icon.mime_type, &icon.alt)?;
+            let size = (content[2] / 4.0).min(content[3]).min(48.0);
+            if let Element::Picture { x, y, width, height, .. } = &mut picture {
+                let scale = size / width.max(*height);
+                *width *= scale; *height *= scale;
+                *x = content[0] + (size - *width) / 2.0;
+                *y = content[1] + (content[3] - *height) / 2.0;
+            }
+            children.push(picture);
+            let offset = size + 8.0_f64.min(content[2] / 8.0);
+            content[0] += offset; content[2] -= offset;
+        }
+        children.push(text(format!("{prefix}-nt-{}", node.id), content, &node.label, node.font_size, &node.color, TextAlign::Center, true));
     }
     for edge in &spec.edges {
         if edge.label.is_empty() { continue; }

@@ -1,9 +1,79 @@
 ﻿import { test, expect } from '@playwright/test';
+import { openSample } from './fixtures';
 import AxeBuilder from '@axe-core/playwright';
 import { readFile } from 'node:fs/promises';
+import { icons as lucideIcons } from 'lucide-react';
+
+test('graph node icons retain labels, connections, history and single-PPTX editing', async ({ page }) => {
+  test.setTimeout(90_000);
+  await openSample(page);
+  await page.getByRole('button', { name: 'New presentation', exact: true }).click();
+  await expect(page.locator('.thumbnail')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await dialog.getByRole('button', { name: 'Select node api', exact: true }).click();
+  await dialog.getByLabel('Node label', { exact: true }).fill('Service API');
+  await dialog.getByRole('button', { name: 'Choose node icon', exact: true }).click();
+  const picker = dialog.getByRole('region', { name: 'Node icon', exact: true });
+  await picker.getByRole('button', { name: 'Cancel icon selection', exact: true }).click();
+  await expect(dialog.getByLabel('Node label', { exact: true })).toHaveValue('Service API');
+  await dialog.getByRole('button', { name: 'Choose node icon', exact: true }).click();
+  await expect(picker.locator('.icon-grid button')).toHaveCount(60);
+  await expect(picker.getByRole('status')).toHaveText(`${Object.keys(lucideIcons).length} icons`);
+  await picker.getByLabel('Search icons', { exact: true }).fill('orbit');
+  await picker.getByRole('button', { name: 'Orbit icon', exact: true }).click();
+  await picker.getByLabel('Icon color', { exact: true }).fill('#007a4d');
+  await picker.getByRole('button', { name: 'Insert icon', exact: true }).click();
+  await expect(picker).toHaveCount(0);
+  const node = dialog.locator('.react-flow__node[data-id="api"]');
+  const icon = node.locator('.graph-node-icon img');
+  await expect(icon).toHaveAttribute('alt', 'Orbit (Lucide)');
+  await expect(icon).toHaveJSProperty('complete', true);
+  expect(await icon.evaluate((image) => (image as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+  await expect(node).toContainText('Service API');
+  await expect(dialog.locator('.react-flow__edge')).toHaveCount(2);
+  await dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click();
+  await expect(icon).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Redo diagram edit', exact: true }).click();
+  await expect(icon).toHaveCount(1);
+  await dialog.getByRole('button', { name: 'Remove node icon', exact: true }).click();
+  await expect(icon).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click();
+  await expect(icon).toHaveCount(1);
+  await dialog.getByRole('button', { name: 'Change node icon', exact: true }).click();
+  await picker.getByLabel('Search icons', { exact: true }).fill('cloud');
+  await picker.getByRole('button', { name: 'Cloud icon', exact: true }).click();
+  await picker.getByRole('button', { name: 'Insert icon', exact: true }).click();
+  await expect(icon).toHaveAttribute('alt', 'Cloud (Lucide)');
+  await node.focus();
+  await node.press('ArrowRight');
+  await expect(dialog.getByLabel('Graph x', { exact: true })).toHaveValue('398');
+  const imageBounds = (await icon.boundingBox())!;
+  const labelBounds = (await node.locator('.graph-fitted-label').boundingBox())!;
+  expect(imageBounds.x + imageBounds.width).toBeLessThan(labelBounds.x);
+  await dialog.getByRole('tab', { name: 'Preview', exact: true }).click();
+  await expect(dialog.locator('.graph-native-preview img')).toHaveCount(1);
+  await dialog.getByRole('button', { name: 'Insert graph', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator('.slide-stage img')).toHaveCount(1);
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  const file = await download;
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: file.suggestedFilename(), mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await readFile((await file.path())!) });
+  await page.getByRole('button', { name: /^Select graph-/ }).click();
+  await page.getByRole('button', { name: 'Edit graph', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Select node api', exact: true }).click();
+  await expect(icon).toHaveAttribute('alt', 'Cloud (Lucide)');
+  await dialog.getByRole('button', { name: 'Remove node icon', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Update graph', exact: true }).click();
+  await expect(page.locator('.slide-stage img')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.slide-stage img')).toHaveCount(1);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
 
 test('graph preview initialization survives repeated editor mounts without a busy error', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   for (let iteration = 0; iteration < 3; iteration++) {
     await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
@@ -13,8 +83,33 @@ test('graph preview initialization survives repeated editor mounts without a bus
   }
 });
 
+test('graph icon import rejects active SVG and invalid images without losing the node draft', async ({ page }) => {
+  await openSample(page);
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await dialog.getByRole('button', { name: 'Select node user', exact: true }).click();
+  await dialog.getByLabel('Node label', { exact: true }).fill('Retained draft');
+  await dialog.getByRole('button', { name: 'Choose node icon', exact: true }).click();
+  const picker = dialog.getByRole('region', { name: 'Node icon', exact: true });
+  const externalRequests: string[] = [];
+  page.on('request', (request) => { if (request.url().startsWith('https://example.invalid/')) externalRequests.push(request.url()); });
+  await picker.getByRole('button', { name: 'SVG', exact: true }).click();
+  await picker.getByLabel('SVG markup', { exact: true }).fill('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><image href="https://example.invalid/icon.png"/></svg>');
+  await picker.getByRole('button', { name: 'Insert SVG', exact: true }).click();
+  await expect(picker.getByRole('alert')).toContainText(/unsupported|external|inert/);
+  await picker.getByLabel('Import asset files', { exact: true }).setInputFiles({ name: 'invalid.png', mimeType: 'image/png', buffer: Buffer.from('not an image') });
+  await expect(picker.getByRole('alert')).toBeVisible();
+  await expect(dialog.locator('.graph-node-icon')).toHaveCount(0);
+  await picker.getByRole('button', { name: 'Cancel icon selection', exact: true }).click();
+  await expect(dialog.getByLabel('Node label', { exact: true })).toHaveValue('Retained draft');
+  await expect(dialog.getByRole('button', { name: 'Choose node icon', exact: true })).toBeFocused();
+  expect(externalRequests).toEqual([]);
+  await page.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  await expect(page.getByRole('button', { name: /^Select graph-/ })).toHaveCount(0);
+});
+
 test('architecture graphs can be created, edited, undone and reopened from PPTX', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
   await expect(dialog.locator('.react-flow__node')).toHaveCount(3);
@@ -44,7 +139,7 @@ test('architecture graphs can be created, edited, undone and reopened from PPTX'
 });
 
 test('graph canvas movement and resizing survive preview while cancel preserves the slide', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
   const node = dialog.locator('.react-flow__node[data-id="user"]');
@@ -72,7 +167,7 @@ test('graph canvas movement and resizing survive preview while cancel preserves 
 });
 
 test('graph node and connection edits use undo without leaving dangling edges', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
   await dialog.getByRole('button', { name: 'Add ellipse node', exact: true }).click();
@@ -94,7 +189,7 @@ test('graph node and connection edits use undo without leaving dangling edges', 
 });
 
 test('graph JSON errors retain the draft and do not change the active tab', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
   await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
@@ -115,7 +210,7 @@ test('graph JSON errors retain the draft and do not change the active tab', asyn
 for (const width of [1440, 390]) {
   test(`DADS-inspired graph controls fit and are accessible at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 960 });
-    await page.goto('/');
+    await openSample(page);
     await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
     await expect(dialog.locator('.react-flow__node')).toHaveCount(3);
@@ -124,5 +219,22 @@ for (const width of [1440, 390]) {
     expect(results.violations.filter((issue) => ['serious', 'critical'].includes(issue.impact ?? ''))).toEqual([]);
     await page.evaluate(() => document.fonts.ready);
     await dialog.screenshot({ path: `.artifacts/graph-editor-${width}.png` });
+    await dialog.getByRole('button', { name: 'Select node api', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Choose node icon', exact: true }).click();
+    const picker = dialog.getByRole('region', { name: 'Node icon', exact: true });
+    await expect(picker.getByLabel('Search icons', { exact: true })).toBeFocused();
+    expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+    const iconResults = await new AxeBuilder({ page }).include('.graph-icon-picker').analyze();
+    expect(iconResults.violations.filter((issue) => ['serious', 'critical'].includes(issue.impact ?? ''))).toEqual([]);
+    await dialog.screenshot({ path: `.artifacts/graph-icon-picker-${width}.png` });
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect x="2" y="2" width="20" height="20" rx="4" fill="#007a4d"/></svg>';
+    await picker.getByLabel('Import asset files', { exact: true }).setInputFiles({ name: 'service.svg', mimeType: 'image/svg+xml', buffer: Buffer.from(svg) });
+    await expect(picker).toHaveCount(0);
+    const icon = dialog.locator('.react-flow__node[data-id="api"] .graph-node-icon img');
+    await expect(icon).toHaveAttribute('src', /^data:image\/png;base64,/);
+    await icon.scrollIntoViewIfNeeded();
+    await expect(icon).toHaveJSProperty('complete', true);
+    await dialog.screenshot({ path: `.artifacts/graph-node-icon-${width}.png` });
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
   });
 }

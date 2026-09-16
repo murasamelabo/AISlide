@@ -8,9 +8,11 @@
   ingest(input, options) { return this.request({ op: 'ingest', input }, options); }
   dataReport(source, mapping, options) { return this.request({ op: 'data_report', source, mapping }, options); }
   designDefaults(options) { return this.request({ op: 'design_defaults' }, options); }
+  designPresets(options) { return this.request({ op: 'design_presets' }, options); }
   objectCatalog(options) { return this.request({ op: 'object_catalog' }, options); }
   partCatalog(options) { return this.request({ op: 'part_catalog' }, options); }
   graphCatalog(options) { return this.request({ op: 'graph_catalog' }, options); }
+  createGraphIcon(input, options) { return this.request({ ...input, op: 'create_graph_icon' }, options); }
   createGraph(input, options) { return this.request({ ...input, op: 'create_graph' }, options); }
   transformGraph(spec, operations, options) { return this.request({ op: 'transform_graph', spec, operations }, options); }
   createPart(input, options) { return this.request({ ...input, op: 'create_part' }, options); }
@@ -110,6 +112,7 @@ export class DocumentSession {
     }, options);
   }
   updateDesign(design, options) { return this.#transform('update_design', { design }, options); }
+  applyDesignPreset(presetId, options) { return this.#transform('apply_design_preset', { preset_id: presetId }, options); }
   applyTheme(theme, options) { return this.#transform('apply_theme', { theme }, options); }
   assignLayout(slideId, layoutId, options) { return this.#transform('assign_layout', { slide_id: slideId, layout_id: layoutId }, options); }
   addObject(slideId, input, options) { return this.#insert('create_object', slideId, input, options); }

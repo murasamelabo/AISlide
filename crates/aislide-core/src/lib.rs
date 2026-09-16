@@ -20,6 +20,7 @@ pub mod import;
 pub mod extraction;
 pub mod publication;
 pub mod design;
+pub mod design_presets;
 pub mod objects;
 pub mod parts;
 mod native;

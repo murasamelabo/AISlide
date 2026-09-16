@@ -55,6 +55,26 @@ pub(crate) fn refresh(parts:&mut [PartInstance],deck:&Deck,origin:Option<&Import
     Ok(())
 }
 
+fn resize_canvas(element: &mut Element, target_width: f64, target_height: f64) -> Result<()> {
+    let Element::Group { view_width, view_height, .. } = element else { return Ok(()); };
+    let horizontal = target_width / *view_width;
+    let vertical = target_height / *view_height;
+    fn scale(value: &mut serde_json::Value, horizontal: f64, vertical: f64) {
+        for (field, factor) in [("x", horizontal), ("y", vertical), ("width", horizontal), ("height", vertical), ("view_width", horizontal), ("view_height", vertical)] {
+            if let Some(number) = value.get(field).and_then(serde_json::Value::as_f64) { value[field] = json!(number * factor); }
+        }
+        let factor = horizontal.min(vertical);
+        if let Some(number) = value.get("font_size").and_then(serde_json::Value::as_f64) { value["font_size"] = json!((number * factor).clamp(8.0, 120.0)); }
+        if let Some(number) = value.get("stroke_width").and_then(serde_json::Value::as_f64).filter(|number| *number > 0.0) { value["stroke_width"] = json!((number * factor).max(0.5)); }
+        if let Some(children) = value.get_mut("children").and_then(serde_json::Value::as_array_mut) { for child in children { scale(child, horizontal, vertical); } }
+    }
+    let mut value = serde_json::to_value(&*element)?;
+    if let Some(children) = value.get_mut("children").and_then(serde_json::Value::as_array_mut) { for child in children { scale(child, horizontal, vertical); } }
+    value["view_width"] = json!(target_width); value["view_height"] = json!(target_height);
+    *element = serde_json::from_value(value)?;
+    Ok(())
+}
+
 pub fn change(document:&Document,expected_revision:u64,slide_id:&str,id:&str,spec:&PartSpec,update:bool)->Result<TransactionResult> {
     crate::document::verify(document)?;
     if document.revision!=expected_revision {return Err(Error::Conflict("stale document revision".into()));}
@@ -62,12 +82,25 @@ pub fn change(document:&Document,expected_revision:u64,slide_id:&str,id:&str,spe
     let slide=deck.slides.iter_mut().find(|slide|slide.id==slide_id).ok_or_else(||Error::Invalid("unknown part slide".into()))?;
     let fallback=crate::design::Theme::default();
     let mut element=super::create_with_theme(id,spec,document.deck.design.as_ref().map(|design|&design.theme).unwrap_or(&fallback))?;
+    if !update {
+        let region = document.deck.design.as_ref().and_then(|design| design.layouts.iter().find(|layout| Some(&layout.id) == slide.layout_id.as_ref() && layout.id == "preset-visual-content"))
+            .and_then(|layout| layout.elements.iter().find(|element| element.bounds().0 == "preset-visual-region"));
+        if let (Some(region), Element::Group { x, y, width, height, .. }) = (region, &mut element) {
+            let (_, left, top, region_width, region_height) = region.bounds();
+            let scale = (region_width / *width).min(region_height / *height);
+            *width *= scale; *height *= scale;
+            *x = left + (region_width - *width) / 2.0; *y = top + (region_height - *height) / 2.0;
+            let target = (*width, *height);
+            resize_canvas(&mut element, target.0, target.1)?;
+        }
+    }
     let existing=parts.iter().position(|part|part.slide_id==slide_id && part.element_id==id);
     let native_sha256=existing.and_then(|index|parts[index].native_sha256.clone());
     if update {
         let index=existing.ok_or_else(||Error::Invalid("part metadata missing".into()))?;
         if parts[index].stale {return Err(Error::Conflict("part metadata is stale; retain manual edits or insert a new part".into()));}
         let current=slide.elements.iter_mut().find(|element|element.bounds().0==id).ok_or_else(||Error::Conflict("part element missing".into()))?;
+        if let Element::Group { view_width, view_height, .. } = current { resize_canvas(&mut element, *view_width, *view_height)?; }
         if let Element::Group{x,y,width,height,..}=&mut element {let bounds=current.bounds();*x=bounds.1;*y=bounds.2;*width=bounds.3;*height=bounds.4;}
         *current=element.clone();parts.remove(index);
     } else {if existing.is_some() || slide.elements.iter().any(|element|element.bounds().0==id) {return Err(Error::Conflict("part identity already exists".into()));}slide.elements.push(element.clone());}

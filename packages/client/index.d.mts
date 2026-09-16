@@ -1,5 +1,5 @@
 ﻿import type { AislideDocument, Checkpoint, DataMapping, DataReport, Deck, Design, Element, ImportedObject, ObjectCatalog, ObjectKind, PatchOperation, PresentationExport, ProjectExport, Report, SourceBinding, SourceDocument, SourceInput, Theme } from './types'
-import type { PartCatalog, PartSpec, GraphCatalog, GraphSpec, GraphOperation, SlideOperation, ElementOperation, AssetInput } from './types'
+import type { PartCatalog, PartSpec, GraphCatalog, GraphIcon, GraphSpec, GraphOperation, SlideOperation, ElementOperation, AssetInput, DesignPreset } from './types'
 export * from './types'
 export type RequestOptions = { signal?: AbortSignal }
 export type TransactionOptions = RequestOptions & { expectedRevision?: number }
@@ -12,9 +12,11 @@ export class AislideClient {
   ingest(input: SourceInput, options?: RequestOptions): Promise<SourceDocument>
   dataReport(source: SourceDocument, mapping: DataMapping, options?: RequestOptions): Promise<DataReport>
   designDefaults(options?: RequestOptions): Promise<Design>
+  designPresets(options?: RequestOptions): Promise<DesignPreset[]>
   objectCatalog(options?: RequestOptions): Promise<ObjectCatalog>
   partCatalog(options?: RequestOptions): Promise<PartCatalog>
   graphCatalog(options?: RequestOptions): Promise<GraphCatalog>
+  createGraphIcon(input: Pick<AssetInput, 'base64' | 'mime_type'> & { alt?: string }, options?: RequestOptions): Promise<GraphIcon>
   createGraph(input: { id: string; spec: GraphSpec; theme?: Theme }, options?: RequestOptions): Promise<Element>
   transformGraph(spec: GraphSpec, operations: GraphOperation[], options?: RequestOptions): Promise<GraphSpec>
   createPart(input: { id: string; spec: PartSpec; theme?: Theme }, options?: RequestOptions): Promise<Element>
@@ -36,6 +38,7 @@ export class DocumentSession {
   transact(operations: PatchOperation[], options?: TransactionOptions): Promise<AislideDocument>
   replaceDeck(deck: Deck, options?: ReplaceOptions): Promise<AislideDocument>
   updateDesign(design: Design, options?: TransactionOptions): Promise<AislideDocument>
+  applyDesignPreset(presetId: string, options?: TransactionOptions): Promise<AislideDocument>
   applyTheme(theme: Theme, options?: TransactionOptions): Promise<AislideDocument>
   assignLayout(slideId: string, layoutId: string, options?: TransactionOptions): Promise<AislideDocument>
   addObject(slideId: string, input: ObjectInput, options?: TransactionOptions): Promise<AislideDocument>

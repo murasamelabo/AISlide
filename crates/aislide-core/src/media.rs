@@ -3,15 +3,20 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use image::{ImageFormat, ImageReader, Limits};
 use serde::{Serialize, Deserialize};
 use sha2::{Digest, Sha256};
+use std::{cell::RefCell, collections::VecDeque};
 use std::io::Cursor;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RasterInfo { pub width: u32, pub height: u32, pub mime_type: String, pub sha256: String, pub byte_length: usize }
 
+thread_local! {
+    static RASTER_INFO_CACHE: RefCell<VecDeque<RasterInfo>> = const { RefCell::new(VecDeque::new()) };
+}
+
 pub fn create_asset(id: &str, base64: String, mime_type: &str, alt: &str, size: f64) -> Result<crate::model::Element> {
     if !size.is_finite() || !(8.0..=640.0).contains(&size) { return Err(Error::Invalid("asset size must be 8-640 pixels".into())); }
-    let (data, mime) = if mime_type == "image/svg+xml" { (svg_png(&base64)?, "image/png") } else { (base64, mime_type) };
+    let (data, mime) = if mime_type == "image/svg+xml" { (svg_png(&base64, 1024)?, "image/png") } else { (base64, mime_type) };
     let mut picture = create_picture(id, data, mime, alt)?;
     if let crate::model::Element::Picture { width, height, y, .. } = &mut picture {
         let scale = size / width.max(*height); *width *= scale; *height *= scale; *y = 180.0;
@@ -19,7 +24,25 @@ pub fn create_asset(id: &str, base64: String, mime_type: &str, alt: &str, size: 
     Ok(picture)
 }
 
-fn svg_png(encoded: &str) -> Result<String> {
+pub(crate) fn icon_raster(base64: String, mime_type: &str) -> Result<(String, String)> {
+    if mime_type == "image/svg+xml" {
+        let data = svg_png(&base64, 256)?;
+        inspect_raster(&data, "image/png")?;
+        return Ok((data, "image/png".into()));
+    }
+    let info = inspect_raster(&base64, mime_type)?;
+    if info.width <= 256 && info.height <= 256 { return Ok((base64, mime_type.into())); }
+    let bytes = STANDARD.decode(base64).map_err(|_| Error::Invalid("invalid image base64".into()))?;
+    let format = if mime_type == "image/png" { ImageFormat::Png } else { ImageFormat::Jpeg };
+    let image = decode_image(&bytes, format)?.thumbnail(256, 256);
+    let mut output = Cursor::new(Vec::new());
+    image.write_to(&mut output, format).map_err(|_| Error::Invalid("graph icon encoding failed".into()))?;
+    let data = STANDARD.encode(output.into_inner());
+    inspect_raster(&data, mime_type)?;
+    Ok((data, mime_type.into()))
+}
+
+fn svg_png(encoded: &str, resolution: u32) -> Result<String> {
     if encoded.len() > 349528 { return Err(Error::Limit("SVG exceeds 256 KiB".into())); }
     let bytes = STANDARD.decode(encoded).map_err(|_| Error::Invalid("invalid SVG base64".into()))?;
     if bytes.len() > 262144 { return Err(Error::Limit("SVG exceeds 256 KiB".into())); }
@@ -51,7 +74,7 @@ fn svg_png(encoded: &str) -> Result<String> {
     let tree = resvg::usvg::Tree::from_str(svg, &options).map_err(|_| Error::Invalid("SVG cannot be parsed for rendering".into()))?;
     let dimensions = tree.size();
     if dimensions.width() > 4096.0 || dimensions.height() > 4096.0 { return Err(Error::Limit("SVG viewport exceeds 4096 pixels".into())); }
-    let factor = 1024.0 / dimensions.width().max(dimensions.height());
+    let factor = resolution as f32 / dimensions.width().max(dimensions.height());
     let width = (dimensions.width() * factor).round().max(1.0) as u32;
     let height = (dimensions.height() * factor).round().max(1.0) as u32;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or_else(|| Error::Limit("SVG raster allocation".into()))?;
@@ -126,21 +149,66 @@ pub fn inspect_raster(base64: &str, mime_type: &str) -> Result<RasterInfo> {
     };
     let actual = image::guess_format(&bytes).map_err(|_| Error::Invalid("unrecognized raster image".into()))?;
     if actual != expected { return Err(Error::Invalid("image content does not match its media type".into())); }
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    if let Some(info) = RASTER_INFO_CACHE.with(|cache| cache.borrow().iter().find(|info| info.sha256 == sha256 && info.mime_type == mime_type).cloned()) { return Ok(info); }
+    let info = decode_raster(&bytes, actual, mime_type, sha256)?;
+    RASTER_INFO_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 64 { cache.pop_front(); }
+        cache.push_back(info.clone());
+    });
+    Ok(info)
+}
+
+fn decode_raster(bytes: &[u8], format: ImageFormat, mime_type: &str, sha256: String) -> Result<RasterInfo> {
+    let image = decode_image(bytes, format)?;
+    Ok(RasterInfo { width: image.width(), height: image.height(), mime_type: mime_type.into(), sha256, byte_length: bytes.len() })
+}
+
+fn decode_image(bytes: &[u8], format: ImageFormat) -> Result<image::DynamicImage> {
     let mut limits = Limits::default();
     limits.max_image_width = Some(4096);
     limits.max_image_height = Some(4096);
     limits.max_alloc = Some(64 * 1024 * 1024);
-    let mut reader = ImageReader::with_format(Cursor::new(&bytes), actual);
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     reader.limits(limits);
     let image = reader.decode().map_err(|_| Error::Invalid("image cannot be decoded within the 4096px/64MiB limits".into()))?;
     if image.width() == 0 || image.height() == 0 { return Err(Error::Invalid("image has empty dimensions".into())); }
-    Ok(RasterInfo { width: image.width(), height: image.height(), mime_type: mime_type.into(), sha256: format!("{:x}", Sha256::digest(&bytes)), byte_length: bytes.len() })
+    Ok(image)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn raster_metadata_cache_preserves_content_mime_and_size_checks() {
+        RASTER_INFO_CACHE.with(|cache| cache.borrow_mut().clear());
+        let png = |width: u32, color: u8| {
+            let image = image::RgbImage::from_pixel(width, 2, image::Rgb([color, 32, 160]));
+            let mut output = Cursor::new(Vec::new());
+            image.write_to(&mut output, ImageFormat::Png).unwrap();
+            STANDARD.encode(output.into_inner())
+        };
+        let encoded = png(4, 1);
+        let first = inspect_raster(&encoded, "image/png").unwrap();
+        assert_eq!((first.width, first.height), (4, 2));
+        assert_eq!(inspect_raster(&encoded, "image/png").unwrap().sha256, first.sha256);
+        assert_eq!(RASTER_INFO_CACHE.with(|cache| cache.borrow().len()), 1);
+        assert!(inspect_raster(&encoded, "image/jpeg").is_err());
+        assert!(inspect_raster(&encoded, "image/svg+xml").is_err());
+        let truncated = STANDARD.decode(&encoded).unwrap();
+        assert!(inspect_raster(&STANDARD.encode(&truncated[..20]), "image/png").is_err());
+        assert!(inspect_raster(&"A".repeat(1_398_105), "image/png").is_err());
+        assert!(inspect_raster(&png(4097, 2), "image/png").is_err());
+        assert_eq!(RASTER_INFO_CACHE.with(|cache| cache.borrow().len()), 1);
+        let changed = inspect_raster(&png(8, 1), "image/png").unwrap();
+        assert_eq!((changed.width, changed.height), (8, 2));
+        assert_ne!(changed.sha256, first.sha256);
+        for color in 0..70 { inspect_raster(&png(4, color), "image/png").unwrap(); }
+        assert_eq!(RASTER_INFO_CACHE.with(|cache| cache.borrow().len()), 64);
+    }
 
     #[test]
     fn svg_assets_render_to_bounded_transparent_png() {
@@ -175,7 +243,7 @@ mod tests {
         expansion.push_str("<mask id='mask10'><rect width='24' height='24'/></mask></defs>");
         for fragment in [cycle, expansion.as_str(), "<defs><mask id='test'><path d='M0 0h24v24z' fill='url(#missing)'/></mask></defs>", "<path id='target' d='M0 0h24v24z'/><rect width='24' height='24' mask='url(#target)'/>"] {
             let svg = format!("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'>{fragment}<rect width='24' height='24' fill='#0017c1'/></svg>");
-            assert!(svg_png(&STANDARD.encode(svg)).is_err(), "unsafe SVG reference graph was accepted");
+            assert!(svg_png(&STANDARD.encode(svg), 1024).is_err(), "unsafe SVG reference graph was accepted");
         }
     }
 }

@@ -2,7 +2,7 @@
 import { join, extname } from 'node:path';
 
 const ignored = new Set(['.git', '.tools', '.artifacts', 'node_modules', 'target', 'dist', 'gen']);
-const sourceExtensions = new Set(['.rs', '.mjs', '.ts', '.mts', '.tsx', '.css', '.html', '.md', '.toml', '.ps1', '.psm1', '.yml', '.yaml']);
+const sourceExtensions = new Set(['.rs', '.mjs', '.ts', '.mts', '.tsx', '.css', '.html', '.md', '.toml', '.ps1', '.psm1', '.nsh', '.yml', '.yaml']);
 const fix = process.argv.includes('--fix');
 let checked = 0;
 let mismatches = 0;

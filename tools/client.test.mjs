@@ -3,6 +3,70 @@ import assert from 'node:assert/strict';
 import { AislideClient, DocumentSession } from '../packages/client/index.mjs';
 import { requestCore } from './core-client.mjs';
 
+test('design preset SDK shares native layouts, preservation, revision guards and undo', async () => {
+  const client = new AislideClient(requestCore);
+  const presets = await client.designPresets();
+  assert.equal(presets.length, 7);
+  for (const preset of presets) {
+    const session = await client.createPresentation(`preset-${preset.id}`, 'Preset example');
+    const original = session.document;
+    await session.applyDesignPreset(preset.id, { expectedRevision: 0 });
+    assert.equal(session.document.deck.design.masters.length, 2);
+    await assert.rejects(() => session.applyDesignPreset(preset.id, { expectedRevision: 0 }), /Revision conflict/);
+    await session.undo();
+    assert.equal(session.document.hash, original.hash);
+    await session.redo();
+    await session.assignLayout('slide-1', 'preset-cover');
+    await session.editSlides(preset.design.layouts.filter((layout) => layout.id !== 'preset-cover').map((layout) => ({ op: 'insert', id: layout.id, title: layout.name, layout_id: layout.id })));
+    const exported = await session.exportPresentation();
+    const opened = (await client.openPresentation(`reopen-${preset.id}`, exported.base64)).session;
+    assert.equal(opened.document.deck.design.theme.colors.accent1, preset.design.theme.colors.accent1);
+    assert.equal(opened.document.deck.slides[0].layout_id, 'preset-cover');
+    assert.equal(opened.document.deck.design.layouts.length, 11);
+    assert.equal(opened.document.deck.slides.length, 7);
+    await opened.applyDesignPreset('minimal');
+    assert.equal(opened.document.deck.slides[0].elements.find((entry) => entry.id === 'title').text, 'Presentation title');
+  }
+});
+
+test('new slides use the applied preset blank layout without adding sample text', async () => {
+  const client = new AislideClient(requestCore);
+  const session = await client.createPresentation('preset-new-slide');
+  await session.applyDesignPreset('public');
+  await session.editSlides([{ op: 'insert', id: 'next', after: 'slide-1', title: 'Next slide' }]);
+  assert.equal(session.document.deck.slides[1].layout_id, 'preset-blank');
+  assert.deepEqual(session.document.deck.slides[1].elements, []);
+});
+
+test('design preset visual regions place new parts without moving body text', async () => {
+  const client = new AislideClient(requestCore);
+  const session = await client.createPresentation('preset-part-layout', 'Visual layout');
+  await session.applyDesignPreset('minimal');
+  await session.assignLayout('slide-1', 'preset-visual-content');
+  const body = session.document.deck.slides[0].elements.find((entry) => entry.id === 'body');
+  const region = session.document.deck.design.layouts.find((entry) => entry.id === 'preset-visual-content').elements.find((entry) => entry.id === 'preset-visual-region');
+  const catalog = await client.partCatalog();
+  const spec = catalog.presets.find((entry) => entry.id === 'flow/balanced').example;
+  await session.addPart('slide-1', { id: 'visual-part', spec });
+  const part = session.document.deck.slides[0].elements.find((entry) => entry.id === 'visual-part');
+  assert.ok(part.x >= region.x && part.y >= region.y);
+  assert.ok(part.x + part.width <= region.x + region.width + 0.01);
+  assert.ok(part.y + part.height <= region.y + region.height + 0.01);
+  assert.equal(part.view_width, part.width);
+  assert.equal(part.view_height, part.height);
+  const labels = part.children.filter((entry) => entry.type === 'text');
+  assert.ok(labels[0].y + labels[0].font_size * 1.35 < labels[1].y);
+  assert.deepEqual(session.document.deck.slides[0].elements.find((entry) => entry.id === 'body'), body);
+  const exported = await session.exportPresentation();
+  const opened = (await client.openPresentation('visual-part-reopened', exported.base64)).session;
+  assert.equal(opened.document.parts[0].stale, false);
+  await opened.updatePart('slide-1', { id: 'visual-part', spec: { ...spec, title: 'Edited visual' } });
+  const updated = opened.document.deck.slides[0].elements.find((entry) => entry.id === 'visual-part');
+  assert.equal(updated.x, part.x);
+  assert.ok(Math.abs(updated.view_width - updated.width) < 0.001);
+  assert.ok(Math.abs(updated.children[0].font_size - labels[0].font_size) < 0.01);
+});
+
 test('editor SDK creates blank files, edits native slides and inserts SVG assets with undo', async () => {
   const client = new AislideClient(requestCore);
   const session = await client.createPresentation('editor-sdk', 'New presentation');
@@ -25,7 +89,9 @@ test('editor SDK creates blank files, edits native slides and inserts SVG assets
 test('graph SDK creates, edits and reopens native graph metadata with undo', async () => {
   const client = new AislideClient(requestCore);
   const catalog = await client.graphCatalog();
-  const spec = catalog.examples[0].spec;
+  const spec = structuredClone(catalog.examples[0].spec);
+  const picture = await client.createGraphIcon({ mime_type: 'image/svg+xml', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="10" fill="#0017c1"/></svg>').toString('base64'), alt: 'API icon' });
+  spec.nodes[1].icon = { base64: picture.base64, mime_type: picture.mime_type, alt: picture.alt };
   const session = await client.createDocument({ id: 'graph-sdk', deck: { version: 1, title: 'Graph', width: 1280, height: 720, slides: [{ id: 'slide', title: 'Graph', background: '@lt1', notes: '', elements: [] }] } });
   await session.addGraph('slide', { id: 'graph', spec });
   const original = session.document;
@@ -36,8 +102,14 @@ test('graph SDK creates, edits and reopens native graph metadata with undo', asy
   const exported = await session.exportPresentation();
   const reopened = await client.openPresentation('graph-sdk-open', exported.base64);
   assert.equal(reopened.session.document.parts[0].stale, false);
+  assert.deepEqual(reopened.session.document.parts[0].spec.data.graph.nodes[1].icon, spec.nodes[1].icon);
+  assert.equal(reopened.session.document.deck.slides[0].elements[0].children.filter((element) => element.type === 'picture').length, 1);
   await reopened.session.updateGraph('slide', { id: 'graph', spec });
   await assert.rejects(() => reopened.session.applyGraph('slide', { id: 'graph', operations: [{ op: 'remove', ids: ['user'] }] }, { expectedRevision: 0 }), /Revision conflict/);
+  await reopened.session.applyGraph('slide', { id: 'graph', operations: [{ op: 'put_node', node: { ...spec.nodes[1], icon: null } }] });
+  assert.equal(reopened.session.document.deck.slides[0].elements[0].children.filter((element) => element.type === 'picture').length, 0);
+  await reopened.session.undo();
+  assert.deepEqual(reopened.session.document.parts[0].spec.data.graph.nodes[1].icon, spec.nodes[1].icon);
 });
 
 test('metadata parts share catalog, revisioned updates, undo and single PPTX persistence', async () => {

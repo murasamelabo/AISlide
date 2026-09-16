@@ -1,11 +1,12 @@
 ﻿import { test, expect } from '@playwright/test';
+import { openSample } from './fixtures';
 import sharp from 'sharp';
 import { readFile } from 'node:fs/promises';
 import AxeBuilder from '@axe-core/playwright';
 import { requestCore } from '../../tools/core-client.mjs';
 
 test('native chart can be added, edited, validated and undone', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   await expect(page.getByRole('button', { name: 'Add chart', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Add chart', exact: true }).click();
@@ -28,7 +29,7 @@ test('native chart can be added, edited, validated and undone', async ({ page })
 });
 
 test('a raster picture is decoded, cropped and undoable', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   await expect(page.getByRole('button', { name: 'Add picture', exact: true })).toBeVisible();
   const chooser = page.waitForEvent('filechooser');
@@ -46,7 +47,7 @@ test('a raster picture is decoded, cropped and undoable', async ({ page }) => {
 });
 
 test('connected process groups remain editable and move as one object', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   await expect(page.getByRole('button', { name: 'Add process diagram', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Add process diagram', exact: true }).click();
@@ -61,7 +62,7 @@ test('connected process groups remain editable and move as one object', async ({
 });
 
 test('source mapping preserves provenance inside one PPTX after save and reopen', async ({ page }, testInfo) => {
-  await page.goto('/');
+  await openSample(page);
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   await expect(page.getByRole('button', { name: 'Sources', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Sources', exact: true }).click();
@@ -99,7 +100,7 @@ test('native PPTX opens alone, preserves no-op bytes and allows direct text edit
   const compiled = await requestCore({ op: 'compile', report });
   const original = await requestCore({ op: 'export', deck: compiled.deck });
   const bytes = Buffer.from(original.base64, 'base64');
-  await page.goto('/');
+  await openSample(page);
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: 'original.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: bytes });
   await expect(page.locator('.status-bar')).toContainText('Opened PPTX');
@@ -118,7 +119,7 @@ test('native PPTX opens alone, preserves no-op bytes and allows direct text edit
 });
 
 test('protected PPTX gives an explicit format error and keeps the current document', async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: 'protected.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]) });
   await expect(page.getByRole('alert')).toContainText('encrypted');
@@ -130,7 +131,7 @@ test('protected PPTX gives an explicit format error and keeps the current docume
 
 test('source controls are labeled and fit a small viewport', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/');
+  await openSample(page);
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   await page.getByRole('button', { name: 'Sources', exact: true }).click();
   await page.getByLabel('Source file', { exact: true }).setInputFiles({ name: 'small.csv', mimeType: 'text/csv', buffer: Buffer.from('Quarter,Value\nQ1,1\nQ2,2\n') });

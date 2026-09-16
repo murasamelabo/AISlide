@@ -8,6 +8,103 @@ fn sample() -> Value {
 }
 
 #[test]
+fn design_presets_define_native_layouts_typography_and_spacing() {
+    let presets = execute_request(json!({"op":"design_presets"})).unwrap();
+    let presets = presets.as_array().unwrap();
+    assert_eq!(presets.len(), 7);
+    let mut signatures = std::collections::BTreeSet::new();
+    for preset in presets {
+        let design = preset["design"].clone();
+        assert_eq!(design["masters"].as_array().unwrap().len(), 1);
+        assert_eq!(design["layouts"].as_array().unwrap().len(), 7);
+        assert!(preset["rules"]["margin"].as_f64().unwrap() >= 48.0);
+        assert!(preset["rules"]["gutter"].as_f64().unwrap() >= 32.0);
+        assert!(!design["theme"]["fonts"]["major"].as_str().unwrap().is_empty());
+        let deck = execute_request(json!({"op":"update_design","deck":sample(),"design":design})).unwrap();
+        execute_request(json!({"op":"validate","deck":deck})).unwrap();
+        signatures.insert(preset["design"].to_string());
+        let frames = preset["rules"]["regions"].as_array().unwrap();
+        assert!(frames.iter().any(|frame| frame["layout_id"] == "preset-visual-content"));
+        for frame in frames {
+            assert!(frame["width"].as_f64().unwrap() > 0.0);
+            assert!(frame["height"].as_f64().unwrap() > 0.0);
+        }
+    }
+    assert_eq!(signatures.len(), 7);
+}
+
+#[test]
+fn design_presets_preserve_content_and_replace_only_the_preset_templates() {
+    let original = sample();
+    let mut current = original.clone();
+    for id in ["public", "minimal", "stylish", "pop", "dynamic", "trust", "luxury"] {
+        current = execute_request(json!({"op":"apply_design_preset","deck":current,"preset_id":id})).unwrap();
+        assert_eq!(current["slides"].as_array().unwrap().len(), original["slides"].as_array().unwrap().len());
+        for (before, after) in original["slides"].as_array().unwrap().iter().zip(current["slides"].as_array().unwrap()) {
+            assert_eq!(before["title"], after["title"]);
+            assert_eq!(before["notes"], after["notes"]);
+            let text = |slide: &Value| slide["elements"].as_array().unwrap().iter().map(|entry| (&entry["id"], &entry["text"])).map(|(id, text)| json!([id, text])).collect::<Vec<_>>();
+            assert_eq!(text(before), text(after));
+        }
+        assert_eq!(current["design"]["masters"].as_array().unwrap().len(), 2);
+        assert_eq!(current["design"]["layouts"].as_array().unwrap().len(), 11);
+        assert_eq!(current["design"]["masters"][0]["id"], "master-1");
+    }
+    assert!(execute_request(json!({"op":"apply_design_preset","deck":original,"preset_id":"unknown"})).is_err());
+}
+
+#[test]
+fn design_presets_retain_user_added_master_elements_and_layouts() {
+    let mut deck = execute_request(json!({"op":"apply_design_preset","deck":sample(),"preset_id":"public"})).unwrap();
+    let custom = json!({"type":"text","id":"company-note","x":64,"y":650,"width":700,"height":30,"text":"Retained company text","font_size":14,"color":"@dk1","bold":false});
+    deck["design"]["masters"][1]["elements"].as_array_mut().unwrap().push(custom.clone());
+    deck["design"]["layouts"].as_array_mut().unwrap().push(json!({"id":"company-layout","name":"Company layout","master_id":"preset-master","background":null,"elements":[custom.clone()]}));
+    let updated = execute_request(json!({"op":"apply_design_preset","deck":deck,"preset_id":"minimal"})).unwrap();
+    assert!(updated["design"]["masters"][1]["elements"].as_array().unwrap().iter().any(|element| element["id"] == custom["id"] && element["text"] == custom["text"]));
+    assert!(updated["design"]["layouts"].as_array().unwrap().iter().any(|layout| layout["id"] == "company-layout"));
+}
+
+#[test]
+fn design_presets_reject_foreign_ids_and_modified_templates() {
+    let mut deck = sample();
+    let mut design = execute_request(json!({"op":"design_defaults"})).unwrap();
+    design["masters"][0]["id"] = json!("preset-master");
+    for layout in design["layouts"].as_array_mut().unwrap() { layout["master_id"] = json!("preset-master"); }
+    deck["design"] = design;
+    assert!(execute_request(json!({"op":"apply_design_preset","deck":deck,"preset_id":"public"})).is_err());
+    let mut deck = execute_request(json!({"op":"apply_design_preset","deck":sample(),"preset_id":"public"})).unwrap();
+    let cover = deck["design"]["layouts"].as_array_mut().unwrap().iter_mut().find(|layout| layout["id"] == "preset-cover").unwrap();
+    cover["elements"][0]["text"] = json!("Custom master title");
+    assert!(execute_request(json!({"op":"apply_design_preset","deck":deck,"preset_id":"minimal"})).is_err());
+}
+
+#[test]
+fn design_presets_remove_previous_style_artwork_on_every_switch() {
+    let ids = ["public", "minimal", "stylish", "pop", "dynamic", "trust", "luxury"];
+    for source in ids {
+        let previous = execute_request(json!({"op":"apply_design_preset","deck":sample(),"preset_id":source})).unwrap();
+        for target in ids {
+            let actual = execute_request(json!({"op":"apply_design_preset","deck":previous,"preset_id":target})).unwrap();
+            let expected = execute_request(json!({"op":"apply_design_preset","deck":sample(),"preset_id":target})).unwrap();
+            assert_eq!(actual["design"], expected["design"], "{source} -> {target}");
+        }
+    }
+}
+
+#[test]
+fn design_presets_reject_capacity_before_appending_templates() {
+    let mut deck = sample();
+    let mut design = execute_request(json!({"op":"design_defaults"})).unwrap();
+    for index in 1..8 {
+        design["masters"].as_array_mut().unwrap().push(json!({"id":format!("company-{index}"),"name":"Company master","background":"@lt1","elements":[]}));
+        design["layouts"].as_array_mut().unwrap().push(json!({"id":format!("company-layout-{index}"),"name":"Company layout","master_id":format!("company-{index}"),"background":null,"elements":[]}));
+    }
+    deck["design"] = design;
+    let error = execute_request(json!({"op":"apply_design_preset","deck":deck,"preset_id":"public"})).unwrap_err();
+    assert!(error.to_string().contains("capacity"));
+}
+
+#[test]
 fn native_masters_layouts_and_theme_are_editable_package_parts() {
     let mut design = execute_request(json!({"op":"design_defaults"})).unwrap();
     design["theme"]["name"] = json!("Company theme");

@@ -1,8 +1,9 @@
 ﻿import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { openSample } from './fixtures';
 
 test.beforeEach(async ({ page }) => {
-  await page.goto('/');
+  await openSample(page);
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
   await page.getByRole('button', { name: 'Generate with AI', exact: true }).click();
   await expect(page.getByText('local-fixture-model', { exact: true })).toBeVisible();

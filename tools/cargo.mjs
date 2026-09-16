@@ -20,13 +20,18 @@ if (hasLocal) {
     environment.CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = '-C link-self-contained=yes';
   }
 }
-const result = spawnSync(hasLocal ? localCargo : 'cargo', process.argv.slice(2), {
-  cwd: root,
+const argumentsList = process.argv.slice(2);
+const tauri = argumentsList[0] === 'tauri';
+const tauriArguments = argumentsList.slice(1);
+const command = tauri ? process.execPath : hasLocal ? localCargo : 'cargo';
+const commandArguments = tauri ? [join(root, 'node_modules', '@tauri-apps', 'cli', 'tauri.js'), ...tauriArguments] : argumentsList;
+const result = spawnSync(command, commandArguments, {
+  cwd: tauri ? join(root, 'apps', 'studio') : root,
   env: environment,
   stdio: 'inherit',
   shell: false,
 });
 if (result.error) {
-  console.error(`Cargo unavailable: ${result.error.message}. Install Rust from https://rustup.rs/.`);
+  console.error(`${tauri ? 'Tauri' : 'Cargo'} unavailable: ${result.error.message}. Install project dependencies and Rust from https://rustup.rs/.`);
 }
 process.exitCode = result.status ?? 1;

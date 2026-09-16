@@ -98,7 +98,7 @@ pub fn slides(document: &Document, expected_revision: u64, operations: &[SlideOp
                 identity(id)?; valid_text(title, 200)?;
                 if deck.slides.iter().any(|slide| &slide.id == id) { return Err(Error::Conflict("slide ID already exists".into())); }
                 let index = after.as_deref().map(locate).transpose()?.map_or(deck.slides.len(), |index| index + 1);
-                let layout = layout_id.clone().or_else(|| deck.design.as_ref().and_then(|design| design.layouts.iter().find(|layout| layout.elements.is_empty()).map(|layout| layout.id.clone())));
+                let layout = layout_id.clone().or_else(|| deck.design.as_ref().and_then(|design| design.layouts.iter().filter(|layout| layout.elements.is_empty()).min_by_key(|layout| usize::from(layout.id != "preset-blank" || layout.master_id != "preset-master")).map(|layout| layout.id.clone())));
                 deck.slides.insert(index, blank(id.clone(), title.clone(), layout.clone()));
                 if layout_id.is_some() { deck = crate::design::assign_layout(deck, id, layout.as_deref().unwrap_or(""))?; }
             }
