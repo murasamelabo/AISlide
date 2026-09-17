@@ -2,6 +2,35 @@
 
 Verified locally on 2026-09-14, Windows 11 ARM64, Microsoft Edge and Microsoft 365 PowerPoint. The implementation is shared by Rust core, Studio, SDK and the official-SDK MCP server. This is a bounded research PoC, not a full PowerPoint replacement.
 
+## 2026-09-16 Refresh
+
+The requested horizontal flow, vertical flow, tree and cycle categories now use substantial filled native geometry rather than line-only treatment. All 12 existing preset IDs remain. Horizontal flows use stage panels, safe-inset custom chevrons or process columns; vertical flows use aligned panels, arrow stages or numbered lanes. Trees lay out actual subtrees with filled hierarchy blocks and orthogonal branches. Cycles use filled segmented ring arrows and a separated label ledger. These are independently drawn layouts, not copies of the linked Slideland presentations or the supplied screenshot artwork.
+
+New geometry tests first failed against unfilled tree nodes. The catalog-wide text-frame test then reproduced overlapping labels on crossed relationship links. A bounded search along each link avoids nodes and prior labels; labels render after the lines. An initially coarse search rejected the normal example; a finer bounded search fixed it without loosening overlap rules. Full-slide PowerPoint inspection additionally revealed a single-character Japanese line in the three-set Venn center. A wider, shorter center frame fixed that while the existing circle-outline intersection test still passed.
+
+Verification for this refresh:
+
+| Scope | Observed result |
+| --- | --- |
+| All 108 default presets | Native generation, measured text fit, separate text frames, bounds, export and reopen passed |
+| Four revised diagram categories | Filled safe label areas and nonoverlapping text across all 12 variants; selected minimum/maximum counts and Japanese labels passed |
+| Dense trees | An unreadable wide sibling set is explicitly rejected with a split/alternate-layout suggestion |
+| All 108 browser previews | Nonblank images and fitted labels after fonts loaded |
+| All 108 parts actually inserted with Japanese text | Four 27-slide PPTX files; current metadata, byte-identical no-op save, and every reopened Studio slide checked |
+| PowerPoint | All 108 final Japanese slides rendered; all 24 embedded chart workbooks accepted temporary edits in disposable copies; all four PPTX files passed Open XML validation |
+| Four guided-authoring examples | 14 Japanese slides created through real MCP, exported/reopened, edited and undone exactly; all 14 rendered in PowerPoint and checked in Studio |
+| Installed desktop | Actual Start Menu launch, four core profiles, revised cycle insertion and Undo, preserved drag behavior, console-free PE, and existing setup cleanup checks passed |
+
+The final catalog's first, second and fourth PPTX files are byte-identical to their already rendered copies. The third was regenerated and all 27 slides rendered again after the Venn correction. [The verification tool](../../tools/authoring-verify.mjs) compares each exact PPTX SHA-256 with its Office verification copy before accepting captures, checks 1280x720/nonblank pixels, produces contact sheets, and tests all guided pages plus part edit/Undo/byte-identical save in an owned Edge session. All four 27-page contact sheets and representative full-size pages were visually reviewed; the images are not merely Studio screenshots.
+
+Final automated gates for this refresh: **263 distinct passing tests**: Rust workspace 148, Node bridge/SDK/MCP/data tests 35, Studio browser 71, native unit 4, and setup/installed lifecycle 5. Build, frontend typecheck and lint passed. After the full suites, a guide-only capability-list correction received a focused Rust test and final SDK/MCP reruns. The newly compiled installed WebView contains the same revised parts and guide catalog. Prior generation-browser and separate native-generation workflows were not rerun; they are not counted as new checks.
+
+Use `node tools/parts-demo.mjs <new-directory> --japanese` with Studio on loopback port 4174 to reproduce the actual-insertion check. Use `node tools/guided-demo.mjs <new-directory>` for four complete MCP inputs and editable sample decks. The [English guides and MCP contract](../authoring/README.md) describe the five-stage workflow, evidence declarations and the 48 consulting patterns. Dedicated C02/C03 summary/decision templates use purpose-sized native groups; they are separate from the 108-part catalog and the seven existing master presets.
+
+These checks cover the default examples, Japanese sample inputs and selected boundaries, not every permitted text length, theme, geometry or input combination. Intentional fill containment and Venn intersections are not treated as erroneous overlaps. General map-label avoidance and arbitrary diagram routing remain limited. Static tests, font measurement and screenshots are not an Office-parity or semantic-truth certification. Review agents were excerpt-limited; the final code-snippet review reported no findings, not an independent full-source audit. No existing user presentation, installed app, Git branch or remote was overwritten by verification.
+
+References: [horizontal flow](https://www.slideland.tech/docs/schematic/flow), [vertical flow](https://www.slideland.tech/docs/schematic/vertical-flow), [tree](https://www.slideland.tech/docs/schematic/tree), [cycle](https://www.slideland.tech/docs/schematic/cycle). The supplied consulting workflow was edited into English guidance with explicit capability limits; its sample company/data/artwork were not imported.
+
 ## Use
 
 1. Open **Parts library** from the ribbon and choose a category and layout.

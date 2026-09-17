@@ -74,6 +74,17 @@ export type PartPreset = { id: string; category: string; category_name: string; 
 export type PartCatalog = { version: 1; presets: PartPreset[]; schema: unknown; style: string; default_bounds: Omit<Bounds, 'id'> }
 export type PartInstance = { slide_id: string; element_id: string; spec: PartSpec; render_sha256: string; native_sha256?: string | null; stale: boolean }
 
+export type AuthoringProfile = 'consulting-decision' | 'technical-explainer' | 'event-talk' | 'status-report'
+export type GuidedEvidence = { id: string; kind: 'source' | 'assumption' | 'unknown'; reference: string; statement: string }
+export type ClauseSupport = { clause: string; body_paths: string[]; evidence_ids: string[] }
+export type NumberEvidence = { path: string; value: Scalar; evidence_id: string }
+export type DecisionIssue = { id: string; question: string; requested_decision: string; criterion: string; owner: string; due: string; evidence_ids: string[]; analysis_slide_ids: string[] }
+export type GuidedSlide = { id: string; section: string; headline: string; sentence_form: 'causal' | 'conditional' | 'contrast' | 'causal-focus' | 'evaluation' | 'proposal' | 'explanation' | 'comparison' | 'outcome'; pattern_id: string; question: string; parent_message: string; transition: string; parallel_basis: string; part?: PartSpec | null; support: ClauseSupport[]; numbers?: NumberEvidence[] }
+export type GuidedInput = { version: 1; profile_id: AuthoringProfile; title: string; audience: string; purpose: string; governing_message: string; language: 'en' | 'ja'; brand_color?: string | null; evidence: GuidedEvidence[]; issues?: DecisionIssue[]; slides: GuidedSlide[] }
+export type GuidedReview = { ready: boolean; issues: string[]; review_required: string[]; semantic_truth_verified: false; office_visual_parity: false }
+export type BestPracticeGuide = { version: 1; profile_id: AuthoringProfile; title: string; language: 'en'; markdown: string; patterns: { id: string; name: string; purpose: string; capability: 'native-template' | 'composition-required' | 'guidance-only'; rule: string }[]; input_schema: unknown; automatic_patterns: string[]; semantic_truth_verified: false; limits: { slides: number; evidence: number; issues: number }; creation: string }
+export type BestPracticeProfiles = { version: 1; profiles: { id: AuthoringProfile; title: string; language: 'en'; default_primary: string }[] }
+
 export type GraphNodeKind = 'rectangle' | 'rounded_rectangle' | 'ellipse' | 'diamond' | 'cylinder' | 'cloud'
 export type GraphPort = 'auto' | 'top' | 'left' | 'bottom' | 'right'
 export type GraphRoute = 'straight' | 'elbow'

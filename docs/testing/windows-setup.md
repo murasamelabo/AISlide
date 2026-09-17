@@ -1,12 +1,40 @@
 ﻿# Windows Setup And Start Menu
 
-Date: 2026-09-15. Windows setup now uses the existing Tauri CLI 2.11.4 and its NSIS template. This addition is local and uncommitted; it does not authorize signing, a project license, a GitHub push or binary publication.
+Date: 2026-09-16. Windows setup uses the existing Tauri CLI 2.11.4 and its NSIS template. The parts/guided-authoring refresh below is local and uncommitted; it does not authorize signing, a project license, a GitHub push or binary publication.
+
+## Parts And Guided Authoring
+
+The current installer includes the revised horizontal/vertical flows, trees and cycles, relationship-label and Japanese Venn fixes, and the shared core's four authoring profiles. The existing standalone MCP server exposes guide retrieval and validated creation; the desktop continues to use Parts library for direct insertion. See [parts verification](parts-library.md#2026-09-16-refresh) and [guided authoring](../authoring/README.md).
+
+The current regular installer is **83,341,220 bytes**, SHA-256 `c5280adc1d4a4a874bf7df5b7b2bf25654605cec2aed2a3c6f3fa9859f6262b7`. `npm run setup:build -- --debug --no-sign` succeeded. All five `npm run test:setup:installed` cases passed against the newly built core: the test-owned actual Start Menu launch retrieved all four profiles, inserted a segmented cycle, checked four filled polygon segments, and undid it. Existing icon/master operations, pending move/resize stability, GUI-subsystem checks and install/uninstall safety gates also passed. Native unit tests passed all four cases.
+
+This remains an unsigned debug x64 build tested on Windows 11 ARM64. Save and exit the normal AISlide application, then run setup to update it. No regular installation, user window or presentation was modified by the isolated tests. Console-free startup and earlier drag improvements remain included. Release, signing, native ARM64/MSVC and missing-WebView2 qualification remain separate work.
+
+## Console-Free Startup
+
+The preceding refresh opens only the Studio GUI instead of also opening a blank terminal. The prior entry-point attribute selected the Windows GUI subsystem only when debug assertions were disabled, so the distributed debug build was a console executable. Studio now selects the GUI subsystem for Windows application builds in either profile. Rust test executables retain their console output through `not(test)`; the separate CLI and MCP are unchanged.
+
+That installer was **83,062,695 bytes**, SHA-256 `5c681b29b2e35f0c31bd0c5f568a3303fb34187b693ca32d437a4b3fa4519c06`, now superseded by the parts/guided-authoring refresh above. It includes the canvas interaction improvements below. Save work and exit AISlide before running the updated setup. Do not close only the old black terminal while working: a console close can also terminate the attached app. Existing open windows are not changed automatically by a new build.
+
+The added installed-test assertion reads the built and installed PE headers: Windows GUI subsystem `2` is required for both PE32 and PE32+. The original debug payload reproduced the failure with subsystem `3`; the rebuilt payload passed before and after installation. The actual test-owned Start Menu shortcut launched the app successfully, and the existing edit, Undo, running-app install/uninstall guards and cleanup checks passed.
+
+Final checks for this correction: **149 distinct tests passed** (Rust workspace 140, native unit 4, setup/installed lifecycle 5). `npm run setup:build -- --debug --no-sign` passed, including the frontend typecheck/build and native build. Native unit tests used `node tools/cargo.mjs test --manifest-path apps/studio/src-tauri/Cargo.toml --bin aislide-studio --locked --target-dir apps/studio/src-tauri/target/x86_64-pc-windows-gnu`; the final installed check used `npm run test:setup:installed`. The first GUI-only attribute also hid test-harness output; excluding test builds restored the visible four-test result without restoring the app console. Reviews were excerpt-limited. Unchanged browser suites were not rerun for this native entry-point change.
+
+This remains an unsigned debug x64 build tested on Windows 11 ARM64, not a signed release or native ARM64 qualification. No terminal preferences, shortcuts, file associations or user installation were modified by verification. Startup failures still exit with a nonzero code; a GUI launch has no visible stderr console, as in the previous release configuration.
+
+## Canvas Interaction Refresh
+
+The preceding installer added smoother canvas movement and resizing: animation-frame batching, translated movement, memoized unchanged content and a preview retained until the core edit completes. Existing Undo, error handling, blank startup, icon categories and master presets remain. See [the measurements and regression evidence](workspace-ux.md#canvas-drag-responsiveness).
+
+That installer was **83,060,275 bytes**, SHA-256 `8133153c9cad8727364efd445fdbb1d0fd4e759f77dc1d147009a96f3864499c`, now superseded by the console-free startup refresh above. `npm run setup:build -- --debug --no-sign` succeeded; all five `npm run test:setup:installed` cases passed. The actual installed WebView held move and resize transactions, measured 0.000px preview displacement for each, and verified Undo before the existing install/uninstall lifecycle checks.
+
+This remains an **unsigned debug x64 build** tested on Windows 11 ARM64. Save and close AISlide before running setup to update the regular installation. Verification used only a random test product, shortcut, directory and WebView profile; the user's running app and presentations were preserved. Signing, release/MSVC/native-ARM64 builds and WebView2-absent bootstrap remain unqualified.
 
 ## Blank And Master Refresh
 
-The latest 2026-09-16 build starts with one empty slide, filters the complete Lucide catalog by 42 official categories, and includes seven original native master presets with fonts, palettes, spacing and layout regions. It includes the fitted-canvas correction for parts placed into the Text and visual layout. See [preset definitions and verification](master-presets.md).
+The preceding 2026-09-16 build starts with one empty slide, filters the complete Lucide catalog by 42 official categories, and includes seven original native master presets with fonts, palettes, spacing and layout regions. It includes the fitted-canvas correction for parts placed into the Text and visual layout. See [preset definitions and verification](master-presets.md).
 
-The regular installer at the path below is **83,054,559 bytes**, SHA-256 `d5824afc9d2d25fcdf005890b994ad8bae2f8e7d08c9acffc991379de53055ce`. This is the current artifact; the earlier hashes below are historical. `npm run setup:build -- --debug --no-sign` and all five `npm run test:setup:installed` cases passed against this checkpoint. The isolated test launched the actual Start Menu shortcut, checked blank startup, category-filtered icon insertion, a master preset and layout, Undo, running-app guards, shortcut/registry removal and unrelated-file preservation.
+That installer was **83,054,559 bytes**, SHA-256 `d5824afc9d2d25fcdf005890b994ad8bae2f8e7d08c9acffc991379de53055ce`, now superseded by the canvas interaction refresh above. `npm run setup:build -- --debug --no-sign` and all five `npm run test:setup:installed` cases passed against this checkpoint. The isolated test launched the actual Start Menu shortcut, checked blank startup, category-filtered icon insertion, a master preset and layout, Undo, running-app guards, shortcut/registry removal and unrelated-file preservation.
 
 This is still an unsigned debug x64 build qualified on Windows 11 ARM64, not a signed production release. Installation is not automatic: save and close AISlide, then run the updated setup. No regular installed app or user document was changed by the isolated verification.
 

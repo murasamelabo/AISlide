@@ -55,7 +55,7 @@ pub(crate) fn refresh(parts:&mut [PartInstance],deck:&Deck,origin:Option<&Import
     Ok(())
 }
 
-fn resize_canvas(element: &mut Element, target_width: f64, target_height: f64) -> Result<()> {
+pub(crate) fn resize_canvas(element: &mut Element, target_width: f64, target_height: f64) -> Result<()> {
     let Element::Group { view_width, view_height, .. } = element else { return Ok(()); };
     let horizontal = target_width / *view_width;
     let vertical = target_height / *view_height;

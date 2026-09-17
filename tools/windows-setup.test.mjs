@@ -1,6 +1,6 @@
 ﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, open, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { createServer } from 'node:net';
@@ -9,6 +9,22 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+
+async function assertGuiSubsystem(path) {
+  const binary = await open(path, 'r');
+  try {
+    const dos = Buffer.alloc(64);
+    assert.equal((await binary.read(dos, 0, dos.length, 0)).bytesRead, dos.length);
+    assert.equal(dos.toString('ascii', 0, 2), 'MZ');
+    const header = Buffer.alloc(94);
+    assert.equal((await binary.read(header, 0, header.length, dos.readUInt32LE(60))).bytesRead, header.length);
+    assert.equal(header.toString('ascii', 0, 4), 'PE\0\0');
+    assert.ok([0x10b, 0x20b].includes(header.readUInt16LE(24)));
+    assert.equal(header.readUInt16LE(92), 2, 'Studio must use the Windows GUI subsystem, including debug setup builds');
+  } finally {
+    await binary.close();
+  }
+}
 
 test('Windows setup registers a current-user Start Menu app without changing file associations', async () => {
   const root = resolve(import.meta.dirname, '../apps/studio/src-tauri');
@@ -81,6 +97,7 @@ test('NSIS installs a working Start Menu shortcut and removes only its own files
   assert.match(host, /^(x86_64|i686|aarch64)-pc-windows-(gnu|msvc)$/);
   const profile = process.argv.includes('--release') ? 'release' : 'debug';
   const binaryDirectory = resolve(root, 'apps/studio/src-tauri/target', host, profile);
+  await assertGuiSubsystem(join(binaryDirectory, 'aislide-studio.exe'));
   const tag = randomUUID().replaceAll('-', '').slice(0, 10);
   const name = `AISlide Setup Verification ${tag}`;
   const binaryName = `aislide-setup-check-${tag}`;
@@ -116,6 +133,7 @@ test('NSIS installs a working Start Menu shortcut and removes only its own files
   await execute(setup, ['/S', `/D=${destination}`], { windowsHide: true, windowsVerbatimArguments: true });
   const installedBinary = join(destination, `${binaryName}.exe`);
   assert.ok((await stat(installedBinary)).size > 0);
+  await assertGuiSubsystem(installedBinary);
   assert.ok((await stat(shortcut)).size > 0);
   const link = JSON.parse(await powershell("$shell = New-Object -ComObject WScript.Shell; $link = $shell.CreateShortcut($env:AISLIDE_SETUP_SHORTCUT); @{ Target = $link.TargetPath; Arguments = $link.Arguments } | ConvertTo-Json -Compress", { AISLIDE_SETUP_SHORTCUT: shortcut }));
   assert.equal(link.Target.toLowerCase(), installedBinary.toLowerCase());
@@ -151,8 +169,73 @@ test('NSIS installs a working Start Menu shortcut and removes only its own files
   await expect(page.locator('.slide-stage img')).toHaveAttribute('alt', 'Database (Lucide)');
   await expect(page.locator('.slide-stage img')).toHaveJSProperty('complete', true);
   assert.ok(await page.locator('.slide-stage img').evaluate((image) => image.naturalWidth > 0));
+  const picture = page.locator('.slide-stage [data-element-id]').filter({ has: page.locator('img') });
+  for (const operation of ['move', 'resize']) {
+    const hitbox = picture.getByRole('button', { name: /^Edit / });
+    await hitbox.click();
+    const beforeBounds = await picture.boundingBox();
+    const control = operation === 'move' ? hitbox : picture.getByRole('button', { name: /^Resize / });
+    const pointer = await control.boundingBox();
+    await page.evaluate(() => {
+      const endpoint = window.__TAURI_INTERNALS__.convertFileSrc('core_request', 'ipc');
+      const original = window.fetch;
+      let release;
+      const waiting = new Promise((resolve) => { release = resolve; });
+      const gate = { started: false, pending: Promise.resolve(), release, restore: () => { window.fetch = original; delete window.__aislideDragGate; } };
+      window.__aislideDragGate = gate;
+      window.fetch = (input, options) => {
+        if (input === endpoint && typeof options?.body === 'string' && JSON.parse(options.body).request?.op === 'transaction' && !gate.started) {
+          gate.started = true;
+          gate.pending = waiting.then(() => original.call(window, input, options));
+          return gate.pending;
+        }
+        return original.call(window, input, options);
+      };
+    });
+    try {
+      await page.mouse.move(pointer.x + pointer.width / 2, pointer.y + pointer.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(pointer.x + pointer.width / 2 + 72, pointer.y + pointer.height / 2 + 36, { steps: 12 });
+      const preview = await picture.boundingBox();
+      assert.ok(preview[operation === 'move' ? 'x' : 'width'] - beforeBounds[operation === 'move' ? 'x' : 'width'] > 60);
+      await page.mouse.up();
+      await expect.poll(() => page.evaluate(() => window.__aislideDragGate.started)).toBe(true);
+      await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeDisabled();
+      const jumps = await picture.evaluate(async (element, target) => {
+        const samples = [];
+        for (let index = 0; index < 4; index++) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          const bounds = element.getBoundingClientRect();
+          samples.push(Math.max(...['x', 'y', 'width', 'height'].map((key) => Math.abs(bounds[key] - target[key]))));
+        }
+        return samples;
+      }, preview);
+      assert.ok(Math.max(...jumps) < 1, `${operation} preview jumped while the native transaction was pending`);
+      await page.screenshot({ path: resolve(root, `.artifacts/drag-native-${operation}.png`) });
+      context.diagnostic(`Native ${operation} pending preview: maximum jump ${Math.max(...jumps).toFixed(3)} px.`);
+    } finally {
+      await page.evaluate(async () => { const gate = window.__aislideDragGate; if (gate) { gate.restore(); gate.release(); await gate.pending; } });
+    }
+    await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+    await page.getByRole('button', { name: 'Undo', exact: true }).click();
+    await expect.poll(async () => Math.abs((await picture.boundingBox())[operation === 'move' ? 'x' : 'width'] - beforeBounds[operation === 'move' ? 'x' : 'width'])).toBeLessThan(1);
+  }
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
   await expect(page.locator('.slide-stage img')).toHaveCount(0);
+  const profiles = await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('core_request', { operationId: crypto.randomUUID(), request: { op: 'best_practice_profiles' } }));
+  assert.equal(profiles.profiles.length, 4);
+  await page.getByRole('button', { name: 'Parts library', exact: true }).click();
+  const parts = page.getByRole('dialog', { name: 'Parts library', exact: true });
+  await parts.getByLabel('Part category', { exact: true }).selectOption('cycle');
+  await parts.getByRole('button', { name: 'Segmented cycle', exact: true }).click();
+  await parts.getByLabel('Part title', { exact: true }).fill('Native cycle verification');
+  await parts.getByRole('button', { name: 'Insert part', exact: true }).click();
+  await expect(page.locator('.slide-stage').getByText('Native cycle verification', { exact: true })).toBeVisible();
+  const segments = await page.locator('.slide-stage svg polygon').evaluateAll((nodes) => nodes.filter((node) => node.getAttribute('points').trim().split(/\s+/).length > 40).length);
+  assert.equal(segments, 4);
+  await page.screenshot({ path: resolve(root, '.artifacts/parts-refresh-native.png') });
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.slide-stage').getByText('Native cycle verification', { exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Edit masters and layouts', exact: true }).click();
   const design = page.getByRole('dialog', { name: 'Masters and layouts', exact: true });
   await design.getByRole('button', { name: 'Browse presets', exact: true }).click();

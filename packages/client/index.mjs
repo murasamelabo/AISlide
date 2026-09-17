@@ -11,6 +11,15 @@
   designPresets(options) { return this.request({ op: 'design_presets' }, options); }
   objectCatalog(options) { return this.request({ op: 'object_catalog' }, options); }
   partCatalog(options) { return this.request({ op: 'part_catalog' }, options); }
+  bestPracticeProfiles(options) { return this.request({ op: 'best_practice_profiles' }, options); }
+  bestPracticeGuide(profileId, options) { return this.request({ op: 'best_practice_guide', profile_id: profileId }, options); }
+  validateGuidedPresentation(input, options) { return this.request({ op: 'validate_guided_presentation', input }, options); }
+  async createGuidedPresentation(id, input, options) {
+    if (options?.signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError');
+    const result = await this.request({ op: 'create_guided_presentation', id, input }, options);
+    if (options?.signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError');
+    return { session: new DocumentSession(this.#transport, result.document), validation: result.validation, profile_id: result.profile_id, model_inference: result.model_inference };
+  }
   graphCatalog(options) { return this.request({ op: 'graph_catalog' }, options); }
   createGraphIcon(input, options) { return this.request({ ...input, op: 'create_graph_icon' }, options); }
   createGraph(input, options) { return this.request({ ...input, op: 'create_graph' }, options); }

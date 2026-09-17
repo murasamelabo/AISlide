@@ -23,6 +23,7 @@ pub mod design;
 pub mod design_presets;
 pub mod objects;
 pub mod parts;
+pub mod guided;
 mod native;
 mod native_save;
 mod native_slides;

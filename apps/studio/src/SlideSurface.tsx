@@ -1,4 +1,5 @@
-﻿import { lazy, Suspense, useEffect, useId, useRef, useState } from 'react'
+﻿import { lazy, memo, Suspense, useEffect, useId, useRef, useState } from 'react'
+import type { PointerEvent as ReactPointerEvent } from 'react'
 import type { Design, Element, Slide, Theme } from './types'
 import { InlineEditor } from './InlineEditor'
 import { ShapeSurface } from './ShapeSurface'
@@ -7,9 +8,9 @@ import type { MenuPosition } from './ContextMenu'
 
 const ChartSurface = lazy(() => import('./ChartSurface').then((module) => ({ default: module.ChartSurface })))
 
-type Props = { slide: Slide; design?: Design | null; selected?: string | null; onSelect?: (id: string) => void; onMove?: (id: string, x: number, y: number) => void; onResize?: (id: string, width: number, height: number) => void; onEdit?: (element: Element) => Promise<void>; editRequest?: { id: string; slideId: string; sequence: number }; onContextMenu?: (position: MenuPosition, id?: string) => void; onDraftChange?: (dirty: boolean) => void }
+type Props = { slide: Slide; design?: Design | null; selected?: string | null; onSelect?: (id: string) => void; onMove?: (id: string, x: number, y: number) => void | Promise<void>; onResize?: (id: string, width: number, height: number) => void | Promise<void>; onEdit?: (element: Element) => Promise<void>; editRequest?: { id: string; slideId: string; sequence: number }; onContextMenu?: (position: MenuPosition, id?: string) => void; onDraftChange?: (dirty: boolean) => void }
 
-export function Content({ element, theme }: { element: Element; theme?: Theme }) {
+export const Content = memo(function ElementContent({ element, theme }: { element: Element; theme?: Theme }) {
   const arrowId = useId()
   if (element.type === 'group') return <div style={{ position: 'absolute', width: element.view_width, height: element.view_height, transformOrigin: 'top left', transform: `scale(${element.width / element.view_width}, ${element.height / element.view_height})` }}>
     {element.children.map((child) => <div key={child.id} style={{ position: 'absolute', left: child.x, top: child.y, width: child.width, height: child.height, transform: child.type === 'shape' ? `rotate(${child.rotation}deg)` : undefined }}><Content element={child} theme={theme} /></div>)}
@@ -36,21 +37,87 @@ export function Content({ element, theme }: { element: Element; theme?: Theme })
     {element.type === 'shape' && <ShapeSurface preset={element.preset} fill={element.fill === 'none' ? 'none' : cssColor(element.fill, theme)} stroke={cssColor(element.stroke, theme)} strokeWidth={element.stroke_width} />}
     <div className="slide-text" style={{ ...textStyle(element, theme), justifyContent: element.format?.vertical === 'middle' ? 'center' : element.format?.vertical === 'bottom' ? 'flex-end' : 'flex-start' }}>{content}</div>
   </>
-}
+})
+
+type TransformPreview = { id: string; slideId: string; mode: 'move' | 'resize'; x: number; y: number; width: number; height: number; pending: boolean }
+type Gesture = { element: Element; preview: TransformPreview; pointerId: number; startX: number; startY: number; scale: number; control: HTMLButtonElement }
 
 export function SlideSurface({ slide, design, selected, onSelect, onMove, onResize, onEdit, editRequest, onContextMenu, onDraftChange }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const [scale, setScale] = useState(0.5)
   const [editing, setEditing] = useState<{ slide: string; id: string } | null>(null)
   const [cancelledRequest, setCancelledRequest] = useState(0)
-  const [drag, setDrag] = useState<{ id: string; startX: number; startY: number; x: number; y: number; nextX: number; nextY: number } | null>(null)
-  const [resize, setResize] = useState<{ id: string; startX: number; startY: number; width: number; height: number; nextWidth: number; nextHeight: number } | null>(null)
+  const [preview, setPreview] = useState<TransformPreview | null>(null)
+  const [gestureError, setGestureError] = useState('')
+  const gesture = useRef<Gesture | null>(null)
+  const frame = useRef<number | null>(null)
+  if (preview && preview.slideId !== slide.id) { setPreview(null); setGestureError('') }
+  const activePreview = preview?.slideId === slide.id ? preview : null
   const layout = design?.layouts.find((entry) => entry.id === (slide.layout_id ?? design.layouts[0]?.id))
   const master = design?.masters.find((entry) => entry.id === layout?.master_id)
   const background = slide.inherit_background ? layout?.background ?? master?.background ?? slide.background : slide.background
   const common = slide.hide_master_graphics ? [] : [...(master?.elements ?? []), ...(layout?.elements ?? [])].filter((element) => element.type !== 'text' || !element.format?.placeholder)
   const activeEditing = editing ?? (editRequest?.slideId === slide.id && editRequest.sequence !== cancelledRequest && slide.elements.some((element) => element.id === editRequest.id) ? { slide: slide.id, id: editRequest.id } : null)
   function finishEditing() { setEditing(null); setCancelledRequest(editRequest?.sequence ?? 0) }
+  function cancelFrame() { if (frame.current !== null) { cancelAnimationFrame(frame.current); frame.current = null } }
+  function releasePointer(current: Gesture) { if (current.control.hasPointerCapture(current.pointerId)) current.control.releasePointerCapture(current.pointerId) }
+  function cancelGesture(event?: ReactPointerEvent<HTMLButtonElement>) {
+    const current = gesture.current
+    if (!current || current.preview.pending || event && event.pointerId !== current.pointerId) return
+    gesture.current = null; cancelFrame(); releasePointer(current); setPreview(null)
+  }
+  function beginGesture(event: ReactPointerEvent<HTMLButtonElement>, element: Element, mode: TransformPreview['mode']) {
+    if (event.button !== 0 || !event.isPrimary || gesture.current || mode === 'move' && !onMove) return
+    event.preventDefault(); event.stopPropagation()
+    event.currentTarget.focus({ preventScroll: true })
+    onSelect?.(element.id)
+    const next: TransformPreview = { id: element.id, slideId: slide.id, mode, x: element.x, y: element.y, width: element.width, height: element.height, pending: false }
+    gesture.current = { element, preview: next, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, scale, control: event.currentTarget }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setGestureError(''); setPreview(next)
+  }
+  function calculatePreview(current: Gesture, clientX: number, clientY: number): TransformPreview {
+    const element = current.element
+    if (Math.hypot(clientX - current.startX, clientY - current.startY) < 3) return { ...current.preview, x: element.x, y: element.y, width: element.width, height: element.height }
+    const horizontal = (clientX - current.startX) / current.scale
+    const vertical = (clientY - current.startY) / current.scale
+    if (current.preview.mode === 'move') return { ...current.preview, x: Math.max(0, Math.min(1280 - element.width, Math.round(element.x + horizontal))), y: Math.max(0, Math.min(720 - element.height, Math.round(element.y + vertical))) }
+    const angle = element.type === 'shape' ? element.rotation * Math.PI / 180 : 0
+    return { ...current.preview, width: Math.max(1, Math.min(1280 - element.x, Math.round(element.width + horizontal * Math.cos(angle) + vertical * Math.sin(angle)))), height: Math.max(1, Math.min(720 - element.y, Math.round(element.height - horizontal * Math.sin(angle) + vertical * Math.cos(angle)))) }
+  }
+  function moveGesture(event: ReactPointerEvent<HTMLButtonElement>) {
+    const current = gesture.current
+    if (!current || current.preview.pending || current.pointerId !== event.pointerId || current.control !== event.currentTarget) return
+    current.preview = calculatePreview(current, event.clientX, event.clientY)
+    if (frame.current === null) frame.current = requestAnimationFrame(() => { frame.current = null; setPreview(gesture.current?.preview ?? null) })
+  }
+  async function finishGesture(event: ReactPointerEvent<HTMLButtonElement>) {
+    const current = gesture.current
+    if (!current || current.preview.pending || current.pointerId !== event.pointerId || current.control !== event.currentTarget) return
+    cancelFrame()
+    current.preview = { ...calculatePreview(current, event.clientX, event.clientY), pending: true }
+    setPreview(current.preview); releasePointer(current)
+    const next = current.preview
+    try {
+      if (next.mode === 'move' && (next.x !== current.element.x || next.y !== current.element.y)) await onMove?.(next.id, next.x, next.y)
+      if (next.mode === 'resize' && (next.width !== current.element.width || next.height !== current.element.height)) await onResize?.(next.id, next.width, next.height)
+    } catch (reason) { setGestureError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { if (gesture.current === current) { gesture.current = null; setPreview(null) } }
+  }
+  useEffect(() => () => {
+    const current = gesture.current
+    gesture.current = null
+    if (frame.current !== null) { cancelAnimationFrame(frame.current); frame.current = null }
+    if (current?.control.hasPointerCapture(current.pointerId)) current.control.releasePointerCapture(current.pointerId)
+  }, [slide.id])
+  useEffect(() => {
+    const current = gesture.current
+    if (!current || current.preview.pending || onSelect && slide.elements.includes(current.element)) return
+    gesture.current = null
+    if (frame.current !== null) { cancelAnimationFrame(frame.current); frame.current = null }
+    if (current.control.hasPointerCapture(current.pointerId)) current.control.releasePointerCapture(current.pointerId)
+    setPreview(null)
+  }, [onSelect, slide.elements])
   useEffect(() => {
     const node = host.current
     if (!node) return
@@ -58,31 +125,27 @@ export function SlideSurface({ slide, design, selected, onSelect, onMove, onResi
     observer.observe(node)
     return () => observer.disconnect()
   }, [])
-  return <div className="slide-surface" ref={host}>
+  return <div className="slide-surface" ref={host} aria-busy={activePreview?.pending || undefined}>
     <div className="slide-page" style={{ transform: `scale(${scale})`, background: cssColor(background, design?.theme) }}>
       <div className="master-graphics">{common.map((element, index) => <div key={index} className="slide-element" style={{ left: element.x, top: element.y, width: element.width, height: element.height, transform: element.type === 'shape' ? `rotate(${element.rotation}deg)` : undefined }}><Content element={element} theme={design?.theme} /></div>)}</div>
-      {slide.elements.map((element) => <div key={element.id} data-element-id={element.id} className={`slide-element ${onSelect && selected === element.id ? 'selected' : ''} ${activeEditing?.slide === slide.id && activeEditing.id === element.id ? 'editing' : ''}`} style={{ left: drag?.id === element.id ? drag.nextX : element.x, top: drag?.id === element.id ? drag.nextY : element.y, width: resize?.id === element.id ? resize.nextWidth : element.width, height: resize?.id === element.id ? resize.nextHeight : element.height, transform: element.type === 'shape' ? `rotate(${element.rotation}deg)` : undefined }}>
-        <Content element={resize?.id === element.id ? { ...element, width: resize.nextWidth, height: resize.nextHeight } : element} theme={design?.theme} />
+      {slide.elements.map((element) => {
+        const temporary = activePreview?.id === element.id ? activePreview : null
+        const transform = [temporary?.mode === 'move' ? `translate3d(${temporary.x - element.x}px, ${temporary.y - element.y}px, 0)` : '', element.type === 'shape' ? `rotate(${element.rotation}deg)` : ''].filter(Boolean).join(' ')
+        return <div key={element.id} data-element-id={element.id} className={`slide-element ${temporary?.mode === 'move' ? 'moving' : ''} ${onSelect && selected === element.id ? 'selected' : ''} ${activeEditing?.slide === slide.id && activeEditing.id === element.id ? 'editing' : ''}`} style={{ left: element.x, top: element.y, width: temporary?.mode === 'resize' ? temporary.width : element.width, height: temporary?.mode === 'resize' ? temporary.height : element.height, transform: transform || undefined }}>
+        <Content element={temporary?.mode === 'resize' ? { ...element, width: temporary.width, height: temporary.height } : element} theme={design?.theme} />
         {activeEditing?.slide === slide.id && activeEditing.id === element.id && onEdit ? <InlineEditor key={element.id} element={element} theme={design?.theme} onCommit={onEdit} onCancel={finishEditing} onDraftChange={onDraftChange} /> : onSelect && <button type="button" className="element-hitbox" aria-label={`Edit ${element.id}`} title={element.id}
           onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu?.({ x: event.clientX, y: event.clientY, anchor: event.currentTarget }, element.id) }}
           onClick={() => onSelect(element.id)}
-          onDoubleClick={() => { if (onEdit && ['text', 'shape', 'table', 'group'].includes(element.type)) { setDrag(null); setEditing({ slide: slide.id, id: element.id }) } }}
-          onPointerDown={(event) => {
-            if (event.button !== 0) return
-            onSelect(element.id)
-            event.currentTarget.setPointerCapture(event.pointerId)
-            setDrag({ id: element.id, startX: event.clientX, startY: event.clientY, x: element.x, y: element.y, nextX: element.x, nextY: element.y })
-          }}
-          onPointerMove={(event) => {
-            if (drag?.id !== element.id) return
-            setDrag({ ...drag, nextX: Math.max(0, Math.min(1280 - element.width, Math.round(drag.x + (event.clientX - drag.startX) / scale))), nextY: Math.max(0, Math.min(720 - element.height, Math.round(drag.y + (event.clientY - drag.startY) / scale))) })
-          }}
-          onPointerUp={() => {
-            if (drag?.id === element.id && (drag.nextX !== drag.x || drag.nextY !== drag.y)) onMove?.(element.id, drag.nextX, drag.nextY)
-            setDrag(null)
-          }}
-          onPointerCancel={() => setDrag(null)}
+          onDoubleClick={() => { if (onEdit && ['text', 'shape', 'table', 'group'].includes(element.type)) { cancelGesture(); setEditing({ slide: slide.id, id: element.id }) } }}
+          onDragStart={(event) => event.preventDefault()}
+          onPointerDown={(event) => beginGesture(event, element, 'move')}
+          onPointerMove={moveGesture}
+          onPointerUp={finishGesture}
+          onPointerCancel={cancelGesture}
+          onLostPointerCapture={cancelGesture}
           onKeyDown={(event) => {
+            if (event.key === 'Escape' && gesture.current) { event.preventDefault(); event.stopPropagation(); cancelGesture(); return }
+            if (gesture.current) return
             if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); event.stopPropagation(); const bounds = event.currentTarget.getBoundingClientRect(); onContextMenu?.({ x: bounds.left + 12, y: bounds.top + 12, anchor: event.currentTarget }, element.id); return }
             if (onEdit && ['text', 'shape', 'table', 'group'].includes(element.type) && (event.key === 'Enter' || event.key === 'F2')) {
               event.preventDefault(); setEditing({ slide: slide.id, id: element.id }); return
@@ -94,12 +157,14 @@ export function SlideSurface({ slide, design, selected, onSelect, onMove, onResi
             onMove?.(element.id, Math.max(0, Math.min(1280 - element.width, element.x + delta[0])), Math.max(0, Math.min(720 - element.height, element.y + delta[1])))
           }} />}
         {onSelect && onResize && selected === element.id && !activeEditing && <button type="button" className="resize-handle" aria-label={`Resize ${element.id}`} title={`Resize ${element.id}`} style={{ width: 24 / scale, height: 24 / scale, right: -8 / scale, bottom: -8 / scale }}
-          onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); setResize({ id: element.id, startX: event.clientX, startY: event.clientY, width: element.width, height: element.height, nextWidth: element.width, nextHeight: element.height }) }}
-          onPointerMove={(event) => { if (resize?.id !== element.id) return; const angle = element.type === 'shape' ? element.rotation * Math.PI / 180 : 0; const horizontal = (event.clientX - resize.startX) / scale; const vertical = (event.clientY - resize.startY) / scale; setResize({ ...resize, nextWidth: Math.max(1, Math.min(1280 - element.x, Math.round(resize.width + horizontal * Math.cos(angle) + vertical * Math.sin(angle)))), nextHeight: Math.max(1, Math.min(720 - element.y, Math.round(resize.height - horizontal * Math.sin(angle) + vertical * Math.cos(angle)))) }) }}
-          onPointerUp={() => { if (resize?.id === element.id && (resize.nextWidth !== resize.width || resize.nextHeight !== resize.height)) onResize(element.id, resize.nextWidth, resize.nextHeight); setResize(null) }}
-          onPointerCancel={() => setResize(null)}
-          onKeyDown={(event) => { const amount = event.shiftKey ? 10 : 1; const delta = { ArrowLeft: [-amount, 0], ArrowRight: [amount, 0], ArrowUp: [0, -amount], ArrowDown: [0, amount] }[event.key]; if (!delta) return; event.preventDefault(); onResize(element.id, Math.max(1, Math.min(1280 - element.x, element.width + delta[0])), Math.max(1, Math.min(720 - element.y, element.height + delta[1]))) }}><span /></button>}
-      </div>)}
+          onPointerDown={(event) => beginGesture(event, element, 'resize')}
+          onPointerMove={moveGesture}
+          onPointerUp={finishGesture}
+          onPointerCancel={cancelGesture}
+          onLostPointerCapture={cancelGesture}
+          onKeyDown={(event) => { if (event.key === 'Escape' && gesture.current) { event.preventDefault(); event.stopPropagation(); cancelGesture(); return }; if (gesture.current) return; const amount = event.shiftKey ? 10 : 1; const delta = { ArrowLeft: [-amount, 0], ArrowRight: [amount, 0], ArrowUp: [0, -amount], ArrowDown: [0, amount] }[event.key]; if (!delta) return; event.preventDefault(); void onResize(element.id, Math.max(1, Math.min(1280 - element.x, element.width + delta[0])), Math.max(1, Math.min(720 - element.y, element.height + delta[1]))) }}><span /></button>}
+      </div>})}
     </div>
+    {gestureError && <div className="canvas-interaction-error" role="alert">{gestureError}</div>}
   </div>
 }

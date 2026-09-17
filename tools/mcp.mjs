@@ -90,6 +90,14 @@ const partData = z.discriminatedUnion('kind', [
 	z.object({ kind: z.literal('diagram'), graph: graphSpec }).strict(),
 ]);
 const partSpec = z.object({ version: z.literal(1), preset: z.string().min(1).max(100), title: z.string().max(80), subtitle: z.string().max(120).optional(), data: partData }).strict();
+const authoringProfile = z.enum(['consulting-decision', 'technical-explainer', 'event-talk', 'status-report']);
+const evidenceId = z.string().min(1).max(40);
+const guidedInput = z.object({
+	version: z.literal(1), profile_id: authoringProfile, title: z.string().min(1).max(120), audience: z.string().min(1).max(240), purpose: z.string().min(1).max(600), governing_message: z.string().min(1).max(600), language: z.enum(['en', 'ja']), brand_color: z.string().regex(/^[0-9a-fA-F]{6}$/).nullable().optional(),
+	evidence: z.array(z.object({ id: evidenceId, kind: z.enum(['source', 'assumption', 'unknown']), reference: z.string().min(1).max(600), statement: z.string().min(1).max(1200) }).strict()).max(64),
+	issues: z.array(z.object({ id: z.string().min(1).max(32), question: z.string().min(1).max(100), requested_decision: z.string().min(1).max(120), criterion: z.string().min(1).max(120), owner: z.string().min(1).max(48), due: z.string().min(1).max(48), evidence_ids: z.array(evidenceId).min(1).max(8), analysis_slide_ids: z.array(slideId).min(1).max(12) }).strict()).max(6).optional(),
+	slides: z.array(z.object({ id: slideId, section: z.string().min(1).max(80), headline: z.string().min(1).max(240), sentence_form: z.enum(['causal', 'conditional', 'contrast', 'causal-focus', 'evaluation', 'proposal', 'explanation', 'comparison', 'outcome']), pattern_id: z.string().min(1).max(80), question: z.string().min(1).max(240), parent_message: z.string().min(1).max(80), transition: z.string().min(1).max(80), parallel_basis: z.string().min(1).max(80), part: partSpec.nullable().optional(), support: z.array(z.object({ clause: z.string().min(1).max(240), body_paths: z.array(z.string().min(1).max(512)).min(1).max(16), evidence_ids: z.array(evidenceId).min(1).max(16) }).strict()).max(8), numbers: z.array(z.object({ path: z.string().min(1).max(512), value: z.union([partValue, z.string().max(120), z.boolean(), z.null()]), evidence_id: evidenceId }).strict()).max(256).optional() }).strict()).min(1).max(32),
+}).strict();
 
 function getDeck(id) {
 	const state = decks.get(id);
@@ -153,6 +161,16 @@ for (const name of ['add_graph', 'update_graph', 'apply_graph']) {
 }
 register('object_catalog', 'List native preset shapes, supported chart types and table limits. Insertion examples contain clearly named synthetic chart values.', {}, true, async (_input, signal) => client.objectCatalog({ signal }));
 register('part_catalog', 'List 108 original metadata-driven presets across 36 chart and diagram categories, with synthetic examples and the core input schema. No model calls, downloads or document mutation.', {}, true, async (_input, signal) => client.partCatalog({ signal }));
+register('best_practice_profiles', 'List four evidence-led authoring profiles: consulting decisions, technical explanations, event talks and reports. English guides are retrieved separately; no file or model access.', {}, true, async (_input, signal) => client.bestPracticeProfiles({ signal }));
+register('best_practice_guide', 'Retrieve the English five-stage workflow, profile-specific guidance and strict creation schema. The consulting catalog retains 48 patterns with honest native-template, composition-required or guidance-only status. Read this before planning; guidance does not verify truth.', { profile_id: authoringProfile }, true, async ({ profile_id }, signal) => client.bestPracticeGuide(profile_id, { signal }));
+register('validate_guided_presentation', 'Dry-run a structured outline, clause-to-body evidence, numeric source declarations and native layout. ready means compilable, not semantically proven or Office-qualified. Returns unmet checks and human-review requirements; no deck handle or file is created.', { input: guidedInput }, true, async ({ input }, signal) => client.validateGuidedPresentation(input, { signal }));
+register('create_guided_presentation', 'Create a NEW evidence-led presentation from supplied claims and native parts after the same strict validation. Consulting multi-page decks require 3-6 issues, C02 summary and C03 close. Unknown numbers must remain xx in qualitative content. Does not invent content, call a model, overwrite a deck or save a file; use export_pptx separately. Review semantics and actual rendering.', { input: guidedInput }, false, async ({ input }, signal) => {
+	if (decks.size >= 8) throw new Error('At most eight decks per session; close a deck first');
+	const id = randomUUID(); const result = await client.createGuidedPresentation(id, input, { signal });
+	if (signal.aborted) throw new Error('Operation cancelled');
+	decks.set(id, result.session);
+	return { deck_id: id, revision: result.session.revision, slides: result.session.document.deck.slides.length, profile_id: result.profile_id, validation: result.validation, model_inference: false };
+});
 register('create_part', 'Preview a metadata-driven part as native editable elements without inserting it. Validates bounds, numeric meaning and references in Rust. This is deterministic design, not AI generation.', { id: z.string().min(1).max(40), spec: partSpec, theme: themeSchema.optional() }, true, async (input, signal) => client.createPart(input, { signal }));
 for (const name of ['add_part', 'update_part']) {
 	register(name, name === 'add_part' ? 'Insert a native metadata-driven part in one undoable revision. Presets and metadata schema come from part_catalog. Placement does not rearrange existing content.' : 'Update a part from metadata while retaining its placement, in one undoable revision. Rejects stale metadata after native edits; never restores a cached scene over external changes.', { deck_id: handle, expected_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), slide_id: z.string().min(1).max(80), id: z.string().min(1).max(40), spec: partSpec }, false, async ({ deck_id, expected_revision, slide_id, ...input }, signal) => {

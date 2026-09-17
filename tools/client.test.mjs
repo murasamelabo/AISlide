@@ -2,6 +2,38 @@
 import assert from 'node:assert/strict';
 import { AislideClient, DocumentSession } from '../packages/client/index.mjs';
 import { requestCore } from './core-client.mjs';
+import { guidedExamples } from './guided-demo.mjs';
+
+test('guided SDK profiles create editable documents and reject early or late cancellation', async () => {
+  const client = new AislideClient(requestCore);
+  assert.equal((await client.bestPracticeProfiles()).profiles.length, 4);
+  for (const input of guidedExamples()) {
+    assert.equal((await client.bestPracticeGuide(input.profile_id)).language, 'en');
+    const result = await client.createGuidedPresentation(`guided-${input.profile_id}`, input);
+    assert.equal(result.validation.ready, true);
+    assert.equal(result.validation.semantic_truth_verified, false);
+    assert.equal(result.session.document.deck.slides.length, input.slides.length);
+    const snapshot = result.session.document; snapshot.deck.title = 'Changed copy';
+    assert.equal(result.session.document.deck.title, input.title);
+    assert.equal(result.session.canUndo, false);
+    const saved = await result.session.exportPresentation();
+    const opened = await client.openPresentation(`reopen-${input.profile_id}`, saved.base64);
+    assert.ok(opened.session.document.parts.every((part) => !part.stale));
+  }
+  let calls = 0;
+  let finish;
+  const response = new Promise((resolveReply) => { finish = resolveReply; });
+  const delayed = new AislideClient(async () => { calls += 1; return response; });
+  const early = new AbortController(); early.abort();
+  await assert.rejects(() => delayed.createGuidedPresentation('early', guidedExamples()[0], { signal: early.signal }), /cancelled/i);
+  assert.equal(calls, 0);
+  const late = new AbortController();
+  const pending = delayed.createGuidedPresentation('late', guidedExamples()[0], { signal: late.signal });
+  const rejected = assert.rejects(pending, /cancelled/i);
+  late.abort(); finish({ document: { version: 1, id: 'late', revision: 0, hash: 'unused' }, validation: { ready: true } });
+  await rejected;
+  assert.equal(calls, 1);
+});
 
 test('design preset SDK shares native layouts, preservation, revision guards and undo', async () => {
   const client = new AislideClient(requestCore);

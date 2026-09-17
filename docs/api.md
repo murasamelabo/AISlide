@@ -52,6 +52,21 @@ Assets accept `image/svg+xml`, `image/png` or `image/jpeg`. `size` is the displa
 
 SDK: `client.createPresentation(id,title?,options?)`, `session.editSlides(operations,options?)`, `session.editElements(slideId,operations,options?)`, `client.createAsset(input,options?)`, `session.addAsset(slideId,input,options?)`. Session options retain `expectedRevision` and cancellation. MCP exposes the same names with `add_asset` for insertion; mutations take `deck_id`, `expected_revision` and, for assets/elements, `slide_id`. `create_asset` is stateless. No additional filesystem/network authority is exposed.
 
+## Guided Authoring
+
+| Operation | Inputs | Result |
+| --- | --- | --- |
+| `best_practice_profiles` | None | Four purpose-specific English profiles and default color |
+| `best_practice_guide` | `profile_id` | English common/profile guide, pattern capabilities, limits and Rust-derived `GuidedInput` schema |
+| `validate_guided_presentation` | `input: GuidedInput` | Pure preflight `{ready,issues,review_required,semantic_truth_verified:false,office_visual_parity:false}` |
+| `create_guided_presentation` | `id`, `input: GuidedInput` | New `{document,validation,profile_id,model_inference:false}`; no existing document or file is replaced |
+
+Profiles are `consulting-decision`, `technical-explainer`, `event-talk`, and `status-report`. The [guided authoring contract](authoring/README.md) defines the evidence, headline ledger, numeric JSON pointers and decision issue fields. All actual document behavior is computed in Rust; no model or source URL is contacted. `ready` means compilable input and measured text layout, not factual or semantic verification. Complete notes retain the supplied ledger/evidence and require privacy review before redistribution.
+
+All profiles accept `native-part` with an existing `PartSpec`. Consulting multi-page inputs require 3-6 stable issues, an opening `C02` summary and closing `C03` decision grid. Both are dedicated native templates with purpose-sized columns; analysis references must point to real body pages. The 48-item consulting catalog is selection guidance with explicit `native-template`, `composition-required`, or `guidance-only` status, not 48 implemented automatic templates.
+
+MCP exposes the same four operation names. It allocates an opaque new `deck_id` only after successful validation and cancellation checks, within the existing eight-deck limit. File output still requires a separate `export_pptx` call. SDK creation returns `{session,validation,profile_id,model_inference:false}` through `client.createGuidedPresentation(id,input,options?)`; getter/validator methods are `bestPracticeProfiles`, `bestPracticeGuide` and `validateGuidedPresentation`. Use the returned revision; creation and later manual edits are not a continuously maintained semantic-proof record.
+
 ## Metadata Parts
 
 | Operation | Request fields besides op | Result |

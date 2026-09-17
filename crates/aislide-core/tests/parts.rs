@@ -89,6 +89,28 @@ fn part_data_is_validated_before_geometry_is_generated() {
 }
 
 #[test]
+fn all_catalog_parts_keep_text_frames_separate_and_inside_their_canvas() {
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let mut failures = Vec::new();
+    for preset in catalog["presets"].as_array().unwrap() {
+        let element = execute_request(json!({"op":"create_part","id":"geometry","spec":preset["example"]})).unwrap();
+        let text: Vec<_> = element["children"].as_array().unwrap().iter().filter(|child| child["type"] == "text" && !child["text"].as_str().unwrap().is_empty()).collect();
+        for (index, first) in text.iter().enumerate() {
+            let rectangle = |value:&Value| [value["x"].as_f64().unwrap(),value["y"].as_f64().unwrap(),value["width"].as_f64().unwrap(),value["height"].as_f64().unwrap()];
+            let [left, top, width, height] = rectangle(first);
+            if left < 0.0 || top < 0.0 || left + width > 1152.5 || top + height > 512.5 { failures.push(format!("{}: text outside canvas: {}",preset["id"],first["text"])); }
+            for second in &text[index + 1..] {
+                let [other_left, other_top, other_width, other_height] = rectangle(second);
+                if left < other_left + other_width - 0.5 && other_left < left + width - 0.5 && top < other_top + other_height - 0.5 && other_top < top + height - 0.5 {
+                    failures.push(format!("{}: {} overlaps {}",preset["id"],first["text"],second["text"]));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn metadata_parts_are_revisioned_undoable_and_do_not_override_external_xml() {
     let mut scene=deck(json!({"id":"label","type":"text","x":64,"y":20,"width":900,"height":60,"text":"Parts","font_size":28,"color":"202426","bold":true}));
     scene["slides"][0]["elements"]=json!([]);
@@ -132,6 +154,53 @@ fn long_part_labels_are_fitted_or_rejected_before_insertion() {
 }
 
 #[test]
+fn process_diagrams_use_filled_geometry_with_safe_separate_labels() {
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    for preset in catalog["presets"].as_array().unwrap().iter().filter(|preset| matches!(preset["category"].as_str(), Some("flow" | "vertical-flow" | "tree" | "cycle"))) {
+        let element = execute_request(json!({"op":"create_part","id":"visual","spec":preset["example"]})).unwrap();
+        let children = element["children"].as_array().unwrap();
+        let labels = preset["example"]["data"]["items"].as_array().or_else(|| preset["example"]["data"]["nodes"].as_array()).unwrap();
+        for item in labels {
+            let label = children.iter().find(|child| child["type"] == "text" && child["text"] == item["label"]).unwrap();
+            let left = label["x"].as_f64().unwrap(); let top = label["y"].as_f64().unwrap();
+            let right = left + label["width"].as_f64().unwrap(); let bottom = top + label["height"].as_f64().unwrap();
+            let contained = children.iter().any(|shape| {
+                if !matches!(shape["type"].as_str(), Some("rect" | "polygon" | "shape")) || matches!(shape["fill"].as_str(), None | Some("none" | "@lt1" | "FFFFFF")) { return false; }
+                let shape_left = shape["x"].as_f64().unwrap(); let shape_top = shape["y"].as_f64().unwrap();
+                let width = shape["width"].as_f64().unwrap(); let height = shape["height"].as_f64().unwrap();
+                let corners = [[left, top], [right, top], [right, bottom], [left, bottom]];
+                if !corners.iter().all(|point| point[0] > shape_left && point[0] < shape_left + width && point[1] > shape_top && point[1] < shape_top + height) { return false; }
+                if shape["preset"] == "chevron" { return left > shape_left + width.min(height) / 2.0 && right < shape_left + width - width.min(height) / 2.0; }
+                if shape["type"] != "polygon" { return true; }
+                let points = shape["points"].as_array().unwrap();
+                corners.iter().all(|point| {
+                    let horizontal = (point[0] - shape_left) / width; let vertical = (point[1] - shape_top) / height;
+                    let mut inside = false;
+                    for index in 0..points.len() {
+                        let start = &points[index]; let end = &points[(index + 1) % points.len()];
+                        let start_x = start[0].as_f64().unwrap(); let start_y = start[1].as_f64().unwrap();
+                        let end_x = end[0].as_f64().unwrap(); let end_y = end[1].as_f64().unwrap();
+                        if (start_y > vertical) != (end_y > vertical) && horizontal < (end_x - start_x) * (vertical - start_y) / (end_y - start_y) + start_x { inside = !inside; }
+                    }
+                    inside
+                })
+            });
+            assert!(contained, "{}: label {} must fit inside its filled node, away from arrow notches", preset["id"], item["label"]);
+        }
+        let text: Vec<_> = children.iter().filter(|child| child["type"] == "text" && !child["text"].as_str().unwrap().is_empty()).collect();
+        for (index, first) in text.iter().enumerate() {
+            for second in &text[index + 1..] {
+                let overlaps = first["x"].as_f64().unwrap() < second["x"].as_f64().unwrap() + second["width"].as_f64().unwrap() - 0.5
+                    && second["x"].as_f64().unwrap() < first["x"].as_f64().unwrap() + first["width"].as_f64().unwrap() - 0.5
+                    && first["y"].as_f64().unwrap() < second["y"].as_f64().unwrap() + second["height"].as_f64().unwrap() - 0.5
+                    && second["y"].as_f64().unwrap() < first["y"].as_f64().unwrap() + first["height"].as_f64().unwrap() - 0.5;
+                assert!(!overlaps, "{}: text frames {} and {} overlap", preset["id"], first["text"], second["text"]);
+            }
+        }
+    }
+}
+
+#[test]
 fn deleting_parts_removes_metadata_and_undo_restores_both() {
     let mut scene=deck(json!({}));scene["slides"][0]["elements"]=json!([]);
     let document=execute_request(json!({"op":"new_document","id":"delete-part","deck":scene})).unwrap();
@@ -152,6 +221,36 @@ fn deleting_parts_removes_metadata_and_undo_restores_both() {
             assert_eq!(replaced["document"]["parts"][0]["stale"],false);
         }
     }
+}
+
+#[test]
+fn process_diagrams_handle_boundary_counts_and_reject_unreadable_trees() {
+    let catalog=execute_request(json!({"op":"part_catalog"})).unwrap();
+    for category in ["flow","vertical-flow","cycle","tree"] {
+        for variant in ["balanced","focus","labeled"] {
+            let id=format!("{category}/{variant}");
+            let example=&catalog["presets"].as_array().unwrap().iter().find(|preset|preset["id"]==id).unwrap()["example"];
+            for count in if category=="tree" {vec![2,8]} else if category=="vertical-flow" {vec![2,5]} else if category=="cycle" {vec![3,6]} else {vec![2,6]} {
+                let mut spec=example.clone();
+                spec["title"]=json!("日本語の境界条件");
+                if category=="tree" {spec["data"]=json!({"kind":"tree","nodes":(0..count).map(|index|json!({"id":format!("node-{index}"),"label":format!("項目{index}"),"parent":if index==0 {None} else {Some("node-0")}})).collect::<Vec<_>>()});}
+                else {spec["data"]=json!({"kind":"items","center":"共通目的","items":(0..count).map(|index|json!({"label":format!("工程{index}"),"detail":"担当が確認"})).collect::<Vec<_>>()});}
+                let element=execute_request(json!({"op":"create_part","id":"boundary","spec":spec})).unwrap_or_else(|error|panic!("{id} / {count}: {error}"));
+                let measured=execute_request(json!({"op":"measure_layout","deck":deck(element.clone())})).unwrap();
+                assert!(measured["issues"].as_array().unwrap().iter().all(|issue|issue["severity"]!="error"),"{id} / {count}: {measured}");
+                let text:Vec<_>=element["children"].as_array().unwrap().iter().filter(|child|child["type"]=="text" && child["text"].as_str().is_some_and(|text|text.starts_with("項目") || text.starts_with("工程"))).collect();
+                for (index,first) in text.iter().enumerate() {for second in &text[index+1..] {
+                    let separated=first["x"].as_f64().unwrap()+first["width"].as_f64().unwrap()<=second["x"].as_f64().unwrap()
+                        || second["x"].as_f64().unwrap()+second["width"].as_f64().unwrap()<=first["x"].as_f64().unwrap()
+                        || first["y"].as_f64().unwrap()+first["height"].as_f64().unwrap()<=second["y"].as_f64().unwrap()
+                        || second["y"].as_f64().unwrap()+second["height"].as_f64().unwrap()<=first["y"].as_f64().unwrap();
+                    assert!(separated,"{id} / {count}: labels overlap");
+                }}
+            }
+        }
+    }
+    let dense=json!({"version":1,"preset":"tree/focus","title":"Dense tree","data":{"kind":"tree","nodes":(0..12).map(|index|json!({"id":format!("node-{index}"),"label":"Review ownership","parent":if index==0 {None} else {Some("node-0")}})).collect::<Vec<_>>()}});
+    assert!(execute_request(json!({"op":"create_part","id":"dense","spec":dense})).unwrap_err().to_string().contains("sibling branches"));
 }
 
 #[test]
@@ -223,4 +322,8 @@ fn three_set_venn_labels_do_not_cross_circle_outlines() {
             assert!(nearest>1.0 || furthest<1.0,"circle outline crosses {}",text["text"]);
         }
     }
+    let mut japanese=spec.clone();japanese["data"]["center"]=json!("共通の目的");
+    let element=execute_request(json!({"op":"create_part","id":"venn-ja","spec":japanese})).unwrap();
+    let label=element["children"].as_array().unwrap().iter().find(|child|child["text"]=="共通の目的").unwrap();
+    assert!(label["width"].as_f64().unwrap()>=5.0*label["font_size"].as_f64().unwrap()+8.0,"Japanese center label should not leave a one-character line");
 }

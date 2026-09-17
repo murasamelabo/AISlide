@@ -6,6 +6,45 @@ import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
+test('MCP guided authoring retrieves profiles and creates only evidence-linked decks', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-guided-mcp-'));
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const client = new Client({ name: 'guided-proof', version: '1.0.0' });
+  const call = async (name, args = {}) => { const response = await client.callTool({ name, arguments: args }); assert.ok(!response.isError, JSON.stringify(response.content)); return JSON.parse(response.content[0].text); };
+  const headline = 'We should validate each boundary before we deploy the service.';
+  const input = { version: 1, profile_id: 'technical-explainer', title: 'Technical briefing', audience: 'Engineering reviewers', purpose: 'Agree the validation order', governing_message: headline, language: 'en', evidence: [{ id: 'design', kind: 'assumption', reference: 'Synthetic architecture proposal for this test', statement: 'Validation before deployment is a proposed control, not a measured outcome.' }], slides: [{ id: 'process', section: 'Validation', headline, sentence_form: 'proposal', pattern_id: 'native-part', question: 'What should we validate?', parent_message: 'governing', transition: 'therefore', parallel_basis: 'boundary', part: { version: 1, preset: 'flow/balanced', title: 'Proposed validation stages', subtitle: 'Synthetic proposal', data: { kind: 'items', items: [{ label: 'Identity', detail: 'Verify the caller' }, { label: 'Data', detail: 'Validate the contract' }, { label: 'Release', detail: 'Check the outcome' }] } }, support: [{ clause: headline, body_paths: ['/data/items'], evidence_ids: ['design'] }], numbers: [] }] };
+  try {
+    await client.connect(transport);
+    const profiles = await call('best_practice_profiles');
+    assert.equal(profiles.profiles.length, 4);
+    const guide = await call('best_practice_guide', { profile_id: 'consulting-decision' });
+    assert.equal(guide.patterns.length, 48);
+    assert.equal(guide.semantic_truth_verified, false);
+    assert.match(guide.markdown, /Claim/);
+    assert.equal((await call('validate_guided_presentation', { input })).ready, true);
+    assert.deepEqual(await readdir(directory), []);
+    const invalid = structuredClone(input); invalid.slides[0].support = [];
+    assert.equal((await call('validate_guided_presentation', { input: invalid })).ready, false);
+    assert.equal((await client.callTool({ name: 'create_guided_presentation', arguments: { input: invalid } })).isError, true);
+    const result = await call('create_guided_presentation', { input });
+    assert.equal(result.slides, 1);
+    assert.equal(result.validation.ready, true);
+    assert.equal(result.model_inference, false);
+    const document = await call('get_document', { deck_id: result.deck_id });
+    assert.equal(document.parts[0].spec.preset, 'flow/balanced');
+    assert.equal(document.parts[0].stale, false);
+    await call('export_pptx', { deck_id: result.deck_id, filename: 'guided.pptx' });
+    const bytes = await readFile(join(directory, 'guided.pptx'));
+    assert.equal(bytes.subarray(0, 2).toString(), 'PK');
+    const reopened = await call('open_pptx', { base64: bytes.toString('base64') });
+    assert.equal((await call('get_document', { deck_id: reopened.deck_id })).parts[0].stale, false);
+    await call('update_part', { deck_id: result.deck_id, expected_revision: document.revision, slide_id: 'process', id: document.parts[0].element_id, spec: { ...document.parts[0].spec, title: 'Updated validation stages' } });
+    await call('undo', { deck_id: result.deck_id });
+    assert.equal((await call('get_document', { deck_id: result.deck_id })).hash, document.hash);
+    assert.equal((await client.callTool({ name: 'best_practice_guide', arguments: { profile_id: '../../secret' } })).isError, true);
+  } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('MCP design presets share the native catalog and guarded application', async () => {
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
   const client = new Client({ name: 'preset-proof', version: '1.0.0' });

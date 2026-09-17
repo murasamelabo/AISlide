@@ -79,6 +79,23 @@ const exported = await session.exportPresentation();
 
 The seven presets define native masters/layouts, palette and font roles, side margins, gutters and content regions. Application retains existing slide content and original masters; custom or edited template conflicts fail before commit. The normal session revision, cancellation and Undo guards apply. New blank slides inherit the selected preset master. New parts on `preset-visual-content` are fitted to the layout's visual region without moving existing content. Reopened documents must already contain a compatible preset structure. See [preset limits and definitions](../../docs/testing/master-presets.md).
 
+## Guided Authoring
+
+```js
+const profiles = await client.bestPracticeProfiles();
+const guide = await client.bestPracticeGuide('consulting-decision');
+const review = await client.validateGuidedPresentation(input);
+if (!review.ready) throw new Error(review.issues.join('; '));
+const created = await client.createGuidedPresentation('new-guided-document', input);
+const exported = await created.session.exportPresentation();
+```
+
+`input` follows the `GuidedInput` schema returned with the guide; the complete [contract and four English profiles](../../docs/authoring/README.md) describe claims, logical ledger, body evidence paths, numeric source declarations and decision issues. [The executable MCP demo](../../tools/guided-demo.mjs) contains complete synthetic inputs for all four profiles.
+
+Creation uses the shared core and returns a new session only on success. Early and late cancellation are rejected. Existing documents are never replaced, and file output is separate. `validation.ready` means compilable input, not verified source truth or a semantically justified conclusion. Review requirements and `model_inference:false` are explicit. The guide's 48 consulting patterns include manual/composed designs; only `native-part` and the consulting-specific `C02`/`C03` templates are automatic.
+
+The complete ledger and source/assumption declarations are stored in notes and need privacy review before redistribution. They are distinct from the live source bindings API. Subsequent normal edits can invalidate reasoning without rerunning guided validation. Part geometry and data remain editable through the usual native metadata and Undo safeguards.
+
 ## Metadata Parts
 
 The catalog contains 108 original layouts across 36 categories, each with a typed synthetic example. Given an existing session and a slide with room for a part:

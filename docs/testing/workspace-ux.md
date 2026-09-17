@@ -2,6 +2,36 @@
 
 Date: 2026-09-15. The right-click, file/slide-operation and icon-import extension is implemented and locally verified. After confirming that they changed the repository to **Public**, the owner explicitly authorized a public source push. The agent does not change visibility, billing or the project license. Local input materials and generated deliverables are excluded from publication.
 
+## Canvas Drag Responsiveness
+
+On 2026-09-16, moving and resizing existing canvas objects was improved without changing the document format, core validation, revision guards or Undo. This follow-up is local and uncommitted. The user journey is to drag an icon or picture, release it without a visible return to its previous position, and retain a single undoable edit. File import/conversion and graph-editor node dragging are not the optimized path.
+
+Previously, pointer-up discarded the preview while the asynchronous core transaction was still running. Held-response browser tests reproduced a maximum **72.225px** return for both movement and resizing. Studio now returns the transaction promise to SlideSurface, which retains the preview until that promise settles. A rejected edit restores committed geometry and retains the existing error message. Commit processing can still take time; this change does not queue edits or bypass the busy guard.
+
+Pointer updates are coalesced into one animation-frame update. Movement uses CSS translation instead of changing layout coordinates on every frame; unchanged image, chart, group and text content is memoized using immutable element/theme references. Resize still recalculates the selected object's size. Escape, pointer cancellation, capture loss, slide/document changes and a different pending edit clear uncommitted gestures. Drag-owned pending commits are retained. Fractional coordinates survive clicks within a 3px screen-space threshold, and pointer-up uses its final coordinates even before a queued frame runs.
+
+### Measurements
+
+The same synthetic slide contains 80 ordinary PNG pictures. Each of three drags uses 120 pointer moves over 72 by 36 screen pixels; images and fonts are decoded before sampling, and each drag is undone. Edge CDP `Performance.getMetrics` measures cumulative browser task work during movement, before the core commit. These are not end-to-end latency, FPS, GPU paint measurements or guarantees for every presentation.
+
+| Variant | Task work, three runs (ms) | Median (ms) | Layouts per drag |
+| --- | --- | --- | --- |
+| Before rendering optimization | 976.806 / 925.762 / 881.491 | 925.762 | 107 / 107 / 107 |
+| Animation frames, translation and memoized content | 720.323 / 670.457 / 661.509 | 670.457 | 0 / 0 / 0 |
+| Final lifecycle guards, full-suite remeasurement | 716.691 / 738.833 / 693.246 | 716.691 | 0 / 0 / 0 |
+
+The initial measured reduction was 27.6%; the final remeasurement was **22.6%** relative to the baseline median. Style recalculation was not uniformly faster. Held-transaction preview displacement was **0px** for both move and resize in the browser and in the installed desktop WebView. The image data remained unchanged and Undo restored the original geometry.
+
+### Regression Evidence
+
+The existing [authoring tests](../../tests/e2e/authoring.spec.ts) contain seven added scenarios: dense-picture measurements; pending move; pending resize; cancellation/slide changes; rejection/retry; fractional clicks/final pointer coordinates; and overlapping edits. The last case first reproduced a stale 54px preview when another edit removed the pointer control, then passed after explicit gesture cleanup. Its unrelated edit toggles master-graphic visibility so a newly inserted object cannot obscure the tested picture.
+
+The [installed lifecycle test](../../tools/windows-setup.test.mjs) launches an isolated installation through its actual Start Menu shortcut. It temporarily holds only transaction transport in that test-owned WebView, checks four preview frames and busy state, restores/releases the transport in `finally`, waits for completion, and tests Undo. Tauri's `invoke` property is read-only; the first test interception did not take effect. The corrected test holds the exact IPC fetch endpoint without changing native requests or production code. Both native gestures measured 0.000px displacement. Screenshots were inspected.
+
+Final verification covers **216 distinct passing tests**: Rust workspace 140, Studio browser 71 and setup contracts/installed lifecycle 5. The full Studio run passed 70; an existing graph accessibility/import scenario hit its 30-second limit and passed unchanged in 8.1 seconds on a single-case rerun. Frontend typecheck/build, embedded desktop/NSIS build, lint and scoped editor diagnostics passed. No coverage percentage, complete WCAG audit, new Office parity or independent full-source review is claimed. Review agents were excerpt-limited. Unchanged Node/generation and separate native-unit suites were not rerun for this frontend interaction change.
+
+Commands: `node tools/cargo.mjs test --workspace --locked`, `npm run setup:build -- --debug --no-sign`, `npm run test:setup:installed`, `npm run lint`, and `npm run test:e2e` with `AISLIDE_TEST_PORT=4174`. For the focused measurement, use `npm run test:e2e -- tests/e2e/authoring.spec.ts --grep "dense picture drags"` with the same port environment. See the [updated setup artifact](windows-setup.md#canvas-interaction-refresh). No regular installed app or user document was modified by verification.
+
 ## Icon Library Expansion
 
 On 2026-09-16, the user requested the complete current Lucide catalog, superseding an intermediate 96-icon selection. The official npm registry reported **1.43.0** as the latest stable `lucide-react`; the installed package and lockfile were updated from 1.41.0. Its public `icons` export contains **1,818 canonical icons**. The picker is derived from that export instead of a hand-maintained subset, without counting duplicate aliases as additional drawings.

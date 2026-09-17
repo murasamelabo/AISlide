@@ -39,11 +39,21 @@ Studio offers right-click menus for canvas, slide thumbnails, layers, objects an
 
 The current single-file path supports 108 presets in 36 categories. Shared core, SDK, MCP and Studio create ordinary editable groups, not slide-sized raster images or SmartArt. Charts retain native editable workbooks; geographic land outlines use simple native polygons. Metadata travels inside the PPTX and is optional for PowerPoint editing. Insert/update/delete and their metadata participate in the same revisioned Undo/Redo.
 
+Horizontal/vertical flow, tree and cycle presets now use filled process panels, safe-inset arrows, subtree-aware blocks and segmented cycles. The 108 existing preset IDs remain; display names describe the revised drawings. Relationship labels use a bounded collision-avoiding placement search. All default presets and 108 inserted Japanese examples have been checked; excessive density can still be rejected rather than overlapped. See [the refresh evidence](testing/parts-library.md#2026-09-16-refresh).
+
 Parts accept bounded typed data and use installed-font fitting with a 12px minimum. All 108 catalog defaults have generated, reopened and rendered successfully; this does not prove every permitted input combination or universal Office parity. Percentage stacks retain raw numbers and show shares; waterfalls require reconciled totals; ties use competition ranking. The area part currently accepts one series. Pictograms use 5% units; Venn/relationship diagrams are nominal, not computed area/causal models. General map-label collision avoidance, country borders and geocoding are not provided.
 
 The preset Text and visual layout additionally fits newly inserted parts/graphs into its right-hand native region, normalizing child coordinates, text and strokes together. Updates retain the fitted canvas and placement. This explicit reduction can reach the model's 8px font floor; dense labels may require a wider layout or fewer items. Other objects and existing content are not automatically reflowed.
 
 Manual changes that disagree with stored metadata mark it stale and prevent semantic replacement, while preserving native content. Unsupported polygon point/style replacement after reopening fails closed. Insertion does not reflow existing objects. Detailed bounds, examples, provenance and verification are in the [parts guide](testing/parts-library.md).
+
+## Guided Authoring
+
+Core, SDK and MCP provide four English best-practice profiles and deterministic creation from a structured evidence-linked outline: consulting decisions, technical explanation, event presentation and reports. Guided creation makes a new document, not a replacement for an imported deck. It uses existing parts and a native headline/evidence layout; consulting multi-page decks additionally have dedicated C02 summary and C03 closing grids with the same 3-6 issue IDs, analysis references, owners, timing and criteria.
+
+The 48 consulting patterns are retained as selection guidance with explicit capabilities. Only C02/C03 and `native-part` are automatic layouts; other compound patterns require composition or manual design. Guides are available through `best_practice_profiles` and `best_practice_guide`; `validate_guided_presentation` and `create_guided_presentation` enforce bounded inputs, declared numeric evidence, full-headline support references, basic headline rules and measured text fit. They do not invent values or contact a model. Unknown values remain `xx` in qualitative bodies rather than numeric charts.
+
+`ready` is a compilation result, not proof that sources are true, a recommendation is justified, all prose quantities are sourced, all graphical conventions hold, or Office rendering is identical. Human-review requirements remain explicit. Notes retain the supplied ledger and evidence and need privacy review before redistribution. Later ordinary edits do not maintain a live proof of guideline conformance. See [the full input contract and limitations](authoring/README.md).
 
 ## Architecture Graphs
 

@@ -198,7 +198,7 @@ export default function Studio() {
   function replaceElement(next: Element) {
     if (!deck || !slide) return
     if (next.type === 'text' && next.format?.inherit_layout) next = { ...next, format: { ...next.format, inherit_layout: false } }
-    void run(() => apply({ ...deck, slides: deck.slides.map((item) => item.id === slide.id ? { ...item, elements: item.elements.map((old) => old.id === next.id ? next : old) } : item) }))
+    return run(() => apply({ ...deck, slides: deck.slides.map((item) => item.id === slide.id ? { ...item, elements: item.elements.map((old) => old.id === next.id ? next : old) } : item) }))
   }
   async function editOnSlide(next: Element) {
     if (!deck || !slide || activeOperation.current || busy) throw new Error('Another edit is in progress')
@@ -499,12 +499,12 @@ export default function Studio() {
         <div className="canvas-heading"><span>{String(slideIndex + 1).padStart(2, '0')} <span className="slash">/</span> {String(deck?.slides.length ?? 0).padStart(2, '0')}</span><h2>{slide?.title.split('\n')[0] ?? 'Opening report'}</h2><span className="native-badge">NATIVE OBJECTS</span></div>
         <div className="canvas-scroll">
           <div className="slide-stage" style={{ width: zoom === 'fit' ? '100%' : `${1280 * Number(zoom)}px` }}>
-            {slide ? <SlideSurface slide={slide} design={deck?.design} selected={selected} onEdit={editOnSlide} onDraftChange={setInlineDraft} editRequest={editRequest} onContextMenu={(position, id) => openContext(id ? 'element' : 'canvas', position, slide.id, id)} onSelect={busy ? undefined : setSelected} onMove={(id, x, y) => {
+            {slide ? <SlideSurface key={documentState?.id} slide={slide} design={deck?.design} selected={selected} onEdit={editOnSlide} onDraftChange={setInlineDraft} editRequest={editRequest} onContextMenu={(position, id) => openContext(id ? 'element' : 'canvas', position, slide.id, id)} onSelect={busy ? undefined : setSelected} onMove={(id, x, y) => {
               const original = slide.elements.find((item) => item.id === id)
-              if (original && !busy) replaceElement({ ...original, x, y })
+              if (original && !busy) return replaceElement({ ...original, x, y })
             }} onResize={(id, width, height) => {
               const original = slide.elements.find((item) => item.id === id)
-              if (original && !busy) replaceElement({ ...original, width, height })
+              if (original && !busy) return replaceElement({ ...original, width, height })
             }} /> : <div className="loading-state">{error ? 'Core unavailable' : 'Opening local report...'}</div>}
           </div>
         </div>

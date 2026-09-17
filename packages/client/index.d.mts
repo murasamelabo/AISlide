@@ -1,5 +1,6 @@
 ﻿import type { AislideDocument, Checkpoint, DataMapping, DataReport, Deck, Design, Element, ImportedObject, ObjectCatalog, ObjectKind, PatchOperation, PresentationExport, ProjectExport, Report, SourceBinding, SourceDocument, SourceInput, Theme } from './types'
 import type { PartCatalog, PartSpec, GraphCatalog, GraphIcon, GraphSpec, GraphOperation, SlideOperation, ElementOperation, AssetInput, DesignPreset } from './types'
+import type { AuthoringProfile, BestPracticeGuide, BestPracticeProfiles, GuidedInput, GuidedReview } from './types'
 export * from './types'
 export type RequestOptions = { signal?: AbortSignal }
 export type TransactionOptions = RequestOptions & { expectedRevision?: number }
@@ -15,6 +16,10 @@ export class AislideClient {
   designPresets(options?: RequestOptions): Promise<DesignPreset[]>
   objectCatalog(options?: RequestOptions): Promise<ObjectCatalog>
   partCatalog(options?: RequestOptions): Promise<PartCatalog>
+  bestPracticeProfiles(options?: RequestOptions): Promise<BestPracticeProfiles>
+  bestPracticeGuide(profileId: AuthoringProfile, options?: RequestOptions): Promise<BestPracticeGuide>
+  validateGuidedPresentation(input: GuidedInput, options?: RequestOptions): Promise<GuidedReview>
+  createGuidedPresentation(id: string, input: GuidedInput, options?: RequestOptions): Promise<{ session: DocumentSession; validation: GuidedReview; profile_id: AuthoringProfile; model_inference: false }>
   graphCatalog(options?: RequestOptions): Promise<GraphCatalog>
   createGraphIcon(input: Pick<AssetInput, 'base64' | 'mime_type'> & { alt?: string }, options?: RequestOptions): Promise<GraphIcon>
   createGraph(input: { id: string; spec: GraphSpec; theme?: Theme }, options?: RequestOptions): Promise<Element>
