@@ -41,6 +41,8 @@ jobs:
         run: node tools/cargo.mjs test --workspace --locked
       - name: Build headless CLI
         run: npm run core:build -- --locked
+      - name: Test strict and Office histogram validation
+        run: node --test tools/validate-openxml.test.mjs
       - name: Test bridge and atomic output
         run: npm run test:bridge
       - name: Test MCP editing and export

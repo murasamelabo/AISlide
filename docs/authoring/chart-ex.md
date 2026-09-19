@@ -178,6 +178,143 @@ tests passed, including all-24 PNG/PDF rendering, the histogram last-interval
 overflow label, and pie/doughnut legends. Final integrated Node, browser,
 native and follow-up results are recorded in the [editing verification](../planning/editing-expansion.md).
 
+### Validation Commands
+
+Run from the repository root with PowerShell 7.4+ (.NET 8+) and the repository's
+Node version. The existing helper uses cached Open XML SDK/framework 3.5.1 and
+System.IO.Packaging 10.0.0 under `.tools/openxml`; when absent it downloads them
+from the configured Microsoft package feed. Prepare that cache before offline CI.
+Inputs are opened read-only and are never rewritten.
+
+```powershell
+pwsh -NoProfile -NonInteractive -File tools/validate-openxml.ps1 -Path '.\synthetic.pptx'
+pwsh -NoProfile -NonInteractive -File tools/validate-openxml.ps1 -Path '.\synthetic.pptx' -AllowOfficeHistogramBinning
+pwsh -NoProfile -NonInteractive -File tools/validate-openxml.ps1 -Path '.\synthetic.pptx' -TargetVersion Office2021 -AllowOfficeHistogramBinning
+node --test tools/validate-openxml.test.mjs
+```
+
+The default mode is **strict**: any SDK issue fails. The target is explicitly
+**Office2016** in both modes, replacing the SDK constructor's Office2007 default,
+which omitted the histogram findings in a synthetic control. `-TargetVersion`
+also accepts Office2019, Office2021 and Microsoft365; earlier targets are rejected
+so that selecting a target cannot hide these chartEx findings.
+
+The opt-in only recognizes exactly one `Sch_UndeclaredAttribute` and one
+`Sch_ElementValueDataTypeDetailed` schema issue on the same SDK node and part.
+That node must be a 2014 chartEx binCount/binSize in the complete chartSpace
+ancestry of a `clusteredColumn` series, with just one unqualified `val` attribute,
+no text or nested content, and no duplicate or simultaneous count/width children.
+Count must be an integer 1..128; width must be finite, positive and at most 1e15.
+Other findings still fail, including invalid parent attributes. At 256 issues,
+`IssueLimitReached` is true and either mode fails conservatively; enumeration may
+be incomplete even when all reported findings are known.
+
+Every issue remains a JSON line with its original `Description`, `Part`, `XPath`
+plus `Id`, `Classification` and `Severity`. The final JSON summary reports
+`Mode`, `TargetVersion`, `SchemaValid`, all three issue counts,
+`IssueLimitReached`, `GateAccepted` and `CompatibilityAccepted`. A compatibility
+acceptance exits 0 but retains `SchemaValid: false` and a stderr warning; it is
+not a schema pass or proof of Office visual parity or workbook editability.
+A schema-valid classic chart exits 0 in either mode without a compatibility warning.
+
+The Node regression requires an already-built CLI (the normal `npm run core:build`
+prerequisite). It never rebuilds it or skips missing prerequisites, generates fresh
+synthetic TEMP fixtures through the client, mutates only those copies through
+ZIP/XML APIs, and checks unchanged input/CLI hashes. CI runs the final Node
+command after its existing core-build step; no Office or user reference files are used.
+
+The final 2026-09-19 publication check passed all **41 Node test entries**, with
+no failures or skips, including strict rejection, explicit compatibility
+acceptance, malformed data and the diagnostic cutoff. PowerShell parsing,
+PSScriptAnalyzer and Node syntax checks passed. The shared-core gate passed
+511 tests with six explicitly ignored cases. Its CLI integration tests rebuilt
+the CLI; the final Node gate then ran against that fixed binary without changing
+it. Evidence: `.artifacts/hist-compat-08ngx5/final-checks.json`,
+`.artifacts/final-histogram-publish-JCRYSx/summary.json` and
+`.artifacts/histogram-publish-final-PBVDfE/summary.json`. These are local test
+results, not a claim that hosted CI or all Office versions have passed.
+
+### Explicit-Binning Reference Investigation (2026-09-19)
+
+The initial automated attempt to obtain PowerPoint UI-authored count=4 and
+width=2 references was blocked. On PowerPoint 16.0 build 16.0.20430.20048, isolated
+automation reached the Histogram insertion dialog and, in a populated AISlide
+seed, the horizontal-axis picker. It did not verify committed axis selection,
+the bin controls, or an explicit-bin save/reopen. Foreground activation and
+the embedded-data COM path failed in separate attempts; neither failure proves
+that the product cannot set bins. No new Office-authored serialization result
+or schema-compliant alternative was established.
+
+The populated AISlide seed was separately checked with Open XML SDK 3.5.1
+targeting Office2016, Office2021 and Microsoft365. Each reported the same two
+known binCount errors, with no suppression. This is not a comparison against
+an Office-resaved file. Product histogram code and existing presentation bytes
+were unchanged. Later journaled test windows were closed and checked absent;
+two possible unmarked blank windows from the first failed ownership attempt
+were not adopted or closed without proof of ownership.
+
+The next step was to request manually authored references with explicit count
+4 and width 2. Private diagnostic evidence for the failed automated attempt is in
+`.artifacts/histogram-bins-bounded-20260919-a71c/handoff.md` and the earlier
+owned-attempt records. The supplied references below resolve the count/width
+serialization comparison without repeating the failed UI automation.
+
+### Supplied PowerPoint References (2026-09-19)
+
+Three user-supplied PowerPoint reference files were inspected read-only, without
+launching Office, fetching external relationships, or modifying any source.
+The root presentation slide list and slide relationships identify these live
+chart resources, rather than counting unreferenced or section-extension parts:
+
+| Reference | Slide | Part | Explicit Setting |
+| --- | --- | --- | --- |
+| A, two slides | 1 | ppt/charts/chartEx1.xml | `<cx:binCount val="4"/>` |
+| A, two slides | 2 | ppt/charts/chartEx2.xml | `<cx:binCount val="2"/>` |
+| B, one slide | 1 | ppt/charts/chartEx1.xml | `<cx:binCount val="2"/>` |
+| C, one slide | 1 | ppt/charts/chartEx1.xml | `<cx:binSize val="2.5"/>` |
+
+All three use the existing 2014 chartEx namespace and `intervalClosed="r"`. The
+count=4 binning subtree is identical to the namespace-complete subtree extracted
+from the AISlide count comparison seed. Reference C's width=2.5 subtree is also
+identical to a fresh AISlide width=2.5 output. Reference A has four SDK errors;
+references B and C and each one-chart AISlide comparison have two. Open XML SDK
+3.5.1 produced these same totals independently for Office2016, Office2021 and
+Microsoft365 validation targets. Every issue was the known undeclared `val`
+attribute or empty binCount/binSize text value; there were no other reported
+whole-presentation issues or truncated results. Validation targets are not
+executions of three Office installations.
+
+This confirms that both count and width encodings and the two errors per chart
+resource are not unique to AISlide: they also occur in the supplied PowerPoint
+references. It supports retaining the current writer while reporting the
+compatibility exception, not claiming schema conformance or suppressing
+unrelated errors. It does not establish which Microsoft component should
+change, whole-chart visual equivalence, or preservation after a new Office
+editing cycle.
+
+References A and B contain only binCount; B stores **bin count 2**, not width 2.
+The subsequently supplied reference C contains **bin width 2.5**, despite its
+filename suggesting width 2. The actual stored value was used for comparison,
+not rewritten to fit the requested sample. AISlide's fresh synthetic width=2.5
+output reopened with width 2.5 and exported byte-identically without edits.
+The reference's chart resource was verified as the single live slide chart.
+This completes the text-versus-attribute comparison; another exact-width-2 file
+is not required for that purpose. No product writer or parser was changed.
+
+Source fingerprints, unchanged before/after inspection:
+
+- Reference A: 77,559 bytes, SHA-256 `84130a660ef2c3e4ee4aac1bd6cd7b980a12b00dcdb2549590348039f0d19d87`.
+- Reference B: 55,504 bytes, SHA-256 `09e18209086eb176767160644e5b1df36a0372cb427db9c937eb10177abec58d`.
+- Reference C: 60,759 bytes, SHA-256 `142ab6b65dc772da21c7a12b0ccfa894f7244187842ec7241b63b1b5c39657ff`.
+- AISlide count seed: 14,634 bytes, SHA-256 `75d580de7dc1058f39e20352ca055beb4f5eb11bf151e615558c90ae2a6fe810`.
+- AISlide width seed: 14,630 bytes, SHA-256 `cfd250608f0934b339bbe612e2d7f4f18ce9404de60baa5465835f79b62dcdff`.
+
+Private evidence records are
+`.artifacts/histogram-provided-37b3b314dfc14fe5bc3b80b98dd3f6ef/comparison.json`
+and `.artifacts/histogram-width-reference-f835782ffdb74122b1bb2c94902da3e1/comparison.json`.
+The supplied presentations are not copied into the repository or publication
+payload. No validation issue was suppressed.
+
 Sunburst native replacement accepts either the exact current generated XML or
 the exact previous no-boundary encoding, followed by the same complete workbook
 check. A custom line, unknown property or independently edited workbook remains
