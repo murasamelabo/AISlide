@@ -82,3 +82,26 @@ fn native_bar_axes_include_zero_for_one_sided_values() {
         assert!(axis.descendants().any(|node| node.tag_name().name() == bound && node.attribute("val") == Some("0")));
     }
 }
+
+#[test]
+fn extended_funnel_uses_native_chartex_not_a_renamed_bar_chart() {
+    let mut input = scene("funnel");
+    input["slides"][0]["elements"][0]["series"] = json!([
+        {"name":"Synthetic funnel & stages","values":[120,80,40],"color":"087F73"}
+    ]);
+    let deck: Deck = serde_json::from_value(input).expect("native funnel kind");
+    validate_deck(&deck).unwrap();
+    let bytes = export_pptx(&deck).unwrap();
+    assert_eq!(bytes, export_pptx(&deck).unwrap());
+    let package = Package::open(bytes).unwrap();
+    let chart = roxmltree::Document::parse(package.text("ppt/charts/chart1.xml").unwrap()).unwrap();
+    let namespace = "http://schemas.microsoft.com/office/drawing/2014/chartex";
+    assert!(chart.root_element().has_tag_name((namespace, "chartSpace")));
+    assert!(chart.descendants().any(|node| node.has_tag_name((namespace, "series")) && node.attribute("layoutId") == Some("funnel")));
+    assert!(!chart.descendants().any(|node| node.tag_name().name() == "barChart"));
+    assert!(!package.parts().keys().any(|name| name.starts_with("ppt/media/")));
+    assert!(package.text("[Content_Types].xml").unwrap().contains("application/vnd.ms-office.chartex+xml"));
+    assert!(package.text("ppt/slides/_rels/slide1.xml.rels").unwrap().contains("http://schemas.microsoft.com/office/2014/relationships/chartEx"));
+    let workbook = Package::open(package.part("ppt/embeddings/chart1.xlsx").unwrap().to_vec()).unwrap();
+    assert!(workbook.text("xl/worksheets/sheet1.xml").unwrap().contains("120"));
+}

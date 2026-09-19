@@ -53,6 +53,8 @@ jobs:
         run: npm run test:generation
       - name: Build Studio
         run: npm run build
+      - name: Test extended editing APIs
+        run: node --test --test-concurrency=1 tools/geometry.test.mjs tools/proofing.test.mjs tools/fonts.test.mjs tools/local-ai.test.mjs tools/capacity.test.mjs
       - name: Lint Studio
         run: npm run lint
       - name: Test editor in Edge

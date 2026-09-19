@@ -1,5 +1,5 @@
 ﻿import { test, expect } from '@playwright/test';
-import { openSample } from './fixtures';
+import { openSample, waitForCoreOperation } from './fixtures';
 
 test('dense picture drags measure browser work without changing the image data', async ({ page }, testInfo) => {
   test.setTimeout(90_000);
@@ -41,7 +41,9 @@ test('dense picture drags measure browser work without changing the image data',
     await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
     await expect(hitbox).toBeVisible();
     expect(await picture.locator('img').getAttribute('src')).toBe(originalData);
+    const undone = waitForCoreOperation(page, 'undo_transaction');
     await page.getByRole('button', { name: 'Undo', exact: true }).click();
+    await undone;
     await expect.poll(async () => Math.abs((await picture.boundingBox())!.x - start.x)).toBeLessThan(1);
   }
   await testInfo.attach('drag-browser-work', { body: JSON.stringify({ pictures: 80, pointerEventsPerDrag: 120, measurements }), contentType: 'application/json' });
@@ -54,10 +56,14 @@ for (const operation of ['move', 'resize'] as const) {
     await page.goto('/');
     await page.getByRole('button', { name: 'Insert icons', exact: true }).click();
     const picker = page.getByRole('dialog', { name: 'Icons and assets', exact: true });
+    const inserted = waitForCoreOperation(page, 'transaction');
     await picker.getByRole('button', { name: 'Insert icon', exact: true }).click();
+    await inserted;
+    await expect(picker).toHaveCount(0);
     const picture = page.locator('.slide-stage [data-element-id]').filter({ has: page.locator('img') });
     const hitbox = picture.getByRole('button', { name: /^Edit / });
     await expect(picture.locator('img')).toHaveJSProperty('complete', true);
+    const source = await picture.locator('img').getAttribute('src');
     await hitbox.click();
     const before = (await picture.boundingBox())!;
     const control = operation === 'move' ? hitbox : picture.getByRole('button', { name: /^Resize / });
@@ -72,6 +78,7 @@ for (const operation of ['move', 'resize'] as const) {
       await route.continue();
     });
     let preview = before;
+    const committed = waitForCoreOperation(page, 'transaction');
     try {
       await page.mouse.move(pointer.x + pointer.width / 2, pointer.y + pointer.height / 2);
       await page.mouse.down();
@@ -95,10 +102,16 @@ for (const operation of ['move', 'resize'] as const) {
       expect(Math.max(...jumps)).toBeLessThan(1);
       expect(commits).toBe(1);
     } finally { release(); }
+    await committed;
     await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
     await expect.poll(async () => Math.abs((await picture.boundingBox())![operation === 'move' ? 'x' : 'width'] - preview[operation === 'move' ? 'x' : 'width'])).toBeLessThan(1);
+    expect(commits).toBe(1);
+    expect(await picture.locator('img').getAttribute('src')).toBe(source);
+    const undone = waitForCoreOperation(page, 'undo_transaction');
     await page.getByRole('button', { name: 'Undo', exact: true }).click();
+    await undone;
     await expect.poll(async () => Math.abs((await picture.boundingBox())![operation === 'move' ? 'x' : 'width'] - before[operation === 'move' ? 'x' : 'width'])).toBeLessThan(1);
+    expect(await picture.locator('img').getAttribute('src')).toBe(source);
     await expect(page.getByRole('alert')).toHaveCount(0);
   });
 }

@@ -45,7 +45,7 @@ pub fn data_report(source: &SourceDocument, mapping: &DataMapping) -> Result<Dat
     let categories: Vec<String> = selected.iter().map(|row| display(&row[mapping.category_column])).collect();
     for category in &categories { valid_text(category, 80)?; if category.is_empty() { return Err(Error::Invalid("category cells must not be empty".into())); } }
     let palette = ["087F73", "CF5847", "416CA5", "C68B19", "677C54", "9A506B"];
-    let series = mapping.value_columns.iter().enumerate().map(|(index, column)| Ok(ChartSeries { name: table.columns[*column].clone(), values: selected.iter().map(|row| number(&row[*column])).collect::<Result<Vec<_>>>()?, color: palette[index].into() })).collect::<Result<Vec<_>>>()?;
+    let series = mapping.value_columns.iter().enumerate().map(|(index, column)| Ok(ChartSeries { name: table.columns[*column].clone(), values: selected.iter().map(|row| number(&row[*column])).collect::<Result<Vec<_>>>()?, color: palette[index].into(), ..Default::default() })).collect::<Result<Vec<_>>>()?;
     let mut sections = vec![
         section(&mapping.title, Layout::Cover, vec!["SOURCE-BOUND DATA REPORT".into()]),
         section("Source and selection", Layout::Statement, vec![format!("File: {}", source.name), format!("Table: {}", table.name), format!("Rows {}-{}, selected explicitly. Source data is not independently verified.", mapping.row_start + 1, end)]),
@@ -55,7 +55,7 @@ pub fn data_report(source: &SourceDocument, mapping: &DataMapping) -> Result<Dat
     let mut bindings = Vec::new();
     for (position, (title, kind)) in [("Provided values by category", mapping.chart_kind), ("Ordered values", ChartKind::Line), ("Category comparison", ChartKind::Bar)].into_iter().enumerate() {
         let mut slide = section(title, Layout::Chart, vec![format!("{} / {}. Same source values; no causal inference.", source.name, table.name)]);
-        slide.chart = Some(ReportChart { kind, categories: categories.clone(), series: series.clone() });
+        slide.chart = Some(ReportChart { kind, categories: categories.clone(), series: series.clone(), options: Default::default() });
         for (row_index, row) in selected.iter().enumerate() {
             for (series_index, column) in mapping.value_columns.iter().enumerate() {
                 bindings.push(SourceBinding { slide_id: format!("slide-{}", position + 4), element_id: "data-chart".into(), field: format!("/series/{series_index}/values/{row_index}"), source_id: source.id.clone(), source_sha256: source.sha256.clone(), locator: table.locators[mapping.row_start + row_index][*column].clone(), value: json!(series[series_index].values[row_index]), raw_value: row[*column].clone(), transform: "strict_numeric".into(), stale: false });

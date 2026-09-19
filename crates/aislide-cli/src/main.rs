@@ -32,13 +32,13 @@ fn run() -> Result<()> {
     match args.first().map_or("request", String::as_str) {
         "request" if args.len() <= 1 => {
             let bytes = bounded_read(std::io::stdin().lock(), MAX_REQUEST_BYTES)?;
-            let response = execute_request(serde_json::from_slice(json_bytes(&bytes))?)?;
+            let response = execute_request(aislide_core::preflight::json(json_bytes(&bytes))?)?;
             print_json(&response)
         }
         "sample" if args.len() == 1 => print_json(&execute_request(serde_json::json!({"op":"sample"}))?),
         "generate" if args.len() == 3 => {
             let input = bounded_read(std::fs::File::open(&args[1])?, MAX_REQUEST_BYTES)?;
-            let report: ReportInput = serde_json::from_slice(json_bytes(&input))?;
+            let report: ReportInput = serde_json::from_value(aislide_core::preflight::json(json_bytes(&input))?)?;
             let compiled = compile_report(&report)?;
             let bytes = export_pptx(&compiled.deck)?;
             let destination = Path::new(&args[2]);

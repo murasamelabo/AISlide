@@ -1,8 +1,340 @@
 ﻿import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { AislideClient, DocumentSession } from '../packages/client/index.mjs';
 import { requestCore } from './core-client.mjs';
 import { guidedExamples } from './guided-demo.mjs';
+
+test('phase6 SDK modern native workflow, exact Undo and masked inspection', async () => {
+  const client = new AislideClient(requestCore);
+  const session = await client.createPresentation('phase6-sdk', 'Synthetic review');
+  const draft = { author_name: 'Offline reviewer', created: '2026-09-19T10:00:00Z', body: [{ runs: [{ text: 'sentinel@example.invalid +1 (202) 555-0147' }] }] };
+  await session.modernComment('slide-1', { type: 'create', draft, anchor: { kind: 'unknown' } });
+  const source = await session.exportPresentation();
+  const { session: opened } = await client.openPresentation('phase6-native', source.base64);
+  const thread = opened.document.deck.slides[0].review.modern_threads[0];
+  await opened.modernComment('slide-1', { type: 'reply', thread_id: thread.id, draft });
+  await opened.modernComment('slide-1', { type: 'set_status', comment_id: thread.id, status: 'closed' });
+  await opened.modernComment('slide-1', { type: 'update_body', comment_id: thread.id, body: [{ runs: [{ text: 'Updated synthetic rich body', style: { bold: true } }] }] });
+  const { session: reopened } = await client.openPresentation('phase6-reopened', (await opened.exportPresentation()).base64);
+  assert.equal(reopened.document.deck.slides[0].review.modern_threads[0].status, 'closed');
+  assert.equal(reopened.document.deck.slides[0].review.modern_threads[0].replies.length, 1);
+  assert.equal(reopened.document.deck.slides[0].review.modern_threads[0].body[0].runs[0].text, 'Updated synthetic rich body');
+  const inspection = await reopened.inspectDocument();
+  assert.ok(inspection.candidates.some(candidate => candidate.rule === 'email_candidate'));
+  assert.equal(JSON.stringify(inspection).includes('example.invalid'), false);
+  assert.equal(JSON.stringify(inspection).includes('555-0147'), false);
+  await assert.rejects(() => reopened.exportCleanCopy({ new_document_id: 'no-pii-delete', categories: ['email_candidate'], confirmed: true }));
+  await opened.undo(); await opened.undo(); await opened.undo();
+  assert.equal((await opened.exportPresentation()).base64, source.base64);
+  await opened.transact([{ op: 'add', path: '/deck/slides/0/elements/-', value: { type: 'table', id: 'headers', x: 40, y: 40, width: 700, height: 200, rows: [['', 'Column'], ['Row', 'Value']], font_size: 20 } }]);
+  await opened.setTableHeaders('slide-1', 'headers', 'both');
+  assert.ok((await opened.checkAccessibility()).issues.some(issue => issue.code === 'table_declared_header_empty' && issue.repair_target === 'table_headers'));
+  const { session: headers } = await client.openPresentation('phase6-headers', (await opened.exportPresentation()).base64);
+  assert.equal(headers.document.deck.slides[0].review.table_headers.headers, 'both');
+});
+
+test('phase6 SDK omitted modern fields preserve unsaved current model rather than stale origin', async () => {
+  const client = new AislideClient(requestCore);
+  let session = await client.createPresentation('phase6-omission', 'Synthetic omission');
+  const draft = { author_name: 'Offline', created: '2026-09-19T10:00:00Z', body: [{ runs: [{ text: 'Initial' }] }] };
+  await session.modernComment('slide-1', { type: 'create', draft, anchor: { kind: 'unknown' } });
+  for (const native of [false, true]) {
+    if (native) ({ session } = await client.openPresentation('phase6-omission-native', (await session.exportPresentation()).base64));
+    const id = session.document.deck.slides[0].review.modern_threads[0].id;
+    await session.modernComment('slide-1', { type: 'reply', thread_id: id, draft: { ...draft, body: [{ runs: [{ text: 'Unsaved reply' }] }] } });
+    await session.modernComment('slide-1', { type: 'set_status', comment_id: id, status: 'closed' });
+    const before = session.document;
+    const olderClient = session.document.deck;
+    delete olderClient.slides[0].review.modern_threads;
+    olderClient.title = 'Older client unrelated edit';
+    await session.replaceDeck(olderClient);
+    assert.deepEqual(session.document.deck.slides[0].review.modern_threads, before.deck.slides[0].review.modern_threads);
+    await session.undo();
+    assert.equal(session.document.hash, before.hash);
+    const explicit = session.document.deck;
+    explicit.slides[0].review.modern_threads = [];
+    await session.replaceDeck(explicit);
+    assert.deepEqual(session.document.deck.slides[0].review.modern_threads, []);
+    const { session: removed } = await client.openPresentation('phase6-explicit-empty', (await session.exportPresentation()).base64);
+    assert.equal(removed.document.deck.slides[0].review?.modern_threads?.length ?? 0, 0);
+    await session.undo();
+    assert.equal(session.document.hash, before.hash);
+  }
+});
+
+test('phase6 SDK authored modern metadata cannot be forged by raw transactions', async () => {
+  const client = new AislideClient(requestCore);
+  const session = await client.createPresentation('phase6-metadata', 'Synthetic metadata');
+  await session.modernComment('slide-1', { type: 'create', anchor: { kind: 'unknown' }, draft: { author_name: 'Offline original', created: '2026-09-19T10:00:00Z', body: [{ runs: [{ text: 'Original' }] }] } });
+  const original = session.document;
+  for (const [path, value] of [['/author/name', 'Forged'], ['/created', '2026-09-19T11:00:00Z'], ['/anchor', { kind: 'preserved' }]]) {
+    await assert.rejects(() => session.transact([{ op: 'replace', path: '/deck/slides/0/review/modern_threads/0' + path, value }]));
+    assert.equal(session.document.hash, original.hash);
+  }
+});
+
+test('phase3 SDK projection and WordArt previews preserve native state and exact Undo', async () => {
+  const client = new AislideClient(requestCore);
+  const authored = await client.createPresentation('phase3-sdk', 'Synthetic statistics');
+  const element = { type: 'chart', id: 'statistics', x: 30, y: 30, width: 800, height: 450, kind: 'line', categories: ['1','2','3'], series: [{ name: 'Measured', values: [3,5,7], color: '087F73', trendline: { kind: 'linear', forward: 1 }, error_bars: { kind: 'fixed_value', value: 1 } }] };
+  await authored.transact([{ op: 'add', path: '/deck/slides/0/elements/-', value: element }]);
+  const source = await authored.exportPresentation();
+  const { session } = await client.openPresentation('phase3-opened', source.base64);
+  const before = session.document;
+  const { kind, categories, series, options } = element;
+  const projection = await client.computeChartPresentation({ kind, categories, series, options });
+  assert.ok(Math.abs(projection.series[0].trend.points.at(-1).y - 9) < 1e-10);
+  const preview = await client.renderElementPreview(element);
+  assert.ok(preview.svg.includes('stroke-dasharray'));
+  assert.deepEqual(session.document, before);
+  assert.equal(session.canUndo, false);
+  assert.equal((await session.exportPresentation()).base64, source.base64);
+  await session.transact([{ op: 'replace', path: '/deck/slides/0/elements/0/series/0/trendline/kind', value: 'exponential' }]);
+  const copied = await session.copyFormat('slide-1', { id: 'statistics' });
+  assert.ok(copied);
+  const { session: reopened } = await client.openPresentation('phase3-edited', (await session.exportPresentation()).base64);
+  assert.deepEqual(reopened.document.deck.slides[0].elements[0].series[0].values, [3,5,7]);
+  await session.undo();
+  assert.equal((await session.exportPresentation()).base64, source.base64);
+  const wordart = { type: 'text', id: 'wordart', x: 30, y: 30, width: 500, height: 200, text: 'office affinity', font_size: 40, color: '087F73', bold: false, visual: { text_warp: 'arch_down' } };
+  assert.ok((await client.renderElementPreview(wordart)).warnings.some(warning => warning.code === 'WORDART_APPROXIMATION'));
+  const cancelled = new AbortController(); cancelled.abort();
+  await assert.rejects(client.renderElementPreview(wordart, undefined, { signal: cancelled.signal }), /cancel/i);
+});
+
+test('G25 G27 SDK rich notes and auxiliary masters survive native reopen and exact Undo', async () => {
+  const client = new AislideClient(requestCore);
+  const session = await client.createPresentation('native-notes-sdk', 'Synthetic notes');
+  const original = await session.exportPresentation();
+  const { session: opened } = await client.openPresentation('native-notes-opened', original.base64);
+  await opened.updateRichNotes('slide-1', [{ runs: [{ text: 'Rich ', style: { bold: true } }, { text: 'notes', style: { italic: true } }] }], { expectedRevision: 0 });
+  assert.equal(opened.document.deck.slides[0].notes, 'Rich notes');
+  await assert.rejects(() => opened.updateRichNotes('slide-1', [], { expectedRevision: 0 }), /revision/i);
+  const { session: reopened } = await client.openPresentation('native-notes-reopened', (await opened.exportPresentation()).base64);
+  assert.equal(reopened.document.deck.slides[0].notes_paragraphs[0].runs[0].style.bold, true);
+  await opened.undo();
+  assert.equal((await opened.exportPresentation()).base64, original.base64);
+  const auxiliary = opened.document.deck.auxiliary_design;
+  auxiliary.handout_master = { name: 'Handout', background: '@lt1', theme: (await client.designDefaults()).theme, elements: [] };
+  await opened.updateAuxiliaryDesign(auxiliary);
+  const { session: master } = await client.openPresentation('native-master-reopened', (await opened.exportPresentation()).base64);
+  assert.equal(master.document.deck.auxiliary_design.handout_master.name, 'Handout');
+  await opened.undo();
+  assert.equal((await opened.exportPresentation()).base64, original.base64);
+  await opened.updateRichNotes('slide-1', [{ runs: [{ text: 'retained', field: { id: '00112233-4455-6677-8899-aabbccddeeff', kind: 'datetime13' } }] }]);
+  const { session: timed } = await client.openPresentation('native-time', (await opened.exportPresentation()).base64);
+  await timed.refreshFields('2026-09-18');
+  assert.ok(timed.fieldWarnings.some(warning => warning.includes('reference time required')));
+  await timed.refreshFields('2026-09-18', { referenceTime: '16:28:34', locale: 'en-US' });
+  assert.equal(timed.document.deck.slides[0].notes, '4:28:34 PM');
+  assert.deepEqual(timed.fieldWarnings, []);
+});
+
+test('G23 G25 SDK master themes and fields are native undoable and reject stale revisions', async () => {
+  const client = new AislideClient(requestCore);
+  const session = await client.createPresentation('design-field-sdk', 'Synthetic design field');
+  await session.updateDesign(await client.designDefaults());
+  const original = await session.exportPresentation();
+  const { session: opened } = await client.openPresentation('opened-design-field', original.base64);
+  await opened.setDesignField({ master_id: 'master-1', kind: 'slide_number', reference_date: '2026-09-18' }, { expectedRevision: 0 });
+  assert.ok(opened.document.deck.slides[0].elements.some(element => element.text === '1' && element.format?.placeholder?.kind === 'slide_number'));
+  await assert.rejects(() => opened.setMasterTheme('master-1', null, { expectedRevision: 0 }), /revision/i);
+  await opened.undo();
+  assert.equal((await opened.exportPresentation()).base64, original.base64);
+  const theme = (await client.designDefaults()).theme;
+  theme.fonts.minor = 'Courier New';
+  await opened.setMasterTheme('master-1', theme);
+  const { session: reopened } = await client.openPresentation('reopened-design-field', (await opened.exportPresentation()).base64);
+  assert.equal(reopened.document.deck.design.theme.fonts.minor, 'Courier New');
+  await opened.undo();
+  assert.equal((await opened.exportPresentation()).base64, original.base64);
+});
+
+test('G23 G25 SDK typed transforms preserve the session on early and late cancellation', async () => {
+  for (const [method, args] of [['setMasterTheme', ['master', null]], ['setDesignField', [{ master_id: 'master', kind: 'date', reference_date: '2026-09-18' }]]]) {
+    const before = { id: 'cancel-design', revision: 0, hash: 'before', deck: { slides: [] } };
+    let calls = 0; let finish;
+    const session = new DocumentSession(async () => { calls += 1; return new Promise(resolve => { finish = resolve; }); }, before);
+    const early = new AbortController(); early.abort();
+    await assert.rejects(() => session[method](...args, { signal: early.signal }), /cancelled/i);
+    assert.equal(calls, 0);
+    const late = new AbortController(); const pending = session[method](...args, { signal: late.signal });
+    const rejected = assert.rejects(pending, /cancelled/i); late.abort(); finish(before.deck); await rejected;
+    assert.equal(calls, 1); assert.deepEqual(session.document, before); assert.equal(session.canUndo, false);
+  }
+});
+
+test('cell-path stateless SDK helpers forward complete typed input and respect early and late cancellation', async () => {
+  for (const [method, op, input] of [
+    ['setTableCellText', 'set_table_cell_text', { element: { type: 'table', format: { cells: [] } }, row: 1, column: 2, text: 'Changed' }],
+    ['editVector', 'edit_vector', { element: { type: 'polygon', visual: { opacity: 0.5 } }, path: { commands: [{ op: 'close' }] } }],
+  ]) {
+    let calls = 0; let finish;
+    const client = new AislideClient(async request => { calls += 1; assert.deepEqual(request, { ...input, op }); return new Promise(resolveReply => { finish = resolveReply; }); });
+    const early = new AbortController(); early.abort();
+    await assert.rejects(() => client[method](input, { signal: early.signal }), /cancelled/i);
+    assert.equal(calls, 0);
+    const late = new AbortController(); const pending = client[method](input, { signal: late.signal });
+    const rejected = assert.rejects(pending, /cancelled/i); late.abort(); finish(input.element); await rejected;
+    assert.equal(calls, 1);
+    const normal = client[method](input); finish(input.element);
+    assert.deepEqual(await normal, input.element);
+  }
+});
+
+test('cell-path layout option forwards preserveFreeform only when explicitly supplied', async () => {
+  for (const preserveFreeform of [undefined, false, true]) {
+    const calls = [];
+    const before = { id: 'layout-test', revision: 0, hash: 'before', deck: { slides: [] } };
+    const session = new DocumentSession(async request => { calls.push(request); return request.op === 'assign_layout' ? before.deck : { document: before, receipt: null }; }, before);
+    await session.assignLayout('slide', 'layout', { expectedRevision: 0, preserveFreeform });
+    assert.deepEqual(calls[0], { op: 'assign_layout', deck: before.deck, slide_id: 'slide', layout_id: 'layout', ...(preserveFreeform === undefined ? {} : { preserve_freeform: preserveFreeform }) });
+  }
+});
+
+test('static export and verified recovery SDK preserve source and start empty history', async () => {
+  const client = new AislideClient(requestCore);
+  const session = await client.createPresentation('output-recovery-sdk', 'Output recovery');
+  await session.addObject('slide-1', { id: 'text', kind: 'text' });
+  const before = session.document;
+  for (const format of ['pdf', 'png', 'jpeg']) {
+    const result = await session.exportStatic({ format, scale: 0.5 });
+    assert.equal(result.files.length, 1);
+    assert.ok(Buffer.from(result.files[0].base64, 'base64').length > 10);
+    assert.equal(result.pdf_text_outlined, format === 'pdf');
+    assert.equal(result.pdf_searchable_text, format === 'pdf');
+    assert.equal(result.pdf_selectable_text, format === 'pdf');
+    assert.equal(result.pdf_tagged, format === 'pdf');
+    assert.equal(result.pdf_semantic_overlay, format === 'pdf');
+    assert.equal(result.pdf_editable_text, false);
+    assert.equal(result.pdf_ua_certified, false);
+    assert.equal(result.office_parity_verified, false);
+  }
+  assert.deepEqual(session.document, before);
+  assert.equal(session.canUndo, true);
+  const verified = await client.verifyRecovery(before);
+  assert.deepEqual(verified, before);
+  assert.ok(Object.isFrozen(verified));
+  assert.ok(Object.isFrozen(verified.deck.slides[0].elements[0]));
+  const recovered = await client.recoverPresentation(before);
+  assert.equal(recovered.canUndo, false);
+  assert.equal(recovered.canRedo, false);
+  assert.equal(recovered.document.hash, before.hash);
+  await assert.rejects(() => client.verifyRecovery({ ...before, hash: '0'.repeat(64) }), /transaction|hash/i);
+  for (const method of ['exportStatic', 'verifyRecovery']) {
+    let calls = 0; let finish;
+    const transport = async () => { calls += 1; return new Promise(resolveReply => { finish = resolveReply; }); };
+    const target = method === 'exportStatic' ? new DocumentSession(transport, before) : new AislideClient(transport);
+    const input = method === 'exportStatic' ? {} : before;
+    const early = new AbortController(); early.abort();
+    await assert.rejects(() => target[method](input, { signal: early.signal }), /cancelled/i);
+    assert.equal(calls, 0);
+    const late = new AbortController(); const pending = target[method](input, { signal: late.signal });
+    const rejected = assert.rejects(pending, /cancelled/i); late.abort(); finish(before); await rejected;
+    assert.equal(calls, 1);
+  }
+});
+
+test('expanded authoring SDK routes all operations without hidden calls and rejects early/late aborts', async () => {
+  const document = { id: 'synthetic', revision: 0, hash: 'original', deck: { slides: [] } };
+  const invocations = [
+    ['replaceText', [{ search: { query: 'alpha' }, replacement: 'beta', replace_all: true }], 'replace_text'],
+    ['replaceFont', ['Old', 'New'], 'replace_font'],
+    ['formatText', ['slide', { id: 'text', start: 0, end: 1, style: { bold: true } }], 'format_text'],
+    ['replaceTextContent', ['slide', { id: 'text', text: 'beta' }], 'replace_text_content'],
+    ['updateParagraphs', ['slide', { id: 'text', paragraphs: [] }], 'update_paragraphs'],
+    ['editTable', ['slide', { id: 'table', operations: [{ op: 'split', row: 0, column: 0 }] }], 'edit_table'],
+    ['resizeCanvas', [{ width: 1600, height: 900, mode: 'scale' }], 'resize_canvas'],
+    ['applyImageEdit', ['slide', { id: 'image', image: { base64: '', mime_type: 'image/png', width: 1, height: 1 } }], 'apply_image_edit'],
+    ['editSelection', ['slide', { op: 'translate', ids: ['text'], dx: 1, dy: 0 }], 'edit_selection'],
+  ];
+  for (const [method, args, op] of invocations) {
+    let calls = 0;
+    let finish;
+    const session = new DocumentSession(async (request) => {
+      calls += 1;
+      assert.equal(request.op, op);
+      assert.equal(request.expected_revision, 0);
+      assert.equal(request.document.hash, 'original');
+      return new Promise((resolveReply) => { finish = resolveReply; });
+    }, document);
+    const early = new AbortController(); early.abort();
+    await assert.rejects(() => session[method](...args, { signal: early.signal }), /cancelled/i);
+    assert.equal(calls, 0);
+    await assert.rejects(() => session[method](...args, { expectedRevision: 7 }), /Revision conflict/);
+    assert.equal(calls, 0);
+    const late = new AbortController();
+    const pending = session[method](...args, { signal: late.signal });
+    const rejected = assert.rejects(pending, /cancelled/i);
+    late.abort();
+    const transaction = { document: { ...document, revision: 1, hash: 'candidate' }, receipt: { inverse: [] } };
+    finish(op === 'edit_selection' ? { transaction, clipboard: null, effects: {} } : transaction);
+    await rejected;
+    assert.equal(calls, 1);
+    assert.deepEqual(session.document, document);
+    assert.equal(session.canUndo, false);
+    assert.equal(session.busy, false);
+  }
+  for (const [method, args] of [['authoringCapabilities', []], ['searchText', [{}, { query: 'x' }]], ['editImage', [{ base64: '', mime_type: 'image/png', params: {} }]], ['importTemplate', ['new', { kind: 'thmx', base64: '' }]]]) {
+    let calls = 0; let finish;
+    const client = new AislideClient(async () => { calls += 1; return new Promise((resolveReply) => { finish = resolveReply; }); });
+    const early = new AbortController(); early.abort();
+    await assert.rejects(() => client[method](...args, { signal: early.signal }), /cancelled/i);
+    assert.equal(calls, 0);
+    const late = new AbortController(); const pending = client[method](...args, { signal: late.signal });
+    const rejected = assert.rejects(pending, /cancelled/i); late.abort(); finish(document);
+    await rejected; assert.equal(calls, 1);
+  }
+});
+
+test('expanded authoring SDK integrates rich, notes, selection, table, images, canvas and templates', async () => {
+  const client = new AislideClient(requestCore);
+  const capabilities = await client.authoringCapabilities();
+  assert.equal(capabilities.limits.request_bytes, 96 * 1024 * 1024);
+  assert.equal(capabilities.capacity_profiles.legacy.request_bytes, 4 * 1024 * 1024);
+  assert.equal(capabilities.limits.canvas_max, 4096);
+  const session = await client.createPresentation('expanded-sdk', 'Synthetic authoring');
+  await session.addObject('slide-1', { id: 'text', kind: 'text' });
+  await session.replaceTextContent('slide-1', { id: 'text', text: 'Alpha Beta' });
+  await session.transact([{ op: 'replace', path: '/deck/slides/0/notes', value: 'Needle' }]);
+  assert.equal((await session.searchText({ query: 'Needle', include_notes: true })).length, 1);
+  await session.replaceText({ search: { query: 'Needle', include_notes: true }, replacement: 'Replaced', replace_all: true });
+  assert.equal(session.document.deck.slides[0].notes, 'Replaced');
+  await session.formatText('slide-1', { id: 'text', start: 0, end: 5, style: { bold: true } });
+  await session.replaceTextContent('slide-1', { id: 'text', text: 'Alpha Gamma' });
+  assert.equal(session.document.deck.slides[0].elements[0].format.paragraphs[0].runs[0].style.bold, true);
+  await session.updateParagraphs('slide-1', { id: 'text', paragraphs: [{ runs: [{ text: 'Hello', style: { italic: true } }] }] });
+  const beforeCopy = session.document;
+  const copied = await session.editSelection('slide-1', { op: 'copy', ids: ['text'], format: 'keep_source_formatting' });
+  assert.deepEqual(session.document, beforeCopy);
+  await session.editSelection('slide-1', { op: 'paste', id_prefix: 'copy', dx: 0, dy: 0 }, { clipboard: copied.clipboard });
+  assert.equal(session.document.deck.slides[0].elements.length, 2);
+  await session.undo(); assert.equal(session.document.hash, beforeCopy.hash);
+  await session.addObject('slide-1', { id: 'table', kind: 'table', rows: 2, columns: 2 });
+  await session.editTable('slide-1', { id: 'table', operations: [{ op: 'insert_row', index: 1, values: ['', ''] }, { op: 'merge', region: { row: 1, column: 0, row_span: 1, col_span: 2 } }] });
+  const beforeInvalid = session.document;
+  await assert.rejects(() => session.editTable('slide-1', { id: 'table', operations: [{ op: 'remove_column', index: 1 }] }), /merge/i);
+  assert.deepEqual(session.document, beforeInvalid);
+  await session.undo();
+  await session.resizeCanvas({ width: 1600, height: 900, mode: 'keep' });
+  assert.equal(session.document.deck.width, 1600);
+  for (const kind of ['potx', 'thmx']) {
+    const exported = await session.exportTemplate(kind);
+    assert.equal(exported.filename, `template.${kind}`);
+    const opened = await client.importTemplate(`template-${kind}`, { kind, base64: exported.base64 });
+    assert.equal(opened.revision, 0);
+  }
+  await session.addAsset('slide-1', { id: 'image', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="red"/></svg>').toString('base64'), mime_type: 'image/svg+xml', alt: 'Synthetic image', size: 32 });
+  const beforeImage = session.document;
+  const picture = beforeImage.deck.slides[0].elements.find((element) => element.id === 'image');
+  const image = await client.editImage({ base64: picture.base64, mime_type: picture.mime_type, params: { grayscale: true, resize_longest_side: 8, format: { kind: 'jpeg', quality: 80, matte: [255, 255, 255] } } });
+  assert.equal(image.mime_type, 'image/jpeg');
+  assert.deepEqual(session.document, beforeImage);
+  await session.applyImageEdit('slide-1', { id: 'image', image });
+  assert.equal(session.document.deck.slides[0].elements.find((element) => element.id === 'image').width, picture.width);
+  await session.undo(); assert.equal(session.document.hash, beforeImage.hash);
+});
 
 test('guided SDK profiles create editable documents and reject early or late cancellation', async () => {
   const client = new AislideClient(requestCore);
@@ -264,4 +596,107 @@ test('a late transport success after cancellation never commits session state', 
   assert.deepEqual(session.document, initial);
   assert.equal(session.canUndo, false);
   assert.equal(session.busy, false);
+});
+
+test('review SDK preserves immutable helpers, local comments, field caches, notes and clean-copy isolation', async () => {
+  const client = new AislideClient(requestCore);
+  const session = await client.createPresentation('review-sdk', 'Synthetic review SDK');
+  await session.addObject('slide-1', { id: 'text', kind: 'text' });
+  await session.replaceTextContent('slide-1', { id: 'text', text: 'Alpha Beta' });
+  const beforeHelper = session.document;
+  const formatted = await client.formatTextElement({ element: beforeHelper.deck.slides[0].elements[0], start: 0, end: 5, style: { bold: true } });
+  const replaced = await client.replaceElementText({ element: formatted, text: 'Alpha Gamma' });
+  assert.equal(replaced.format.paragraphs[0].runs[0].style.bold, true);
+  assert.equal(replaced.document, undefined);
+  assert.deepEqual(session.document, beforeHelper);
+  const revision = session.revision;
+  await session.updateNotes('slide-1', 'PRIVATE_SYNTHETIC_NOTES', { expectedRevision: revision });
+  await assert.rejects(() => session.updateNotes('slide-1', 'stale draft', { expectedRevision: revision }), /Revision conflict/);
+  assert.equal(session.document.deck.slides[0].notes, 'PRIVATE_SYNTHETIC_NOTES');
+  const comment = { id: 'first', author: 'PRIVATE_SYNTHETIC_AUTHOR', initials: 'SA', timestamp: '2026-09-17T10:00:00Z', text: 'PRIVATE_SYNTHETIC_COMMENT' };
+  await session.addComment('slide-1', comment);
+  await session.replyComment('slide-1', 'first', { ...comment, id: 'reply' });
+  await session.resolveComment('slide-1', 'first', true);
+  await session.setAccessibility('slide-1', 'text', { title: 'Synthetic text' });
+  const order = await session.setReadingOrder('slide-1', ['text']);
+  assert.match(order.warnings.join(' '), /z-order/);
+  assert.equal((await session.checkAccessibility()).wcag_certified, false);
+  const inspection = await session.inspectDocument();
+  assert.equal(inspection.complete_personal_data_detection, false);
+  assert.equal(JSON.stringify(inspection).includes('PRIVATE_SYNTHETIC'), false);
+  const field = { id: '{00112233-4455-6677-8899-aabbccddeeff}', kind: 'slidenum' };
+  const date = { id: '00112233-4455-6677-8899-aabbccddee00', kind: 'datetime1' };
+  await session.updateParagraphs('slide-1', { id: 'text', paragraphs: [{ runs: [{ text: 'Page ' }, { text: '9', field }, { text: ' ' }, { text: '1/1/2000', field: date }] }] });
+  const beforeRefresh = session.document;
+  await session.refreshFields('2024-02-29');
+  assert.equal(session.document.deck.slides[0].elements[0].text, 'Page 1 2/29/2024');
+  assert.deepEqual(session.document.deck.slides[0].elements[0].format.paragraphs[0].runs[1].field, field);
+  await session.undo(); assert.equal(session.document.hash, beforeRefresh.hash);
+  await session.redo();
+  const beforeInvalid = session.document;
+  await assert.rejects(() => session.refreshFields('2023-02-29'), /reference date/);
+  await assert.rejects(() => session.updateParagraphs('slide-1', { id: 'text', paragraphs: [{ runs: [{ text: '1', field: { ...field, id: 'not-a-uuid' } }] }] }), /UUID/);
+  assert.deepEqual(session.document, beforeInvalid);
+  const exported = await session.exportPresentation();
+  const { session: reopened } = await client.openPresentation('review-sdk-opened', exported.base64);
+  assert.equal(reopened.document.deck.slides[0].review.comments[1].parent_id, 'first');
+  assert.equal(reopened.document.deck.slides[0].review.comments[0].resolved, true);
+  const beforeReopen = reopened.document;
+  await reopened.resolveComment('slide-1', 'first', false);
+  assert.equal(reopened.document.deck.slides[0].review.comments[0].resolved, false);
+  await reopened.undo(); assert.equal(reopened.document.hash, beforeReopen.hash);
+  const beforeClean = reopened.document;
+  const options = { new_document_id: 'clean-review-sdk', categories: ['notes'], confirmed: true };
+  await assert.rejects(() => reopened.exportCleanCopy({ ...options, confirmed: false }), /confirmation/);
+  await assert.rejects(() => reopened.exportCleanCopy({ ...options, new_document_id: reopened.document.id }), /new document ID/);
+  const clean = await reopened.exportCleanCopy(options);
+  assert.equal(clean.document.id, options.new_document_id);
+  assert.equal(clean.document.revision, 0);
+  assert.equal(clean.document.deck.slides[0].notes, '');
+  assert.equal(clean.document.deck.slides[0].review.comments.length, 2);
+  assert.deepEqual(reopened.document, beforeClean);
+  await reopened.removeComment('slide-1', 'first');
+  assert.equal(reopened.document.deck.slides[0].review.comments, undefined);
+  await reopened.undo(); assert.equal(reopened.document.hash, beforeReopen.hash);
+});
+
+test('review SDK late cancellation and notes revision guards leave state and history untouched', async () => {
+  const initial = { id: 'cancel-review', revision: 2, hash: 'before', deck: { slides: [{ id: 'slide', notes: 'before' }] } };
+  for (const [method, args] of [
+    ['addComment', ['slide', {}]], ['replyComment', ['slide', 'parent', {}]],
+    ['resolveComment', ['slide', 'parent', false]], ['removeComment', ['slide', 'parent']],
+    ['modernComment', ['slide', { type: 'remove', comment_id: 'parent' }]], ['setTableHeaders', ['slide', 'table', 'both']],
+    ['setAccessibility', ['slide', 'element', null]], ['setReadingOrder', ['slide', ['element']]],
+    ['refreshFields', ['2026-09-17']], ['updateNotes', ['slide', 'after']],
+  ]) {
+    let finish; let calls = 0;
+    const session = new DocumentSession(async (request) => {
+      calls += 1;
+      assert.equal(request.op === 'transaction' ? request.transaction.expected_revision : request.expected_revision, 2);
+      return new Promise((resolveReply) => { finish = resolveReply; });
+    }, initial);
+    await assert.rejects(() => session[method](...args, { expectedRevision: 1 }), /Revision conflict/);
+    assert.equal(calls, 0);
+    const controller = new AbortController(); controller.abort();
+    await assert.rejects(() => session[method](...args, { signal: controller.signal }), /cancelled/i);
+    assert.equal(calls, 0);
+    const late = new AbortController();
+    const pending = session[method](...args, { expectedRevision: 2, signal: late.signal });
+    const rejected = assert.rejects(pending, /cancelled/i);
+    await assert.rejects(() => session.updateNotes('slide', 'overlap'), /busy/);
+    late.abort(); finish({ document: { ...initial, revision: 3, hash: 'candidate' }, receipt: { inverse: [] }, warnings: ['z-order'] });
+    await rejected;
+    assert.deepEqual(session.document, initial);
+    assert.equal(session.canUndo, false); assert.equal(session.busy, false);
+  }
+});
+
+test('review API source files retain exactly one UTF-8 BOM', async () => {
+  const files = ['crates/aislide-core/src/protocol.rs', 'crates/aislide-core/src/authoring_ops.rs', 'crates/aislide-core/src/comments.rs', 'crates/aislide-core/src/modern_comments.rs', 'crates/aislide-core/src/review.rs', 'crates/aislide-core/tests/review_api.rs', 'crates/aislide-core/tests/review_features.rs', 'apps/studio/src/ReviewPanel.tsx', 'tests/e2e/editing-workflows.spec.ts', 'packages/client/index.mjs', 'packages/client/index.d.mts', 'packages/client/types.ts', 'tools/mcp.mjs', 'tools/client.test.mjs', 'tools/mcp-poc.test.mjs'];
+  for (const path of files) {
+    const bytes = await readFile(new URL(`../${path}`, import.meta.url));
+    assert.equal(bytes.subarray(0, 3).toString('hex'), 'efbbbf', `${path}: missing BOM`);
+    assert.notEqual(bytes.subarray(3, 6).toString('hex'), 'efbbbf', `${path}: duplicate BOM`);
+    assert.doesNotThrow(() => new TextDecoder('utf-8', { fatal: true }).decode(bytes), `${path}: invalid UTF-8`);
+  }
 });

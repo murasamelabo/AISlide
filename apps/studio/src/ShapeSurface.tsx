@@ -1,4 +1,7 @@
-﻿function polygon(sides: number, inner?: number): string {
+﻿import type { ReactNode } from 'react'
+import type { ShapeAdjustment } from './types'
+
+function polygon(sides: number, inner?: number): string {
   const count = inner ? sides * 2 : sides
   return Array.from({ length: count }, (_, index) => {
     const angle = -Math.PI / 2 + index * Math.PI * 2 / count
@@ -7,7 +10,7 @@
   }).join(' ') + ' Z'
 }
 
-export function ShapeSurface({ preset, fill, stroke, strokeWidth = 2 }: { preset: string; fill: string; stroke: string; strokeWidth?: number }) {
+export function ShapeSurface({ preset, fill, stroke, strokeWidth = 2, fillOpacity, adjustments, children, width = 100, height = 100 }: { preset: string; fill: string; stroke: string; strokeWidth?: number; fillOpacity?: number; adjustments?: ShapeAdjustment[]; children?: ReactNode; width?: number; height?: number }) {
   const rectangle = 'M0 0H100V100H0Z'
   const ellipse = 'M0 50A50 50 0 1 0 100 50A50 50 0 1 0 0 50Z'
   const paths: Record<string, string> = {
@@ -33,9 +36,21 @@ export function ShapeSurface({ preset, fill, stroke, strokeWidth = 2 }: { preset
     wedgeEllipseCallout: 'M20 76C-20 52 0 0 50 0C115 0 120 76 50 80L10 100Z',
   }
   const star = /^star(\d+)$/.exec(preset)
+  const adjustment = adjustments?.find((entry) => entry.name === 'adj')?.value
+  if (adjustment != null) {
+    if (preset === 'roundRect') {
+      const radius = Math.max(0, Math.min(0.5, adjustment / 100000)) * Math.min(width, height)
+      const horizontal = radius / width * 100
+      const vertical = radius / height * 100
+      paths.roundRect = `M${horizontal} 0H${100 - horizontal}Q100 0 100 ${vertical}V${100 - vertical}Q100 100 ${100 - horizontal} 100H${horizontal}Q0 100 0 ${100 - vertical}V${vertical}Q0 0 ${horizontal} 0Z`
+    }
+    if (preset === 'triangle') paths.triangle = `M${Math.max(0, Math.min(100, adjustment / 1000))} 0L100 100H0Z`
+    if (preset === 'chevron') { const inset = Math.max(0, Math.min(100, adjustment / 100000 * Math.min(width, height) / width * 100)); paths.chevron = `M0 0H${100 - inset}L100 50 ${100 - inset} 100H0L${inset} 50Z` }
+  }
   const path = star ? polygon(Number(star[1]), Number(star[1]) === 5 ? 0.382 : 0.5) : paths[preset] ?? rectangle
   return <svg className="preset-shape" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-    <path d={path} fill={fill} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+    {children}
+    <path d={path} fill={fill} fillOpacity={fillOpacity} stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
     {preset === 'flowChartPredefinedProcess' && <path d="M13 0V100M87 0V100" stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" />}
     {preset === 'flowChartInternalStorage' && <path d="M15 0V100M0 15H100" stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" />}
     {preset === 'can' && <path d="M0 15A50 15 0 0 0 100 15" fill="none" stroke={stroke} strokeWidth={strokeWidth} vectorEffect="non-scaling-stroke" />}

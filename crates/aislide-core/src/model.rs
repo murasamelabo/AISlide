@@ -12,6 +12,30 @@ pub struct Deck {
     pub slides: Vec<Slide>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub design: Option<crate::design::Design>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub embedded_fonts: Vec<crate::fonts::EmbeddedFont>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auxiliary_design: Option<AuxiliaryDesign>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuxiliaryMaster {
+    pub name: String,
+    pub background: String,
+    pub theme: crate::design::Theme,
+    pub elements: Vec<Element>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuxiliaryDesign {
+    pub width: u32,
+    pub height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_master: Option<AuxiliaryMaster>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handout_master: Option<AuxiliaryMaster>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -22,6 +46,8 @@ pub struct Slide {
     pub background: String,
     pub elements: Vec<Element>,
     pub notes: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes_paragraphs: Vec<crate::rich_text::RichParagraph>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -30,20 +56,22 @@ pub struct Slide {
     pub hide_master_graphics: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::review::SlideReview>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Element {
-    Text { id: String, x: f64, y: f64, width: f64, height: f64, text: String, font_size: f64, color: String, bold: bool, #[serde(default, skip_serializing_if = "TextFormat::is_default")] format: TextFormat },
-    Rect { id: String, x: f64, y: f64, width: f64, height: f64, fill: String },
-    Polygon { id: String, x: f64, y: f64, width: f64, height: f64, points: Vec<[f64; 2]>, fill: String, stroke: String, stroke_width: f64 },
-    Shape { id: String, x: f64, y: f64, width: f64, height: f64, preset: String, fill: String, stroke: String, stroke_width: f64, #[serde(default)] rotation: f64, text: String, font_size: f64, color: String, bold: bool, #[serde(default)] format: TextFormat },
-    Table { id: String, x: f64, y: f64, width: f64, height: f64, rows: Vec<Vec<String>>, font_size: f64 },
-    Chart { id: String, x: f64, y: f64, width: f64, height: f64, kind: ChartKind, categories: Vec<String>, series: Vec<ChartSeries> },
-    Picture { id: String, x: f64, y: f64, width: f64, height: f64, base64: String, mime_type: String, alt: String, #[serde(default)] crop: Crop },
-    Connector { id: String, x: f64, y: f64, width: f64, height: f64, color: String, stroke_width: f64, arrow: bool, #[serde(default)] flip_v: bool, #[serde(default)] start: Option<Connection>, #[serde(default)] end: Option<Connection>, #[serde(default, skip_serializing_if = "Option::is_none")] routing: Option<ConnectorRouting> },
-    Group { id: String, x: f64, y: f64, width: f64, height: f64, view_width: f64, view_height: f64, children: Vec<Element> },
+    Text { id: String, x: f64, y: f64, width: f64, height: f64, text: String, font_size: f64, color: String, bold: bool, #[serde(default, skip_serializing_if = "TextFormat::is_default")] format: TextFormat, #[serde(default, skip_serializing_if = "Option::is_none")] visual: Option<crate::visual::VisualStyle> },
+    Rect { id: String, x: f64, y: f64, width: f64, height: f64, fill: String, #[serde(default, skip_serializing_if = "Option::is_none")] visual: Option<crate::visual::VisualStyle> },
+    Polygon { id: String, x: f64, y: f64, width: f64, height: f64, points: Vec<[f64; 2]>, fill: String, stroke: String, stroke_width: f64, #[serde(default, skip_serializing_if = "Option::is_none")] visual: Option<crate::visual::VisualStyle> },
+    Shape { id: String, x: f64, y: f64, width: f64, height: f64, preset: String, fill: String, stroke: String, stroke_width: f64, #[serde(default)] rotation: f64, text: String, font_size: f64, color: String, bold: bool, #[serde(default)] format: TextFormat, #[serde(default, skip_serializing_if = "Option::is_none")] visual: Option<crate::visual::VisualStyle> },
+    Table { id: String, x: f64, y: f64, width: f64, height: f64, rows: Vec<Vec<String>>, font_size: f64, #[serde(default, skip_serializing_if = "crate::table_format::TableFormat::is_default")] format: crate::table_format::TableFormat },
+    Chart { id: String, x: f64, y: f64, width: f64, height: f64, kind: ChartKind, categories: Vec<String>, series: Vec<ChartSeries>, #[serde(default, skip_serializing_if = "ChartOptions::is_default")] options: ChartOptions },
+    Picture { id: String, x: f64, y: f64, width: f64, height: f64, base64: String, mime_type: String, alt: String, #[serde(default)] crop: Crop, #[serde(default, skip_serializing_if = "Option::is_none")] visual: Option<crate::visual::VisualStyle>, #[serde(default, skip_serializing_if = "Option::is_none")] svg: Option<String> },
+    Connector { id: String, x: f64, y: f64, width: f64, height: f64, color: String, stroke_width: f64, arrow: bool, #[serde(default)] flip_v: bool, #[serde(default)] start: Option<Connection>, #[serde(default)] end: Option<Connection>, #[serde(default, skip_serializing_if = "Option::is_none")] routing: Option<ConnectorRouting>, #[serde(default, skip_serializing_if = "Option::is_none")] visual: Option<crate::visual::VisualStyle> },
+    Group { id: String, x: f64, y: f64, width: f64, height: f64, view_width: f64, view_height: f64, children: Vec<Element>, #[serde(default, skip_serializing_if = "Option::is_none")] visual: Option<crate::visual::VisualStyle> },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,11 +89,13 @@ pub enum PlaceholderKind { Title, Body, Subtitle, Footer, Date, SlideNumber }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Placeholder { pub kind: PlaceholderKind, pub index: u32 }
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TextFormat {
     pub italic: bool, pub underline: bool, pub alignment: TextAlign, pub vertical: VerticalAlign, pub bullet: Bullet,
     pub font_family: Option<String>, pub hyperlink: Option<String>, pub placeholder: Option<Placeholder>, pub inherit_layout: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::rich_text::deserialize_paragraphs")]
+    pub paragraphs: Vec<crate::rich_text::RichParagraph>,
 }
 impl TextFormat { pub fn is_default(&self) -> bool { self == &Self::default() } }
 
@@ -116,18 +146,34 @@ impl ConnectorRouting {
     }
 }
 
+#[path = "chart_format.rs"]
+pub mod chart_format;
+pub use chart_format::{ChartOptions, ChartAxis, Trendline, ErrorBars};
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum ChartKind { Column, Bar, Line, Pie, Doughnut, Area, Scatter, StackedColumn, StackedBar, PercentStackedColumn }
+pub enum ChartKind { Column, Bar, Line, Pie, Doughnut, Area, Scatter, StackedColumn, StackedBar, PercentStackedColumn, PercentStackedBar, Combo, Bubble, Radar, RadarFilled, Column3d, Bar3d, Pie3d, Funnel, Waterfall, Histogram, BoxWhisker, Treemap, Sunburst }
 impl ChartKind {
-    pub fn is_bar(self) -> bool { matches!(self, Self::Column | Self::Bar | Self::StackedColumn | Self::StackedBar | Self::PercentStackedColumn) }
-    pub fn is_horizontal(self) -> bool { matches!(self, Self::Bar | Self::StackedBar) }
-    pub fn is_polar(self) -> bool { matches!(self, Self::Pie | Self::Doughnut) }
+    pub fn is_extended(self) -> bool { matches!(self, Self::Funnel | Self::Waterfall | Self::Histogram | Self::BoxWhisker | Self::Treemap | Self::Sunburst) }
+    pub fn is_bar(self) -> bool { matches!(self, Self::Column | Self::Bar | Self::StackedColumn | Self::StackedBar | Self::PercentStackedColumn | Self::PercentStackedBar | Self::Column3d | Self::Bar3d) }
+    pub fn is_horizontal(self) -> bool { matches!(self, Self::Bar | Self::StackedBar | Self::PercentStackedBar | Self::Bar3d) }
+    pub fn is_percent(self) -> bool { matches!(self, Self::PercentStackedColumn | Self::PercentStackedBar) }
+    pub fn is_polar(self) -> bool { matches!(self, Self::Pie | Self::Doughnut | Self::Pie3d) }
+    pub fn is_xy(self) -> bool { matches!(self, Self::Scatter | Self::Bubble) }
+    pub fn is_3d(self) -> bool { matches!(self, Self::Column3d | Self::Bar3d | Self::Pie3d) }
+    pub fn is_radar(self) -> bool { matches!(self, Self::Radar | Self::RadarFilled) }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ChartSeries { pub name: String, pub values: Vec<f64>, pub color: String }
+pub struct ChartSeries {
+    pub name: String, pub values: Vec<f64>, pub color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub kind: Option<ChartKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub axis: Option<ChartAxis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub bubble_sizes: Option<Vec<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub trendline: Option<Trendline>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub error_bars: Option<ErrorBars>,
+}
 
 impl Element {
     pub fn bounds(&self) -> (&str, f64, f64, f64, f64) {
@@ -171,47 +217,61 @@ pub fn valid_color(value: &str) -> Result<()> {
 }
 
 pub fn validate_deck(deck: &Deck) -> Result<()> {
-    if deck.version != 1 || deck.width != 1280 || deck.height != 720 {
-        return Err(Error::Unsupported("expected scene version 1, 1280 x 720".into()));
+    crate::fonts::validate(&deck.embedded_fonts)?;
+    crate::preflight::deck(deck, &crate::limits::LARGE)?;
+    if deck.version != 1 {
+        return Err(Error::Unsupported("expected scene version 1".into()));
     }
+    crate::canvas::validate_size(deck.width, deck.height)?;
     valid_text(&deck.title, 120)?;
-    if let Some(design) = &deck.design { crate::design::validate_design(design)?; }
-    if deck.slides.is_empty() || deck.slides.len() > 32 {
-        return Err(Error::Limit("expected 1-32 slides".into()));
-    }
+    if let Some(design) = &deck.design { crate::design::validate_design_on_canvas(design, deck.width, deck.height)?; }
     let mut slide_ids = BTreeSet::new();
     let mut total = 0;
     let mut image_bytes = 0;
+    if let Some(auxiliary) = &deck.auxiliary_design {
+        crate::canvas::validate_size(auxiliary.width, auxiliary.height)?;
+        for master in [&auxiliary.notes_master, &auxiliary.handout_master].into_iter().flatten() {
+            valid_text(&master.name, 100)?; valid_color(&master.background)?;
+            crate::design::validate_theme(&master.theme)?;
+            validate_elements(&master.elements, (f64::from(auxiliary.width), f64::from(auxiliary.height)), 0, &mut BTreeSet::new(), &mut total, &mut image_bytes)?;
+            if element_list(&master.elements).iter().any(|element| matches!(element, Element::Text { format, .. } if format.inherit_layout)) { return Err(Error::Invalid("auxiliary masters cannot inherit slide layouts".into())); }
+        }
+    }
     for slide in &deck.slides {
         valid_text(&slide.id, 80)?;
         valid_text(&slide.title, 120)?;
         valid_text(&slide.notes, 8000)?;
+        crate::rich_text::validate_paragraphs_with_limit(&slide.notes_paragraphs, 8000)?;
+        if !slide.notes_paragraphs.is_empty() && crate::rich_text::plain_text(&slide.notes_paragraphs) != slide.notes { return Err(Error::Unsupported("rich notes require an atomic plain text and paragraph update".into())); }
         valid_color(&slide.background)?;
         if let Some(id) = &slide.layout_id { if !deck.design.as_ref().is_some_and(|design| design.layouts.iter().any(|layout| &layout.id == id)) { return Err(Error::Invalid("slide refers to an unknown layout".into())); } }
         if slide.id.is_empty() || !slide_ids.insert(&slide.id) {
             return Err(Error::Invalid("duplicate/empty slide ID or too many elements".into()));
         }
         let mut ids = BTreeSet::new();
-        validate_elements(&slide.elements, (1280.0, 720.0), 0, &mut ids, &mut total, &mut image_bytes)?;
+        validate_elements(&slide.elements, (f64::from(deck.width), f64::from(deck.height)), 0, &mut ids, &mut total, &mut image_bytes)?;
         crate::design::validate_inheritance(slide, deck.design.as_ref())?;
+        crate::review::validate_slide(slide)?;
     }
     Ok(())
 }
 
 pub(crate) fn validate_elements(elements: &[Element], canvas: (f64, f64), depth: usize, ids: &mut BTreeSet<String>, total: &mut usize, image_bytes: &mut usize) -> Result<()> {
-    if depth > 8 { return Err(Error::Limit("group nesting > 8".into())); }
+    if depth > crate::limits::STANDARD.group_depth { return Err(Error::Limit("group nesting > 8".into())); }
     *total += elements.len();
-    if elements.len() > 256 || *total > 2048 { return Err(Error::Limit("too many scene elements".into())); }
+    if elements.len() > crate::limits::STANDARD.elements_per_slide || *total > crate::limits::STANDARD.elements_total { return Err(Error::Limit("too many scene elements".into())); }
     for element in elements {
             let (id, x, y, width, height) = element.bounds();
             valid_text(id, 80)?;
-            if id.is_empty() || !ids.insert(id.into()) || ids.len() > 256 || [x, y, width, height].iter().any(|value| !value.is_finite())
+            if id.is_empty() || !ids.insert(id.into()) || ids.len() > crate::limits::STANDARD.elements_per_slide || [x, y, width, height].iter().any(|value| !value.is_finite())
                 || x < 0.0 || y < 0.0 || width <= 0.0 || height <= 0.0 || x + width > canvas.0 + 0.01 || y + height > canvas.1 + 0.01 {
                 return Err(Error::Invalid(format!("invalid element geometry or ID: {id}")));
             }
+            crate::visual::validate(element)?;
             match element {
                 Element::Text { text, font_size, color, format, .. } | Element::Shape { text, font_size, color, format, .. } => {
                     valid_text(text, 4000)?;
+                    crate::rich_text::validate_element(element)?;
                     valid_color(color)?;
                     font_size_check(*font_size)?;
                     if let Some(family) = &format.font_family { valid_text(family, 100)?; if family.trim().is_empty() || family.chars().any(char::is_control) { return Err(Error::Invalid("invalid font family".into())); } }
@@ -233,12 +293,18 @@ pub(crate) fn validate_elements(elements: &[Element], canvas: (f64, f64), depth:
                 Element::Table { rows, font_size, .. } => {
                     font_size_check(*font_size)?;
                     validate_rows(rows)?;
+                    crate::table_format::validate_element(element)?;
                 }
-                Element::Chart { kind, categories, series, .. } => validate_chart_kind(*kind, categories, series)?,
-                Element::Picture { base64, mime_type, alt, crop, .. } => {
+                Element::Chart { kind, categories, series, options, .. } => chart_format::validate(*kind, categories, series, options)?,
+                Element::Picture { base64, mime_type, alt, crop, svg, .. } => {
                     valid_text(alt, 500)?;
                     *image_bytes += base64.len();
-                    if *image_bytes > 3 * 1024 * 1024 { return Err(Error::Limit("scene image payload > 3 MiB encoded".into())); }
+                    if let Some(svg) = svg {
+                        *image_bytes += svg.len();
+                        if mime_type != "image/png" { return Err(Error::Invalid("SVG requires a PNG fallback".into())); }
+                        crate::vector::prepare_svg(svg)?;
+                    }
+                    if *image_bytes > crate::limits::STANDARD.image_encoded_bytes { return Err(Error::Limit("scene image payload > 3 MiB encoded".into())); }
                     if [crop.left, crop.right, crop.top, crop.bottom].iter().any(|value| !value.is_finite() || !(0.0..1.0).contains(value)) || crop.left + crop.right >= 1.0 || crop.top + crop.bottom >= 1.0 {
                         return Err(Error::Invalid("image crop must retain positive area".into()));
                     }
@@ -308,11 +374,7 @@ pub fn validate_chart(categories: &[String], series: &[ChartSeries]) -> Result<(
 }
 
 pub fn validate_chart_kind(kind: ChartKind, categories: &[String], series: &[ChartSeries]) -> Result<()> {
-    validate_chart(categories, series)?;
-    if kind == ChartKind::PercentStackedColumn && (series.iter().flat_map(|series| &series.values).any(|value| *value < 0.0) || (0..categories.len()).any(|index| series.iter().map(|series| series.values[index]).sum::<f64>() <= 0.0)) { return Err(Error::Invalid("100% stacks require nonnegative values and positive category totals".into())); }
-    if kind.is_polar() && (series.len() != 1 || series[0].values.iter().any(|value| *value < 0.0) || series[0].values.iter().all(|value| *value == 0.0)) { return Err(Error::Invalid("pie/doughnut requires one non-negative series with a positive total".into())); }
-    if kind == ChartKind::Scatter && categories.iter().any(|value| value.parse::<f64>().map_or(true, |number| !number.is_finite() || number.abs() > 1e15)) { return Err(Error::Invalid("scatter X coordinates must be finite numbers in +/-1e15".into())); }
-    Ok(())
+    chart_format::validate(kind, categories, series, &ChartOptions::default())
 }
 
 pub fn validate_rows(rows: &[Vec<String>]) -> Result<()> {

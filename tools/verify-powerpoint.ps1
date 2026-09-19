@@ -5,10 +5,15 @@ param(
     [int]$ExpectedSlides = 12,
     [int]$ExpectedCharts = 0,
     [int]$ExpectedPictures = 0,
+    [int]$ExpectedGraphics = 0,
     [int]$ExpectedGroups = 0,
     [int]$ExpectedConnectors = 0,
     [int]$MinimumTables = 1,
     [switch]$VerifyChartData,
+    [ValidatePattern('^[A-E][1-9][0-9]{0,3}$')]
+    [string]$ChartValueCell = 'B2',
+    [switch]$FirstNumericChartCell,
+    [switch]$InspectHistogramBins,
     [switch]$VerifyConnections,
     [int[]]$CaptureSlides = @()
 )
@@ -50,16 +55,19 @@ try {
     $notes = 0
     $charts = 0
     $pictures = 0
+    $graphics = 0
     $groups = 0
     $connectors = 0
     $attachedConnectors = 0
     $connectionMoves = 0
     $editedWorkbooks = 0
+    $histogramBins = @()
     foreach ($slide in $presentation.Slides) {
         foreach ($shape in (Get-VerificationShape -Shapes $slide.Shapes)) {
             if ($shape.HasTextFrame -eq -1) { $textShapes++ }
             if ($shape.HasTable -eq -1) { $tables++ }
             if ($shape.Type -eq 13) { $pictures++ }
+            if ($shape.Type -eq 28) { $graphics++ }
             if ($shape.Type -eq 6) { $groups++ }
             if ($shape.Connector -eq -1) {
                 $connectors++
@@ -88,6 +96,20 @@ try {
             }
             if ($shape.HasChart -eq -1) {
                 $charts++
+                if ($InspectHistogramBins) {
+                    if ($shape.Chart.ChartType -ne 118) { throw 'Expected a native histogram chart' }
+                    $histogram = $shape.Chart.ChartGroups(1)
+                    $histogramBins += [pscustomobject]@{
+                        ChartType = $shape.Chart.ChartType
+                        Mode = [int]$histogram.BinsType
+                        Count = $histogram.BinsCountValue
+                        Width = $histogram.BinWidthValue
+                        UnderflowEnabled = $histogram.BinsUnderflowEnabled
+                        Underflow = $histogram.BinsUnderflowValue
+                        OverflowEnabled = $histogram.BinsOverflowEnabled
+                        Overflow = $histogram.BinsOverflowValue
+                    }
+                }
                 if ($VerifyChartData) {
                     $stage = 'editing a chart workbook in the disposable presentation'
                     if ($shape.Chart.ChartData.IsLinked) { throw 'Chart data must be embedded, not externally linked' }
@@ -97,7 +119,16 @@ try {
                         $shape.Chart.ChartData.Activate()
                         $workbook = $shape.Chart.ChartData.Workbook
                         $excel = $workbook.Application
-                        $cell = $workbook.Worksheets.Item(1).Range('B2')
+                        $cell = $workbook.Worksheets.Item(1).Range($ChartValueCell)
+                        if ($FirstNumericChartCell) {
+                            $cell = $null
+                            foreach ($address in @('B2', 'C2', 'D2', 'E2')) {
+                                $candidate = $workbook.Worksheets.Item(1).Range($address)
+                                if ($candidate.Value2 -is [double] -or $candidate.Value2 -is [int]) { $cell = $candidate; break }
+                            }
+                            if ($null -eq $cell) { throw 'No numeric chart sample/leaf cell in B2:E2' }
+                        }
+                        if ($cell.Value2 -isnot [double] -and $cell.Value2 -isnot [int]) { throw 'Chart value cell must contain a numeric sample or leaf value' }
                         $originalValue = [double]$cell.Value2
                         $cell.Value2 = $originalValue + 1
                         if ([double]$cell.Value2 -ne $originalValue + 1) { throw 'Embedded chart data did not accept an edit' }
@@ -118,19 +149,25 @@ try {
         }
     }
     if ($textShapes -lt $ExpectedSlides -or $tables -lt $MinimumTables -or $notes -lt $ExpectedSlides) { throw 'Native object or notes inspection failed' }
-    if ($charts -ne $ExpectedCharts -or $pictures -ne $ExpectedPictures) { throw 'Unexpected native chart or picture count' }
+    if ($charts -ne $ExpectedCharts -or $pictures -ne $ExpectedPictures -or $graphics -ne $ExpectedGraphics) { throw "Unexpected native count: charts=$charts pictures=$pictures graphics=$graphics" }
     if ($groups -ne $ExpectedGroups -or $connectors -ne $ExpectedConnectors) { throw 'Unexpected native group or connector count' }
     if ($VerifyChartData -and $editedWorkbooks -ne $ExpectedCharts) { throw 'Chart workbook editing verification incomplete' }
     if ($VerifyConnections -and $attachedConnectors -ne $ExpectedConnectors) { throw 'Connector attachment verification incomplete' }
     $stage = 'slide PNG export'
-    $presentation.Slides.Item(1).Export((Join-Path $temporary 'cover.png'), 'PNG', 1280, 720)
-    if ($ExpectedSlides -ge 4) { $presentation.Slides.Item(4).Export((Join-Path $temporary 'table.png'), 'PNG', 1280, 720) }
-    if ($ExpectedCharts -gt 0 -and $ExpectedSlides -ge 5) { $presentation.Slides.Item(5).Export((Join-Path $temporary 'chart.png'), 'PNG', 1280, 720) }
-    if ($ExpectedGroups -gt 0 -and $ExpectedSlides -ge 8) { $presentation.Slides.Item(8).Export((Join-Path $temporary 'diagram.png'), 'PNG', 1280, 720) }
-    if ($ExpectedPictures -gt 0 -and $ExpectedSlides -ge 11) { $presentation.Slides.Item(11).Export((Join-Path $temporary 'picture.png'), 'PNG', 1280, 720) }
+    $pageWidth = [double]$presentation.PageSetup.SlideWidth
+    $pageHeight = [double]$presentation.PageSetup.SlideHeight
+    if ($pageWidth -le 0 -or $pageHeight -le 0) { throw 'Invalid native page dimensions' }
+    $longest = [Math]::Max($pageWidth, $pageHeight)
+    $captureWidth = [Math]::Max(1, [int][Math]::Round(1280 * $pageWidth / $longest))
+    $captureHeight = [Math]::Max(1, [int][Math]::Round(1280 * $pageHeight / $longest))
+    $presentation.Slides.Item(1).Export((Join-Path $temporary 'cover.png'), 'PNG', $captureWidth, $captureHeight)
+    if ($ExpectedSlides -ge 4) { $presentation.Slides.Item(4).Export((Join-Path $temporary 'table.png'), 'PNG', $captureWidth, $captureHeight) }
+    if ($ExpectedCharts -gt 0 -and $ExpectedSlides -ge 5) { $presentation.Slides.Item(5).Export((Join-Path $temporary 'chart.png'), 'PNG', $captureWidth, $captureHeight) }
+    if ($ExpectedGroups -gt 0 -and $ExpectedSlides -ge 8) { $presentation.Slides.Item(8).Export((Join-Path $temporary 'diagram.png'), 'PNG', $captureWidth, $captureHeight) }
+    if ($ExpectedPictures + $ExpectedGraphics -gt 0 -and $ExpectedSlides -ge 11) { $presentation.Slides.Item(11).Export((Join-Path $temporary 'picture.png'), 'PNG', $captureWidth, $captureHeight) }
     foreach ($slideNumber in $CaptureSlides) {
         if ($slideNumber -lt 1 -or $slideNumber -gt $presentation.Slides.Count) { throw 'Capture slide number is outside presentation' }
-        $presentation.Slides.Item($slideNumber).Export((Join-Path $temporary ('slide-{0:d2}.png' -f $slideNumber)), 'PNG', 1280, 720)
+        $presentation.Slides.Item($slideNumber).Export((Join-Path $temporary ('slide-{0:d2}.png' -f $slideNumber)), 'PNG', $captureWidth, $captureHeight)
     }
     $captureCount = @(Get-ChildItem -LiteralPath $temporary -Filter '*.png').Count
     [pscustomobject]@{
@@ -139,13 +176,16 @@ try {
         Tables = $tables
         Charts = $charts
         Pictures = $pictures
+        Graphics = $graphics
         Groups = $groups
         Connectors = $connectors
         AttachedConnectorsVerified = $attachedConnectors
         ConnectionMovesVerified = $connectionMoves
         EmbeddedWorkbooksEdited = $editedWorkbooks
+        HistogramBins = $histogramBins
         NoteTextShapes = $notes
         Captures = $captureCount
+        CaptureDimensions = @($captureWidth, $captureHeight)
         ArtifactDirectory = $temporary
         SourceSha256 = $before
         Scope = 'Generated sample only; no general Office visual parity assertion'

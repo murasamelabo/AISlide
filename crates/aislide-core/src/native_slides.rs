@@ -66,11 +66,11 @@ fn clone_slide(package: &mut Package, original: &NativePart, path: &str, id: &st
     Ok(NativePart { path: path.into(), id: id.into(), nodes: original.nodes.clone() })
 }
 
-fn insert_slide(package: &mut Package, original: &NativeDeck, deck: &Deck, slide: &Slide, path: &str, main: &str, scale: (f64, f64)) -> Result<NativePart> {
+fn insert_slide(package: &mut Package, layouts: &[NativePart], deck: &Deck, slide: &Slide, path: &str, main: &str, scale: (f64, f64)) -> Result<NativePart> {
     let design = deck.design.as_ref().ok_or_else(|| Error::Invalid("native design missing".into()))?;
     let layout_id = slide.layout_id.as_ref().unwrap_or(&design.layouts[0].id);
-    let layout = original.layouts.iter().find(|layout| &layout.id == layout_id).ok_or_else(|| Error::Invalid("native layout missing".into()))?;
-    let blank = Slide { id: slide.id.clone(), elements: Vec::new(), layout_id: None, native_source_id: None, ..slide.clone() };
+    let layout = layouts.iter().find(|layout| &layout.id == layout_id).ok_or_else(|| Error::Invalid("native layout missing".into()))?;
+    let blank = Slide { id: slide.id.clone(), elements: Vec::new(), layout_id: None, native_source_id: None, review: None, ..slide.clone() };
     let generated = Package::open(crate::pptx::export_pptx(&Deck { slides: vec![blank], design: None, ..deck.clone() })?)?;
     let xml = generated.text("ppt/slides/slide1.xml")?.to_owned(); let parsed = parse(&xml)?;
     let tree = child(parsed.root_element(), P, "cSld").and_then(|node| child(node, P, "spTree")).ok_or_else(|| Error::Invalid("generated slide tree".into()))?;
@@ -128,7 +128,7 @@ fn remove_deleted(package: &mut Package, original: &NativeDeck, deck: &Deck, mai
     Ok(())
 }
 
-pub(crate) fn prepare(package: &mut Package, original: &NativeDeck, deck: &Deck, main: &str, scale: (f64, f64)) -> Result<Vec<NativePart>> {
+pub(crate) fn prepare(package: &mut Package, original: &NativeDeck, deck: &Deck, main: &str, scale: (f64, f64), layouts: &[NativePart]) -> Result<Vec<NativePart>> {
     if original.deck.slides.iter().map(|slide| &slide.id).eq(deck.slides.iter().map(|slide| &slide.id)) {
         if deck.slides.iter().any(|slide| slide.native_source_id.is_some()) { return Err(Error::Unsupported("existing native slide cannot change its source".into())); }
         return original.slides.iter().map(|part| Ok(NativePart { path: part.path.clone(), id: part.id.clone(), nodes: part.nodes.clone() })).collect();
@@ -154,7 +154,7 @@ pub(crate) fn prepare(package: &mut Package, original: &NativeDeck, deck: &Deck,
         let binding = if let Some(source) = &slide.native_source_id {
             let source = original.slides.iter().find(|part| &part.id == source).ok_or_else(|| Error::Invalid("native duplicate source missing".into()))?;
             clone_slide(package, source, &path, &slide.id)?
-        } else { insert_slide(package, original, deck, slide, &path, main, scale)? };
+        } else { insert_slide(package, layouts, deck, slide, &path, main, scale)? };
         add_type(package, &path, "application/vnd.openxmlformats-officedocument.presentationml.slide+xml")?;
         let relation = loop { let candidate = format!("rIdAislideSlide{counter}"); counter += 1; if used.insert(candidate.clone()) { break candidate; } };
         next_id = next_id.checked_add(1).filter(|id| *id < 2147483648).ok_or_else(|| Error::Limit("native slide IDs exhausted".into()))?;

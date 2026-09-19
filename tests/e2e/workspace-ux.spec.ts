@@ -2,7 +2,7 @@
 import { readFile } from 'node:fs/promises';
 import AxeBuilder from '@axe-core/playwright';
 import { icons as lucideIcons } from 'lucide-react';
-import { openSample } from './fixtures';
+import { openSample, waitForCoreOperation } from './fixtures';
 
 test('startup opens a clean blank presentation and the sample is explicit', async ({ page }) => {
   const operations: string[] = [];
@@ -88,6 +88,65 @@ for (const mode of ['inline', 'properties']) {
   });
 }
 
+test('Properties Apply prepares rich text and preserves IME, errors, in-flight blocking and Undo', async ({ page }) => {
+  await openSample(page);
+  await page.getByRole('button', { name: 'Select title', exact: true }).click();
+  const field = page.getByRole('textbox', { name: 'Text content', exact: true });
+  const original = await field.inputValue();
+  const apply = page.getByRole('button', { name: 'Apply changes', exact: true });
+  await page.getByRole('button', { name: 'Paragraph align right', exact: true }).click();
+  await apply.click();
+  const rendered = page.locator('.slide-stage .slide-text').filter({ hasText: 'Quarterly performance' });
+  await expect(rendered.locator('.document-paragraph').first()).toHaveCSS('text-align', 'right');
+  await field.fill('Prepared title\nDraft');
+  await expect(apply).toBeEnabled();
+
+  let replacements = 0;
+  let fail = true;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/api/core', async (route) => {
+    if (route.request().postDataJSON().op !== 'replace_element_text') return route.fallback();
+    replacements += 1;
+    if (fail) return route.fulfill({ status: 400, json: { error: 'Text preparation rejected' } });
+    await held;
+    return route.fallback();
+  });
+  await field.dispatchEvent('compositionstart');
+  await apply.click();
+  expect(replacements).toBe(0);
+  await expect(field).toHaveValue('Prepared title\nDraft');
+  await field.dispatchEvent('compositionend');
+  await apply.click();
+  await expect(page.getByRole('alert')).toContainText('Text preparation rejected');
+  await expect(field).toHaveValue('Prepared title\nDraft');
+  await expect(rendered).toBeVisible();
+
+  fail = false;
+  try {
+    await apply.click();
+    await expect.poll(() => replacements).toBe(2);
+    await expect(apply).toBeDisabled();
+    await expect(field).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'New presentation', exact: true })).toBeDisabled();
+    await field.dispatchEvent('keydown', { key: 'Escape', code: 'Escape' });
+    await expect(field).toHaveValue('Prepared title\nDraft');
+  } finally { release(); }
+
+  const updated = page.locator('.slide-stage .slide-text').filter({ hasText: 'Prepared title' });
+  await expect(updated.locator('.document-paragraph')).toHaveText(['Prepared title', 'Draft']);
+  await expect(updated.locator('.document-paragraph').first()).toHaveCSS('text-align', 'right');
+  await expect(apply).toBeEnabled();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(replacements).toBe(2);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(rendered.locator('.document-paragraph')).toHaveText(original.split('\n'));
+  await page.getByRole('button', { name: 'Select title', exact: true }).click();
+  await expect(field).toHaveValue(original);
+  await expect(rendered.locator('.document-paragraph').first()).toHaveCSS('text-align', 'right');
+});
+
 test('context commands target the clicked element and support keyboard dismissal', async ({ page }) => {
   await openSample(page);
   await page.getByRole('button', { name: 'Add rectangle', exact: true }).click();
@@ -147,7 +206,7 @@ test('master presets preview spacing and native layouts while retaining content 
   await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
-test('all seven master presets have fitted native previews and accessible controls', async ({ page }) => {
+test('all seven master presets have fitted native previews and accessible controls', async ({ page }, testInfo) => {
   test.setTimeout(90_000);
   await page.goto('/');
   await page.getByRole('button', { name: 'Edit masters and layouts', exact: true }).click();
@@ -161,7 +220,7 @@ test('all seven master presets have fitted native previews and accessible contro
       await page.evaluate(() => document.fonts.ready);
       expect(await page.evaluate(() => [...document.fonts].some((font) => font.family.replaceAll('"', '') === 'IBM Plex Sans' && font.status === 'loaded'))).toBe(true);
     }
-    const layouts = await dialog.getByLabel('Preset preview layout', { exact: true }).locator('option').evaluateAll((options) => options.map((option) => option.value));
+    const layouts = await dialog.getByLabel('Preset preview layout', { exact: true }).locator('option').evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value));
     expect(layouts).toHaveLength(7);
     for (const layout of layouts) {
       await dialog.getByLabel('Preset preview layout', { exact: true }).selectOption(layout);
@@ -170,7 +229,7 @@ test('all seven master presets have fitted native previews and accessible contro
       expect(overflow, `${name}: ${layout}`).toEqual([]);
     }
     await dialog.getByLabel('Preset preview layout', { exact: true }).selectOption('preset-cover');
-    await dialog.locator('.preset-preview').screenshot({ path: `.artifacts/preset-${name.replaceAll(' ', '-')}.png` });
+    await dialog.locator('.preset-preview').screenshot({ path: testInfo.outputPath(`preset-${name.replaceAll(' ', '-')}.png`) });
   }
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 1000 });
@@ -180,7 +239,7 @@ test('all seven master presets have fitted native previews and accessible contro
     const apply = dialog.getByRole('button', { name: 'Use preset', exact: true });
     await apply.scrollIntoViewIfNeeded();
     await expect(apply).toBeInViewport({ ratio: 1 });
-    await dialog.screenshot({ path: `.artifacts/preset-controls-${width}.png` });
+    await dialog.screenshot({ path: testInfo.outputPath(`preset-controls-${width}.png`) });
   }
 });
 
@@ -273,7 +332,9 @@ test('complete Lucide library pages through every icon and reopens inserted pict
   await dialog.getByLabel('Icon color', { exact: true }).fill('#007a4d');
   await dialog.getByLabel('Icon stroke width', { exact: true }).fill('1.5');
   await dialog.getByLabel('Asset size', { exact: true }).fill('80');
+  const inserted = waitForCoreOperation(page, 'transaction');
   await dialog.getByRole('button', { name: 'Insert icon', exact: true }).click();
+  await inserted;
   const image = page.locator('.slide-stage img');
   await expect(image).toHaveCount(1);
   await expect(image).toHaveAttribute('alt', 'Zodiac Virgo (Lucide)');
@@ -300,13 +361,17 @@ test('built-in icons and pasted SVG become editable PNG pictures without unsafe 
   const dialog = page.getByRole('dialog', { name: 'Icons and assets', exact: true });
   await dialog.getByLabel('Search icons', { exact: true }).fill('database');
   await dialog.getByRole('button', { name: 'Database icon', exact: true }).click();
+  const inserted = waitForCoreOperation(page, 'transaction');
   await dialog.getByRole('button', { name: 'Insert icon', exact: true }).click();
+  await inserted;
   await expect(page.locator('.slide-stage img')).toHaveCount(1);
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="#007f73"/></svg>';
+  const pasted = waitForCoreOperation(page, 'transaction');
   await page.locator('.canvas-workspace').evaluate((element, text) => {
     const clipboardData = new DataTransfer(); clipboardData.setData('text/plain', text);
     element.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }));
   }, svg);
+  await pasted;
   await expect(page.locator('.slide-stage img')).toHaveCount(2);
   await expect(page.locator('.slide-stage img').last()).toHaveAttribute('src', /^data:image\/png;base64,/);
   await page.getByRole('button', { name: 'Insert icons', exact: true }).click();
@@ -342,7 +407,7 @@ test('asset drops are atomic and keyboard file commands preserve unsaved work', 
     inputs.forEach((svg, index) => dataTransfer.items.add(new File([svg], `${index}.svg`, { type: 'image/svg+xml' })));
     element.dispatchEvent(new DragEvent('drop', { dataTransfer, bubbles: true, cancelable: true, clientX: 400, clientY: 300 }));
   }, [valid, invalid]);
-  await expect(page.getByRole('alert')).toContainText(/unsupported|inert/);
+  await expect(page.getByRole('alert')).toContainText('Unsupported: SVG images require embedded base64 PNG or JPEG; no external or nested SVG references');
   await expect(page.locator('.slide-stage img')).toHaveCount(0);
   await page.getByRole('button', { name: 'Dismiss error', exact: true }).click();
   await canvas.evaluate((element, svg) => {
@@ -360,7 +425,7 @@ test('asset drops are atomic and keyboard file commands preserve unsaved work', 
 });
 
 for (const width of [1440, 1200, 390]) {
-  test(`context menu and asset controls fit and are labeled at ${width}px`, async ({ page }) => {
+  test(`context menu and asset controls fit and are labeled at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 1000 });
     await page.goto('/');
     await expect(page.getByRole('button', { name: 'File operations', exact: true })).toBeEnabled();
@@ -375,9 +440,10 @@ for (const width of [1440, 1200, 390]) {
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
     expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(1000);
-    const menuA11y = await new AxeBuilder({ page }).include('.context-menu').disableRules(['color-contrast']).analyze();
+    await expect(page.locator('iframe, frame')).toHaveCount(0);
+    const menuA11y = await new AxeBuilder({ page }).setLegacyMode().include('.context-menu').disableRules(['color-contrast']).analyze();
     expect(menuA11y.violations.filter((entry) => ['serious', 'critical'].includes(entry.impact ?? ''))).toEqual([]);
-    await page.screenshot({ path: `.artifacts/workspace-menu-${width}.png` });
+    await page.screenshot({ path: testInfo.outputPath(`workspace-menu-${width}.png`) });
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: 'Insert icons', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
@@ -392,14 +458,15 @@ for (const width of [1440, 1200, 390]) {
       return label.left < bounds.left || label.right > bounds.right || label.top < bounds.top || label.bottom > bounds.bottom || symbol.width <= 0 || symbol.height <= 0;
     }).map((button) => button.getAttribute('aria-label')));
     expect(invalidIcons).toEqual([]);
-    const assetA11y = await new AxeBuilder({ page }).include('.asset-panel').disableRules(['color-contrast']).analyze();
+    await expect(page.locator('iframe, frame')).toHaveCount(0);
+    const assetA11y = await new AxeBuilder({ page }).setLegacyMode().include('.asset-panel').disableRules(['color-contrast']).analyze();
     expect(assetA11y.violations.filter((entry) => ['serious', 'critical'].includes(entry.impact ?? ''))).toEqual([]);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.getByRole('button', { name: 'Next icon page', exact: true }).click();
     await expect(page.getByRole('navigation', { name: 'Icon pages', exact: true })).toContainText('61-120');
     await page.locator('.icon-grid button').last().scrollIntoViewIfNeeded();
     await expect(page.locator('.icon-grid button').last()).toBeVisible();
-    await page.screenshot({ path: `.artifacts/workspace-assets-${width}.png`, fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath(`workspace-assets-${width}.png`), fullPage: true });
     const longestName = Object.keys(lucideIcons).reduce((longest, name) => name.length > longest.length ? name : longest, '');
     await page.getByLabel('Search icons', { exact: true }).fill(longestName);
     const longest = page.locator(`.icon-grid button[data-icon-name="${longestName}"]`);
@@ -416,7 +483,7 @@ for (const width of [1440, 1200, 390]) {
     const insert = page.getByRole('dialog').getByRole('button', { name: 'Insert icon', exact: true });
     await insert.scrollIntoViewIfNeeded();
     await expect(insert).toBeInViewport({ ratio: 1 });
-    await page.screenshot({ path: `.artifacts/lucide-long-name-${width}.png`, fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath(`lucide-long-name-${width}.png`), fullPage: true });
     await insert.click();
     await expect(page.locator('.slide-stage img')).toHaveCount(1);
     await expect(page.locator('.slide-stage img')).toHaveJSProperty('complete', true);

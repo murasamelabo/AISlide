@@ -65,7 +65,7 @@ await reopened.session.editSlides([
 ]);
 ```
 
-`client.createAsset()` is stateless; `session.addAsset()` inserts under revision, cancellation and Undo guards. SVG becomes an inspected transparent PNG, not an embedded SVG/vector object. Native slide copies retain original XML and independently copy chart/workbook resources. Unsupported custom shows/sections or unsafe native copies fail without changing the session. Use the [workspace API](../../docs/api.md#workspace-commands) for limits and source-preservation details.
+`client.createAsset()` is stateless; `session.addAsset()` inserts under revision, cancellation and Undo guards. Accepted inert SVG is retained as a native SVG picture with an inspected transparent PNG fallback, not converted into editable shape paths. Arbitrary SVG, active content and external references are rejected. Native slide copies retain original XML and independently copy chart/workbook resources. Unsupported custom shows/sections or unsafe native copies fail without changing the session. Default `large` permits 256 slides / 32 MiB complete document; explicit `standard` retains 128 / 8 MiB and `legacy` 32 / 2 MiB. Constructor and create/open options accept `capacityProfile`; session operations preserve it. `setCapacityProfile()` verifies before changing the selection. `recoveryEnvelope` and `client.recoverSession()` preserve verified bounded Undo/Redo; legacy document-only recovery starts empty history. See [Phase 5 contracts](../../docs/testing/phase5-recovery-capacity.md).
 
 ## Master Presets
 
@@ -77,7 +77,7 @@ await session.assignLayout('slide-1', 'preset-two-columns');
 const exported = await session.exportPresentation();
 ```
 
-The seven presets define native masters/layouts, palette and font roles, side margins, gutters and content regions. Application retains existing slide content and original masters; custom or edited template conflicts fail before commit. The normal session revision, cancellation and Undo guards apply. New blank slides inherit the selected preset master. New parts on `preset-visual-content` are fitted to the layout's visual region without moving existing content. Reopened documents must already contain a compatible preset structure. See [preset limits and definitions](../../docs/testing/master-presets.md).
+The seven presets define native masters/layouts, palette and font roles, side margins, gutters and content regions. Application retains existing slide content and original masters; custom or edited template conflicts fail before commit. The normal session revision, cancellation and Undo guards apply. New blank slides inherit the selected preset master. New parts on `preset-visual-content` are fitted to the layout's visual region without moving existing content. Reopened documents can add a supported preset structure within native preservation and capacity limits; an existing dedicated preset structure must pass its compatibility checks before replacement. See [preset limits and definitions](../../docs/testing/master-presets.md).
 
 ## Guided Authoring
 
@@ -159,7 +159,7 @@ The helper accepts supplied SVG/PNG/JPEG bytes and returns PNG/JPEG `GraphIcon` 
 
 ## Design Helpers
 
-Authored documents also expose transactional design and insertion helpers:
+Transactional design and insertion helpers apply to authored documents and the supported native subset of reopened presentations:
 
 ```js
 const design = await client.designDefaults();
@@ -174,7 +174,9 @@ await session.applyTheme(theme, { expectedRevision: session.revision });
 console.log(catalog.charts);
 ```
 
-`client.createObject()` returns a validated element without mutating a session. Session helpers hold the same busy guard across the core transformation and commit, retain undo receipts, and check cancellation before committing. Design operations are for authored documents; imported-origin writable-field restrictions still apply.
+`client.createObject()` returns a validated element without mutating a session. Session helpers hold the same busy guard across the core transformation and commit, retain undo receipts, and check cancellation before committing. Reopened designs support ID-based master/layout additions, removals and reassignment, with immutable origins and unknown-XML/reference guards. Ordinary native shapes and other objects are editable only within their represented subset; unsupported replacements fail rather than flatten content. See the [authoring model](../../docs/api.md#authoring-model) for rich text, visual styles, paths, master themes and fields.
+
+`client.authoringCapabilities()` and `client.designCapabilities()` expose operation limits and supported subsets. The object catalog has 24 chart kinds: 18 classic and six chartEx; see the [chartEx guide](../../docs/authoring/chart-ex.md) for the histogram Office/schema compatibility exception. Full method signatures and payloads are in [index.d.mts](index.d.mts) and [types.ts](types.ts), including search/replacement, selection, image/table/vector editing, bounded Boolean operations, review and comments. See [capability discovery](../../docs/api.md#capability-discovery), [local proofing](../../docs/authoring/proofing-format-painter.md), [document fonts](../../docs/authoring/fonts.md) and [master fields and themes](../../docs/authoring/master-fields-themes.md) for scoped contracts rather than assuming general Office parity.
 
 `exportProject()` rejects stale source bindings and measured text errors in newly authored documents. It returns PPTX base64 and a hash-bound checkpoint, but does not itself write to disk. The native application and MCP use create-new publication. Browser downloads can require permission for multiple files.
 

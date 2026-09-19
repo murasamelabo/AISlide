@@ -1,8 +1,11 @@
 ﻿import { invoke, isTauri } from '@tauri-apps/api/core'
+import { CAPACITY_PROFILES, encodeCoreRequest } from '../../../packages/client/index.mjs'
+import type { CapacityProfile } from '../../../packages/client/index.mjs'
 import type { AislideDocument, PresentationExport, ProjectExport, AssetInput } from './types'
 
 export async function core<T>(request: unknown, { signal }: { signal?: AbortSignal } = {}): Promise<T> {
   if (signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError')
+  const payload = encodeCoreRequest(request)
   if (isTauri()) {
     const operationId = crypto.randomUUID()
     const pending = invoke<T>('core_request', { request, operationId })
@@ -21,7 +24,7 @@ export async function core<T>(request: unknown, { signal }: { signal?: AbortSign
   const response = await fetch('/api/core', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
+    body: payload,
     signal,
   })
   const value = await response.json()
@@ -47,9 +50,9 @@ export async function downloadBytes(bytes: Uint8Array, filename: string, mime: s
   return true
 }
 
-export async function downloadProject(document: AislideDocument, result: ProjectExport) {
+export async function downloadProject(document: AislideDocument, result: ProjectExport, capacityProfile: CapacityProfile = 'large') {
   if (isTauri()) {
-    const saved = await invoke('save_project', { document, operationId: crypto.randomUUID() })
+    const saved = await invoke('save_project', { document, capacityProfile, operationId: crypto.randomUUID() })
     return Boolean(saved)
   }
   await downloadBytes(decodeBase64(result.base64), result.filename, 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
@@ -61,16 +64,16 @@ export function decodeBase64(value: string) {
   return Uint8Array.from(atob(value), (character) => character.charCodeAt(0))
 }
 
-export async function fileBase64(file: File) {
-  if (file.size > 2.8 * 1024 * 1024) throw new Error('This slice accepts PPTX files up to 2.8 MiB')
+export async function fileBase64(file: File, capacityProfile: CapacityProfile = 'large') {
+  if (file.size > CAPACITY_PROFILES[capacityProfile].archive_bytes) throw new Error(`File exceeds the ${CAPACITY_PROFILES[capacityProfile].archive_bytes / 1048576} MiB archive budget; expanded document limits also apply`)
   const bytes = new Uint8Array(await file.arrayBuffer())
   let text = ''
   for (let index = 0; index < bytes.length; index += 16384) text += String.fromCharCode(...bytes.subarray(index, index + 16384))
   return btoa(text)
 }
 
-export async function downloadPresentation(document: AislideDocument, result: PresentationExport) {
-  if (isTauri()) return Boolean(await invoke('save_presentation', { document, operationId: crypto.randomUUID(), filename: result.filename }))
+export async function downloadPresentation(document: AislideDocument, result: PresentationExport, capacityProfile: CapacityProfile = 'large') {
+  if (isTauri()) return Boolean(await invoke('save_presentation', { document, capacityProfile, operationId: crypto.randomUUID(), filename: result.filename }))
   return downloadBytes(decodeBase64(result.base64), result.filename, 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
 }
 
@@ -86,9 +89,11 @@ export async function fileAssets(files: File[], size = 128): Promise<AssetInput[
   if (!files.length || files.length > 8) throw new Error('Select between 1 and 8 assets')
   return Promise.all(files.map(async (file) => {
     const extension = file.name.split('.').at(-1)?.toLowerCase()
-    const mime = file.type || (extension === 'svg' ? 'image/svg+xml' : extension === 'png' ? 'image/png' : ['jpg', 'jpeg'].includes(extension ?? '') ? 'image/jpeg' : '')
-    if (!['image/svg+xml', 'image/png', 'image/jpeg'].includes(mime)) throw new Error('Choose SVG, PNG or JPEG assets; export .fig assets from Figma first')
-    if (file.size > (mime === 'image/svg+xml' ? 262144 : 1048576)) throw new Error(mime === 'image/svg+xml' ? 'SVG must be at most 256 KiB' : 'Images must be at most 1 MiB')
+    const supplied = file.type.replace('image/x-emf', 'image/emf').replace('image/x-wmf', 'image/wmf')
+    const mime = supplied && supplied !== 'application/octet-stream' ? supplied : (extension === 'svg' ? 'image/svg+xml' : extension === 'emf' ? 'image/emf' : extension === 'wmf' ? 'image/wmf' : extension === 'png' ? 'image/png' : ['jpg', 'jpeg'].includes(extension ?? '') ? 'image/jpeg' : '')
+    if (!['image/svg+xml', 'image/png', 'image/jpeg', 'image/emf', 'image/wmf'].includes(mime)) throw new Error('Choose SVG, PNG, JPEG, EMF or WMF assets; export .fig assets from Figma first')
+    const vector = ['image/svg+xml', 'image/emf', 'image/wmf'].includes(mime)
+    if (file.size > (vector ? 262144 : 1048576)) throw new Error(vector ? 'Vector assets must be at most 256 KiB' : 'Images must be at most 1 MiB')
     return { id: `asset-${crypto.randomUUID().slice(0, 8)}`, base64: await fileBase64(file), mime_type: mime as AssetInput['mime_type'], alt: file.name.slice(0, 500), size }
   }))
 }

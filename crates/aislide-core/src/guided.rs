@@ -158,7 +158,7 @@ fn checks(input:&GuidedInput)->Vec<String> {
 
 fn text(id:&str,value:&str,bounds:[f64;4],size:f64,color:&str,bold:bool)->Element {
     let [x,y,width,height]=bounds;
-    Element::Text{id:id.into(),x,y,width,height,text:value.into(),font_size:size,color:color.into(),bold,format:TextFormat{font_family:Some("@minor".into()),alignment:TextAlign::Left,..TextFormat::default()}}
+    Element::Text{visual:None,id:id.into(),x,y,width,height,text:value.into(),font_size:size,color:color.into(),bold,format:TextFormat{font_family:Some("@minor".into()),alignment:TextAlign::Left,..TextFormat::default()}}
 }
 
 fn decision_table(rows:&[Vec<String>],top:f64,height:f64,closing:bool)->Element {
@@ -176,7 +176,7 @@ fn decision_table(rows:&[Vec<String>],top:f64,height:f64,closing:bool)->Element 
             left+=widths[column];
         }
     }
-    Element::Group{id:"decision-table".into(),x:64.0,y:top,width:1152.0,height,view_width:1152.0,view_height:height,children:drawing.elements}
+    Element::Group{visual:None,id:"decision-table".into(),x:64.0,y:top,width:1152.0,height,view_width:1152.0,view_height:height,children:drawing.elements}
 }
 
 fn build(input:&GuidedInput,id:&str)->Result<Document> {
@@ -217,7 +217,7 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
             if closing {
                 elements.push(text("schedule-title",if input.language=="ja" {"直近の実行日程"} else {"Immediate execution schedule"},[64.0,body_top+400.0,1152.0,28.0],20.0,"@dk1",true));
                 let slot=1152.0/input.issues.len() as f64;
-                for (offset,issue) in input.issues.iter().enumerate() {elements.push(Element::Rect{id:format!("schedule-panel-{offset}"),x:64.0+offset as f64*slot,y:body_top+434.0,width:slot-12.0,height:44.0,fill:"@lt2".into()});elements.push(text(&format!("schedule-{offset}"),&format!("{} / {}\n{}",issue.id,issue.due,issue.owner),[74.0+offset as f64*slot,body_top+438.0,slot-32.0,36.0],14.0,"@dk1",false));}
+                for (offset,issue) in input.issues.iter().enumerate() {elements.push(Element::Rect{visual:None,id:format!("schedule-panel-{offset}"),x:64.0+offset as f64*slot,y:body_top+434.0,width:slot-12.0,height:44.0,fill:"@lt2".into()});elements.push(text(&format!("schedule-{offset}"),&format!("{} / {}\n{}",issue.id,issue.due,issue.owner),[74.0+offset as f64*slot,body_top+438.0,slot-32.0,36.0],14.0,"@dk1",false));}
             }
         }
         let notes=format!("Profile: {}\nAudience: {}\nPurpose: {}\nGoverning message: {}\nLedger: {}\nEvidence: {}\nSemantic truth and Office parity require human review.",input.profile_id,input.audience,input.purpose,input.governing_message,serde_json::to_string(slide)?,serde_json::to_string(&citations)?);

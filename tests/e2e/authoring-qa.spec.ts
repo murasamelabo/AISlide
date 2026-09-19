@@ -1,8 +1,8 @@
 ﻿import { expect, test } from '@playwright/test'
-import { openSample } from './fixtures';
+import { openSample, waitForCoreOperation } from './fixtures';
 import AxeBuilder from '@axe-core/playwright'
 
-test('toolbar tooltips escape the scrolling ribbon without shifting their controls', async ({ page }) => {
+test('toolbar tooltips escape the scrolling ribbon without shifting their controls', async ({ page }, testInfo) => {
   await openSample(page)
   await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled()
   for (const width of [1200, 390]) {
@@ -32,7 +32,7 @@ test('toolbar tooltips escape the scrolling ribbon without shifting their contro
       expect(await button.boundingBox()).toEqual(before)
       await tooltip.hover()
       await expect(tooltip).toBeVisible()
-      await page.screenshot({ path: `.artifacts/ui-tooltip-${width}-${name === 'Add chart' ? 'chart' : 'graph'}.png` })
+      await page.screenshot({ path: testInfo.outputPath(`ui-tooltip-${width}-${name === 'Add chart' ? 'chart' : 'graph'}.png`) })
       await page.keyboard.press('Escape')
       await expect(tooltip).toHaveCount(0)
     }
@@ -65,7 +65,7 @@ test('toolbar tooltips escape the scrolling ribbon without shifting their contro
 })
 
 for (const width of [1440, 1200, 960, 390]) {
-  test(`long presentation names keep header controls in place at ${width}px`, async ({ page }) => {
+  test(`long presentation names keep header controls in place at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 960 })
     await openSample(page)
     await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled()
@@ -85,7 +85,7 @@ for (const width of [1440, 1200, 960, 390]) {
     }).map((button) => button.getAttribute('aria-label')))
     expect(outside).toEqual([])
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-    await page.screenshot({ path: `.artifacts/ui-header-${width}.png`, fullPage: true })
+    await page.screenshot({ path: testInfo.outputPath(`ui-header-${width}.png`), fullPage: true })
   })
 }
 
@@ -131,7 +131,7 @@ test('toolbar commands have distinct icons and inspector state stays visible', a
 })
 
 for (const width of [1440, 390]) {
-  test(`DADS application typography, targets and focus preserve slide styling at ${width}px`, async ({ page }) => {
+  test(`DADS application typography, targets and focus preserve slide styling at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 960 })
     await openSample(page)
     const save = page.getByRole('button', { name: 'Save PPTX', exact: true })
@@ -153,10 +153,10 @@ for (const width of [1440, 390]) {
     await page.getByRole('button', { name: /^Slide 4:/ }).click()
     await expect(page.locator('.slide-stage .slide-table th').first()).toHaveCSS('background-color', 'rgb(8, 127, 115)')
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
-    await page.screenshot({ path: `.artifacts/dads-studio-${width}.png`, fullPage: true })
+    await page.screenshot({ path: testInfo.outputPath(`dads-studio-${width}.png`), fullPage: true })
   })
 
-  test(`authoring dialogs fit and have labeled controls at ${width}px`, async ({ page }) => {
+  test(`authoring dialogs fit and have labeled controls at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 960 })
     const errors: string[] = []
     page.on('pageerror', (error) => errors.push(error.message))
@@ -181,26 +181,31 @@ for (const width of [1440, 390]) {
       const result = await new AxeBuilder({ page }).include('dialog').withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze()
       expect(result.violations.filter((issue) => ['serious', 'critical'].includes(issue.impact ?? ''))).toEqual([])
       await page.getByRole('heading', { name: name === 'Insert objects' ? 'Insert objects' : name === 'Edit theme' ? 'Theme' : 'Masters and layouts', exact: true }).scrollIntoViewIfNeeded()
-      await page.screenshot({ path: `.artifacts/authoring-${screenshot}-${width}.png`, fullPage: true })
+      await page.screenshot({ path: testInfo.outputPath(`authoring-${screenshot}-${width}.png`), fullPage: true })
       await page.getByRole('button', { name: 'Close dialog', exact: true }).click()
     }
     expect(errors).toEqual([])
   })
 }
 
-test('all nine chart kinds render after insertion without runtime errors', async ({ page }) => {
-  const errors: string[] = []
-  page.on('pageerror', (error) => errors.push(error.message))
-  await openSample(page)
-  await expect(page.getByRole('button', { name: /^Slide 12:/ })).toBeVisible()
-  for (const kind of ['Column', 'Bar', 'Line', 'Pie', 'Doughnut', 'Area', 'Scatter', 'Stacked column', 'Stacked bar']) {
+for (const kind of ['Column', 'Bar', 'Line', 'Pie', 'Doughnut', 'Area', 'Scatter', 'Stacked column', 'Stacked bar']) {
+  test(`${kind} chart renders after insertion without runtime errors`, async ({ page }) => {
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    await openSample(page)
+    await expect(page.getByRole('button', { name: /^Slide 12:/ })).toBeVisible()
     await page.getByRole('button', { name: 'Insert objects', exact: true }).click()
+    const inserted = waitForCoreOperation(page, 'transaction')
     await page.getByRole('button', { name: `Insert ${kind} chart`, exact: true }).click()
+    await inserted
     const chart = page.locator('.canvas-workspace .recharts-wrapper')
+    await expect(chart).toHaveCount(1)
     await expect(chart).toBeVisible()
     expect(await chart.locator('path').count()).toBeGreaterThan(0)
+    const undone = waitForCoreOperation(page, 'undo_transaction')
     await page.getByRole('button', { name: 'Undo', exact: true }).click()
+    await undone
     await expect(chart).toHaveCount(0)
-  }
-  expect(errors).toEqual([])
-})
+    expect(errors).toEqual([])
+  })
+}

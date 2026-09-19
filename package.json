@@ -10,6 +10,7 @@
     "core:build": "node tools/cargo.mjs build -p aislide-cli",
     "core:test": "node tools/cargo.mjs test --workspace",
     "test:bridge": "node --test tools/core-client.test.mjs tools/atomic-output.test.mjs tools/atomic-project.test.mjs",
+    "test:capacity": "npm run core:build && npm run build && node --test tools/capacity.test.mjs",
     "test:mcp": "node --test tools/mcp.test.mjs tools/mcp-poc.test.mjs",
     "test:sdk": "node --test tools/client.test.mjs",
     "test:extraction": "node --test tools/extraction.test.mjs",

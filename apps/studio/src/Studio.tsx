@@ -22,8 +22,24 @@ import { ThemePanel } from './ThemePanel'
 import { DesignPanel } from './DesignPanel'
 import { ColorField, TextControls } from './TextControls'
 import { Tool } from './Tool'
+import { TextToolsPanel } from './TextToolsPanel'
+import { ObjectToolsPanel } from './ObjectToolsPanel'
+import { NotesPagePreview, ReviewPanel } from './ReviewPanel'
+import { DocumentSetupPanel } from './DocumentSetupPanel'
+import { ExportPanel } from './ExportPanel'
+import { DocumentFonts, FontPanel } from './FontPanel'
+import { SessionRecoveryPanel } from './SessionRecoveryPanel'
+import { createSessionRecoveryScheduler, sessionRecoveryStore } from './recovery-v2'
+import type { SessionRecoveryScheduler } from './recovery-v2'
+import { FileOutput, History } from 'lucide-react'
+import { Search, SlidersHorizontal, MessageSquare, Settings2, Eye, EyeOff, Lock, Unlock } from 'lucide-react'
+import { SelectionTools } from './SelectionTools'
+import { visualOf } from './visual-render'
+import type { ElementBundle, SelectionOperation, SelectionEditResult, CombineShapesInput } from './types'
+import type { FormatSnapshot } from './types'
 import { chartNames } from './design'
 import { AislideClient, DocumentSession } from '../../../packages/client/index.mjs'
+import type { CapacityProfile, SessionRecovery } from '../../../packages/client/index.mjs'
 import type { ReplaceOptions } from '../../../packages/client/index.mjs'
 import type { AislideDocument, Deck, Element, Compiled, Exported, Report, Inspection, ProviderStatus, LayoutReport, Design, ObjectCatalog, Theme } from './types'
 
@@ -36,7 +52,7 @@ function loadInitial() {
   return initial
 }
 
-function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+function Modal({ title, children, onClose, busy = false }: { title: string; children: ReactNode; onClose: () => void; busy?: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null)
   useEffect(() => {
     const previous = document.activeElement
@@ -44,34 +60,43 @@ function Modal({ title, children, onClose }: { title: string; children: ReactNod
     return () => { if (previous instanceof HTMLElement) previous.focus() }
   }, [])
   return <dialog ref={dialog} className="modal" aria-label={title} onCancel={(event) => { event.preventDefault(); onClose() }}>
-    <header><h2>{title}</h2><Tool label="Close dialog" onClick={onClose}><X size={18} /></Tool></header>
+    <header><h2>{title}</h2><Tool label="Close dialog" disabled={busy} onClick={onClose}><X size={18} /></Tool></header>
     {children}
   </dialog>
 }
 
-function Properties({ element, theme, busy, onApply, onReplaceImage, onDraftChange }: { element: Element; theme?: Theme; busy: boolean; onApply: (value: Element) => Promise<void>; onReplaceImage: () => void; onDraftChange: (dirty: boolean) => void }) {
+function Properties({ element, theme, busy, width, height, onApply, onReplaceImage, onDraftChange, onTextBusy }: { element: Element; theme?: Theme; busy: boolean; width: number; height: number; onApply: (value: Element) => Promise<void>; onReplaceImage: () => void; onDraftChange: (dirty: boolean) => void; onTextBusy: (busy: boolean) => void }) {
   const [draft, setDraft] = useState<Element>(structuredClone(element))
   const [rows, setRows] = useState(element.type === 'table' ? JSON.stringify(element.rows, null, 2) : '')
   const [chartData, setChartData] = useState(element.type === 'chart' ? JSON.stringify({ categories: element.categories, series: element.series }, null, 2) : '')
   const [error, setError] = useState('')
-  const hasDraft = JSON.stringify(draft) !== JSON.stringify(element)
+  const [pendingText, setPendingText] = useState(false)
+  const textPreparation = useRef<{ prepare: () => Promise<Element | undefined> }>(null)
+  const submitting = useRef(false)
+  const hasDraft = pendingText || JSON.stringify(draft) !== JSON.stringify(element)
     || element.type === 'table' && rows !== JSON.stringify(element.rows, null, 2)
     || element.type === 'chart' && chartData !== JSON.stringify({ categories: element.categories, series: element.series }, null, 2)
   useEffect(() => { onDraftChange(hasDraft); return () => onDraftChange(false) }, [hasDraft, onDraftChange])
   async function submit() {
+    if (busy || submitting.current) return
+    submitting.current = true
     setError('')
     try {
-      if (draft.type === 'chart') {
+      if (draft.type === 'text' || draft.type === 'shape') {
+        const prepared = await textPreparation.current?.prepare()
+        if (prepared) await onApply(prepared)
+      } else if (draft.type === 'chart') {
         const data = JSON.parse(chartData)
         await onApply({ ...draft, categories: data.categories, series: data.series })
       } else await onApply(draft.type === 'table' ? { ...draft, rows: JSON.parse(rows) } : draft)
     } catch (reason) { setError(reason instanceof SyntaxError ? 'Data must be valid JSON with the required fields' : reason instanceof Error ? reason.message : String(reason)) }
+    finally { submitting.current = false }
   }
   return <form className="properties" onSubmit={(event) => { event.preventDefault(); void submit() }}>
     <fieldset className="properties-body" disabled={busy}>
     <div className="section-label">POSITION & SIZE <span>px</span></div>
-    <div className="geometry-inputs">{(['x', 'y', 'width', 'height'] as const).map((field) => <label key={field}><span>{field.toUpperCase()}</span><input aria-label={`Element ${field}`} type="number" required step="1" min={field === 'width' || field === 'height' ? 1 : 0} max={field === 'y' || field === 'height' ? 720 : 1280} value={draft[field]} onChange={(event) => setDraft({ ...draft, [field]: event.currentTarget.valueAsNumber })} /></label>)}</div>
-    {(draft.type === 'text' || draft.type === 'shape') && <TextControls element={draft} theme={theme} onChange={setDraft} />}
+    <div className="geometry-inputs">{(['x', 'y', 'width', 'height'] as const).map((field) => <label key={field}><span>{field.toUpperCase()}</span><input aria-label={`Element ${field}`} type="number" required step="1" min={field === 'width' || field === 'height' ? 1 : 0} max={field === 'y' || field === 'height' ? height : width} value={draft[field]} onChange={(event) => setDraft({ ...draft, [field]: event.currentTarget.valueAsNumber })} /></label>)}</div>
+    {(draft.type === 'text' || draft.type === 'shape') && <TextControls element={draft} theme={theme} onChange={setDraft} onPendingTextChange={setPendingText} onBusy={onTextBusy} disabled={busy} prepareRef={textPreparation} />}
     {(draft.type === 'rect' || draft.type === 'shape') && <ColorField label="Fill" value={draft.fill} theme={theme} onChange={(fill) => setDraft({ ...draft, fill })} />}
     {draft.type === 'shape' && <><ColorField label="Outline" value={draft.stroke} theme={theme} onChange={(stroke) => setDraft({ ...draft, stroke })} /><label className="field">Outline width<input aria-label="Outline width" type="number" min={0} max={20} step={0.5} value={draft.stroke_width} onChange={(event) => setDraft({ ...draft, stroke_width: event.currentTarget.valueAsNumber })} /></label><label className="field">Rotation<input aria-label="Rotation" type="number" min={-360} max={360} value={draft.rotation} onChange={(event) => setDraft({ ...draft, rotation: event.currentTarget.valueAsNumber })} /></label></>}
     {draft.type === 'picture' && <>
@@ -99,13 +124,27 @@ function Properties({ element, theme, busy, onApply, onReplaceImage, onDraftChan
 export default function Studio() {
   const [documentState, setDocumentSnapshot] = useState<AislideDocument | null>(null)
   const [historyState, setHistoryState] = useState({ undo: false, redo: false })
+  const [capacityProfile, setCapacityProfile] = useState<CapacityProfile>('large')
+  const [historyBoundary, setHistoryBoundary] = useState(false)
   const session = useRef<DocumentSession | null>(null)
+  const [panelSession, setPanelSession] = useState<DocumentSession | null>(null)
   const [slideIndex, setSlideIndex] = useState(0)
-  const [selected, setSelected] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
+  const [selected, setPrimarySelected] = useState<string | null>(null)
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [clipboard, setClipboard] = useState<ElementBundle | null>(null)
+  const [formatClipboard, setFormatClipboard] = useState<{ session: DocumentSession; style: FormatSnapshot } | null>(null)
+  const [selectionWarnings, setSelectionWarnings] = useState<string[]>([])
+  function setSelected(id: string | null) { setPrimarySelected(id); setSelectedIds(id ? [id] : []) }
+  function selectMany(ids: string[]) { setSelectedIds(ids); setPrimarySelected(ids.at(-1) ?? null) }
+  const [documentBusy, setBusy] = useState(false)
+  const [inlineWorking, setInlineWorking] = useState(false)
+  const [propertiesWorking, setPropertiesWorking] = useState(false)
+  const [recoveryWorking, setRecoveryWorking] = useState(false)
+  const busy = documentBusy || inlineWorking || propertiesWorking
   const [error, setError] = useState('')
   const [status, setStatus] = useState('Loading local core')
-  const [modal, setModal] = useState<'report' | 'inspect' | 'generate' | 'sources' | 'layout' | 'import' | 'insert' | 'parts' | 'graph' | 'theme' | 'design' | 'assets' | null>(null)
+  const [modal, setModalState] = useState<'report' | 'inspect' | 'generate' | 'sources' | 'layout' | 'import' | 'insert' | 'parts' | 'graph' | 'theme' | 'design' | 'assets' | 'text-tools' | 'object-tools' | 'review' | 'setup' | 'export' | 'recovery' | 'fonts' | null>(null)
+  const [templateDecision, setTemplateDecision] = useState<((approved: boolean) => void) | null>(null)
   const [graphCatalog, setGraphCatalog] = useState<GraphCatalog | null>(null)
   const [partCatalog, setPartCatalog] = useState<PartCatalog | null>(null)
   const [partEditing, setPartEditing] = useState<PartInstance | null>(null)
@@ -125,6 +164,12 @@ export default function Studio() {
   const [showInspector, setShowInspector] = useState(true)
   const [filename, setFilename] = useState('Untitled presentation.pptx')
   const [savedHash, setSavedHash] = useState<string | null>(null)
+  const [recoveryEnabled, setRecoveryEnabled] = useState(false)
+  const [recoveryStatus, setRecoveryStatus] = useState('')
+  const [recoveryFailure, setRecoveryFailure] = useState('')
+  const recoveryScheduler = useRef<SessionRecoveryScheduler | null>(null)
+  const recoveryMounted = useRef(false)
+  const setOutputBusy = useCallback((value: boolean) => { if (recoveryMounted.current) setBusy(value) }, [])
   const [inlineDraft, setInlineDraft] = useState(false)
   const [propertiesDraft, setPropertiesDraft] = useState(false)
   const [pendingReplacement, setPendingReplacement] = useState<(() => Promise<void>) | null>(null)
@@ -142,12 +187,22 @@ export default function Studio() {
   const report = documentState?.report
   const slide = deck?.slides[slideIndex]
   const element = slide?.elements.find((item) => item.id === selected)
+  const selection = slide?.elements.filter((item) => selectedIds.includes(item.id)) ?? []
+  const selectionLocked = selection.some((item) => visualOf(item)?.locked)
   const selectedPart = documentState?.parts?.find((part) => part.slide_id === slide?.id && part.element_id === selected)
   const inspectedSlide = inspection?.slides[importedSlide]
   const inspectedText = inspectedSlide?.texts[importedRun]
   const hasDrafts = inlineDraft || propertiesDraft
   const dirty = hasDrafts || Boolean(documentState && documentState.hash !== savedHash)
+  function setModal(next: typeof modal) {
+    if (next && hasDrafts) { setError('Apply or cancel the current object edits before opening another panel'); return }
+    setModalState(next)
+  }
   function setDocumentState(next: AislideDocument) {
+    setPanelSession(session.current)
+    setCapacityProfile(session.current?.capacityProfile ?? 'large')
+    setHistoryBoundary(Boolean(session.current?.historyBoundary))
+    setSelectionWarnings([])
     setDocumentSnapshot(next)
     setHistoryState({ undo: Boolean(session.current?.canUndo), redo: Boolean(session.current?.canRedo) })
   }
@@ -165,13 +220,49 @@ export default function Studio() {
     return () => { disposed = true }
   }, [])
 
+  useEffect(() => {
+    recoveryMounted.current = true
+    const scheduler = createSessionRecoveryScheduler({
+      onError: reason => { setRecoveryFailure(reason.message); setRecoveryStatus('') },
+      onSaved: entry => { if (entry) { setRecoveryStatus('Recovery copy saved'); setRecoveryFailure('') } },
+    })
+    recoveryScheduler.current = scheduler
+    void sessionRecoveryStore.config().then(enabled => { if (recoveryMounted.current) setRecoveryEnabled(enabled) }, reason => { if (recoveryMounted.current) setRecoveryFailure(String(reason)) })
+    return () => { recoveryMounted.current = false; scheduler.dispose(); recoveryScheduler.current = null }
+  }, [])
+  useEffect(() => {
+    if (!recoveryEnabled) { recoveryScheduler.current?.cancel(); return }
+    if (documentState && session.current && (documentState.hash !== savedHash || session.current.canRedo)) recoveryScheduler.current?.schedule(session.current.recoveryEnvelope, filename)
+  }, [documentState, filename, recoveryEnabled, capacityProfile, savedHash])
+
+  async function openRecovery() {
+    await run(async () => { recoveryScheduler.current?.cancel(); await recoveryScheduler.current?.flush(); setRecoveryEnabled(await sessionRecoveryStore.config()); setModal('recovery') })
+  }
+  async function changeRecoveryEnabled(enabled: boolean) {
+    recoveryScheduler.current?.cancel()
+    await recoveryScheduler.current?.flush()
+    await sessionRecoveryStore.config(enabled)
+    setRecoveryEnabled(enabled); setRecoveryFailure(''); setRecoveryStatus('')
+  }
+  function restoreRecovery(envelope: SessionRecovery, recoveredFilename: string) {
+    setModalState(null)
+    replacePresentation(async () => {
+      const restored = await client.recoverSession(envelope)
+      session.current = restored; setDocumentState(restored.document); setSavedHash(null); setFilename(recoveredFilename)
+      setImportWarnings([]); changeSlide(0); setStatus('Recovered presentation / Unsaved')
+    })
+  }
+  function restoreLegacyRecovery(document: AislideDocument, recoveredFilename: string) {
+    restoreRecovery({ format: 'aislide.session', version: 1, capacity_profile: capacityProfile, document, past: [], future: [], history_boundary: null }, recoveredFilename)
+  }
+
   function undo() {
     void run(async () => {
       if (!session.current) return
       const result = await session.current.undo(); setDocumentState(result)
       changeSlide(Math.max(0, result.deck.slides.findIndex((entry) => entry.id === slide?.id)))
       setStatus('Undo / Shared transaction')
-    })
+    }, true)
   }
   function redo() {
     void run(async () => {
@@ -179,10 +270,11 @@ export default function Studio() {
       const result = await session.current.redo(); setDocumentState(result)
       changeSlide(Math.max(0, result.deck.slides.findIndex((entry) => entry.id === slide?.id)))
       setStatus('Redo / Shared transaction')
-    })
+    }, true)
   }
-  async function run(action: () => Promise<void>) {
+  async function run(action: () => Promise<void>, allowDrafts = false) {
     if (activeOperation.current || busy) return
+    if (hasDrafts && !allowDrafts) { setError('Apply or cancel the current object edits before continuing'); return }
     activeOperation.current = true
     setContext(null)
     setBusy(true)
@@ -197,16 +289,111 @@ export default function Studio() {
   }
   function replaceElement(next: Element) {
     if (!deck || !slide) return
+    if (visualOf(slide.elements.find((item) => item.id === next.id) ?? next)?.locked) { setError('Unlock the object before editing'); return }
     if (next.type === 'text' && next.format?.inherit_layout) next = { ...next, format: { ...next.format, inherit_layout: false } }
     return run(() => apply({ ...deck, slides: deck.slides.map((item) => item.id === slide.id ? { ...item, elements: item.elements.map((old) => old.id === next.id ? next : old) } : item) }))
   }
   async function editOnSlide(next: Element) {
-    if (!deck || !slide || activeOperation.current || busy) throw new Error('Another edit is in progress')
+    if (!deck || !slide || activeOperation.current || documentBusy) throw new Error('Another edit is in progress')
+    if (visualOf(slide.elements.find((item) => item.id === next.id) ?? next)?.locked) throw new Error('Unlock the object before editing')
     activeOperation.current = true; setBusy(true); setError('')
     try { await apply({ ...deck, slides: deck.slides.map((item) => item.id === slide.id ? { ...item, elements: item.elements.map((old) => old.id === next.id ? next : old) } : item) }) }
     finally { activeOperation.current = false; setBusy(false) }
   }
   function changeSlide(index: number) { setSlideIndex(index); setSelected(null) }
+  function selectElement(id: string, toggle = false) {
+    if (busy || hasDrafts) { if (hasDrafts) setError('Apply or cancel the current object edits before changing selection'); return }
+    if (toggle) selectMany(selectedIds.includes(id) ? selectedIds.filter((value) => value !== id) : [...selectedIds, id])
+    else setSelected(id)
+  }
+  function acceptSelection(result: SelectionEditResult, operation: SelectionOperation) {
+    setDocumentState(result.document)
+    if (result.clipboard) setClipboard(result.clipboard)
+    const warnings = [...result.effects.warnings]
+    if (result.effects.metadata_review_required) warnings.push('Selection changes require review of part and source metadata.')
+    setSelectionWarnings(warnings)
+    if (operation.op !== 'copy') {
+      const roots = result.document.deck.slides.find((entry) => entry.id === slide?.id)?.elements ?? []
+      const candidates = result.effects.added_ids.length ? result.effects.added_ids : result.effects.affected_ids
+      selectMany(roots.filter((item) => candidates.includes(item.id)).map((item) => item.id))
+      setStatus('Unsaved selection changes')
+    } else setStatus('Selection copied in Studio')
+  }
+  function selectionCommand(operation: SelectionOperation) {
+    return run(async () => {
+      if (!session.current || !slide) return
+      if (operation.op !== 'copy' && operation.op !== 'paste' && slide.elements.some((item) => operation.ids.includes(item.id) && visualOf(item)?.locked)) throw new Error('Unlock the selection before editing')
+      const result = await session.current.editSelection(slide.id, operation, { expectedRevision: session.current.revision, ...(operation.op === 'paste' ? { clipboard } : {}) })
+      acceptSelection(result, operation)
+    })
+  }
+  function removeSelection() {
+    if (!slide || !selectedIds.length || selectionLocked) return
+    elementsCommand(slide.id, selectedIds.map((id) => ({ op: 'remove', id })))
+  }
+  function combineShapes(input: CombineShapesInput) {
+    return run(async () => {
+      if (!session.current || !slide) return
+      const result = await session.current.combineShapes(slide.id, input, { expectedRevision: session.current.revision })
+      setDocumentState(result.document)
+      setSelectionWarnings(result.effects.warnings)
+      selectMany(result.effects.added_ids)
+      setStatus('Unsaved combined shape')
+    })
+  }
+  function copyFormat(paragraphIndex: number, runIndex: number) {
+    return run(async () => {
+      const owner = session.current
+      if (!owner || !slide || selectedIds.length !== 1) return
+      const revision = owner.revision
+      const style = await owner.copyFormat(slide.id, { id: selectedIds[0], paragraph_index: paragraphIndex, run_index: runIndex })
+      if (session.current !== owner || owner.revision !== revision) throw new Error('Document changed; copy the format again')
+      setFormatClipboard({ session: owner, style }); setStatus('Format copied in Studio')
+    })
+  }
+  function applyFormat() {
+    const owner = session.current
+    const revision = owner?.revision
+    return run(async () => {
+      if (!owner || !slide || !formatClipboard || formatClipboard.session !== owner || !selectedIds.length) return
+      setDocumentState(await owner.applyFormat(slide.id, { ids: selectedIds, style: formatClipboard.style }, { expectedRevision: revision }))
+      setStatus('Format applied / Unsaved changes')
+    })
+  }
+  function duplicateSelection() {
+    if (!slide || !selectedIds.length || selectionLocked) return
+    void run(async () => {
+      if (!session.current) return
+      const copied = await session.current.editSelection(slide.id, { op: 'copy', ids: selectedIds, format: 'keep_source_formatting' })
+      const operation: SelectionOperation = { op: 'paste', id_prefix: `copy-${crypto.randomUUID().slice(0, 8)}`, dx: 24, dy: 24 }
+      const result = await session.current.editSelection(slide.id, operation, { clipboard: copied.clipboard })
+      acceptSelection(result, operation)
+    })
+  }
+  function toggleLayer(item: Element, field: 'hidden' | 'locked') {
+    if (item.type === 'table' || item.type === 'chart') return
+    void run(async () => {
+      if (!session.current || !slide) return
+      const document = session.current.document
+      const index = document.deck.slides.findIndex((entry) => entry.id === slide.id)
+      const elementIndex = document.deck.slides[index].elements.findIndex((entry) => entry.id === item.id)
+      setDocumentState(await session.current.transact([{ op: 'add', path: `/deck/slides/${index}/elements/${elementIndex}/visual`, value: { ...item.visual, [field]: !item.visual?.[field] } }], { expectedRevision: document.revision }))
+    })
+  }
+  function openTextTools() {
+    if (hasDrafts) { setError('Apply or cancel the current object edits before opening text tools'); return }
+    setModal('text-tools')
+  }
+  function openEditingPanel(next: 'object-tools' | 'review' | 'setup') {
+    if (busy) return
+    if (next === 'object-tools' && selectionLocked) { setError('Unlock the object before editing'); return }
+    if (hasDrafts) { setError('Apply or cancel the current object edits before opening another panel'); return }
+    setModal(next)
+  }
+  async function exportPanelBytes(bytes: Uint8Array, name: string, mime: string) {
+    const extension = name.split('.').at(-1) ?? 'pptx'
+    return downloadBytes(bytes, `aislide-copy-${crypto.randomUUID()}.${extension}`, mime)
+  }
   function replacePresentation(action: () => Promise<void>) {
     if (busy || activeOperation.current) return
     setContext(null); setError('')
@@ -214,7 +401,7 @@ export default function Studio() {
     else void run(action)
   }
   async function newPresentation() {
-    const opened = await client.createPresentation(crypto.randomUUID())
+    const opened = await client.createPresentation(crypto.randomUUID(), 'Untitled presentation', { capacityProfile })
     session.current = opened; setDocumentState(opened.document); setSavedHash(null); setFilename('Untitled presentation.pptx')
     setImportWarnings([]); setModal(null); changeSlide(0); setStatus('New presentation / Unsaved')
   }
@@ -225,7 +412,7 @@ export default function Studio() {
     if (!clean.toLowerCase().endsWith('.pptx') || /[\\/:*?"<>|]/.test(clean) || [...clean].some((character) => character.charCodeAt(0) < 32) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(clean.split('.')[0].trimEnd()) || clean.length > 180 || clean.startsWith('.')) throw new Error('Choose a plain PPTX filename without path characters')
     const document = session.current.document
     const result = await session.current.exportPresentation()
-    const saved = await downloadPresentation(document, { ...result, filename: clean })
+    const saved = await downloadPresentation(document, { ...result, filename: clean }, session.current.capacityProfile)
     if (session.current.document.id !== document.id || session.current.document.hash !== document.hash) throw new Error('The document changed during saving; newer edits remain unsaved')
     if (saved) { setSavedHash(document.hash); setFilename(clean); setStatus('PPTX export completed') } else setStatus('Save cancelled')
     return saved
@@ -250,16 +437,16 @@ export default function Studio() {
     slidesCommand([{ op: 'duplicate', slide_id: id, id: copy }], copy)
   }
   function elementsCommand(slideId: string, operations: ElementOperation[], focus: string | null = null) {
-    void run(async () => { if (!session.current) return; setDocumentState(await session.current.editElements(slideId, operations)); setSelected(focus); setStatus('Unsaved object changes') })
+    void run(async () => { if (!session.current) return; const roots = session.current.document.deck.slides.find((entry) => entry.id === slideId)?.elements ?? []; if (operations.some((operation) => roots.some((item) => item.id === operation.id && visualOf(item)?.locked))) throw new Error('Unlock the object before editing'); setDocumentState(await session.current.editElements(slideId, operations)); setSelected(focus); setStatus('Unsaved object changes') })
   }
   function duplicateElement(slideId: string, id: string) {
     const copy = `copy-${crypto.randomUUID().slice(0, 8)}`
     elementsCommand(slideId, [{ op: 'duplicate', id, new_id: copy }], copy)
   }
   function openContext(kind: 'file' | 'canvas' | 'slide' | 'element', position: MenuPosition, slideId = slide?.id, id?: string) {
-    if (busy || modal || nameDialog || pendingReplacement) return
+    if (busy || hasDrafts || modal || nameDialog || pendingReplacement) return
     if (slideId && kind === 'slide') changeSlide(deck?.slides.findIndex((entry) => entry.id === slideId) ?? 0)
-    if (kind === 'element') setSelected(id ?? null)
+    if (kind === 'element' && !selectedIds.includes(id ?? '')) setSelected(id ?? null)
     if (kind === 'canvas') setSelected(null)
     setContext({ kind, position, commands: menuCommands({ kind, slideId, id }) })
   }
@@ -283,7 +470,7 @@ export default function Studio() {
     const elements: Element[] = []
     for (const [offset, asset] of assets.entries()) {
       const element = await client.createAsset(asset)
-      if (location) { element.x = Math.max(0, Math.min(1280 - element.width, location.x + offset * 24)); element.y = Math.max(0, Math.min(720 - element.height, location.y + offset * 24)) }
+      if (location) { element.x = Math.max(0, Math.min(document.deck.width - element.width, location.x + offset * 24)); element.y = Math.max(0, Math.min(document.deck.height - element.height, location.y + offset * 24)) }
       else { element.x += offset * 24; element.y += offset * 24 }
       elements.push(element)
     }
@@ -293,7 +480,7 @@ export default function Studio() {
   async function importDropped(files: File[], location?: { x: number; y: number }) {
     if (files.length === 1 && files[0].name.toLowerCase().endsWith('.pptx')) {
       const file = files[0]
-      replacePresentation(async () => { const opened = await client.openPresentation(crypto.randomUUID(), await fileBase64(file)); session.current = opened.session; setDocumentState(opened.session.document); setSavedHash(opened.session.document.hash); setFilename(file.name); setImportWarnings(opened.warnings); changeSlide(0); setStatus(`Opened PPTX / ${file.name}`) })
+      replacePresentation(async () => { const opened = await client.openPresentation(crypto.randomUUID(), await fileBase64(file, capacityProfile), { capacityProfile }); session.current = opened.session; setDocumentState(opened.session.document); setSavedHash(opened.session.document.hash); setFilename(file.name); setImportWarnings(opened.warnings); changeSlide(0); setStatus(`Opened PPTX / ${file.name}`) })
     } else await run(async () => insertAssets(await fileAssets(files), location))
   }
   const shortcuts = useEffectEvent((event: KeyboardEvent) => {
@@ -301,21 +488,43 @@ export default function Studio() {
     const input = (event.target as HTMLElement)?.closest('input,textarea,select,[contenteditable=true]')
     const key = event.key.toLowerCase()
     if (event.ctrlKey || event.metaKey) {
-      if (!['s', 'o', 'n', 'm', 'd', 'z', 'y'].includes(key) || input && !['s', 'o'].includes(key)) return
+      if (!input && ['a', 'c', 'x', 'v'].includes(key)) {
+        if (key === 'v') return
+        if (modal || nameDialog || pendingReplacement || busy) return
+        if (key === 'a' && !(event.target as HTMLElement)?.closest('.canvas-workspace,.layer-list') && event.target !== document.body) return
+        event.preventDefault()
+        if (hasDrafts) { setError('Apply or cancel the current object edits before continuing'); return }
+        if (key === 'a') selectMany(slide?.elements.filter((item) => !visualOf(item)?.hidden && !visualOf(item)?.locked).map((item) => item.id) ?? [])
+        else if (selectedIds.length) void selectionCommand({ op: key === 'c' ? 'copy' : 'cut', ids: selectedIds, format: 'keep_source_formatting' })
+        return
+      }
+      if (!['s', 'o', 'n', 'm', 'd', 'z', 'y', 'f', 'h'].includes(key) || input && !['s', 'o', 'f', 'h'].includes(key)) return
       event.preventDefault()
       if (busy || modal || nameDialog || pendingReplacement) return
-      if (key === 's') { if (event.shiftKey) setNameDialog({ kind: 'save', value: filename }); else void run(async () => { await savePresentation() }) }
+      if (key === 'f' || key === 'h') openTextTools()
+      else if (key === 's') { if (event.shiftKey) setNameDialog({ kind: 'save', value: filename }); else void run(async () => { await savePresentation() }) }
       else if (key === 'o') nativeInput.current?.click()
       else if (key === 'n') replacePresentation(newPresentation)
       else if (key === 'm') newSlide()
-      else if (key === 'd') { if (slide && selected) duplicateElement(slide.id, selected); else duplicateSlide() }
+      else if (key === 'd') { if (slide && selected) duplicateSelection(); else duplicateSlide() }
       else if (key === 'y' || key === 'z' && event.shiftKey) { if (session.current?.canRedo) redo() }
       else if (session.current?.canUndo) undo()
     } else if (key === 'delete' && !input && !modal && !nameDialog && !pendingReplacement && !context && slide && selected) {
-      event.preventDefault(); elementsCommand(slide.id, [{ op: 'remove', id: selected }])
+      event.preventDefault(); removeSelection()
     }
   })
   useEffect(() => { const handler = (event: KeyboardEvent) => shortcuts(event); window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler) }, [])
+  const paste = useEffectEvent((event: ClipboardEvent) => {
+    if (event.defaultPrevented || busy || modal || pendingReplacement || nameDialog || (event.target as HTMLElement)?.closest('input,textarea,select,[contenteditable=true]')) return
+    const data = event.clipboardData
+    if (!data) return
+    const files = [...data.files]
+    const text = data.getData('text/plain').trim()
+    if (files.length) { event.preventDefault(); void run(async () => insertAssets(await fileAssets(files))); return }
+    if (/^(?:<\?xml[\s\S]*?\?>\s*)?<svg\b/i.test(text)) { event.preventDefault(); void run(async () => insertAssets([svgAsset(text)])); return }
+    if (clipboard) { event.preventDefault(); void selectionCommand({ op: 'paste', id_prefix: `paste-${crypto.randomUUID().slice(0, 8)}`, dx: 24, dy: 24 }) }
+  })
+  useEffect(() => { const handler = (event: ClipboardEvent) => paste(event); window.addEventListener('paste', handler); return () => window.removeEventListener('paste', handler) }, [])
   useEffect(() => {
     if (!dirty) return
     const handler = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
@@ -344,7 +553,7 @@ export default function Studio() {
   const disable = busy || !deck
   const hasOrigin = Boolean(documentState?.origin)
   const importedMode = hasOrigin && !documentState?.origin?.native
-  const closeModal = () => { if (!busy) { setModal(null); setError('') } }
+  const closeModal = () => { if (!busy && !recoveryWorking) { setModal(null); setError('') } }
   function menuCommands(context: { kind: 'file' | 'canvas' | 'slide' | 'element'; slideId?: string; id?: string }): MenuCommand[] {
   const fileCommands: MenuCommand[] = [
     { label: 'New presentation', icon: FilePlus2, action: () => replacePresentation(newPresentation) },
@@ -389,7 +598,7 @@ export default function Studio() {
     { label: 'New slide', icon: Plus, action: () => newSlide(), separator: true, disabled: importedMode || (deck?.slides.length ?? 0) >= 32 },
     ...fileCommands.map((command, index) => ({ ...command, separator: index === 0 })),
   ]
-  return contextCommands
+  return contextElement && visualOf(contextElement)?.locked ? contextCommands.map((command) => ({ ...command, disabled: command.disabled || command.label !== 'Properties' })) : contextCommands
   }
 
   return <div className="studio">
@@ -406,6 +615,8 @@ export default function Studio() {
         <Tool label="Inspect PPTX" disabled={disable} onClick={() => pptxInput.current?.click()}><FileInput size={19} /></Tool>
         <Tool className="primary" label="Save PPTX" disabled={disable} onClick={() => void run(async () => { await savePresentation() })}><Save size={20} /><span>Save .pptx</span></Tool>
         <Tool label="Save as" disabled={disable} onClick={() => setNameDialog({ kind: 'save', value: filename })}><FileDown size={18} /></Tool>
+        <Tool label="Export PDF and images" disabled={disable} onClick={() => setModal('export')}><FileOutput size={18} /></Tool>
+        <Tool label="Local recovery" disabled={disable} onClick={() => void openRecovery()}><History size={18} /></Tool>
       </div>
       <input ref={pptxInput} type="file" accept=".pptx" hidden aria-label="Inspect PPTX file" onChange={(event) => {
         const file = event.target.files?.[0]
@@ -422,7 +633,7 @@ export default function Studio() {
         if (!file) return
         replacePresentation(async () => {
           if (!file.name.toLowerCase().endsWith('.pptx')) throw new Error('Choose an Open XML .pptx presentation')
-          const imported = await client.openPresentation(crypto.randomUUID(), await fileBase64(file))
+          const imported = await client.openPresentation(crypto.randomUUID(), await fileBase64(file, capacityProfile), { capacityProfile })
           session.current = imported.session; setDocumentState(imported.session.document); changeSlide(0)
           setFilename(file.name); setSavedHash(imported.session.document.hash)
           setImportWarnings(imported.warnings); setModal(imported.warnings.length > 1 ? 'import' : null); setStatus(`Opened PPTX / ${file.name}`)
@@ -432,6 +643,7 @@ export default function Studio() {
 
     <div className="ribbon">
       <div className="ribbon-group"><Tool label="Undo" disabled={disable || !historyState.undo} onClick={undo}><Undo2 size={18} /></Tool><Tool label="Redo" disabled={disable || !historyState.redo} onClick={redo}><Redo2 size={18} /></Tool></div>
+      <div className="ribbon-group" role="group" aria-label="Editing and review"><Tool label="Find and replace" disabled={disable} onClick={openTextTools}><Search /></Tool><Tool label="Advanced object settings" disabled={disable || !element || selectionLocked || selectedIds.length > 1} onClick={() => openEditingPanel('object-tools')}><SlidersHorizontal /></Tool><Tool label="Review document" disabled={disable} onClick={() => openEditingPanel('review')}><MessageSquare /></Tool><Tool label="Document setup" disabled={disable} onClick={() => openEditingPanel('setup')}><Settings2 /></Tool></div>
       <div className="ribbon-group"><Tool label="Add text" disabled={disable} onClick={() => addElement('text')}><Type size={19} /></Tool><Tool label="Add rectangle" disabled={disable} onClick={() => addElement('rect')}><Square size={18} /></Tool><Tool label="Add chart" disabled={disable} onClick={() => addElement('chart')}><ChartNoAxesCombined size={18} /></Tool>
         <Tool label="Insert objects" disabled={disable || importedMode} onClick={() => void run(async () => { setCatalog(await core<ObjectCatalog>({ op: 'object_catalog' })); setModal('insert') })}><Shapes size={18} /></Tool>
         <Tool label="Parts library" disabled={disable || importedMode} onClick={() => void run(async () => { setPartCatalog(await client.partCatalog()); setPartEditing(null); setModal('parts') })}><Blocks size={18} /></Tool>
@@ -457,49 +669,46 @@ export default function Studio() {
           setSelected(next.id)
         })
       }} />
-      <div className="ribbon-group"><Tool label="New slide" disabled={disable || importedMode || (deck?.slides.length ?? 0) >= 32} onClick={() => newSlide()}><Plus size={18} /></Tool><Tool label="Duplicate slide" disabled={disable || !slide || importedMode || (deck?.slides.length ?? 0) >= 32} onClick={() => duplicateSlide()}><Copy size={18} /></Tool><Tool label="Delete element" disabled={disable || !selected} onClick={() => { if (slide && selected) elementsCommand(slide.id, [{ op: 'remove', id: selected }]) }}><Trash2 size={18} /></Tool></div>
+      <div className="ribbon-group"><Tool label="New slide" disabled={disable || importedMode || (deck?.slides.length ?? 0) >= 32} onClick={() => newSlide()}><Plus size={18} /></Tool><Tool label="Duplicate slide" disabled={disable || !slide || importedMode || (deck?.slides.length ?? 0) >= 32} onClick={() => duplicateSlide()}><Copy size={18} /></Tool><Tool label="Delete element" disabled={disable || !selected || selectionLocked} onClick={removeSelection}><Trash2 size={18} /></Tool></div>
       <span className="ribbon-space" />
       <Tool label="Edit theme" disabled={disable || importedMode} onClick={() => void run(async () => { setDesignDefaults(deck?.design ?? await core<Design>({ op: 'design_defaults' })); setModal('theme') })}><Palette size={18} /></Tool>
       <Tool label="Edit masters and layouts" disabled={disable || importedMode} onClick={() => void run(async () => { setDesignDefaults(deck?.design ?? await core<Design>({ op: 'design_defaults' })); setModal('design') })}><LayoutTemplate size={18} /></Tool>
       {deck?.design && slide && <><select aria-label="Slide layout" className="layout-select" disabled={disable || importedMode} value={slide.layout_id ?? deck.design.layouts[0].id} onChange={(event) => { const layout_id = event.target.value; void run(async () => apply(await core<Deck>({ op: 'assign_layout', deck, slide_id: slide.id, layout_id }))) }}>{deck.design.layouts.map((layout) => <option key={layout.id} value={layout.id}>{layout.name}</option>)}</select><Tool label="Reset layout" disabled={disable || importedMode || !slide.layout_id} onClick={() => void run(async () => apply(await core<Deck>({ op: 'assign_layout', deck, slide_id: slide.id, layout_id: slide.layout_id })))}><RotateCcw size={18} /></Tool></>}
       <Tool label="New report" disabled={disable} onClick={() => replacePresentation(async () => {
         const report = await core<Report>({ op: 'sample' }); const result = await core<Compiled>({ op: 'compile', report })
-        session.current = await client.createDocument({ id: crypto.randomUUID(), deck: result.deck, report }); setDocumentState(session.current.document)
+        session.current = await client.createDocument({ id: crypto.randomUUID(), deck: result.deck, report }, { capacityProfile }); setDocumentState(session.current.document)
         setSavedHash(null); setFilename('sample-report.pptx'); setImportWarnings([]); changeSlide(0); setStatus('New synthetic report')
       })}><Presentation size={18} /></Tool>
       <Tool label="Validate layout" disabled={disable} onClick={() => void run(async () => { setLayoutReport(await core<LayoutReport>({ op: 'measure_layout', deck })); setModal('layout') })}><ScanLine size={18} /></Tool>
+      <Tool label="Fonts" disabled={disable || hasDrafts || importedMode} onClick={() => setModal('fonts')}><Type size={18} /></Tool>
       <Tool label="PPTX details" disabled={disable || !hasOrigin} onClick={() => setModal('import')}><AlertCircle size={18} /></Tool>
       <select aria-label="Zoom" className="zoom-select" value={zoom} onChange={(event) => setZoom(event.target.value)}><option value="fit">Fit</option><option value="0.75">75%</option><option value="1">100%</option></select>
-      <Tool label="Toggle inspector" pressed={showInspector} onClick={() => setShowInspector(!showInspector)}><PanelRight size={18} /></Tool>
+      <Tool label="Toggle inspector" pressed={showInspector} disabled={busy || hasDrafts} onClick={() => setShowInspector(!showInspector)}><PanelRight size={18} /></Tool>
     </div>
 
+    <SelectionTools elements={selection} disabled={disable || hasDrafts || Boolean(modal)} canPaste={Boolean(clipboard)} onCommand={(operation) => { void selectionCommand(operation) }} onCombine={(input) => { void combineShapes(input) }} canApplyFormat={Boolean(formatClipboard && formatClipboard.session === panelSession)} onCopyFormat={(paragraph, run) => { void copyFormat(paragraph, run) }} onApplyFormat={() => { void applyFormat() }} />
+    {selectionWarnings.length > 0 && <details className="selection-warning" open><summary>Selection metadata warnings</summary><ul>{selectionWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></details>}
     {error && !modal && !nameDialog && !pendingReplacement && <div className="error-strip" role="alert"><AlertCircle size={17} />{error}<button aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
 
     <div className={`workbench ${showInspector ? '' : 'inspector-hidden'}`}>
       <aside className="slide-list" aria-label="Slides">
         <div className="panel-heading"><h2>Slides</h2><span>{deck?.slides.length ?? 0}</span></div>
-        <div className="thumbnails">{deck?.slides.map((item, index) => <button key={item.id} disabled={busy} className={`thumbnail ${index === slideIndex ? 'active' : ''}`} aria-label={`Slide ${index + 1}: ${item.title.replaceAll('\n', ' ')}`} aria-current={index === slideIndex ? 'true' : undefined} onClick={() => changeSlide(index)} onContextMenu={(event) => handleContext(event, 'slide', item.id)} onKeyDown={(event) => handleContext(event, 'slide', item.id)}>
-          <div className="thumbnail-image"><SlideSurface slide={item} design={deck?.design} /></div><div className="thumbnail-caption"><span>{String(index + 1).padStart(2, '0')}</span><strong>{item.title.split('\n')[0]}</strong></div>
+        <div className="thumbnails">{deck?.slides.map((item, index) => <button key={item.id} disabled={busy || hasDrafts} className={`thumbnail ${index === slideIndex ? 'active' : ''}`} aria-label={`Slide ${index + 1}: ${item.title.replaceAll('\n', ' ')}`} aria-current={index === slideIndex ? 'true' : undefined} onClick={() => changeSlide(index)} onContextMenu={(event) => handleContext(event, 'slide', item.id)} onKeyDown={(event) => handleContext(event, 'slide', item.id)}>
+          <div className="thumbnail-image"><SlideSurface slide={item} pageNumber={index + 1} design={deck?.design} width={deck.width} height={deck.height} /></div><div className="thumbnail-caption"><span>{String(index + 1).padStart(2, '0')}</span><strong>{item.title.split('\n')[0]}</strong></div>
         </button>)}</div>
       </aside>
 
-      <main className={`canvas-workspace ${assetDrag ? 'asset-drag' : ''}`} onContextMenu={(event) => handleContext(event, 'canvas', slide?.id)} onKeyDown={(event) => handleContext(event, 'canvas', slide?.id)} onDragOver={(event) => { if (disable || modal) return; if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setAssetDrag(true) } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setAssetDrag(false) }} onDrop={(event) => {
+      <main tabIndex={0} aria-label="Active slide canvas" className={`canvas-workspace ${assetDrag ? 'asset-drag' : ''}`} onContextMenu={(event) => handleContext(event, 'canvas', slide?.id)} onKeyDown={(event) => handleContext(event, 'canvas', slide?.id)} onDragOver={(event) => { if (disable || modal) return; if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setAssetDrag(true) } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setAssetDrag(false) }} onDrop={(event) => {
         event.preventDefault(); setAssetDrag(false)
         if (disable || modal || pendingReplacement || nameDialog) return
         const stage = event.currentTarget.querySelector('.slide-stage')?.getBoundingClientRect()
-        const location = stage ? { x: (event.clientX - stage.left) * 1280 / stage.width, y: (event.clientY - stage.top) * 1280 / stage.width } : undefined
+        const location = stage ? { x: (event.clientX - stage.left) * (deck?.width ?? 1280) / stage.width, y: (event.clientY - stage.top) * (deck?.width ?? 1280) / stage.width } : undefined
         void importDropped([...event.dataTransfer.files], location)
-      }} onPaste={(event) => {
-        if (disable || modal || pendingReplacement || nameDialog || (event.target as HTMLElement).closest('input,textarea,[contenteditable=true]')) return
-        const files = [...event.clipboardData.files]
-        if (files.length) { event.preventDefault(); void run(async () => insertAssets(await fileAssets(files))); return }
-        const text = event.clipboardData.getData('text/plain').trim()
-        if (/^(?:<\?xml[\s\S]*?\?>\s*)?<svg\b/i.test(text)) { event.preventDefault(); void run(async () => insertAssets([svgAsset(text)])) }
       }}>
         <div className="canvas-heading"><span>{String(slideIndex + 1).padStart(2, '0')} <span className="slash">/</span> {String(deck?.slides.length ?? 0).padStart(2, '0')}</span><h2>{slide?.title.split('\n')[0] ?? 'Opening report'}</h2><span className="native-badge">NATIVE OBJECTS</span></div>
         <div className="canvas-scroll">
-          <div className="slide-stage" style={{ width: zoom === 'fit' ? '100%' : `${1280 * Number(zoom)}px` }}>
-            {slide ? <SlideSurface key={documentState?.id} slide={slide} design={deck?.design} selected={selected} onEdit={editOnSlide} onDraftChange={setInlineDraft} editRequest={editRequest} onContextMenu={(position, id) => openContext(id ? 'element' : 'canvas', position, slide.id, id)} onSelect={busy ? undefined : setSelected} onMove={(id, x, y) => {
+          <div className="slide-stage" style={{ width: zoom === 'fit' ? '100%' : `${(deck?.width ?? 1280) * Number(zoom)}px` }}>
+            {slide ? <SlideSurface key={documentState?.id} slide={slide} pageNumber={slideIndex + 1} design={deck?.design} width={deck?.width} height={deck?.height} selected={selected} selectedIds={selectedIds} onSelectMany={selectMany} onSelectionTransform={selectionCommand} onEdit={editOnSlide} onDraftChange={setInlineDraft} onBusy={setInlineWorking} disabled={documentBusy} editRequest={editRequest} onContextMenu={(position, id) => openContext(id ? 'element' : 'canvas', position, slide.id, id)} onSelect={busy || hasDrafts ? undefined : selectElement} onMove={(id, x, y) => {
               const original = slide.elements.find((item) => item.id === id)
               if (original && !busy) return replaceElement({ ...original, x, y })
             }} onResize={(id, width, height) => {
@@ -508,27 +717,48 @@ export default function Studio() {
             }} /> : <div className="loading-state">{error ? 'Core unavailable' : 'Opening local report...'}</div>}
           </div>
         </div>
-        <div className="canvas-footer"><span>{selected ? `${element?.type ?? ''} / ${selected}` : 'No selection'}</span><div><Tool label="Previous slide" disabled={slideIndex === 0} onClick={() => changeSlide(slideIndex - 1)}><ChevronLeft size={17} /></Tool><Tool label="Next slide" disabled={!deck || slideIndex === deck.slides.length - 1} onClick={() => changeSlide(slideIndex + 1)}><ChevronRight size={17} /></Tool></div></div>
+        <div className="canvas-footer"><span>{selected ? `${element?.type ?? ''} / ${selected}` : 'No selection'}</span><div><Tool label="Previous slide" disabled={busy || hasDrafts || slideIndex === 0} onClick={() => changeSlide(slideIndex - 1)}><ChevronLeft size={17} /></Tool><Tool label="Next slide" disabled={busy || hasDrafts || !deck || slideIndex === deck.slides.length - 1} onClick={() => changeSlide(slideIndex + 1)}><ChevronRight size={17} /></Tool></div></div>
         <div className="notes-preview"><FileText size={16} /><span>{slide?.notes.split('\n')[0]}</span></div>
       </main>
 
       {showInspector && <aside className="inspector" aria-label="Inspector">
-        <div className="panel-tabs" role="tablist" aria-label="Inspector views"><button role="tab" aria-selected={panel === 'elements'} onClick={() => setPanel('elements')}><Layers size={16} />Elements</button><button role="tab" aria-selected={panel === 'notes'} onClick={() => setPanel('notes')}><FileText size={16} />Notes</button></div>
+        <div className="panel-tabs" role="tablist" aria-label="Inspector views"><button role="tab" disabled={busy || hasDrafts} aria-selected={panel === 'elements'} onClick={() => setPanel('elements')}><Layers size={16} />Elements</button><button role="tab" disabled={busy || hasDrafts} aria-selected={panel === 'notes'} onClick={() => setPanel('notes')}><FileText size={16} />Notes</button></div>
         {panel === 'elements' ? <>
-          <div className="layer-list">{slide?.elements.map((item) => <button key={item.id} disabled={busy} className={selected === item.id ? 'active' : ''} aria-label={`Select ${item.id}`} onClick={() => setSelected(item.id)} onContextMenu={(event) => handleContext(event, 'element', slide.id, item.id)} onKeyDown={(event) => handleContext(event, 'element', slide.id, item.id)}>{item.type === 'text' ? <Type size={15} /> : item.type === 'table' ? <Table2 size={15} /> : <Square size={15} />}<span>{item.id}</span></button>)}</div>
+          <div className="layer-list">{slide?.elements.map((item) => <div className="selection-layer" key={item.id}><button disabled={busy} className={selectedIds.includes(item.id) ? 'active' : ''} aria-label={`Select ${item.id}`} aria-pressed={selectedIds.includes(item.id)} onClick={(event) => selectElement(item.id, event.shiftKey || event.ctrlKey || event.metaKey)} onContextMenu={(event) => handleContext(event, 'element', slide.id, item.id)} onKeyDown={(event) => handleContext(event, 'element', slide.id, item.id)}>{item.type === 'text' ? <Type size={15} /> : item.type === 'table' ? <Table2 size={15} /> : <Square size={15} />}<span>{item.id}</span></button><Tool label={`${visualOf(item)?.hidden ? 'Show' : 'Hide'} ${item.id}`} disabled={busy || hasDrafts || item.type === 'table' || item.type === 'chart'} onClick={() => toggleLayer(item, 'hidden')}>{visualOf(item)?.hidden ? <EyeOff /> : <Eye />}</Tool><Tool label={`${visualOf(item)?.locked ? 'Unlock' : 'Lock'} ${item.id}`} disabled={busy || hasDrafts || item.type === 'table' || item.type === 'chart'} onClick={() => toggleLayer(item, 'locked')}>{visualOf(item)?.locked ? <Lock /> : <Unlock />}</Tool></div>)}</div>
           {selectedPart && <div className="part-data-action"><button className="secondary" aria-label={selectedPart.spec.data.kind === 'diagram' ? 'Edit graph' : 'Edit part data'} disabled={busy || selectedPart.stale} onClick={() => void run(async () => { setPartEditing(selectedPart); if (selectedPart.spec.data.kind === 'diagram') { setGraphCatalog(await client.graphCatalog()); setModal('graph') } else { setPartCatalog(await client.partCatalog()); setModal('parts') } })}><Blocks size={16} />{selectedPart.spec.data.kind === 'diagram' ? 'Edit graph' : 'Edit part data'}</button>{selectedPart.stale && <p>Part data is out of sync with native edits.</p>}</div>}
-          {element ? <><div className="selection-heading"><strong>{element.id}</strong><span>{element.type}</span></div><Properties key={JSON.stringify(element)} element={element} theme={deck?.design?.theme} busy={busy} onDraftChange={setPropertiesDraft} onApply={async (value) => editOnSlide(value.type === 'text' && value.format?.inherit_layout ? { ...value, format: { ...value.format, inherit_layout: false } } : value)} onReplaceImage={() => { pictureTarget.current = element.id; pictureInput.current?.click() }} /></> : <div className="empty-properties"><Layers size={24} /><p>No element selected</p></div>}
+          {element && selectedIds.length === 1 ? <><div className="selection-heading"><strong>{element.id}</strong><span>{element.type}</span></div><Properties key={JSON.stringify(element)} element={element} theme={deck?.design?.theme} width={deck?.width ?? 1280} height={deck?.height ?? 720} busy={busy || selectionLocked || Boolean(visualOf(element)?.hidden)} onTextBusy={setPropertiesWorking} onDraftChange={setPropertiesDraft} onApply={async (value) => editOnSlide(value.type === 'text' && value.format?.inherit_layout ? { ...value, format: { ...value.format, inherit_layout: false } } : value)} onReplaceImage={() => { pictureTarget.current = element.id; pictureInput.current?.click() }} /></> : <div className="empty-properties"><Layers size={24} /><p>{selectedIds.length ? `${selectedIds.length} elements selected` : 'No element selected'}</p></div>}
           {slide && deck && <div className="slide-design-properties"><ColorField label="Slide background" value={slide.background} theme={deck.design?.theme} onChange={(background) => void run(() => apply({ ...deck, slides: deck.slides.map((entry) => entry.id === slide.id ? { ...entry, background, inherit_background: false } : entry) }))} />{deck.design && <><label className="checkbox"><input type="checkbox" disabled={busy} checked={Boolean(slide.inherit_background)} onChange={(event) => { const inherit_background = event.target.checked; void run(() => apply({ ...deck, slides: deck.slides.map((entry) => entry.id === slide.id ? { ...entry, inherit_background } : entry) })) }} />Use layout background</label><label className="checkbox"><input type="checkbox" disabled={busy} checked={!slide.hide_master_graphics} onChange={(event) => { const hide_master_graphics = !event.target.checked; void run(() => apply({ ...deck, slides: deck.slides.map((entry) => entry.id === slide.id ? { ...entry, hide_master_graphics } : entry) })) }} />Show master graphics</label></>}</div>}
           <div className="slide-order"><span>Slide order</span><Tool label="Move slide up" disabled={disable || importedMode || slideIndex === 0} onClick={() => { if (slide) slidesCommand([{ op: 'move', slide_id: slide.id, index: slideIndex - 1 }]) }}><ArrowUp size={16} /></Tool><Tool label="Move slide down" disabled={disable || importedMode || !deck || slideIndex >= deck.slides.length - 1} onClick={() => { if (slide) slidesCommand([{ op: 'move', slide_id: slide.id, index: slideIndex + 1 }]) }}><ArrowDown size={16} /></Tool></div>
-        </> : <div className="notes-panel"><h3>Speaker notes & sources</h3><p>{slide?.notes}</p></div>}
+        </> : <div className="notes-panel"><h3>Speaker notes & sources</h3><Tool label="Edit speaker notes" disabled={disable} onClick={() => openEditingPanel('review')}><Pencil /></Tool>{slide?.notes_paragraphs?.length ? slide.notes_paragraphs.map((paragraph, index) => <p key={index} style={{ textAlign: paragraph.alignment ?? 'left' }}>{paragraph.runs.map((run, index) => <span key={index} style={{ fontWeight: run.style?.bold ? 700 : 400, fontStyle: run.style?.italic ? 'italic' : 'normal', textDecoration: run.style?.underline ? 'underline' : 'none' }}>{run.text}</span>)}</p>) : <p>{slide?.notes}</p>}</div>}
         <div className="validation-note"><AlertCircle size={16} /><span>Office text layout unverified</span></div>
+        {panel === 'notes' && slide && deck?.auxiliary_design?.notes_master && <details><summary>Notes page</summary><NotesPagePreview slide={slide} auxiliary={deck.auxiliary_design} pageNumber={slideIndex + 1} /></details>}
       </aside>}
     </div>
-    <footer className="status-bar"><span className={busy ? 'status busy' : 'status'}>{busy ? 'Processing' : status}</span><span>{deck?.slides.length ?? 0} slides<span className="status-divider">|</span>16:9<span className="status-divider">|</span>Core 0.1</span></footer>
+    <footer className="status-bar"><span className={busy ? 'status busy' : 'status'}>{busy ? 'Processing' : status}</span><span>{deck?.slides.length ?? 0} slides<span className="status-divider">|</span>{deck?.width ?? 1280} x {deck?.height ?? 720}<span className="status-divider">|</span>Core 0.1</span></footer>
+    {recoveryEnabled && recoveryStatus && <div className="recovery-status" role="status">{recoveryStatus}</div>}
+    {recoveryFailure && <div className="error recovery-status" role="alert">{recoveryFailure}</div>}
+    {historyBoundary && <div className="recovery-status" role="status">Undo/Redo history boundary reached (30 receipts or 4 MiB per direction). Earlier changes are no longer reversible in this session.</div>}
 
     {context && <ContextMenu position={context.position} label={`${context.kind} actions`} commands={context.commands} onClose={closeContext} />}
+    {modal === 'export' && panelSession && <Modal title="Export PDF and images" onClose={closeModal}><ExportPanel session={panelSession} pageIndex={slideIndex} onBusy={setOutputBusy} /></Modal>}
+    <DocumentFonts key={documentState?.id} fonts={deck?.embedded_fonts} />
+    {modal === 'fonts' && panelSession && <Modal title="Fonts" onClose={closeModal}><FontPanel session={panelSession} element={element ?? undefined} slideId={slide?.id} onDocument={setDocumentState} onBusy={setBusy} /></Modal>}
+    {modal === 'recovery' && <Modal title="Local recovery" busy={recoveryWorking} onClose={closeModal}><SessionRecoveryPanel enabled={recoveryEnabled} onEnabledChange={changeRecoveryEnabled} onRestore={restoreRecovery} onLegacyRestore={restoreLegacyRecovery} onBusy={setRecoveryWorking} /></Modal>}
+    {modal === 'object-tools' && panelSession && slide && element && <Modal title="Advanced object settings" onClose={closeModal}><ObjectToolsPanel session={panelSession} element={element} slideId={slide.id} onDocument={setDocumentState} onBusy={setBusy} /></Modal>}
+    {modal === 'review' && panelSession && slide && <Modal title="Review document" onClose={closeModal}><ReviewPanel session={panelSession} slideId={slide.id} selectedId={selected} onDocument={setDocumentState} onBusy={setBusy} onExport={exportPanelBytes} onNavigate={(slideId, id) => { const index = deck?.slides.findIndex((entry) => entry.id === slideId) ?? -1; if (index >= 0) { changeSlide(index); setSelected(id); setModal(null) } }} /></Modal>}
+    {modal === 'setup' && panelSession && <Modal title="Document setup" onClose={closeModal}><DocumentSetupPanel session={panelSession} onDocument={setDocumentState} onBusy={setBusy} onExport={exportPanelBytes} onBeforeOpen={() => dirty ? new Promise<boolean>((resolve) => setTemplateDecision(() => resolve)) : Promise.resolve(true)} onReplaceSession={(replacement) => {
+      session.current = replacement; setDocumentState(replacement.document); setSavedHash(null); setFilename('Untitled presentation.pptx'); setImportWarnings([]); changeSlide(0); setStatus('New presentation from template / Unsaved')
+    }} /></Modal>}
+    {templateDecision && <Modal title="Replace unsaved presentation" onClose={() => { templateDecision(false); setTemplateDecision(null) }}><div className="workspace-form"><p>Discard unsaved changes to {deck?.title} and open the template?</p><div className="form-actions"><button className="secondary" onClick={() => { templateDecision(false); setTemplateDecision(null) }}>Cancel</button><button className="primary" onClick={() => { templateDecision(true); setTemplateDecision(null) }}>Discard changes and open template</button></div></div></Modal>}
+    {modal === 'text-tools' && panelSession && <Modal title="Find and replace" onClose={closeModal}><TextToolsPanel session={panelSession} disabled={hasDrafts} onBusy={setBusy} onDocument={setDocumentState} proofingSelection={slide && selected ? { slideId: slide.id, id: selected } : undefined} onNavigate={(index, id, path) => {
+      changeSlide(index)
+      const rootIndex = path?.split('/')[3] === 'elements' ? Number(path.split('/')[4]) : undefined
+      setSelected(rootIndex === undefined ? id ?? null : deck?.slides[index]?.elements[rootIndex]?.id ?? id ?? null)
+      if (path?.endsWith('/notes')) { setPanel('notes'); setShowInspector(true) }
+      setModal(null)
+    }} /></Modal>}
     {modal === 'assets' && <Modal title="Icons and assets" onClose={closeModal}><Suspense fallback={<p role="status">Loading icons</p>}><AssetPanel onBusy={setBusy} onInsert={async (assets) => { await insertAssets(assets); setModal(null) }} /></Suspense></Modal>}
-    {pendingReplacement && <Modal title="Unsaved changes" onClose={() => { if (!busy) setPendingReplacement(null) }}><div className="workspace-form"><p>Save changes to {deck?.title}?</p>{error && <p role="alert" className="error">{error}</p>}<div className="form-actions"><button className="secondary" disabled={busy} onClick={() => setPendingReplacement(null)}>Cancel</button><button className="secondary" disabled={busy} onClick={() => void run(async () => { await pendingReplacement(); setPendingReplacement(null) })}>Discard changes</button><button className="primary" disabled={busy} onClick={() => void run(async () => { if (await savePresentation()) { await pendingReplacement(); setPendingReplacement(null) } })}><Save size={16} />Save and continue</button></div></div></Modal>}
+    {pendingReplacement && <Modal title="Unsaved changes" onClose={() => { if (!busy) setPendingReplacement(null) }}><div className="workspace-form"><p>Save changes to {deck?.title}?</p>{error && <p role="alert" className="error">{error}</p>}<div className="form-actions"><button className="secondary" disabled={busy} onClick={() => setPendingReplacement(null)}>Cancel</button><button className="secondary" disabled={busy} onClick={() => void run(async () => { await pendingReplacement(); setPendingReplacement(null) }, true)}>Discard changes</button><button className="primary" disabled={busy} onClick={() => void run(async () => { if (await savePresentation()) { await pendingReplacement(); setPendingReplacement(null) } }, true)}><Save size={16} />Save and continue</button></div></div></Modal>}
     {nameDialog && <Modal title={nameDialog.kind === 'save' ? 'Save presentation' : nameDialog.kind === 'slide' ? 'Rename slide' : 'Rename presentation'} onClose={() => { if (!busy) setNameDialog(null) }}><form className="workspace-form" onSubmit={(event) => {
       event.preventDefault()
       void run(async () => {
@@ -567,14 +797,14 @@ export default function Studio() {
     {modal === 'theme' && designDefaults && deck && <Modal title="Theme" onClose={closeModal}><ThemePanel theme={designDefaults.theme} onBusy={setBusy} onApply={async (theme) => {
       await apply(await core<Deck>({ op: 'apply_theme', deck, theme })); setModal(null)
     }} /></Modal>}
-    {modal === 'design' && designDefaults && deck && <Modal title="Masters and layouts" onClose={closeModal}><DesignPanel design={designDefaults} deck={deck} preserveStructure={hasOrigin} onBusy={setBusy} onSave={async (design) => { await apply(await core<Deck>({ op: 'update_design', deck, design })); setModal(null) }} onPreset={async (preset_id, design) => {
+    {modal === 'design' && designDefaults && deck && <Modal title="Masters and layouts" onClose={closeModal}><DesignPanel design={designDefaults} deck={deck} onBusy={setBusy} onSave={async (design, auxiliary_design) => { await apply(await core<Deck>({ op: 'update_design', deck: { ...deck, auxiliary_design }, design })); setModal(null) }} onPreset={async (preset_id, design) => {
       const updated = await core<Deck>({ op: 'update_design', deck, design })
       await apply(await core<Deck>({ op: 'apply_design_preset', deck: updated, preset_id })); setModal(null)
     }} /></Modal>}
 
     {modal === 'sources' && <Modal title="Sources" onClose={closeModal}>
       <SourcePanel sources={documentState?.sources ?? []} onBusy={setBusy} onApply={async (result, source) => {
-        if (hasOrigin) { const next = await client.createDocument({ id: crypto.randomUUID(), deck: result.compiled.deck, report: result.report, sources: [source], bindings: result.bindings }); session.current = next; setDocumentState(next.document) }
+        if (hasOrigin) { const next = await client.createDocument({ id: crypto.randomUUID(), deck: result.compiled.deck, report: result.report, sources: [source], bindings: result.bindings }, { capacityProfile }); session.current = next; setDocumentState(next.document) }
         else await apply(result.compiled.deck, { report: result.report, sources: [source], bindings: result.bindings })
         changeSlide(0); setStatus('Source-bound report / Data not independently verified'); setModal(null)
       }} onAttach={async (source) => {
@@ -591,7 +821,7 @@ export default function Studio() {
       </div>
     </Modal>}
     {modal === 'import' && <Modal title="PPTX details" onClose={closeModal}>
-      <div className="source-form"><p className="warning">Original package retained. Unsupported content may be absent from preview. Slide/master/layout counts and order are currently preserved when reopening a PPTX. Unsupported edits fail without replacing the open document.</p><ul className="layout-issues">{importWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div>
+      <div className="source-form"><p className="warning">Original package retained. Unsupported content may be absent from preview. Structural edits are validated by the core. Unsupported edits fail without replacing the open document.</p><ul className="layout-issues">{importWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div>
     </Modal>}
 
     {modal === 'report' && <Modal title="Report data" onClose={closeModal}>

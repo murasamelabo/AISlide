@@ -1,4 +1,4 @@
-﻿use crate::{model::{Deck, Slide, Element, Issue, ChartKind, ChartSeries, valid_text, validate_deck, validate_rows, validate_chart}, Error, Result};
+﻿use crate::{model::{Deck, Slide, Element, Issue, ChartKind, ChartSeries, ChartOptions, valid_text, validate_deck, validate_rows}, Error, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -12,7 +12,7 @@ pub struct ReportInput {
     pub period: String,
     #[schemars(length(max = 1200))]
     pub source: String,
-    #[schemars(length(min = 1, max = 32))]
+    #[schemars(length(min = 1, max = 128))]
     pub sections: Vec<Section>,
 }
 
@@ -35,7 +35,11 @@ pub struct Section {
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ReportChart { pub kind: ChartKind, pub categories: Vec<String>, pub series: Vec<ChartSeries> }
+pub struct ReportChart {
+    pub kind: ChartKind, pub categories: Vec<String>, pub series: Vec<ChartSeries>,
+    #[serde(default, skip_serializing_if = "ChartOptions::is_default")]
+    pub options: ChartOptions,
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -54,11 +58,11 @@ const TEAL: &str = "087F73";
 const CORAL: &str = "CF5847";
 
 fn text(id: &str, bounds: [f64; 4], value: &str, size: f64, color: &str, bold: bool) -> Element {
-    Element::Text { id: id.into(), x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3], text: value.into(), font_size: size, color: color.into(), bold, format: Default::default() }
+    Element::Text { visual: None, id: id.into(), x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3], text: value.into(), font_size: size, color: color.into(), bold, format: Default::default() }
 }
 
 fn rect(id: &str, bounds: [f64; 4], fill: &str) -> Element {
-    Element::Rect { id: id.into(), x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3], fill: fill.into() }
+    Element::Rect { visual: None, id: id.into(), x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3], fill: fill.into() }
 }
 
 pub fn compile_report(report: &ReportInput) -> Result<CompiledReport> {
@@ -66,8 +70,8 @@ pub fn compile_report(report: &ReportInput) -> Result<CompiledReport> {
     valid_text(&report.subtitle, 200)?;
     valid_text(&report.period, 80)?;
     valid_text(&report.source, 1200)?;
-    if report.title.trim().is_empty() || report.sections.is_empty() || report.sections.len() > 32 {
-        return Err(Error::Invalid("a title and 1-32 sections are required".into()));
+    if report.title.trim().is_empty() || report.sections.is_empty() || report.sections.len() > crate::limits::LARGE.slides {
+        return Err(Error::Invalid("a title and 1-128 sections are required".into()));
     }
     let mut slides = Vec::new();
     for (index, section) in report.sections.iter().enumerate() {
@@ -110,13 +114,13 @@ pub fn compile_report(report: &ReportInput) -> Result<CompiledReport> {
             }
             Layout::Table => {
                 validate_rows(&section.rows)?;
-                elements.push(Element::Table { id: "data-table".into(), x: 64.0, y: 230.0, width: 1152.0, height: 340.0, rows: section.rows.clone(), font_size: if section.rows.len() > 6 { 12.0 } else { 20.0 } });
+                elements.push(Element::Table { id: "data-table".into(), x: 64.0, y: 230.0, width: 1152.0, height: 340.0, rows: section.rows.clone(), font_size: if section.rows.len() > 6 { 12.0 } else { 20.0 }, format: Default::default() });
                 elements.push(text("body", [64.0, 590.0, 1152.0, 57.0], &section.body.join("\n"), 16.0, MUTED, false));
             }
             Layout::Chart => {
                 let chart = section.chart.as_ref().ok_or_else(|| Error::Invalid("chart layout requires chart data".into()))?;
-                validate_chart(&chart.categories, &chart.series)?;
-                elements.push(Element::Chart { id: "data-chart".into(), x: 64.0, y: 225.0, width: 1152.0, height: 352.0, kind: chart.kind, categories: chart.categories.clone(), series: chart.series.clone() });
+                crate::model::chart_format::validate(chart.kind, &chart.categories, &chart.series, &chart.options)?;
+                elements.push(Element::Chart { id: "data-chart".into(), x: 64.0, y: 225.0, width: 1152.0, height: 352.0, kind: chart.kind, categories: chart.categories.clone(), series: chart.series.clone(), options: chart.options.clone() });
                 elements.push(text("body", [64.0, 590.0, 1152.0, 57.0], &section.body.join("\n"), 16.0, MUTED, false));
             }
             Layout::Process => elements.push(crate::graphics::create_diagram("process", &section.body)?),
@@ -135,9 +139,9 @@ pub fn compile_report(report: &ReportInput) -> Result<CompiledReport> {
                 elements.push(text("body", [104.0, 244.0, 1050.0, 358.0], &section.body.join("\n\n"), 32.0, INK, false));
             }
         }
-        slides.push(Slide { id: format!("slide-{}", index + 1), title: section.title.clone(), background: "FFFFFF".into(), elements, notes: format!("{}\n\nSource: {}", section.body.join("\n"), report.source), layout_id: None, inherit_background: false, hide_master_graphics: false, native_source_id: None });
+        slides.push(Slide { id: format!("slide-{}", index + 1), title: section.title.clone(), background: "FFFFFF".into(), elements, notes: format!("{}\n\nSource: {}", section.body.join("\n"), report.source), notes_paragraphs: Vec::new(), layout_id: None, inherit_background: false, hide_master_graphics: false, native_source_id: None, review: None });
     }
-    let deck = Deck { version: 1, title: report.title.clone(), width: 1280, height: 720, slides, design: None };
+    let deck = Deck { version: 1, title: report.title.clone(), width: 1280, height: 720, slides, design: None, embedded_fonts: Vec::new(), auxiliary_design: None };
     validate_deck(&deck)?;
     Ok(CompiledReport { deck, issues: vec![Issue { severity: "warning".into(), code: "FONT_PARITY_UNVERIFIED".into(), message: "PowerPoint text wrapping depends on installed fonts. Native Office parity has not been established.".into() }] })
 }

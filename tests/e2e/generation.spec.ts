@@ -40,7 +40,7 @@ test('cancel stops generation without changing the deck and permits a retry', as
   await page.getByRole('button', { name: 'Generate draft', exact: true }).click();
   await pending;
   await page.getByRole('button', { name: 'Cancel generation', exact: true }).click();
-  await expect(page.getByRole('status')).toContainText('Generation cancelled');
+  await expect(page.getByRole('dialog', { name: 'Generate report', exact: true }).getByRole('status')).toContainText('Generation cancelled');
   await expect(page.locator('.document-name strong')).toHaveText('Quarterly performance');
   await page.getByLabel('Brief', { exact: true }).fill('Retry after cancellation');
   await page.getByRole('button', { name: 'Generate draft', exact: true }).click();

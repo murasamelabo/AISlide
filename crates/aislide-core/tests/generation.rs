@@ -186,3 +186,70 @@ fn generation_async_api_works_inside_the_tauri_runtime() {
     assert_eq!(result.compiled.deck.slides.len(), 12);
     server.join().unwrap();
 }
+
+#[test]
+fn local_assist_strict_model_response_and_schema_are_not_template_fallbacks() {
+    use aislide_core::{text_assist::{assist, Input, Task}, generation::CancellationToken};
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let input = Input { task: Task::Proofread, text: "This are a test.".into(), language: "en".into(), target_language: None };
+    for content in [r#"{"text":"This is a test."}"#, r#"{"text":"Text","kind":"html"}"#, r#"{"text":""}"#, r#"{"text":"First\nSecond"}"#, "not JSON", r#"{"text":"first","text":"duplicate"}"#] {
+        let (address, requests, server) = serve_once("200 OK", json!({"choices":[{"finish_reason":"stop","message":{"content":content}}]}).to_string(), "");
+        let config = ProviderConfig::new(&address,"fixture-not-real-ai",None,false).unwrap();
+        let result = runtime.block_on(assist(&config,&input,CancellationToken::new()));
+        server.join().unwrap();
+        let request = requests.recv().unwrap();
+        assert_eq!(request["response_format"]["json_schema"]["strict"],true);
+        assert_eq!(request["response_format"]["json_schema"]["schema"]["additionalProperties"],false);
+        if content.contains("This is a test.") { assert_eq!(result.unwrap().candidate.text,"This is a test."); } else { assert!(result.is_err(),"{content}"); }
+    }
+}
+
+#[test]
+fn local_assist_rejects_remote_even_with_consent_and_early_cancel() {
+    use aislide_core::{text_assist::{assist, Input, Task}, generation::CancellationToken};
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let input = Input { task: Task::Translate, text: "Hello.".into(), language: "en".into(), target_language: Some("ja-JP".into()) };
+    let remote = ProviderConfig::new("https://example.invalid/v1","test",None,true).unwrap();
+    assert!(runtime.block_on(assist(&remote,&input,CancellationToken::new())).unwrap_err().to_string().contains("forbids remote"));
+    let local = ProviderConfig::new("http://127.0.0.1:1/v1","test",None,false).unwrap();
+    let token = CancellationToken::new(); token.cancel();
+    assert!(runtime.block_on(assist(&local,&input,token)).unwrap_err().to_string().contains("cancelled"));
+    let mut oversized = input; oversized.text = "x".repeat(8001);
+    assert!(runtime.block_on(assist(&local,&oversized,CancellationToken::new())).is_err());
+}
+
+#[test]
+fn local_assist_cancellation_interrupts_an_inflight_http_request() {
+    use aislide_core::{text_assist::{assist, Input, Task}, generation::CancellationToken};
+    use std::time::Duration;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("http://{}/v1", listener.local_addr().unwrap());
+    let (connected, ready) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut buffer = [0; 4096];
+        assert!(stream.read(&mut buffer).unwrap() > 0);
+        connected.send(()).unwrap();
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {},
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(error) => panic!("cancelled HTTP remained open: {error}"),
+            }
+        }
+    });
+    let token = CancellationToken::new();
+    let worker_token = token.clone();
+    let worker = thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let config = ProviderConfig::new(&address, "bounded-fixture", None, false).unwrap();
+        let input = Input { task: Task::Proofread, text: "This are a test.".into(), language: "en".into(), target_language: None };
+        runtime.block_on(assist(&config, &input, worker_token)).unwrap_err().to_string()
+    });
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    token.cancel();
+    assert!(worker.join().unwrap().contains("cancelled"));
+    server.join().unwrap();
+}

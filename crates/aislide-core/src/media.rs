@@ -16,15 +16,24 @@ thread_local! {
 
 pub fn create_asset(id: &str, base64: String, mime_type: &str, alt: &str, size: f64) -> Result<crate::model::Element> {
     if !size.is_finite() || !(8.0..=640.0).contains(&size) { return Err(Error::Invalid("asset size must be 8-640 pixels".into())); }
-    let (data, mime) = if mime_type == "image/svg+xml" { (svg_png(&base64, 1024)?, "image/png") } else { (base64, mime_type) };
+    if matches!(mime_type,"image/emf" | "image/wmf") {
+        let svg = crate::vector::metafile_svg(&base64,mime_type)?;
+        return create_asset(id,STANDARD.encode(svg),"image/svg+xml",alt,size);
+    }
+    let svg = (mime_type == "image/svg+xml").then(|| base64.clone());
+    let (data, mime) = if mime_type == "image/svg+xml" { (crate::vector::prepare_svg(&base64)?, "image/png") } else { (base64, mime_type) };
     let mut picture = create_picture(id, data, mime, alt)?;
-    if let crate::model::Element::Picture { width, height, y, .. } = &mut picture {
+    if let crate::model::Element::Picture { width, height, y, svg: retained, .. } = &mut picture {
+        *retained = svg;
         let scale = size / width.max(*height); *width *= scale; *height *= scale; *y = 180.0;
     }
     Ok(picture)
 }
 
 pub(crate) fn icon_raster(base64: String, mime_type: &str) -> Result<(String, String)> {
+    if matches!(mime_type,"image/emf" | "image/wmf") {
+        return icon_raster(STANDARD.encode(crate::vector::metafile_svg(&base64,mime_type)?),"image/svg+xml");
+    }
     if mime_type == "image/svg+xml" {
         let data = svg_png(&base64, 256)?;
         inspect_raster(&data, "image/png")?;
@@ -42,25 +51,44 @@ pub(crate) fn icon_raster(base64: String, mime_type: &str) -> Result<(String, St
     Ok((data, mime_type.into()))
 }
 
-fn svg_png(encoded: &str, resolution: u32) -> Result<String> {
+pub(crate) fn svg_png(encoded: &str, resolution: u32) -> Result<String> {
     if encoded.len() > 349528 { return Err(Error::Limit("SVG exceeds 256 KiB".into())); }
     let bytes = STANDARD.decode(encoded).map_err(|_| Error::Invalid("invalid SVG base64".into()))?;
     if bytes.len() > 262144 { return Err(Error::Limit("SVG exceeds 256 KiB".into())); }
     let svg = std::str::from_utf8(&bytes).map_err(|_| Error::Invalid("SVG must be UTF-8".into()))?.trim_start_matches('\u{feff}');
     let document = crate::pptx::parse(svg)?;
+    if document.descendants().any(|node| node.is_pi()) { return Err(Error::Unsupported("SVG processing instructions are not allowed".into())); }
     const SVG: &str = "http://www.w3.org/2000/svg";
     if !document.root_element().has_tag_name((SVG, "svg")) { return Err(Error::Invalid("an SVG root with its standard namespace is required".into())); }
-    let elements = ["svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "defs", "linearGradient", "radialGradient", "stop", "clipPath", "mask", "title", "desc"];
+    let elements = ["svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "defs", "linearGradient", "radialGradient", "stop", "clipPath", "mask", "title", "desc", "text", "tspan", "image"];
     let attributes = ["id", "class", "viewBox", "preserveAspectRatio", "width", "height", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry", "fx", "fy", "fr", "d", "points", "fill", "fill-rule", "fill-opacity", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "stroke-opacity", "opacity", "color", "transform", "clip-path", "clip-rule", "mask", "maskUnits", "maskContentUnits", "gradientUnits", "gradientTransform", "spreadMethod", "offset", "stop-color", "stop-opacity", "href", "version", "role", "aria-hidden", "aria-label", "focusable", "shape-rendering", "vector-effect"];
+    let text_attributes = ["font-family","font-size","font-weight","font-style","text-anchor","dominant-baseline","dx","dy","letter-spacing","word-spacing","text-decoration"];
     let mut ids = std::collections::BTreeSet::new(); let mut count = 0;
+    let mut image_count = 0; let mut image_pixels = 0u64; let mut characters = 0usize; let mut has_text = false;
     for node in document.descendants().filter(|node| node.is_element()) {
         count += 1;
         if count > 2048 || node.ancestors().count() > 32 { return Err(Error::Limit("SVG exceeds element/depth limits".into())); }
         if node.tag_name().namespace() != Some(SVG) || !elements.contains(&node.tag_name().name()) { return Err(Error::Unsupported("SVG contains unsupported content; export outlined paths or PNG instead".into())); }
+        if node.has_tag_name((SVG,"text")) || node.has_tag_name((SVG,"tspan")) {
+            has_text = true;
+            characters += node.children().filter(|child| child.is_text()).map(|child| child.text().unwrap_or_default().chars().count()).sum::<usize>();
+            if characters>16000 { return Err(Error::Limit("SVG text exceeds 16000 characters".into())); }
+        }
+        if node.has_tag_name((SVG,"image")) {
+            image_count += 1;
+            if image_count>8 { return Err(Error::Limit("SVG exceeds eight embedded raster images".into())); }
+            let references: Vec<_> = node.attributes().filter(|attribute| attribute.name()=="href").collect();
+            if references.len()!=1 { return Err(Error::Invalid("SVG image requires exactly one embedded data reference".into())); }
+            let (mime,data) = embedded_raster(references[0].value())?;
+            let info = inspect_raster(data,mime)?;
+            image_pixels += u64::from(info.width)*u64::from(info.height);
+            if image_pixels>16*1024*1024 { return Err(Error::Limit("SVG embedded rasters exceed 16 million decoded pixels".into())); }
+        }
         if let Some(id) = node.attribute("id") { if !ids.insert(id) { return Err(Error::Invalid("duplicate SVG identity".into())); } }
         for attribute in node.attributes() {
-            if !attributes.contains(&attribute.name()) || attribute.namespace().is_some_and(|namespace| namespace != "http://www.w3.org/1999/xlink") { return Err(Error::Unsupported("SVG attribute is outside the inert icon subset".into())); }
+            if (!attributes.contains(&attribute.name()) && !text_attributes.contains(&attribute.name())) || attribute.namespace().is_some_and(|namespace| namespace != "http://www.w3.org/1999/xlink" || attribute.name()!="href") { return Err(Error::Unsupported("SVG attribute is outside the inert icon subset".into())); }
             let value = attribute.value().trim();
+            if node.has_tag_name((SVG,"image")) && attribute.name()=="href" { continue; }
             let local_reference = |value: &str| value.strip_prefix('#').is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')));
             if attribute.name() == "href" && !local_reference(value) { return Err(Error::Unsupported("external SVG references are not allowed".into())); }
             if value.to_ascii_lowercase().contains("url(") {
@@ -70,7 +98,21 @@ fn svg_png(encoded: &str, resolution: u32) -> Result<String> {
         }
     }
     validate_svg_references(&document)?;
-    let options = resvg::usvg::Options::default();
+    let mut options = resvg::usvg::Options::default();
+    options.image_href_resolver.resolve_string = Box::new(|_,_| None);
+    options.image_href_resolver.resolve_data = Box::new(|mime,data,_| match mime {
+        "image/png" => Some(resvg::usvg::ImageKind::PNG(data)),
+        "image/jpeg" => Some(resvg::usvg::ImageKind::JPEG(data)),
+        _ => None,
+    });
+    if has_text {
+        static FONTS: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> = std::sync::OnceLock::new();
+        options.fontdb = FONTS.get_or_init(|| {
+            let mut database = resvg::usvg::fontdb::Database::new();
+            database.load_system_fonts();
+            std::sync::Arc::new(database)
+        }).clone();
+    }
     let tree = resvg::usvg::Tree::from_str(svg, &options).map_err(|_| Error::Invalid("SVG cannot be parsed for rendering".into()))?;
     let dimensions = tree.size();
     if dimensions.width() > 4096.0 || dimensions.height() > 4096.0 { return Err(Error::Limit("SVG viewport exceeds 4096 pixels".into())); }
@@ -83,6 +125,13 @@ fn svg_png(encoded: &str, resolution: u32) -> Result<String> {
     let png = pixmap.encode_png().map_err(|_| Error::Invalid("SVG PNG encoding failed".into()))?;
     if png.len() > 1024 * 1024 { return Err(Error::Limit("rendered SVG exceeds the 1 MiB image limit".into())); }
     Ok(STANDARD.encode(png))
+}
+
+fn embedded_raster(value: &str) -> Result<(&str,&str)> {
+    for mime in ["image/png","image/jpeg"] {
+        if let Some(data) = value.strip_prefix(&format!("data:{mime};base64,")) { return Ok((mime,data)); }
+    }
+    Err(Error::Unsupported("SVG images require embedded base64 PNG or JPEG; no external or nested SVG references".into()))
 }
 
 fn validate_svg_references(document: &roxmltree::Document<'_>) -> Result<()> {
@@ -135,7 +184,7 @@ pub fn create_picture(id: &str, base64: String, mime_type: &str, alt: &str) -> R
     let info = inspect_raster(&base64, mime_type)?;
     let scale = (800.0 / info.width as f64).min(350.0 / info.height as f64);
     Ok(crate::model::Element::Picture { id: id.into(), x: 100.0, y: 230.0, width: info.width as f64 * scale, height: info.height as f64 * scale,
-        base64, mime_type: mime_type.into(), alt: alt.into(), crop: Default::default() })
+        base64, mime_type: mime_type.into(), alt: alt.into(), crop: Default::default(), visual: None, svg: None })
 }
 
 pub fn inspect_raster(base64: &str, mime_type: &str) -> Result<RasterInfo> {
@@ -227,12 +276,57 @@ mod tests {
 
     #[test]
     fn svg_assets_reject_active_external_and_excessive_content() {
-        for body in ["<script>alert(1)</script>", "<foreignObject/>", "<image href='file:///secret.png'/>", "<image href='https://example.com/image.png'/>", "<path onload='alert(1)' d='M0 0h24v24z'/>", "<path fill='url(https://example.com/paint)' d='M0 0h24v24z'/>", "<style>@import url(https://example.com/font.css);</style>", "<text>Hello</text>", "<filter id='blur'><feGaussianBlur stdDeviation='200'/></filter>"] {
+        for body in ["<script>alert(1)</script>", "<foreignObject/>", "<image href='file:///secret.png'/>", "<image href='https://example.com/image.png'/>", "<path onload='alert(1)' d='M0 0h24v24z'/>", "<path fill='url(https://example.com/paint)' d='M0 0h24v24z'/>", "<style>@import url(https://example.com/font.css);</style>", "<text><textPath href='https://example.invalid'>Hello</textPath></text>", "<filter id='blur'><feGaussianBlur stdDeviation='200'/></filter>"] {
             let svg = format!("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'>{body}</svg>");
             assert!(crate::execute_request(json!({"op":"create_asset","id":"unsafe","base64":STANDARD.encode(svg),"mime_type":"image/svg+xml","alt":"Unsafe","size":96})).is_err(), "{body}");
         }
         let oversized = format!("<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'>{}</svg>", " ".repeat(262144));
         assert!(crate::execute_request(json!({"op":"create_asset","id":"huge","base64":STANDARD.encode(oversized),"mime_type":"image/svg+xml","alt":"Huge","size":96})).is_err());
+    }
+
+    #[test]
+    fn phase2_svg_literal_text_and_embedded_rasters_are_inert_and_visible() {
+        let mut output = Cursor::new(Vec::new());
+        image::RgbImage::from_pixel(2,2,image::Rgb([0u8,180,60])).write_to(&mut output,ImageFormat::Png).unwrap();
+        let png = STANDARD.encode(output.into_inner());
+        for body in ["<text x='2' y='22' font-family='sans-serif' font-size='20' fill='#0033aa'>Hello &amp; SVG</text>".into(),format!("<image width='120' height='30' href='data:image/png;base64,{png}'/>")] {
+            let svg = format!("<svg xmlns='http://www.w3.org/2000/svg' width='120' height='30'>{body}</svg>");
+            let encoded = STANDARD.encode(&svg);
+            let asset = create_asset("literal",encoded.clone(),"image/svg+xml","Literal SVG",120.0).unwrap();
+            let crate::model::Element::Picture { base64,svg:retained,.. } = asset else { panic!("picture required") };
+            assert_eq!(retained,Some(encoded));
+            let image = image::load_from_memory(&STANDARD.decode(base64).unwrap()).unwrap().to_rgba8();
+            assert!(image.pixels().filter(|pixel| pixel[3]>0).count()>100);
+        }
+        for target in [format!("data:image/jpeg;base64,{png}"),"data:image/svg+xml;base64,PHN2Zy8+".into(),"data:text/html;base64,PHNjcmlwdC8+".into(),"file:///never-read.png".into()] {
+            let svg = format!("<svg xmlns='http://www.w3.org/2000/svg' width='120' height='30'><image width='120' height='30' href='{target}'/></svg>");
+            assert!(svg_png(&STANDARD.encode(svg),256).is_err());
+        }
+    }
+
+    #[test]
+    fn phase2_metafiles_convert_explicit_records_and_fail_closed() {
+        let mut emf = vec![0u8;88];
+        for (offset,value) in [(0,1u32),(4,88),(16,100),(20,100),(40,0x464d4520),(44,0x10000),(48,144),(52,4),(56,1),(72,100),(76,100),(80,25),(84,25)] { emf[offset..offset+4].copy_from_slice(&value.to_le_bytes()); }
+        for value in [37u32,12,0x80000004,43,24,10,10,90,90,14,20,0,0,20] { emf.extend(value.to_le_bytes()); }
+        let mut wmf = Vec::new();
+        for value in [0x9ac6cdd7u32] { wmf.extend(value.to_le_bytes()); }
+        for value in [0u16,0,0,100,100,1440,0,0] { wmf.extend(value.to_le_bytes()); }
+        let checksum = wmf.chunks_exact(2).map(|chunk| u16::from_le_bytes([chunk[0],chunk[1]])).fold(0,|sum,value| sum^value);
+        wmf.extend(checksum.to_le_bytes());
+        for value in [1u16,9,0x300,30,0,1,7,0,0] { wmf.extend(value.to_le_bytes()); }
+        for record in [vec![7u16,0,0x02fc,0,0x00ff,0,0],vec![4,0,0x012d,0],vec![7,0,0x041b,90,90,10,10],vec![3,0,0]] { for value in record { wmf.extend(value.to_le_bytes()); } }
+        for (mime,bytes) in [("image/emf",emf),("image/wmf",wmf)] {
+            let asset = create_asset("metafile",STANDARD.encode(&bytes),mime,"Converted vector",100.0).unwrap();
+            let crate::model::Element::Picture { svg:Some(svg),base64,.. } = asset else { panic!("converted SVG picture required") };
+            assert!(String::from_utf8(STANDARD.decode(svg).unwrap()).unwrap().contains("<rect"));
+            let image = image::load_from_memory(&STANDARD.decode(base64).unwrap()).unwrap().to_rgba8();
+            assert_eq!(image.get_pixel(512,512)[3],255);
+            let mut unknown = bytes.clone();
+            if mime=="image/emf" { unknown[88..92].copy_from_slice(&70u32.to_le_bytes()); } else { unknown[44..46].copy_from_slice(&0x0626u16.to_le_bytes()); }
+            assert!(create_asset("unsafe",STANDARD.encode(unknown),mime,"",100.0).is_err());
+            assert!(create_asset("truncated",STANDARD.encode(&bytes[..bytes.len()-1]),mime,"",100.0).is_err());
+        }
     }
 
     #[test]

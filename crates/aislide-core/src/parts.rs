@@ -148,7 +148,7 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
     if catalog::CATEGORIES.iter().take(10).any(|entry| entry.0 == category) { charts::render(&mut drawing, category, variant, &spec.data)?; }
     else { diagrams::render(&mut drawing, category, variant, &spec.data)?; }
     crate::layout::fit_part_text(&mut drawing.elements,theme)?;
-    let result = Element::Group { id: id.into(), x: 64.0, y: 144.0, width: 1152.0, height: 512.0, view_width: 1152.0, view_height: 512.0, children: drawing.elements };
+    let result = Element::Group { visual: None, id: id.into(), x: 64.0, y: 144.0, width: 1152.0, height: 512.0, view_width: 1152.0, view_height: 512.0, children: drawing.elements };
     validate_elements(std::slice::from_ref(&result), (1280.0, 720.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
     Ok(result)
 }
@@ -159,28 +159,28 @@ impl Drawing {
     pub fn id(&self) -> String { format!("{}-{}", self.prefix, self.elements.len()) }
     pub fn text(&mut self, text: &str, bounds: [f64; 4], size: f64, color: &str, bold: bool, alignment: TextAlign) {
         let [x, y, width, height] = bounds;
-        self.elements.push(Element::Text { id: self.id(), x, y, width, height, text: text.into(), font_size: size, color: color.into(), bold, format: TextFormat { alignment, font_family: Some("@minor".into()), ..TextFormat::default() } });
+        self.elements.push(Element::Text { visual: None, id: self.id(), x, y, width, height, text: text.into(), font_size: size, color: color.into(), bold, format: TextFormat { alignment, font_family: Some("@minor".into()), ..TextFormat::default() } });
     }
     pub fn chart(&mut self, kind: ChartKind, categories: Vec<String>, series: Vec<ChartSeries>, bounds: [f64; 4]) {
         let [x, y, width, height] = bounds;
-        self.elements.push(Element::Chart { id: self.id(), x, y, width, height, kind, categories, series });
+        self.elements.push(Element::Chart { id: self.id(), x, y, width, height, kind, categories, series, options: Default::default() });
     }
-    pub fn rect(&mut self, bounds: [f64; 4], fill: &str) { let [x,y,width,height] = bounds; if width > 0.0 && height > 0.0 { self.elements.push(Element::Rect { id: self.id(), x,y,width,height,fill:fill.into() }); } }
+    pub fn rect(&mut self, bounds: [f64; 4], fill: &str) { let [x,y,width,height] = bounds; if width > 0.0 && height > 0.0 { self.elements.push(Element::Rect { visual: None, id: self.id(), x,y,width,height,fill:fill.into() }); } }
     pub fn shape(&mut self, preset: &str, bounds: [f64; 4], fill: &str, stroke: &str) {
         let [x,y,width,height] = bounds;
-        self.elements.push(Element::Shape { id:self.id(),x,y,width,height,preset:preset.into(),fill:fill.into(),stroke:stroke.into(),stroke_width:1.5,rotation:0.0,text:String::new(),font_size:18.0,color:"@dk1".into(),bold:false,format:TextFormat::default() });
+        self.elements.push(Element::Shape { visual: None, id:self.id(),x,y,width,height,preset:preset.into(),fill:fill.into(),stroke:stroke.into(),stroke_width:1.5,rotation:0.0,text:String::new(),font_size:18.0,color:"@dk1".into(),bold:false,format:TextFormat::default() });
     }
     pub fn polygon(&mut self, points: Vec<[f64; 2]>, fill: &str, stroke: &str) {
         let left = points.iter().map(|point| point[0]).fold(f64::INFINITY, f64::min); let top = points.iter().map(|point| point[1]).fold(f64::INFINITY, f64::min);
         let width = points.iter().map(|point| point[0]).fold(f64::NEG_INFINITY, f64::max) - left; let height = points.iter().map(|point| point[1]).fold(f64::NEG_INFINITY, f64::max) - top;
         if width <= 0.0 || height <= 0.0 { return; }
         let points = points.into_iter().map(|point| [((point[0]-left)/width*1e6).round()/1e6,((point[1]-top)/height*1e6).round()/1e6]).collect();
-        self.elements.push(Element::Polygon { id:self.id(),x:left,y:top,width,height,points,fill:fill.into(),stroke:stroke.into(),stroke_width:1.0 });
+        self.elements.push(Element::Polygon { visual: None, id:self.id(),x:left,y:top,width,height,points,fill:fill.into(),stroke:stroke.into(),stroke_width:1.0 });
     }
     pub fn line(&mut self, start: [f64; 2], end: [f64; 2], arrow: bool, color: &str) {
         let target=end;let distance=((end[0]-start[0]).powi(2)+(end[1]-start[1]).powi(2)).sqrt();let unit=if distance>0.0 {[(end[0]-start[0])/distance,(end[1]-start[1])/distance]} else {[1.0,0.0]};
         let (start,end) = if start[0] <= end[0] { (start,end) } else { (end,start) };
-        self.elements.push(Element::Connector { id:self.id(),x:start[0],y:start[1].min(end[1]),width:(end[0]-start[0]).max(0.01),height:(end[1]-start[1]).abs().max(0.01),color:color.into(),stroke_width:1.5,arrow:false,flip_v:end[1]<start[1],start:None,end:None,routing:None });
+        self.elements.push(Element::Connector { visual: None, id:self.id(),x:start[0],y:start[1].min(end[1]),width:(end[0]-start[0]).max(0.01),height:(end[1]-start[1]).abs().max(0.01),color:color.into(),stroke_width:1.5,arrow:false,flip_v:end[1]<start[1],start:None,end:None,routing:None });
         if arrow {self.polygon(vec![target,[target[0]-unit[0]*9.0-unit[1]*4.0,target[1]-unit[1]*9.0+unit[0]*4.0],[target[0]-unit[0]*9.0+unit[1]*4.0,target[1]-unit[1]*9.0-unit[0]*4.0]],color,color);}
     }
 }

@@ -1,18 +1,59 @@
 ﻿import type { AislideDocument, Checkpoint, DataMapping, DataReport, Deck, Design, Element, ImportedObject, ObjectCatalog, ObjectKind, PatchOperation, PresentationExport, ProjectExport, Report, SourceBinding, SourceDocument, SourceInput, Theme } from './types'
 import type { PartCatalog, PartSpec, GraphCatalog, GraphIcon, GraphSpec, GraphOperation, SlideOperation, ElementOperation, AssetInput, DesignPreset } from './types'
 import type { AuthoringProfile, BestPracticeGuide, BestPracticeProfiles, GuidedInput, GuidedReview } from './types'
+import type { AuthoringCapabilities, SearchOptions, TextMatch, TextReplaceOptions, FormatTextInput, ReplaceTextContentInput, UpdateParagraphsInput, CanvasResizeInput, TemplateKind, TemplateInput, TemplateExport, ImageEditInput, EditedImage, ApplyImageEditInput, EditTableInput, SelectionOperation, ElementBundle, SelectionEditResult } from './types'
 export * from './types'
-export type RequestOptions = { signal?: AbortSignal }
+import type { FormatTextElementInput, ReplaceElementTextInput, CommentInput, ModernCommentOperation, TableHeaders, ElementAccessibility, ReadingOrderResult, AccessibilityReport, DocumentInspection, CleanCopyOptions, CleanCopyExport } from './types'
+import type { SetTableCellTextInput, EditVectorInput, CombineShapesInput } from './types'
+import type { EmbedFontInput, FontInfo, FontInspection, NativeFontInspection } from './types'
+import type { DictionaryImport, ProofingDictionary, ProofTextInput, ProofResult, FormatSnapshot, CopyFormatInput, ApplyFormatInput } from './types'
+import type { TextAssistInput, TextAssistance, ApplyTextAssistInput, SegmentedImage, SegmentationStatus, ProviderStatus } from './types'
+export type RequestOptions = { signal?: AbortSignal; capacityProfile?: CapacityProfile }
+export type CapacityProfile = 'legacy' | 'standard' | 'large'
+export type SessionRecovery = { format: 'aislide.session'; version: 1; capacity_profile: CapacityProfile; document: AislideDocument; past: import('./types').UndoReceipt[]; future: import('./types').UndoReceipt[]; history_boundary: 'history_limit' | null }
+export type CapacityLimits = Readonly<{ slides: number; elements_per_slide: number; elements_total: number; group_depth: number; document_bytes: number; request_bytes: number; archive_bytes: number; image_encoded_bytes: number; unique_images: number; raster_work_bytes: number; json_nodes: number; json_depth: number }>
+export const CAPACITY_PROFILES: Readonly<Record<CapacityProfile, CapacityLimits>>
+export const FONT_LIMITS: Readonly<{ face_bytes: number; total_bytes: number; faces: number }>
+export function encodeCoreRequest(request: unknown): string
+import type { StaticExportOptions, StaticExport, VerifiedRecoveryDocument } from './types'
 export type TransactionOptions = RequestOptions & { expectedRevision?: number }
+export type AssignLayoutOptions = TransactionOptions & { preserveFreeform?: boolean }
 export type ReplaceOptions = TransactionOptions & { sources?: SourceDocument[]; bindings?: SourceBinding[]; report?: Report | null }
 export type CoreTransport = <T>(request: unknown, options?: RequestOptions) => Promise<T>
 export type ObjectInput = { id: string; kind: ObjectKind; preset?: string; rows?: number; columns?: number }
 export class AislideClient {
-  constructor(transport: CoreTransport)
+  constructor(transport: CoreTransport, options?: Pick<RequestOptions, 'capacityProfile'>)
   request<T>(request: unknown, options?: RequestOptions): Promise<T>
+  /** Current core schemas and limits; does not certify Office rendering. */
+  authoringCapabilities(options?: RequestOptions): Promise<AuthoringCapabilities>
+  computeChartPresentation(input: import('./types').ChartData, options?: RequestOptions): Promise<import('./types').ChartPresentation>
+  renderElementPreview(element: Extract<Element, { type: 'chart' | 'text' | 'shape' }>, theme?: Theme, options?: RequestOptions): Promise<import('./types').ElementPreview>
+  textAssist(input: TextAssistInput, options?: RequestOptions): Promise<TextAssistance>
+  segmentationStatus(options?: RequestOptions): Promise<SegmentationStatus>
+  segmentImage(input: Pick<ImageEditInput, 'base64' | 'mime_type'>, options?: RequestOptions): Promise<SegmentedImage>
+  importProofingDictionary(input: DictionaryImport, options?: RequestOptions): Promise<ProofingDictionary>
+  proofText(input: ProofTextInput, options?: RequestOptions): Promise<ProofResult>
+  inspectFont(base64: string, options?: RequestOptions): Promise<FontInfo>
+  inspectPptxFonts(base64: string, options?: RequestOptions): Promise<NativeFontInspection>
+  capacityProfiles(options?: RequestOptions): Promise<{ default: CapacityProfile; legacy: CapacityLimits; standard: CapacityLimits; large: CapacityLimits }>
+  verifySessionRecovery(envelope: SessionRecovery, options?: RequestOptions): Promise<SessionRecovery>
+  recoverSession(envelope: SessionRecovery, options?: RequestOptions): Promise<DocumentSession>
+  verifyRecovery(document: AislideDocument, options?: RequestOptions): Promise<VerifiedRecoveryDocument>
+  recoverPresentation(document: AislideDocument, options?: RequestOptions): Promise<DocumentSession>
+  formatTextElement(input: FormatTextElementInput, options?: RequestOptions): Promise<Element>
+  replaceElementText(input: ReplaceElementTextInput, options?: RequestOptions): Promise<Element>
+  setTableCellText(input: SetTableCellTextInput, options?: RequestOptions): Promise<Element>
+  editVector(input: EditVectorInput, options?: RequestOptions): Promise<Element>
+  /** Literal search. Paths are relative to Deck; offsets are Unicode scalars, end exclusive. */
+  searchText(deck: Deck, input: SearchOptions, options?: RequestOptions): Promise<TextMatch[]>
+  /** Pure local image preparation. Use session.applyImageEdit separately to mutate a picture. */
+  editImage(input: ImageEditInput, options?: RequestOptions): Promise<EditedImage>
+  /** Explicit POTX/THMX factory returning a new revision-zero document, never modifying another session. */
+  importTemplate(id: string, input: TemplateInput, options?: RequestOptions): Promise<DocumentSession>
   ingest(input: SourceInput, options?: RequestOptions): Promise<SourceDocument>
   dataReport(source: SourceDocument, mapping: DataMapping, options?: RequestOptions): Promise<DataReport>
   designDefaults(options?: RequestOptions): Promise<Design>
+  designCapabilities(options?: RequestOptions): Promise<import('./types').DesignCapabilities>
   designPresets(options?: RequestOptions): Promise<DesignPreset[]>
   objectCatalog(options?: RequestOptions): Promise<ObjectCatalog>
   partCatalog(options?: RequestOptions): Promise<PartCatalog>
@@ -34,22 +75,78 @@ export class AislideClient {
   openProject(input: { base64: string; checkpoint: Checkpoint }, options?: RequestOptions): Promise<DocumentSession>
 }
 export class DocumentSession {
-  constructor(transport: CoreTransport, document: AislideDocument)
+  constructor(transport: CoreTransport, document: AislideDocument, options?: Pick<RequestOptions, 'capacityProfile'>)
+  static recover(transport: CoreTransport, envelope: SessionRecovery, options?: RequestOptions): Promise<DocumentSession>
+  readonly capacityProfile: CapacityProfile
+  readonly recoveryEnvelope: SessionRecovery
+  readonly historyBoundary: 'history_limit' | null
+  setCapacityProfile(profile: CapacityProfile, options?: RequestOptions): Promise<AislideDocument>
   readonly document: AislideDocument
   readonly revision: number
   readonly canUndo: boolean
   readonly canRedo: boolean
   readonly busy: boolean
+  readonly fieldWarnings: string[]
   transact(operations: PatchOperation[], options?: TransactionOptions): Promise<AislideDocument>
   replaceDeck(deck: Deck, options?: ReplaceOptions): Promise<AislideDocument>
   updateDesign(design: Design, options?: TransactionOptions): Promise<AislideDocument>
+  setMasterTheme(masterId: string, theme: Theme | null, options?: TransactionOptions): Promise<AislideDocument>
+  setDesignField(field: import('./types').DesignField, options?: TransactionOptions): Promise<AislideDocument>
   applyDesignPreset(presetId: string, options?: TransactionOptions): Promise<AislideDocument>
   applyTheme(theme: Theme, options?: TransactionOptions): Promise<AislideDocument>
-  assignLayout(slideId: string, layoutId: string, options?: TransactionOptions): Promise<AislideDocument>
+  assignLayout(slideId: string, layoutId: string, options?: AssignLayoutOptions): Promise<AislideDocument>
   addObject(slideId: string, input: ObjectInput, options?: TransactionOptions): Promise<AislideDocument>
   addAsset(slideId: string, input: AssetInput, options?: TransactionOptions): Promise<AislideDocument>
   editSlides(operations: SlideOperation[], options?: TransactionOptions): Promise<AislideDocument>
   editElements(slideId: string, operations: ElementOperation[], options?: TransactionOptions): Promise<AislideDocument>
+  updateNotes(slideId: string, notes: string, options?: TransactionOptions): Promise<AislideDocument>
+  updateRichNotes(slideId: string, paragraphs: import('./types').RichParagraph[], options?: TransactionOptions): Promise<AislideDocument>
+  updateAuxiliaryDesign(design: import('./types').AuxiliaryDesign, options?: TransactionOptions): Promise<AislideDocument>
+  addComment(slideId: string, comment: CommentInput, options?: TransactionOptions): Promise<AislideDocument>
+  modernComment(slideId: string, operation: ModernCommentOperation, options?: TransactionOptions): Promise<AislideDocument>
+  setTableHeaders(slideId: string, elementId: string, policy: TableHeaders, options?: TransactionOptions): Promise<AislideDocument>
+  replyComment(slideId: string, parentId: string, comment: CommentInput, options?: TransactionOptions): Promise<AislideDocument>
+  resolveComment(slideId: string, commentId: string, resolved: boolean, options?: TransactionOptions): Promise<AislideDocument>
+  removeComment(slideId: string, commentId: string, options?: TransactionOptions): Promise<AislideDocument>
+  setAccessibility(slideId: string, elementId: string, metadata: ElementAccessibility | null, options?: TransactionOptions): Promise<AislideDocument>
+  setReadingOrder(slideId: string, order: string[], options?: TransactionOptions): Promise<ReadingOrderResult>
+  refreshFields(referenceDate: string, options?: TransactionOptions & { referenceTime?: string; locale?: string }): Promise<AislideDocument>
+  checkAccessibility(options?: RequestOptions): Promise<AccessibilityReport>
+  inspectDocument(options?: RequestOptions): Promise<DocumentInspection>
+  exportCleanCopy(input: CleanCopyOptions, options?: RequestOptions): Promise<CleanCopyExport>
+  searchText(input: SearchOptions, options?: RequestOptions): Promise<TextMatch[]>
+  textAssist(input: TextAssistInput, options?: RequestOptions): Promise<TextAssistance>
+  textAiStatus(options?: RequestOptions): Promise<ProviderStatus>
+  applyTextAssist(slideId: string, input: ApplyTextAssistInput, options?: TransactionOptions): Promise<AislideDocument>
+  importProofingDictionary(input: DictionaryImport, options?: RequestOptions): Promise<ProofingDictionary>
+  proofText(input: ProofTextInput, options?: RequestOptions): Promise<ProofResult>
+  copyFormat(slideId: string, input: CopyFormatInput, options?: RequestOptions): Promise<FormatSnapshot>
+  sampleSlidePixel(slideId: string, x: number, y: number, options?: RequestOptions): Promise<import('./types').SlidePixelSample>
+  applyFormat(slideId: string, input: ApplyFormatInput, options?: TransactionOptions): Promise<AislideDocument>
+  setProofingLanguage(slideId: string, input: { id: string; language: string }, options?: TransactionOptions): Promise<AislideDocument>
+  /** Choose replace_all=true or selected matches exclusively. Checks revision, expected match text and native preservation. */
+  replaceText(input: TextReplaceOptions, options?: TransactionOptions): Promise<AislideDocument>
+  /** Exact explicit family replacement; does not install fonts or replace theme tokens. */
+  replaceFont(from: string, to: string, options?: TransactionOptions): Promise<AislideDocument>
+  embedFont(input: EmbedFontInput, options?: TransactionOptions): Promise<AislideDocument>
+  setFontUsage(sha256: string, licenseAcknowledged: boolean, options?: TransactionOptions): Promise<AislideDocument>
+  listFonts(options?: RequestOptions): Promise<FontInspection>
+  /** Apply a rich run style to [start,end) Unicode-scalar offsets in text or shape content. */
+  formatText(slideId: string, input: FormatTextInput, options?: TransactionOptions): Promise<AislideDocument>
+  replaceTextContent(slideId: string, input: ReplaceTextContentInput, options?: TransactionOptions): Promise<AislideDocument>
+  /** Replace rich paragraphs and synchronize plain text. An empty array clears content. */
+  updateParagraphs(slideId: string, input: UpdateParagraphsInput, options?: TransactionOptions): Promise<AislideDocument>
+  editTable(slideId: string, input: EditTableInput, options?: TransactionOptions): Promise<AislideDocument>
+  /** Copy leaves revision/history unchanged. Imported raw-copy and topology changes fail closed. Inspect effects for detached/stale metadata. */
+  editSelection(slideId: string, operation: SelectionOperation, options?: TransactionOptions & { clipboard?: ElementBundle | null }): Promise<SelectionEditResult>
+  combineShapes(slideId: string, input: CombineShapesInput, options?: TransactionOptions): Promise<SelectionEditResult>
+  /** Each dimension is 320..4096. Scale may make part metadata stale; keep rejects out-of-bounds content. */
+  resizeCanvas(input: CanvasResizeInput, options?: TransactionOptions): Promise<AislideDocument>
+  /** Apply prepared image bytes without hidden processing; preserve frame/crop/alt, remove superseded SVG source. */
+  applyImageEdit(slideId: string, input: ApplyImageEditInput, options?: TransactionOptions): Promise<AislideDocument>
+  /** Return template bytes without writing a file or changing the document. */
+  exportTemplate(kind: TemplateKind, options?: RequestOptions): Promise<TemplateExport>
+  exportStatic(input?: StaticExportOptions, options?: RequestOptions): Promise<StaticExport>
   addPart(slideId: string, input: { id: string; spec: PartSpec }, options?: TransactionOptions): Promise<AislideDocument>
   updatePart(slideId: string, input: { id: string; spec: PartSpec }, options?: TransactionOptions): Promise<AislideDocument>
   addGraph(slideId: string, input: { id: string; spec: GraphSpec }, options?: TransactionOptions): Promise<AislideDocument>

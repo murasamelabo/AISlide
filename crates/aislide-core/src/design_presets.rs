@@ -24,11 +24,11 @@ const STYLES: [Style; 7] = [
 ];
 
 fn rectangle(id: &str, bounds: [f64; 4], fill: &str) -> Element {
-    Element::Rect { id: id.into(), x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3], fill: fill.into() }
+    Element::Rect { visual: None, id: id.into(), x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3], fill: fill.into() }
 }
 
 fn text(id: &str, bounds: [f64; 4], size: f64, value: &str, kind: PlaceholderKind, index: u32) -> Element {
-    Element::Text { id: id.into(), x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3], text: value.into(), font_size: size, color: "@dk1".into(), bold: kind == PlaceholderKind::Title,
+    Element::Text { visual: None, id: id.into(), x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3], text: value.into(), font_size: size, color: "@dk1".into(), bold: kind == PlaceholderKind::Title,
         format: TextFormat { font_family: Some(if kind == PlaceholderKind::Title { "@major" } else { "@minor" }.into()), placeholder: Some(Placeholder { kind, index }), ..Default::default() } }
 }
 
@@ -43,7 +43,7 @@ fn build(style: &Style) -> Result<Preset> {
     let body_top = if style.id == "dynamic" { 208.0 } else { 192.0 };
     let body_height = 640.0 - body_top;
     let title = || text("title", [margin, 64.0, width, 112.0], style.heading, "Key message", PlaceholderKind::Title, 0);
-    let mut master = Master { id: "preset-master".into(), name: style.name.into(), background: "@lt1".into(), elements: Vec::new() };
+    let mut master = Master { id: "preset-master".into(), name: style.name.into(), background: "@lt1".into(), elements: Vec::new(), theme: None };
     match style.id {
         "minimal" => master.elements.push(rectangle("preset-footer-rule", [margin, 681.0, 48.0, 2.0], "@accent1")),
         "stylish" => {
@@ -55,7 +55,7 @@ fn build(style: &Style) -> Result<Preset> {
                 master.elements.push(rectangle(&format!("preset-color-{index}"), [margin + index as f64 * 40.0, 681.0, 32.0, 6.0], color));
             }
         }
-        "dynamic" => master.elements.push(Element::Polygon { id: "preset-corner".into(), x: 1152.0, y: 0.0, width: 128.0, height: 64.0, points: vec![[0.0,0.0],[1.0,0.0],[1.0,1.0]], fill: "@accent1".into(), stroke: "@dk1".into(), stroke_width: 0.0 }),
+        "dynamic" => master.elements.push(Element::Polygon { visual: None, id: "preset-corner".into(), x: 1152.0, y: 0.0, width: 128.0, height: 64.0, points: vec![[0.0,0.0],[1.0,0.0],[1.0,1.0]], fill: "@accent1".into(), stroke: "@dk1".into(), stroke_width: 0.0 }),
         "luxury" => {
             master.elements.push(rectangle("preset-footer-rule", [margin, 676.0, width, 1.0], "@accent1"));
             master.elements.push(rectangle("preset-footer-accent", [628.0, 688.0, 24.0, 2.0], "@accent1"));

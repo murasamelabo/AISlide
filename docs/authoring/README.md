@@ -1,5 +1,7 @@
 ﻿# Guided Authoring
 
+For local spelling, proofing-language assignment, synonyms, bilingual terms, and text-format reuse, see [Local proofing and format painter](proofing-format-painter.md). These are bounded editing functions, not model-based grammar or full-sentence translation.
+
 AISlide exposes English, purpose-specific best practices and a deterministic compiler for evidence-linked outlines. The calling assistant plans the claims and supplies content; these tools do not contact a model, fetch source URLs, execute source text, or invent missing values.
 
 ## Profiles
@@ -54,7 +56,7 @@ Number declarations have `{path,value,evidence_id}`. For example:
 
 These are synthetic test values, not factual business data. Numeric quantities in part data need exact path/value declarations with source or assumption evidence. Geometry and structural/index fields are excluded: x/y/width/height, font/stroke size, version, edge from/to indices, timeline start/end indices, longitude/latitude. Their factual meaning, along with dates, amounts and counts embedded in prose, remains a review responsibility. Unknown evidence cannot justify a numeric chart value. Use `xx` in qualitative content instead of fabricating a chart bar.
 
-Limits: 1-32 slides, at most 64 evidence entries, 6 decision issues, 8 support clauses per page, 16 body paths and evidence references per clause, and 256 numeric declarations per page. Existing core part limits, 4 MiB protocol and 2 MiB document budgets still apply. Long citations or text that cannot fit are rejected rather than clipped or silently omitted. Source/reference strings are inert, not fetched.
+Limits: guided authoring retains 1-32 slides, at most 64 evidence entries, 6 decision issues, 8 support clauses per page, 16 body paths and evidence references per clause, and 256 numeric declarations per page. Existing core part limits and the selected fixed capacity profile apply; default large is 96 MiB wire / 32 MiB complete document. Standard and legacy remain smaller. [Phase 5 capacity](../testing/phase5-recovery-capacity.md) does not expand the guided input grammar. Long citations or text that cannot fit are rejected rather than clipped or silently omitted. Source/reference strings are inert, not fetched.
 
 ## Decision Templates
 

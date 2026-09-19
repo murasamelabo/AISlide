@@ -20,6 +20,383 @@ fn exported(deck: Value) -> Vec<u8> {
     STANDARD.decode(result["base64"].as_str().unwrap()).unwrap()
 }
 
+fn without_xml_nodes(xml: &str, predicate: impl Fn(roxmltree::Node<'_, '_>) -> bool) -> String {
+    let parsed = roxmltree::Document::parse(xml).unwrap();
+    let mut ranges = parsed.descendants().filter(|node| predicate(*node)).map(|node| node.range()).collect::<Vec<_>>();
+    ranges.sort_by_key(|range| range.start);
+    let mut result = xml.to_owned();
+    for range in ranges.into_iter().rev() { result.replace_range(range, ""); }
+    result
+}
+
+fn native_change(document: &Value, operations: Value) -> Value {
+    execute_request(json!({"op":"transaction","document":document,"transaction":{"expected_revision":document["revision"],"expected_hash":document["hash"],"operations":operations}})).unwrap()
+}
+
+fn assert_native_undo(document: &Value, changed: &Value, original: &[u8]) {
+    let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":changed["document"]["revision"],"receipt":changed["receipt"]})).unwrap();
+    assert_eq!(undone["document"]["hash"], document["hash"]);
+    let restored = execute_request(json!({"op":"export_presentation","document":undone["document"]})).unwrap();
+    assert_eq!(STANDARD.decode(restored["base64"].as_str().unwrap()).unwrap(), original);
+}
+
+#[test]
+fn native_notes_empty_bodies_and_paragraphs_preserve_unrelated_xml() {
+    let path = "ppt/notesSlides/notesSlide1.xml";
+    let namespace = "http://schemas.openxmlformats.org/presentationml/2006/main";
+    for variant in ["empty-p", "styled-empty-p", "no-p", "no-body", "no-placeholder"] {
+        let mut package = Package::open(exported(authored())).unwrap();
+        let mut xml = package.text(path).unwrap().to_owned();
+        let parsed = roxmltree::Document::parse(&xml).unwrap();
+        let body = parsed.descendants().find(|node| node.has_tag_name((namespace, "txBody"))).unwrap().range();
+        let paragraph = if variant == "styled-empty-p" { "<a:p><a:pPr marL=\"42\"/><a:endParaRPr lang=\"en-US\"/></a:p>" } else { "<a:p/>" };
+        let replacement = match variant {
+            "no-body" => String::new(),
+            "no-p" => "<p:txBody><a:bodyPr/><a:lstStyle/></p:txBody>".into(),
+            _ => format!("<p:txBody><a:bodyPr/><a:lstStyle/>{paragraph}</p:txBody>"),
+        };
+        xml.replace_range(body, &replacement);
+        if variant == "no-placeholder" { xml = xml.replace("type=\"body\"", "type=\"sldImg\""); }
+        let sentinel = "<p:extLst><p:ext uri=\"urn:empty-notes\"><v:data xmlns:v=\"urn:vendor\" keep=\"true\"/></p:ext></p:extLst>";
+        xml = xml.replace("</p:notes>", &format!("{sentinel}</p:notes>"));
+        package.replace_part(path, xml.into_bytes()).unwrap();
+        let original = package.save().unwrap();
+        let opened = execute_request(json!({"op":"open_presentation","id":"empty-notes","base64":STANDARD.encode(&original)})).unwrap();
+        assert_eq!(opened["document"]["deck"]["slides"][0]["notes"], "", "{variant}");
+        let changed = native_change(&opened["document"], json!([{"op":"replace","path":"/deck/slides/0/notes","value":" First & <line> \n\nLast"}]));
+        let output = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+        let result = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+        assert!(result.text(path).unwrap().contains(sentinel), "{variant}");
+        if variant == "styled-empty-p" { assert!(result.text(path).unwrap().contains("<a:pPr marL=\"42\"/>")); }
+        for part in package.parts().keys().filter(|part| !part.starts_with("customXml/") && part.as_str() != path) {
+            assert_eq!(result.part(part).unwrap(), package.part(part).unwrap(), "unrelated part: {part}, {variant}");
+        }
+        let reopened = execute_request(json!({"op":"open_presentation","id":"empty-notes-reopened","base64":output["base64"]})).unwrap();
+        assert_eq!(reopened["document"]["deck"]["slides"][0]["notes"], " First & <line> \n\nLast", "{variant}");
+        let cleared = if reopened["document"]["deck"]["slides"][0]["notes_paragraphs"].as_array().is_some_and(|paragraphs| !paragraphs.is_empty()) {
+            execute_request(json!({"op":"update_rich_notes","document":reopened["document"],"expected_revision":0,"slide_id":"slide-1","paragraphs":[]})).unwrap()
+        } else {
+            native_change(&reopened["document"], json!([{"op":"replace","path":"/deck/slides/0/notes","value":""}]))
+        };
+        let saved = execute_request(json!({"op":"export_presentation","document":cleared["document"]})).unwrap();
+        let cleared_open = execute_request(json!({"op":"open_presentation","id":"cleared-notes","base64":saved["base64"]})).unwrap();
+        assert_eq!(cleared_open["document"]["deck"]["slides"][0]["notes"], "");
+        assert_native_undo(&opened["document"], &changed, &original);
+    }
+}
+
+#[test]
+fn native_notes_complex_runs_fields_and_multiple_bodies_reject_without_changes() {
+    let path = "ppt/notesSlides/notesSlide1.xml";
+    for content in [
+        "<a:p><a:r><a:rPr b=\"1\"/><a:t>Mixed</a:t></a:r><a:r><a:rPr i=\"1\"/><a:t> styles</a:t></a:r></a:p>",
+        "<a:p><a:fld id=\"{00000000-0000-0000-0000-000000000001}\" type=\"slidenum\"><a:t>1</a:t></a:fld></a:p>",
+        "<a:p><a:r><a:t>Line</a:t></a:r><a:br/></a:p>",
+        "multiple-bodies",
+    ] {
+        let mut package = Package::open(exported(authored())).unwrap();
+        let mut xml = package.text(path).unwrap().to_owned();
+        let parsed = roxmltree::Document::parse(&xml).unwrap();
+        if content == "multiple-bodies" {
+            let shape = parsed.descendants().find(|node| node.tag_name().name() == "sp").unwrap();
+            let extra = xml[shape.range()].replace("id=\"2\"", "id=\"99\"");
+            xml = xml.replace("</p:spTree>", &format!("{extra}</p:spTree>"));
+        } else {
+            let body = parsed.descendants().find(|node| node.tag_name().name() == "txBody").unwrap().range();
+            xml.replace_range(body, &format!("<p:txBody><a:bodyPr/><a:lstStyle/>{content}</p:txBody>"));
+        }
+        package.replace_part(path, xml.into_bytes()).unwrap();
+        let original = package.save().unwrap();
+        let opened = execute_request(json!({"op":"open_presentation","id":"complex-notes","base64":STANDARD.encode(&original)})).unwrap();
+        let document = &opened["document"];
+        let error = execute_request(json!({"op":"transaction","document":document,"transaction":{"expected_revision":0,"expected_hash":document["hash"],"operations":[{"op":"replace","path":"/deck/slides/0/notes","value":"Replacement"}]}})).unwrap_err();
+        assert!(matches!(error, aislide_core::Error::Unsupported(_)), "{error}");
+        let unchanged = execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+        assert_eq!(STANDARD.decode(unchanged["base64"].as_str().unwrap()).unwrap(), original);
+    }
+}
+
+#[test]
+fn native_notes_absent_creates_one_unique_master_for_existing_and_inserted_slides() {
+    let mut deck = authored(); deck["slides"].as_array_mut().unwrap().truncate(2);
+    let mut parts = Package::open(exported(deck)).unwrap().parts().clone();
+    let removed = parts.keys().filter(|path| path.starts_with("ppt/notes") || path.as_str() == "ppt/theme/theme2.xml").cloned().collect::<Vec<_>>();
+    for path in &removed { parts.remove(path); }
+    let mut package = Package::from_parts(parts).unwrap();
+    for path in ["ppt/slides/_rels/slide1.xml.rels", "ppt/slides/_rels/slide2.xml.rels", "ppt/_rels/presentation.xml.rels"] {
+        let xml = without_xml_nodes(package.text(path).unwrap(), |node| node.attribute("Type").is_some_and(|kind| kind.ends_with("/notesSlide") || kind.ends_with("/notesMaster")));
+        package.replace_part(path, xml.into_bytes()).unwrap();
+    }
+    let xml = without_xml_nodes(package.text("ppt/presentation.xml").unwrap(), |node| node.tag_name().name() == "notesMasterIdLst");
+    package.replace_part("ppt/presentation.xml", xml.into_bytes()).unwrap();
+    let xml = without_xml_nodes(package.text("[Content_Types].xml").unwrap(), |node| node.attribute("PartName").is_some_and(|name| removed.iter().any(|path| name.trim_start_matches('/') == path)));
+    package.replace_part("[Content_Types].xml", xml.into_bytes()).unwrap();
+    let mut parts = Package::open(package.save().unwrap()).unwrap().parts().clone();
+    for path in ["ppt/notesSlides/AISLIDE-NOTES-1.xml", "ppt/notesMasters/AISLIDE-NOTES-MASTER-1.xml", "ppt/theme/AISLIDE-NOTES-THEME-1.xml"] {
+        parts.insert(path.into(), b"<reserved xmlns='urn:vendor'/>".to_vec());
+    }
+    parts.insert("ppt/notesSlides/_rels/aislide-notes-2.xml.rels".into(), b"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'/>".to_vec());
+    let reserved_relation = "<Relationship Id=\"rIdAislideNotes1\" Type=\"urn:vendor:preserve\" Target=\"/ppt/theme/theme1.xml\"/>";
+    for path in ["ppt/_rels/presentation.xml.rels", "ppt/slides/_rels/slide1.xml.rels"] {
+        let xml = String::from_utf8(parts[path].clone()).unwrap().replace("</Relationships>", &format!("{reserved_relation}</Relationships>"));
+        parts.insert(path.into(), xml.into_bytes());
+    }
+    let package = Package::from_parts(parts).unwrap();
+    let original = package.save().unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"new-master","base64":STANDARD.encode(&original)})).unwrap();
+    let mut slides = opened["document"]["deck"]["slides"].as_array().unwrap().clone();
+    slides[0]["notes"] = json!("First notes"); slides[1]["notes"] = json!("Second notes");
+    let mut inserted = slides[0].clone(); inserted["id"] = json!("notes-new-slide"); inserted["elements"] = json!([]); inserted["notes"] = json!("Inserted notes");
+    slides.push(inserted);
+    let changed = native_change(&opened["document"], json!([{"op":"replace","path":"/deck/slides","value":slides}]));
+    let output = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+    let result = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+    for (path, bytes) in package.parts() {
+        if !["[Content_Types].xml", "ppt/presentation.xml", "ppt/_rels/presentation.xml.rels", "ppt/slides/_rels/slide1.xml.rels", "ppt/slides/_rels/slide2.xml.rels"].contains(&path.as_str()) && !path.starts_with("customXml/") {
+            assert_eq!(result.part(path).unwrap(), bytes, "unrelated part: {path}");
+        }
+    }
+    let rels = roxmltree::Document::parse(result.text("ppt/_rels/presentation.xml.rels").unwrap()).unwrap();
+    let masters = rels.descendants().filter(|node| node.attribute("Type").is_some_and(|kind| kind.ends_with("/notesMaster"))).collect::<Vec<_>>();
+    assert_eq!(masters.len(), 1);
+    assert_eq!(masters[0].attribute("Target"), Some("/ppt/notesMasters/aislide-notes-master-2.xml"));
+    assert!(result.text("ppt/_rels/presentation.xml.rels").unwrap().contains(reserved_relation));
+    assert!(result.text("ppt/slides/_rels/slide1.xml.rels").unwrap().contains(reserved_relation));
+    let master_rels = roxmltree::Document::parse(result.text("ppt/notesMasters/_rels/aislide-notes-master-2.xml.rels").unwrap()).unwrap();
+    let theme = master_rels.descendants().find(|node| node.attribute("Type").is_some_and(|kind| kind.ends_with("/theme"))).unwrap().attribute("Target").unwrap();
+    assert_eq!(theme, "/ppt/theme/aislide-notes-theme-2.xml");
+    for path in result.parts().keys().filter(|path| path.ends_with(".rels")) {
+        let parsed = roxmltree::Document::parse(result.text(path).unwrap()).unwrap();
+        let ids = parsed.root_element().children().filter_map(|node| node.attribute("Id")).collect::<Vec<_>>();
+        assert_eq!(ids.len(), ids.iter().collect::<std::collections::BTreeSet<_>>().len(), "unique relationship IDs: {path}");
+    }
+    let main = roxmltree::Document::parse(result.text("ppt/presentation.xml").unwrap()).unwrap();
+    let entry = main.descendants().find(|node| node.tag_name().name() == "notesMasterId").unwrap();
+    assert_eq!(entry.attribute(("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id")), masters[0].attribute("Id"));
+    let reopened = execute_request(json!({"op":"open_presentation","id":"new-master-reopen","base64":output["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["deck"]["slides"][0]["notes"], "First notes");
+    assert_eq!(reopened["document"]["deck"]["slides"][1]["notes"], "Second notes");
+    assert_eq!(reopened["document"]["deck"]["slides"][2]["notes"], "Inserted notes");
+    assert_native_undo(&opened["document"], &changed, &original);
+}
+
+#[test]
+fn native_notes_absent_reuses_master_without_overwriting_orphan_parts() {
+    let mut package = Package::open(exported(authored())).unwrap();
+    let relations = "ppt/slides/_rels/slide1.xml.rels";
+    let xml = without_xml_nodes(package.text(relations).unwrap(), |node| node.attribute("Type").is_some_and(|kind| kind.ends_with("/notesSlide")));
+    package.replace_part(relations, xml.into_bytes()).unwrap();
+    let original = package.save().unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"absent-notes","base64":STANDARD.encode(&original)})).unwrap();
+    assert_eq!(opened["document"]["deck"]["slides"][0]["notes"], "");
+    let changed = native_change(&opened["document"], json!([{"op":"replace","path":"/deck/slides/0/notes","value":"New notes & <evidence>\nSecond line"}]));
+    let output = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+    let result = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+    for (path, bytes) in package.parts() {
+        if path != relations && path != "[Content_Types].xml" && !path.starts_with("customXml/") {
+            assert_eq!(result.part(path).unwrap(), bytes, "unrelated part: {path}");
+        }
+    }
+    let reopened = execute_request(json!({"op":"open_presentation","id":"absent-notes-reopen","base64":output["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["deck"]["slides"][0]["notes"], "New notes & <evidence>\nSecond line");
+    let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":changed["document"]["revision"],"receipt":changed["receipt"]})).unwrap();
+    assert_eq!(undone["document"]["hash"], opened["document"]["hash"]);
+    let restored = execute_request(json!({"op":"export_presentation","document":undone["document"]})).unwrap();
+    assert_eq!(STANDARD.decode(restored["base64"].as_str().unwrap()).unwrap(), original);
+}
+
+#[test]
+fn native_order_insertion_between_unchanged_neighbors_survives_reopen() {
+    let opened = execute_request(json!({"op":"open_presentation","id":"insert-order","base64":STANDARD.encode(exported(authored()))})).unwrap();
+    let mut elements = opened["document"]["deck"]["slides"][0]["elements"].as_array().unwrap().clone();
+    let inserted = execute_request(json!({"op":"create_object","id":"inserted-between","kind":"text"})).unwrap();
+    elements.insert(1, inserted);
+    let changed = native_change(&opened["document"], json!([{"op":"replace","path":"/deck/slides/0/elements","value":elements}]));
+    let output = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+    let reopened = execute_request(json!({"op":"open_presentation","id":"insert-order-reopen","base64":output["base64"]})).unwrap();
+    let actual = reopened["document"]["deck"]["slides"][0]["elements"].as_array().unwrap();
+    assert_eq!(actual.iter().map(|element| &element["id"]).collect::<Vec<_>>(), elements.iter().map(|element| &element["id"]).collect::<Vec<_>>());
+}
+
+#[test]
+fn native_order_nested_edits_keep_opaque_slots_ids_relations_and_undo() {
+    let namespace = "http://schemas.openxmlformats.org/presentationml/2006/main";
+    let text = |id: &str| json!({"id":id,"type":"text","x":10,"y":10,"width":120,"height":30,"text":id,"font_size":16,"color":"202525","bold":false});
+    let inner = json!({"id":"inner","type":"group","x":0,"y":0,"width":200,"height":100,"view_width":200,"view_height":100,"children":[text("inside-1"),text("inside-2")]});
+    let group = json!({"id":"outer","type":"group","x":20,"y":100,"width":500,"height":300,"view_width":500,"view_height":300,"children":[inner,text("group-label")]});
+    let mut linked = text("linked"); linked["format"] = json!({"hyperlink":"https://example.invalid/native?keep=1&raw=2"});
+    let mut deck = authored(); deck["slides"].as_array_mut().unwrap().truncate(1);
+    deck["slides"][0]["elements"] = json!([linked,group,text("last"),text("spare")]);
+    let mut package = Package::open(exported(deck)).unwrap();
+    let path = "ppt/slides/slide1.xml";
+    let mut xml = package.text(path).unwrap().to_owned();
+    let parsed = roxmltree::Document::parse(&xml).unwrap();
+    let first = parsed.descendants().find(|node| node.has_tag_name((namespace, "sp"))).unwrap().range().end;
+    let opaque = "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"9999\" name=\"Opaque\"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"100000\" cy=\"100000\"/></p:xfrm><a:graphic><a:graphicData uri=\"urn:vendor:opaque\"><v:payload xmlns:v=\"urn:vendor\" r:id=\"rIdVendor\" untouched=\"&amp;\"/></a:graphicData></a:graphic></p:graphicFrame>";
+    xml.insert_str(first, opaque);
+    let nested_sentinel = "<v:opaque xmlns:v=\"urn:nested-vendor\" keep=\"raw\"/>";
+    let parsed = roxmltree::Document::parse(&xml).unwrap();
+    let inner = parsed.descendants().find(|node| node.has_tag_name((namespace,"grpSp")) && node.descendants().find(|child| child.has_tag_name((namespace,"cNvPr"))).is_some_and(|identity| identity.attribute("name") == Some("inner"))).unwrap();
+    let position = inner.children().find(|node| node.has_tag_name((namespace,"grpSpPr"))).unwrap().range().end;
+    xml.insert_str(position, nested_sentinel);
+    package.replace_part(path, xml.into_bytes()).unwrap();
+    let rel_path = "ppt/slides/_rels/slide1.xml.rels";
+    let rel = "<Relationship Id=\"rIdVendor\" Type=\"urn:vendor:opaque\" Target=\"/ppt/vendor/opaque.bin\"/>";
+    let xml = package.text(rel_path).unwrap().replace("</Relationships>", &format!("{rel}</Relationships>"));
+    package.replace_part(rel_path, xml.into_bytes()).unwrap();
+    let mut parts = Package::open(package.save().unwrap()).unwrap().parts().clone();
+    parts.insert("ppt/vendor/opaque.bin".into(), vec![0, 13, 255, 42]);
+    let package = Package::from_parts(parts).unwrap(); let original = package.save().unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"nested-order","base64":STANDARD.encode(&original)})).unwrap();
+    assert_eq!(opened["document"]["deck"]["slides"][0]["elements"].as_array().unwrap().len(), 4);
+    let shapes = |source: &str| {
+        let parsed = roxmltree::Document::parse(source).unwrap();
+        parsed.descendants().filter(|node| node.tag_name().namespace() == Some(namespace) && ["sp","grpSp","graphicFrame"].contains(&node.tag_name().name()))
+            .map(|node| { let identity = node.descendants().find(|child| child.has_tag_name((namespace,"cNvPr"))).unwrap(); (identity.attribute("name").unwrap().to_owned(), (identity.attribute("id").unwrap().to_owned(), source[node.range()].to_owned())) }).collect::<std::collections::BTreeMap<_,_>>()
+    };
+    let before = shapes(package.text(path).unwrap());
+    for mode in ["reorder", "insert", "delete"] {
+        let mut elements = opened["document"]["deck"]["slides"][0]["elements"].as_array().unwrap().clone();
+        elements[1]["children"][0]["children"].as_array_mut().unwrap().swap(0,1);
+        elements[1]["children"][0]["children"][0]["text"] = json!("Nested edit & <raw>");
+        elements[1]["children"].as_array_mut().unwrap().swap(0,1);
+        elements[2]["text"] = json!("Top-level edit"); elements.swap(0,2);
+        if mode == "insert" { let mut inserted = elements[3].clone(); inserted["id"] = json!("inserted-native"); inserted["text"] = json!("inserted-native"); elements.insert(1, inserted); }
+        if mode == "delete" { elements.pop(); }
+        let changed = native_change(&opened["document"], json!([{"op":"replace","path":"/deck/slides/0/elements","value":elements}]));
+        let output = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+        let result = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+        let source = result.text(path).unwrap();
+        assert!(source.contains(opaque), "{mode}"); assert!(source.contains(nested_sentinel), "{mode}");
+        let parsed = roxmltree::Document::parse(source).unwrap();
+        let tree = parsed.descendants().find(|node| node.has_tag_name((namespace,"spTree"))).unwrap();
+        let slot = tree.children().filter(|node| node.tag_name().namespace() == Some(namespace) && ["sp","grpSp","graphicFrame"].contains(&node.tag_name().name())).nth(1).unwrap();
+        assert_eq!(&source[slot.range()], opaque, "opaque slot: {mode}");
+        let after = shapes(source);
+        for (name, (id, raw)) in &before {
+            if mode == "delete" && name == "spare" { assert!(!after.contains_key(name)); continue; }
+            assert_eq!(&after[name].0, id, "identity: {name}, {mode}");
+            if !["outer","inner","inside-2","last"].contains(&name.as_str()) { assert_eq!(&after[name].1, raw, "raw shape: {name}, {mode}"); }
+        }
+        let ids = parsed.descendants().filter(|node| node.has_tag_name((namespace,"cNvPr"))).map(|node| node.attribute("id").unwrap()).collect::<Vec<_>>();
+        assert_eq!(ids.len(), ids.iter().collect::<std::collections::BTreeSet<_>>().len());
+        for part in package.parts().keys().filter(|part| part.as_str() != path && !part.starts_with("customXml/")) { assert_eq!(result.part(part).unwrap(), package.part(part).unwrap(), "unrelated part: {part}, {mode}"); }
+        let reopened = execute_request(json!({"op":"open_presentation","id":"nested-order-reopen","base64":output["base64"]})).unwrap();
+        assert_eq!(reopened["document"]["deck"]["slides"][0]["elements"], json!(elements), "{mode}");
+        let unchanged = execute_request(json!({"op":"export_presentation","document":reopened["document"]})).unwrap(); assert_eq!(unchanged["base64"], output["base64"]);
+        assert_native_undo(&opened["document"], &changed, &original);
+    }
+}
+
+#[test]
+fn native_notes_duplicate_uses_current_binding_not_source_path() {
+    let mut package = Package::open(exported(authored())).unwrap();
+    let path = "ppt/notesSlides/notesSlide1.xml";
+    let sentinel = "<p:extLst><p:ext uri=\"urn:copy-notes-raw\"/></p:extLst>";
+    let xml = package.text(path).unwrap().replace("</p:notes>", &format!("{sentinel}</p:notes>"));
+    package.replace_part(path, xml.into_bytes()).unwrap();
+    let original = package.save().unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"copy-notes","base64":STANDARD.encode(&original)})).unwrap();
+    let copied = execute_request(json!({"op":"edit_slides","document":opened["document"],"expected_revision":0,"operations":[{"op":"duplicate","slide_id":"slide-1","id":"notes-copy"}]})).unwrap();
+    let copy_saved = execute_request(json!({"op":"export_presentation","document":copied["document"]})).unwrap();
+    let changed = native_change(&copied["document"], json!([
+        {"op":"replace","path":"/deck/slides/0/notes","value":"Source notes revised"},
+        {"op":"replace","path":"/deck/slides/1/notes","value":"Copy notes revised independently"}
+    ]));
+    let output = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+    let result = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let copy_path = "ppt/notesSlides/aislide-added-1.xml";
+    assert!(result.text(path).unwrap().contains("Source notes revised"));
+    assert!(!result.text(path).unwrap().contains("Copy notes revised independently"));
+    assert!(result.text(copy_path).unwrap().contains("Copy notes revised independently"));
+    assert!(result.text(copy_path).unwrap().contains(sentinel));
+    assert_eq!(result.part("ppt/notesSlides/_rels/notesSlide1.xml.rels").unwrap(), package.part("ppt/notesSlides/_rels/notesSlide1.xml.rels").unwrap());
+    let rels = roxmltree::Document::parse(result.text("ppt/notesSlides/_rels/aislide-added-1.xml.rels").unwrap()).unwrap();
+    let slide = rels.descendants().find(|node| node.attribute("Type").is_some_and(|kind| kind.ends_with("/slide"))).unwrap();
+    assert_eq!(slide.attribute("Target"), Some("/ppt/slides/aislide-added-1.xml"));
+    let reopened = execute_request(json!({"op":"open_presentation","id":"copy-notes-reopen","base64":output["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["deck"]["slides"][0]["notes"], "Source notes revised");
+    assert_eq!(reopened["document"]["deck"]["slides"][1]["notes"], "Copy notes revised independently");
+    assert_native_undo(&copied["document"], &changed, &STANDARD.decode(copy_saved["base64"].as_str().unwrap()).unwrap());
+    assert_native_undo(&opened["document"], &copied, &original);
+}
+
+#[test]
+fn native_notes_shared_targets_reject_without_mutating_other_slides() {
+    let mut package = Package::open(exported(authored())).unwrap();
+    let path = "ppt/slides/_rels/slide2.xml.rels";
+    let mut xml = package.text(path).unwrap().to_owned();
+    let parsed = roxmltree::Document::parse(&xml).unwrap();
+    let relation = parsed.root_element().children().find(|node| node.attribute("Type").is_some_and(|kind| kind.ends_with("/notesSlide"))).unwrap();
+    let target = relation.attributes().find(|attribute| attribute.name() == "Target").unwrap().range_value();
+    xml.replace_range(target, "../notesSlides/./notesSlide1.xml");
+    package.replace_part(path, xml.into_bytes()).unwrap();
+    let original = package.save().unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"shared-notes","base64":STANDARD.encode(&original)})).unwrap();
+    let document = &opened["document"];
+    assert_eq!(document["deck"]["slides"][0]["notes"], document["deck"]["slides"][1]["notes"]);
+    for index in [0, 1] {
+        let error = execute_request(json!({"op":"transaction","document":document,"transaction":{"expected_revision":0,"expected_hash":document["hash"],"operations":[{"op":"replace","path":format!("/deck/slides/{index}/notes"),"value":"Must not change another slide"}]}})).err().expect("shared notes edit must be rejected");
+        assert!(matches!(error, aislide_core::Error::Unsupported(_)), "{error}");
+        assert!(error.to_string().contains("shared notes"), "{error}");
+    }
+    let unchanged = execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+    assert_eq!(STANDARD.decode(unchanged["base64"].as_str().unwrap()).unwrap(), original);
+}
+
+#[test]
+fn reopened_notes_edit_preserves_native_notes_parts_and_undo() {
+    let mut package = Package::open(exported(authored())).unwrap();
+    let note_path = "ppt/notesSlides/notesSlide1.xml";
+    let notes = package.text(note_path).unwrap().replace("</p:notes>", "<p:extLst><p:ext uri=\"urn:notes-preserve\"><v:data xmlns:v=\"urn:vendor\" value=\"retain\"/></p:ext></p:extLst></p:notes>");
+    package.replace_part(note_path, notes.into_bytes()).unwrap();
+    let original = package.save().unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"notes-open","base64":STANDARD.encode(&original)})).unwrap();
+    let changed = execute_request(json!({"op":"transaction","document":opened["document"],"transaction":{"expected_revision":0,"expected_hash":opened["document"]["hash"],"operations":[{"op":"replace","path":"/deck/slides/0/notes","value":"Revised notes\nSecond paragraph & <evidence>"}]}})).unwrap();
+    let output = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+    let result = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+    assert!(result.text(note_path).unwrap().contains("urn:notes-preserve"));
+    for path in ["ppt/notesSlides/_rels/notesSlide1.xml.rels", "ppt/notesMasters/notesMaster1.xml", "ppt/slides/slide1.xml", "ppt/slides/slide2.xml"] {
+        assert_eq!(result.part(path).unwrap(), package.part(path).unwrap(), "non-target part: {path}");
+    }
+    let reopened = execute_request(json!({"op":"open_presentation","id":"notes-reopen","base64":output["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["deck"]["slides"][0]["notes"], "Revised notes\nSecond paragraph & <evidence>");
+    let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":1,"receipt":changed["receipt"]})).unwrap();
+    let restored = execute_request(json!({"op":"export_presentation","document":undone["document"]})).unwrap();
+    assert_eq!(STANDARD.decode(restored["base64"].as_str().unwrap()).unwrap(), original);
+}
+
+#[test]
+fn reopened_object_order_preserves_raw_shapes_and_undo() {
+    let mut package = Package::open(exported(authored())).unwrap();
+    let path = "ppt/slides/slide1.xml";
+    let xml = package.text(path).unwrap().replace("</p:sld>", "<p:extLst><p:ext uri=\"urn:order-preserve\"/></p:extLst></p:sld>");
+    package.replace_part(path, xml.into_bytes()).unwrap();
+    let original = package.save().unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"order-open","base64":STANDARD.encode(&original)})).unwrap();
+    let elements = opened["document"]["deck"]["slides"][0]["elements"].as_array().unwrap();
+    let first_id = elements[0]["id"].as_str().unwrap();
+    let changed = execute_request(json!({"op":"edit_elements","document":opened["document"],"expected_revision":0,"slide_id":"slide-1","operations":[{"op":"order","id":first_id,"index":elements.len()-1}]})).unwrap();
+    let output = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+    let result = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let original_xml = roxmltree::Document::parse(package.text(path).unwrap()).unwrap();
+    let updated_xml = roxmltree::Document::parse(result.text(path).unwrap()).unwrap();
+    let namespace = "http://schemas.openxmlformats.org/presentationml/2006/main";
+    let raw_shapes = |document: &roxmltree::Document<'_>, source: &str| {
+        let mut shapes = document.descendants().find(|node| node.has_tag_name((namespace, "spTree"))).unwrap().children().filter(|node| node.has_tag_name((namespace, "sp"))).map(|node| source[node.range()].to_owned()).collect::<Vec<_>>();
+        shapes.sort();
+        shapes
+    };
+    assert_eq!(raw_shapes(&original_xml, package.text(path).unwrap()), raw_shapes(&updated_xml, result.text(path).unwrap()));
+    assert!(result.text(path).unwrap().contains("urn:order-preserve"));
+    assert_eq!(result.part("ppt/slides/slide2.xml").unwrap(), package.part("ppt/slides/slide2.xml").unwrap());
+    let reopened = execute_request(json!({"op":"open_presentation","id":"order-reopen","base64":output["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["deck"]["slides"][0]["elements"].as_array().unwrap().last().unwrap()["id"], first_id);
+    let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":1,"receipt":changed["receipt"]})).unwrap();
+    let restored = execute_request(json!({"op":"export_presentation","document":undone["document"]})).unwrap();
+    assert_eq!(STANDARD.decode(restored["base64"].as_str().unwrap()).unwrap(), original);
+}
+
 #[test]
 fn slide_commands_create_blank_insert_duplicate_reorder_and_undo() {
     let document = execute_request(json!({"op":"create_presentation","id":"blank","title":"Untitled presentation"})).unwrap();
@@ -381,4 +758,127 @@ fn native_replacements_reject_unrepresented_paragraph_and_table_styles() {
         let result = execute_request(json!({"op":"transaction","document":document,"transaction":{"expected_revision":0,"expected_hash":document["hash"],"operations":[operation]}}));
         assert!(result.is_err(), "unrepresented {} formatting must survive or reject replacement", if table_case { "table" } else { "paragraph" });
     }
+}
+
+#[test]
+fn rich_notes_format_only_round_trip_preserves_body_identity_and_unknown_parts() {
+    let mut deck = authored();
+    deck["slides"][0]["notes"] = json!("Rich notes");
+    deck["slides"][0]["notes_paragraphs"] = json!([{"runs":[{"text":"Rich ","style":{"bold":true}},{"text":"notes","style":{"italic":true}}]}]);
+    let mut package = Package::open(exported(deck)).unwrap();
+    let path = "ppt/notesSlides/notesSlide1.xml";
+    let sentinel = "<p:extLst><p:ext uri=\"urn:rich-notes\"><v:data xmlns:v=\"urn:vendor\" keep=\"true\"/></p:ext></p:extLst>";
+    package.replace_part(path, package.text(path).unwrap().replace("</p:notes>", &format!("{sentinel}</p:notes>")).into_bytes()).unwrap();
+    let original = package.save().unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"rich-notes","base64":STANDARD.encode(&original)})).unwrap();
+    let document = &opened["document"];
+    assert_eq!(document["deck"]["slides"][0]["notes_paragraphs"][0]["runs"][0]["style"]["bold"], true);
+    let changed = native_change(document, json!([{"op":"replace","path":"/deck/slides/0/notes_paragraphs/0/runs/0/style/bold","value":false}]));
+    let output = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+    let result = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+    assert!(result.text(path).unwrap().contains(sentinel));
+    for part in package.parts().keys().filter(|part| !part.starts_with("customXml/") && part.as_str() != path) { assert_eq!(result.part(part).unwrap(), package.part(part).unwrap(), "{part}"); }
+    let reopened = execute_request(json!({"op":"open_presentation","id":"rich-notes","base64":output["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["deck"]["slides"][0]["notes"], "Rich notes");
+    assert_eq!(reopened["document"]["deck"]["slides"][0]["notes_paragraphs"][0]["runs"][0]["style"]["bold"], false);
+    let cleared = execute_request(json!({"op":"update_rich_notes","document":reopened["document"],"expected_revision":0,"slide_id":"slide-1","paragraphs":[]})).unwrap();
+    assert_eq!(cleared["document"]["deck"]["slides"][0]["notes"], "");
+    let cleared_output = execute_request(json!({"op":"export_presentation","document":cleared["document"]})).unwrap();
+    let cleared_open = execute_request(json!({"op":"open_presentation","id":"cleared-rich","base64":cleared_output["base64"]})).unwrap();
+    assert_eq!(cleared_open["document"]["deck"]["slides"][0]["notes"], "");
+    assert_native_undo(document, &changed, &original);
+}
+
+#[test]
+fn rich_notes_cache_refresh_retains_native_field_extensions_and_other_paragraphs() {
+    let mut deck = authored();
+    deck["slides"][0]["notes"] = json!("Before\n9");
+    deck["slides"][0]["notes_paragraphs"] = json!([{"runs":[{"text":"Before"}]},{"runs":[{"text":"9","field":{"id":"00112233-4455-6677-8899-aabbccddeeff","kind":"slidenum"}}]}]);
+    let mut package = Package::open(exported(deck)).unwrap();
+    let path = "ppt/notesSlides/notesSlide1.xml";
+    let extension = "<a:extLst><a:ext uri=\"urn:notes-field\"><v:keep xmlns:v=\"urn:vendor\"/></a:ext></a:extLst>";
+    let xml = package.text(path).unwrap().replace("<a:fld ", "<a:fld xmlns:v=\"urn:vendor\" v:retain=\"yes\" ").replace("</a:fld>", &format!("{extension}</a:fld>"));
+    package.replace_part(path, xml.into_bytes()).unwrap();
+    let original = package.save().unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"notes-fields","base64":STANDARD.encode(&original)})).unwrap();
+    let mut paragraphs = opened["document"]["deck"]["slides"][0]["notes_paragraphs"].clone();
+    paragraphs[0]["runs"][0]["text"] = json!("After");
+    let changed = execute_request(json!({"op":"update_rich_notes","document":opened["document"],"expected_revision":0,"slide_id":"slide-1","paragraphs":paragraphs})).unwrap();
+    let refreshed = execute_request(json!({"op":"refresh_fields","document":changed["document"],"expected_revision":1,"reference_date":"2026-09-18"})).unwrap();
+    assert_eq!(refreshed["document"]["deck"]["slides"][0]["notes"], "After\n1");
+    let output = execute_request(json!({"op":"export_presentation","document":refreshed["document"]})).unwrap();
+    let saved = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+    assert!(saved.text(path).unwrap().contains(extension));
+    assert!(saved.text(path).unwrap().contains("v:retain=\"yes\""));
+    assert_native_undo(&opened["document"], &changed, &original);
+}
+
+#[test]
+fn rich_notes_single_property_formats_survive_native_reopen() {
+    for paragraph in [
+        json!({"runs":[{"text":"Notes","style":{"language":"en-US"}}]}),
+        json!({"runs":[{"text":"Notes"}],"margin_left":285750,"indent":-142875,"level":1}),
+        json!({"runs":[{"text":"Notes"}],"line_spacing":{"kind":"points","value":2400}}),
+    ] {
+        let mut deck = authored();
+        deck["slides"][0]["notes"] = json!("Notes");
+        deck["slides"][0]["notes_paragraphs"] = json!([paragraph]);
+        let bytes = exported(deck);
+        let opened = execute_request(json!({"op":"open_presentation","id":"note-property","base64":STANDARD.encode(&bytes)})).unwrap();
+        let actual = &opened["document"]["deck"]["slides"][0]["notes_paragraphs"][0];
+        assert!(actual.is_object(), "missing rich note format: {paragraph}");
+        for name in ["margin_left", "indent", "level", "line_spacing"] {
+            if let Some(expected) = paragraph.get(name) { assert_eq!(&actual[name], expected, "{name}"); }
+        }
+        if let Some(language) = paragraph.pointer("/runs/0/style/language") { assert_eq!(&actual["runs"][0]["style"]["language"], language); }
+        let saved = execute_request(json!({"op":"export_presentation","document":opened["document"]})).unwrap();
+        assert_eq!(STANDARD.decode(saved["base64"].as_str().unwrap()).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn rich_notes_single_run_font_and_color_remain_editable_after_native_reopen() {
+    let mut deck = authored();
+    deck["slides"][0]["notes"] = json!("Notes");
+    deck["slides"][0]["notes_paragraphs"] = json!([{"runs":[{"text":"Notes","style":{"font_size":28,"color":"ABCDEF"}}]}]);
+    let bytes = exported(deck);
+    let opened = execute_request(json!({"op":"open_presentation","id":"single-rich-note","base64":STANDARD.encode(bytes)})).unwrap();
+    assert_eq!(opened["document"]["deck"]["slides"][0]["notes_paragraphs"][0]["runs"][0]["style"]["font_size"], 28.0);
+    assert_eq!(opened["document"]["deck"]["slides"][0]["notes_paragraphs"][0]["runs"][0]["style"]["color"], "ABCDEF");
+}
+
+#[test]
+fn rich_notes_unmodeled_hyperlinks_fail_closed_on_changed_paragraph() {
+    let mut deck = authored();
+    deck["slides"][0]["notes"] = json!("Linked notes");
+    deck["slides"][0]["notes_paragraphs"] = json!([{"runs":[{"text":"Linked notes","style":{"bold":true}}]}]);
+    let mut package = Package::open(exported(deck)).unwrap();
+    let path = "ppt/notesSlides/notesSlide1.xml";
+    package.replace_part(path, package.text(path).unwrap().replace("</a:rPr>", "<a:hlinkClick r:id=\"external-link\"/></a:rPr>").into_bytes()).unwrap();
+    let path = "ppt/notesSlides/_rels/notesSlide1.xml.rels";
+    package.replace_part(path, package.text(path).unwrap().replace("</Relationships>", "<Relationship Id=\"external-link\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.invalid/\" TargetMode=\"External\"/></Relationships>").into_bytes()).unwrap();
+    let original = package.save().unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"linked-notes","base64":STANDARD.encode(&original)})).unwrap();
+    let mut paragraphs = opened["document"]["deck"]["slides"][0]["notes_paragraphs"].clone();
+    paragraphs[0]["runs"][0]["text"] = json!("Changed");
+    assert!(execute_request(json!({"op":"update_rich_notes","document":opened["document"],"expected_revision":0,"slide_id":"slide-1","paragraphs":paragraphs})).is_err());
+    let result = execute_request(json!({"op":"export_presentation","document":opened["document"]})).unwrap();
+    assert_eq!(STANDARD.decode(result["base64"].as_str().unwrap()).unwrap(), original);
+}
+
+#[test]
+fn omitted_optional_notes_models_preserve_native_content_for_older_clients() {
+    let mut deck = authored();
+    deck["slides"][0]["notes"] = json!("Retain rich notes");
+    deck["slides"][0]["notes_paragraphs"] = json!([{"runs":[{"text":"Retain rich notes","style":{"bold":true}}]}]);
+    let bytes = exported(deck);
+    let opened = execute_request(json!({"op":"open_presentation","id":"old-notes-client","base64":STANDARD.encode(&bytes)})).unwrap();
+    let mut legacy = opened["document"]["deck"].clone();
+    legacy.as_object_mut().unwrap().remove("auxiliary_design");
+    legacy["slides"][0].as_object_mut().unwrap().remove("notes_paragraphs");
+    let updated = native_change(&opened["document"], json!([{"op":"replace","path":"/deck","value":legacy}]));
+    let output = execute_request(json!({"op":"export_presentation","document":updated["document"]})).unwrap();
+    let package = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let before = Package::open(bytes).unwrap();
+    for path in ["ppt/notesSlides/notesSlide1.xml", "ppt/notesMasters/notesMaster1.xml"] { assert_eq!(package.part(path).unwrap(), before.part(path).unwrap()); }
 }

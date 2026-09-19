@@ -203,8 +203,7 @@ pub async fn generate_report_async(config: &ProviderConfig, input: &GenerationIn
     }
 }
 
-async fn request_report(config: &ProviderConfig, input: &GenerationInput, feedback: Option<&str>) -> Result<GenerationResult> {
-    let started = Instant::now();
+async fn request_completion(config: &ProviderConfig, payload: serde_json::Value) -> Result<String> {
     let mut builder = Client::builder().timeout(config.timeout).connect_timeout(Duration::from_secs(5))
         .redirect(Policy::none()).retry(reqwest::retry::never()).no_proxy().referer(false)
         .no_gzip().no_brotli().no_deflate().no_zstd();
@@ -212,6 +211,41 @@ async fn request_report(config: &ProviderConfig, input: &GenerationInput, feedba
         builder = builder.resolve("localhost", SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.endpoint.port_or_known_default().unwrap_or(80)));
     }
     let client = builder.build().map_err(|_| Error::Generation("could not initialize the HTTP/TLS client".into()))?;
+    let mut request = client.post(config.endpoint.clone()).json(&payload);
+    if let Some(header) = &config.authorization { request = request.header(AUTHORIZATION, header.clone()); }
+    let mut response = request.send().await.map_err(|error| Error::Generation(if error.is_timeout() { "model request timed out; no retry was made" } else { "model connection failed; check the configured endpoint and TLS trust" }.into()))?;
+    if !response.status().is_success() { return Err(Error::Generation(format!("provider returned HTTP {}; no retry was made", response.status().as_u16()))); }
+    if response.content_length().is_some_and(|size| size > MAX_RESPONSE_BYTES as u64) { return Err(Error::Limit("model response > 1 MiB".into())); }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| Error::Generation("model response read failed or timed out".into()))? {
+        if chunk.len() > MAX_RESPONSE_BYTES - bytes.len() { return Err(Error::Limit("model response > 1 MiB".into())); }
+        bytes.extend_from_slice(&chunk);
+    }
+    let completion: Completion = serde_json::from_slice(&bytes).map_err(|_| Error::Generation("invalid chat completion response".into()))?;
+    if completion.choices.len() != 1 { return Err(Error::Generation("expected exactly one completion choice".into())); }
+    let choice = &completion.choices[0];
+    if choice.finish_reason != "stop" || choice.message.refusal.is_some() || choice.message.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
+        return Err(Error::Generation("model refused, requested tools, or returned incomplete output".into()));
+    }
+    choice.message.content.clone().ok_or_else(|| Error::Generation("model returned no text content".into()))
+}
+
+pub(crate) async fn local_structured_completion(config: &ProviderConfig, system: &str, content: serde_json::Value, schema: serde_json::Value, cancellation: CancellationToken) -> Result<(String, String)> {
+    if config.remote { return Err(Error::Generation("local AI editing forbids remote providers, including consented remote generation providers".into())); }
+    let payload = json!({"model":config.model,"stream":false,"temperature":0,"max_tokens":8192,
+        "messages":[{"role":"system","content":system},{"role":"user","content":content.to_string()}],
+        "response_format":{"type":"json_schema","json_schema":{"name":"aislide_text_assist","strict":true,"schema":schema}}});
+    let output = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(Error::Generation("text assistance cancelled".into())),
+        result = tokio::time::timeout(config.timeout, request_completion(config, payload)) => result.map_err(|_| Error::Generation("text assistance time budget exceeded".into()))?,
+    }?;
+    if cancellation.is_cancelled() { return Err(Error::Generation("text assistance cancelled".into())); }
+    Ok((output, config.model.clone()))
+}
+
+async fn request_report(config: &ProviderConfig, input: &GenerationInput, feedback: Option<&str>) -> Result<GenerationResult> {
+    let started = Instant::now();
     let content = json!({"brief":input.prompt,"source_text":input.source_text,"slide_count":input.slide_count,"outline":input.outline,"validation_feedback":feedback}).to_string();
     let mut payload = json!({"model":config.model,"stream":false,"max_tokens":16384,"messages":[{"role":"system","content":SYSTEM_PROMPT},{"role":"user","content":content}]});
     if config.json_mode { payload["response_format"] = json!({"type":"json_object"}); }
@@ -255,24 +289,8 @@ async fn request_report(config: &ProviderConfig, input: &GenerationInput, feedba
         }
         payload["response_format"] = json!({"type":"json_schema","json_schema":{"name":"aislide_report","strict":true,"schema":schema}});
     }
-    let mut request = client.post(config.endpoint.clone()).json(&payload);
-    if let Some(header) = &config.authorization { request = request.header(AUTHORIZATION, header.clone()); }
-    let mut response = request.send().await.map_err(|error| Error::Generation(if error.is_timeout() { "model request timed out; no retry was made" } else { "model connection failed; check the configured endpoint and TLS trust" }.into()))?;
-    if !response.status().is_success() { return Err(Error::Generation(format!("provider returned HTTP {}; no retry was made", response.status().as_u16()))); }
-    if response.content_length().is_some_and(|size| size > MAX_RESPONSE_BYTES as u64) { return Err(Error::Limit("model response > 1 MiB".into())); }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| Error::Generation("model response read failed or timed out".into()))? {
-        if chunk.len() > MAX_RESPONSE_BYTES - bytes.len() { return Err(Error::Limit("model response > 1 MiB".into())); }
-        bytes.extend_from_slice(&chunk);
-    }
-    let completion: Completion = serde_json::from_slice(&bytes).map_err(|_| Error::Generation("invalid chat completion response".into()))?;
-    if completion.choices.len() != 1 { return Err(Error::Generation("expected exactly one completion choice".into())); }
-    let choice = &completion.choices[0];
-    if choice.finish_reason != "stop" || choice.message.refusal.is_some() || choice.message.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
-        return Err(Error::Generation("model refused, requested tools, or returned incomplete output".into()));
-    }
-    let content = choice.message.content.as_deref().ok_or_else(|| Error::Generation("model returned no text content".into()))?;
-    let report: ReportInput = serde_json::from_str(content).map_err(|_| Error::ModelOutput("model output is not valid ReportInput JSON; no fallback was applied".into()))?;
+    let content = request_completion(config, payload).await?;
+    let report: ReportInput = serde_json::from_str(&content).map_err(|_| Error::ModelOutput("model output is not valid ReportInput JSON; no fallback was applied".into()))?;
     if report.sections.len() != input.slide_count { return Err(Error::ModelOutput("model returned a different slide count".into())); }
     if report.sections.iter().zip(&input.outline).any(|(section, planned)| section.title != planned.title || section.layout != planned.layout) { return Err(Error::ModelOutput("model output does not match the approved outline titles and layouts".into())); }
     let mut compiled = compile_report(&report).map_err(|error| Error::ModelOutput(format!("model output failed report or geometry validation: {error}; no fallback was applied")))?;

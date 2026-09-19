@@ -13,7 +13,7 @@ pub(super) fn render(drawing: &mut Drawing, category: &str, variant: usize, data
         "area-graph" => ChartKind::Area, "line-graph" => ChartKind::Line, "scatter" => ChartKind::Scatter,
         _ => return Err(Error::Unsupported("chart category".into())),
     };
-    let series: Vec<_> = series.iter().enumerate().map(|(index, entry)| ChartSeries { name:entry.name.clone(),values:entry.values.clone(),color:accent(index) }).collect();
+    let series: Vec<_> = series.iter().enumerate().map(|(index, entry)| ChartSeries { name:entry.name.clone(),values:entry.values.clone(),color:accent(index), ..Default::default() }).collect();
     crate::model::validate_chart_kind(kind, categories, &series)?;
     if kind == ChartKind::Area && series.len() > 1 { return Err(Error::Invalid("area overview currently requires a single series to avoid occluded data".into())); }
     let chart_bounds = match variant { 1 => [48.0,108.0,740.0,344.0], 2 => [48.0,100.0,720.0,360.0], _ => [64.0,104.0,1024.0,348.0] };

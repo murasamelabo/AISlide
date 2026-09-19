@@ -1,10 +1,84 @@
 ﻿import { expect, test } from '@playwright/test'
+import sharp from 'sharp'
+import { readFile } from 'node:fs/promises'
 import { openSample } from './fixtures'
 
 test.beforeEach(async ({ page }) => {
   await openSample(page)
   await expect(page.getByRole('button', { name: 'Slide 12:', exact: false })).toBeVisible()
 })
+
+for (const width of [1440, 390]) {
+  test(`G25 G27 auxiliary masters and rich notes are editable at ${width}px`, async ({ page }) => {
+    test.setTimeout(90_000)
+    await page.setViewportSize({ width, height: 960 })
+    await page.getByRole('button', { name: 'Edit masters and layouts', exact: true }).click()
+    await page.getByRole('button', { name: 'Notes master', exact: true }).click()
+    await page.getByRole('button', { name: 'Add common text', exact: true }).click()
+    await page.getByLabel('Design element text', { exact: true }).fill('Notes master footer')
+    await page.getByLabel('Design element x', { exact: true }).fill('70')
+    await page.getByText('Dynamic fields', { exact: true }).click()
+    await page.getByRole('button', { name: 'Add slide number', exact: true }).click()
+    await page.getByLabel('Design element y', { exact: true }).fill('820')
+    await page.getByLabel('Auxiliary preview page', { exact: true }).fill('3')
+    await expect(page.locator('.design-canvas .slide-text').filter({ hasText: /^3$/ })).toBeVisible()
+    await page.getByRole('button', { name: 'Handout master', exact: true }).click()
+    await page.getByRole('button', { name: 'Add common text', exact: true }).click()
+    await page.getByLabel('Design element text', { exact: true }).fill('Handout master footer')
+    await expect(page.locator('.design-canvas .slide-page')).toHaveJSProperty('clientHeight', 960)
+    await page.locator('.design-canvas .slide-page').scrollIntoViewIfNeeded()
+    await expect(page.locator('.design-canvas .slide-text').filter({ hasText: 'Handout master footer' })).toBeInViewport()
+    await page.locator('.design-canvas').screenshot({ path: `.artifacts/g25-g27-masters-${width}.png` })
+    await page.getByRole('button', { name: 'Save design', exact: true }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await page.getByRole('button', { name: 'Edit masters and layouts', exact: true }).click()
+    await page.getByRole('button', { name: 'Notes master', exact: true }).click()
+    await expect(page.locator('.design-canvas').getByText('Notes master footer', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Handout master', exact: true }).click()
+    await expect(page.locator('.design-canvas').getByText('Handout master footer', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Save design', exact: true }).click()
+    await page.getByRole('tab', { name: 'Notes', exact: true }).click()
+    await page.getByRole('button', { name: 'Edit speaker notes', exact: true }).click()
+    await page.getByLabel('Speaker notes', { exact: true }).fill('Rich notes from Studio')
+    await page.getByRole('button', { name: 'Format notes', exact: true }).click()
+    await page.getByRole('button', { name: 'Notes bold', exact: true }).click()
+    const notesUpdated = page.waitForResponse((response) => response.url().endsWith('/api/core') && response.request().postDataJSON()?.op === 'update_rich_notes')
+    await page.getByRole('button', { name: 'Apply speaker notes', exact: true }).click()
+    expect((await notesUpdated).ok()).toBe(true)
+    await expect(page.getByRole('region', { name: 'Review', exact: true })).toHaveAttribute('aria-busy', 'false')
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await page.screenshot({ path: `.artifacts/g25-g27-notes-${width}.png`, fullPage: true })
+    await page.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.locator('.notes-panel').getByText('Rich notes from Studio', { exact: true })).toHaveCSS('font-weight', '700')
+    await page.getByRole('button', { name: 'Undo', exact: true }).click()
+    await expect(page.locator('.notes-panel').getByText('Rich notes from Studio', { exact: true })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Redo', exact: true }).click()
+    const pendingDownload = page.waitForEvent('download')
+    await page.getByRole('button', { name: 'Save PPTX', exact: true }).click()
+    const download = await pendingDownload
+    const bytes = await readFile((await download.path())!)
+    await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: 'native-rich-notes.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: bytes })
+    await expect(page.locator('.dirty-indicator')).toHaveCount(0)
+    await page.getByRole('tab', { name: 'Notes', exact: true }).click()
+    await page.getByRole('button', { name: 'Edit speaker notes', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Notes bold', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await page.getByLabel('Notes run text', { exact: true }).fill('Native notes changed')
+    const nativeUpdated = page.waitForResponse((response) => response.url().endsWith('/api/core') && response.request().postDataJSON()?.op === 'update_rich_notes')
+    await page.getByRole('button', { name: 'Apply speaker notes', exact: true }).click()
+    expect((await nativeUpdated).ok()).toBe(true)
+    await expect(page.getByRole('region', { name: 'Review', exact: true })).toHaveAttribute('aria-busy', 'false')
+    await page.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await page.getByRole('button', { name: 'Slide 2:', exact: false }).click()
+    await page.getByText('Notes page', { exact: true }).click()
+    await expect(page.getByLabel('Notes page 2', { exact: true }).locator('.slide-text').filter({ hasText: /^2$/ })).toBeVisible()
+    await page.getByRole('button', { name: 'Undo', exact: true }).click()
+    await page.getByRole('button', { name: 'Slide 1:', exact: false }).click()
+    await expect(page.locator('.notes-panel').getByText('Rich notes from Studio', { exact: true })).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+}
 
 test('inserts a native preset with directly editable text and undo', async ({ page }) => {
   await page.getByRole('button', { name: 'Insert objects', exact: true }).click()
@@ -20,15 +94,27 @@ test('inserts a native preset with directly editable text and undo', async ({ pa
 })
 
 test('theme colors are live references and theme edits can be undone', async ({ page }) => {
+  const slide = page.locator('.canvas-workspace .slide-page')
+  const themedPixels = async () => {
+    const { data, info } = await sharp(await slide.screenshot()).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+    let count = 0
+    for (let offset = 0; offset < data.length; offset += info.channels) {
+      if (data[offset] === 181 && data[offset + 1] === 48 && data[offset + 2] === 85) count += 1
+    }
+    return count
+  }
+  await expect.poll(themedPixels).toBe(0)
   await page.getByRole('button', { name: 'Edit theme', exact: true }).click()
   await page.getByLabel('Theme name', { exact: true }).fill('Editorial theme')
   await page.getByLabel('Theme accent1', { exact: true }).fill('#b53055')
   await page.getByLabel('Heading font', { exact: true }).fill('Arial')
   await page.getByRole('button', { name: 'Apply theme', exact: true }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
-  await expect.poll(() => page.locator('.canvas-workspace .slide-page').evaluate((node) => Array.from(node.querySelectorAll('*')).some((child) => getComputedStyle(child).backgroundColor === 'rgb(181, 48, 85)'))).toBe(true)
+  await expect.poll(() => slide.locator('svg rect').evaluateAll((nodes) => nodes.some((node) => getComputedStyle(node).fill === 'rgb(181, 48, 85)'))).toBe(true)
+  await expect.poll(themedPixels).toBeGreaterThan(100)
   await page.getByRole('button', { name: 'Undo', exact: true }).click()
-  await expect.poll(() => page.locator('.canvas-workspace .slide-page').evaluate((node) => Array.from(node.querySelectorAll('*')).some((child) => getComputedStyle(child).backgroundColor === 'rgb(181, 48, 85)'))).toBe(false)
+  await expect.poll(() => slide.locator('svg rect').evaluateAll((nodes) => nodes.some((node) => getComputedStyle(node).fill === 'rgb(181, 48, 85)'))).toBe(false)
+  await expect.poll(themedPixels).toBe(0)
 })
 
 test('master text propagates and a layout preserves the slide title', async ({ page }) => {
@@ -43,3 +129,62 @@ test('master text propagates and a layout preserves the slide title', async ({ p
   await page.getByRole('button', { name: 'Slide 2:', exact: false }).click()
   await expect(page.locator('.canvas-workspace .master-graphics').getByText('Company master footer', { exact: true })).toBeVisible()
 })
+
+for (const width of [1440, 390]) {
+  test(`G23 G25 distinct master fonts and linked slide fields at ${width}px`, async ({ page }) => {
+    test.setTimeout(90_000)
+    await page.setViewportSize({ width, height: 960 })
+    const base64 = await page.evaluate(async (root) => {
+      const { AislideClient } = await import(`${root}/packages/client/index.mjs`)
+      const apiUrl = '/src/api.ts'
+      const { core } = await import(apiUrl)
+      const client = new AislideClient(core)
+      const session = await client.createPresentation('master-field-browser', 'Synthetic master fields')
+      const design = await client.designDefaults()
+      const theme = structuredClone(design.theme)
+      theme.fonts.minor = 'Courier New'
+      design.masters.push({ id: 'second-master', name: 'Second', background: '@lt1', elements: [], theme })
+      design.layouts.push({ id: 'second-layout', name: 'Second layout', master_id: 'second-master', background: null, elements: [] })
+      const deck = session.document.deck
+      deck.design = design
+      deck.slides[0].layout_id = 'blank'
+      deck.slides[0].elements = [{ type: 'text', id: 'sample', x: 80, y: 90, width: 1000, height: 80, text: 'Master font sample', font_size: 28, color: '@dk1', bold: false, format: { font_family: '@minor' } }]
+      deck.slides.push({ ...structuredClone(deck.slides[0]), id: 'slide-2', title: 'Second', layout_id: 'second-layout' })
+      await session.replaceDeck(deck)
+      return (await session.exportPresentation()).base64
+    }, `/@fs/${process.cwd().replaceAll('\\', '/')}`)
+    await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: 'master-fields.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: Buffer.from(base64, 'base64') })
+    const discard = page.getByRole('button', { name: 'Discard changes', exact: true })
+    if (await discard.isVisible()) await discard.click()
+    await expect(page.locator('.canvas-workspace .slide-text').filter({ hasText: 'Master font sample' })).toBeVisible()
+    await page.getByRole('button', { name: 'Slide 2:', exact: false }).click()
+    await expect(page.locator('.canvas-workspace .slide-text').first()).toHaveCSS('font-family', /Courier New/)
+    await page.getByRole('button', { name: 'Edit masters and layouts', exact: true }).click()
+    await page.getByRole('button', { name: 'Master Second', exact: true }).click()
+    await page.getByText('Master theme', { exact: true }).click()
+    await expect(page.getByLabel('Master minor font', { exact: true })).toHaveValue('Courier New')
+    await page.getByLabel('Master minor font', { exact: true }).fill('Arial')
+    await page.getByText('Dynamic fields', { exact: true }).click()
+    await page.getByLabel('Design field reference date', { exact: true }).fill('2026-09-18')
+    await page.getByRole('button', { name: 'Add slide number', exact: true }).click()
+    await page.getByLabel('Design footer text', { exact: true }).fill('Synthetic footer')
+    await page.getByRole('button', { name: 'Add footer', exact: true }).click()
+    await page.getByLabel('Design field reference date', { exact: true }).scrollIntoViewIfNeeded()
+    await page.screenshot({ path: `.artifacts/g23-g25-controls-${width}.png`, fullPage: true })
+    await page.getByRole('button', { name: 'Save design', exact: true }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.locator('.canvas-workspace .slide-text').first()).toHaveCSS('font-family', /Arial/)
+    await expect(page.locator('.canvas-workspace .slide-text').filter({ hasText: /^2$/ })).toBeVisible()
+    await expect(page.locator('.canvas-workspace .slide-text').filter({ hasText: 'Synthetic footer' })).toBeVisible()
+    await page.locator('.canvas-workspace .slide-page').scrollIntoViewIfNeeded()
+    await page.screenshot({ path: `.artifacts/g23-g25-${width}.png`, fullPage: true })
+    await page.getByRole('button', { name: 'Slide 1:', exact: false }).click()
+    await expect(page.locator('.canvas-workspace .slide-text').first()).not.toHaveCSS('font-family', /Courier New/)
+    await expect(page.locator('.canvas-workspace .slide-text').filter({ hasText: /^2$/ })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Undo', exact: true }).click()
+    await page.getByRole('button', { name: 'Slide 2:', exact: false }).click()
+    await expect(page.locator('.canvas-workspace .slide-text').first()).toHaveCSS('font-family', /Courier New/)
+    await expect(page.locator('.canvas-workspace .slide-text').filter({ hasText: /^2$/ })).toHaveCount(0)
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+}

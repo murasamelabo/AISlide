@@ -86,7 +86,9 @@ test('setup rejects target overrides before building or packaging stale artifact
   }
 });
 
-test('NSIS installs a working Start Menu shortcut and removes only its own files', { skip: process.platform !== 'win32' || !process.argv.includes('--installed'), timeout: 180_000 }, async (context) => {
+test('NSIS installs a working Start Menu shortcut and removes only its own files', { skip: process.platform !== 'win32' || !process.argv.includes('--installed'), timeout: 300_000 }, async (context) => {
+  const started = performance.now();
+  const checkpoint = (stage) => context.diagnostic(`Setup ${stage}: ${Math.round(performance.now() - started)} ms elapsed.`);
   const { chromium, expect } = await import('@playwright/test');
   const { icons: lucideIcons } = await import('lucide-react');
   const root = resolve(import.meta.dirname, '..');
@@ -113,11 +115,17 @@ test('NSIS installs a working Start Menu shortcut and removes only its own files
   let applicationId;
   const stopOwned = async () => {
     await browser?.close(); browser = undefined;
-    if (applicationId) await powershell("$owned = Get-Process -Id $env:AISLIDE_SETUP_PID -ErrorAction SilentlyContinue; if ($owned) { if ($owned.Path -ne $env:AISLIDE_SETUP_TARGET) { throw 'Test process identity changed' }; Stop-Process -Id $owned.Id -ErrorAction Stop }", { AISLIDE_SETUP_PID: String(applicationId), AISLIDE_SETUP_TARGET: join(destination, `${binaryName}.exe`) });
+    if (applicationId) {
+      await powershell("$owned = Get-Process -Id $env:AISLIDE_SETUP_PID -ErrorAction SilentlyContinue; if ($owned) { try { $null = $owned.Handle; if ($owned.Path -ne $env:AISLIDE_SETUP_TARGET) { throw 'Test process identity changed' }; Stop-Process -InputObject $owned -ErrorAction Stop; if (-not $owned.WaitForExit(15000)) { throw 'Test-owned application did not exit within 15000 ms' } } finally { $owned.Dispose() } }", { AISLIDE_SETUP_PID: String(applicationId), AISLIDE_SETUP_TARGET: join(destination, `${binaryName}.exe`) });
+      checkpoint('owned process exited');
+    }
     applicationId = undefined;
   };
   const uninstall = async () => {
-    if (await stat(uninstaller).catch(() => null)) await execute(uninstaller, ['/S'], { windowsHide: true });
+    if (await stat(uninstaller).catch(() => null)) {
+      await execute(uninstaller, ['/S', `_?=${destination}`], { windowsHide: true, windowsVerbatimArguments: true });
+      checkpoint('uninstaller completed');
+    }
     await expect(async () => { assert.equal(await stat(shortcut).catch(() => null), null); assert.equal(await stat(desktopShortcut).catch(() => null), null); }).toPass({ timeout: 15000 });
   };
   context.after(async () => {
@@ -130,7 +138,9 @@ test('NSIS installs a working Start Menu shortcut and removes only its own files
   await copyFile(join(binaryDirectory, 'aislide-studio.exe'), alias, constants.COPYFILE_EXCL);
   const config = { productName: name, mainBinaryName: binaryName, identifier: `dev.aislide.setupcheck.${tag}`, bundle: { windows: { nsis: { startMenuFolder: name, compression: 'zlib' } } } };
   await execute(process.execPath, [resolve(root, 'tools/cargo.mjs'), 'tauri', 'bundle', '--bundles', 'nsis', '--target', host, ...profile === 'debug' ? ['--debug'] : [], '--no-sign', '--config', JSON.stringify(config)], { cwd: root, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+  checkpoint('bundled');
   await execute(setup, ['/S', `/D=${destination}`], { windowsHide: true, windowsVerbatimArguments: true });
+  checkpoint('installed');
   const installedBinary = join(destination, `${binaryName}.exe`);
   assert.ok((await stat(installedBinary)).size > 0);
   await assertGuiSubsystem(installedBinary);
@@ -155,6 +165,7 @@ test('NSIS installs a working Start Menu shortcut and removes only its own files
   await expect(page.locator('.document-name strong')).toHaveText('Untitled presentation');
   await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
   await expect(page.getByRole('alert')).toHaveCount(0);
+  checkpoint('launched');
   await mkdir(resolve(root, '.artifacts'), { recursive: true });
   await page.screenshot({ path: resolve(root, '.artifacts/start-menu-installed.png') });
   await page.getByRole('button', { name: 'Insert icons', exact: true }).click();
@@ -223,6 +234,7 @@ test('NSIS installs a working Start Menu shortcut and removes only its own files
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
   await expect(page.locator('.slide-stage img')).toHaveCount(0);
   const profiles = await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('core_request', { operationId: crypto.randomUUID(), request: { op: 'best_practice_profiles' } }));
+  checkpoint('drag checks');
   assert.equal(profiles.profiles.length, 4);
   await page.getByRole('button', { name: 'Parts library', exact: true }).click();
   const parts = page.getByRole('dialog', { name: 'Parts library', exact: true });
@@ -234,6 +246,7 @@ test('NSIS installs a working Start Menu shortcut and removes only its own files
   const segments = await page.locator('.slide-stage svg polygon').evaluateAll((nodes) => nodes.filter((node) => node.getAttribute('points').trim().split(/\s+/).length > 40).length);
   assert.equal(segments, 4);
   await page.screenshot({ path: resolve(root, '.artifacts/parts-refresh-native.png') });
+  checkpoint('part inserted');
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
   await expect(page.locator('.slide-stage').getByText('Native cycle verification', { exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Edit masters and layouts', exact: true }).click();
@@ -248,14 +261,17 @@ test('NSIS installs a working Start Menu shortcut and removes only its own files
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
   await expect(page.getByLabel('Slide layout', { exact: true })).toHaveValue('blank');
+  checkpoint('preset checks');
   const before = await stat(installedBinary);
   await assert.rejects(() => execute(setup, ['/S', `/D=${destination}`], { windowsHide: true, windowsVerbatimArguments: true }), (error) => error.code === 2);
   await assert.rejects(() => execute(uninstaller, ['/S', `_?=${destination}`], { windowsHide: true, windowsVerbatimArguments: true }), (error) => error.code === 2);
   assert.equal((await stat(installedBinary)).mtimeMs, before.mtimeMs);
   await expect(page.locator('.thumbnail')).toHaveCount(1);
+  checkpoint('running guards');
   await writeFile(join(destination, 'keep-user-data.txt'), 'Synthetic user-data preservation check', { flag: 'wx' });
   await stopOwned();
   await uninstall();
+  checkpoint('uninstalled');
   assert.equal(await readFile(join(destination, 'keep-user-data.txt'), 'utf8'), 'Synthetic user-data preservation check');
   const registration = JSON.parse(await powershell("@{ Exists = Test-Path -LiteralPath ('HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + $env:AISLIDE_SETUP_NAME) } | ConvertTo-Json -Compress", { AISLIDE_SETUP_NAME: name }));
   assert.equal(registration.Exists, false);

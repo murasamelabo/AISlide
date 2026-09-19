@@ -58,10 +58,10 @@ fn read_chart(package: &Package, part: &str, node: Node<'_, '_>, common: (&str, 
         let values = string_cache(values_node).into_iter().map(|value| value.parse::<f64>().map_err(|_| Error::Unsupported("nonnumeric chart cache".into()))).collect::<Result<Vec<_>>>()?;
         let name = child(entry, C, "tx").map(|node| { let cached = string_cache(node); cached.first().cloned().or_else(|| child(node, C, "v").and_then(|value| value.text()).map(String::from)).unwrap_or_else(|| "Series".into()) }).unwrap_or_else(|| "Series".into());
         let color = child(entry, C, "spPr").map(|node| child(node, A, "ln").map_or_else(|| solid(node, "087F73"), |line| solid(line, "087F73"))).unwrap_or_else(|| "087F73".into());
-        series.push(ChartSeries { name, values, color });
+        series.push(ChartSeries { name, values, color, ..Default::default() });
     }
     let (id, [x, y, width, height]) = common;
-    Ok(Element::Chart { id: id.into(), x, y, width, height, kind, categories, series })
+    Ok(Element::Chart { id: id.into(), x, y, width, height, kind, categories, series, options: Default::default() })
 }
 
 fn read_element(package: &Package, part: &str, node: Node<'_, '_>, scale: (f64, f64)) -> Result<Element> {
@@ -74,7 +74,7 @@ fn read_element(package: &Package, part: &str, node: Node<'_, '_>, scale: (f64, 
         let extent = child(transform, A, "chExt").ok_or_else(|| Error::Unsupported("group child extent".into()))?;
         let view_width = numeric(extent, "cx", 0.0) / 9525.0; let view_height = numeric(extent, "cy", 0.0) / 9525.0;
         let children = node.children().filter(|node| node.is_element() && ["sp", "pic", "grpSp", "cxnSp", "graphicFrame"].contains(&node.tag_name().name())).map(|child| read_element(package, part, child, (1.0 / 9525.0, 1.0 / 9525.0))).collect::<Result<Vec<_>>>()?;
-        return Ok(Element::Group { id, x, y, width, height, view_width, view_height, children });
+        return Ok(Element::Group { visual: None, id, x, y, width, height, view_width, view_height, children });
     }
     if node.has_tag_name((P, "pic")) {
         let fill = child(node, P, "blipFill").ok_or_else(|| Error::Unsupported("picture fill".into()))?;
@@ -84,18 +84,18 @@ fn read_element(package: &Package, part: &str, node: Node<'_, '_>, scale: (f64, 
         let bytes = package.part(path)?;
         let mime_type = match image::guess_format(bytes) { Ok(image::ImageFormat::Png) => "image/png", Ok(image::ImageFormat::Jpeg) => "image/jpeg", _ => return Err(Error::Unsupported("non-raster picture".into())) }.into();
         let crop = child(fill, A, "srcRect").map(|node| Crop { left: numeric(node, "l", 0.0) / 100000.0, top: numeric(node, "t", 0.0) / 100000.0, right: numeric(node, "r", 0.0) / 100000.0, bottom: numeric(node, "b", 0.0) / 100000.0 }).unwrap_or_default();
-        return Ok(Element::Picture { id, x, y, width, height, base64: STANDARD.encode(bytes), mime_type, alt: properties(node).and_then(|node| node.attribute("descr")).unwrap_or("").into(), crop });
+        return Ok(Element::Picture { visual: None, svg: None, id, x, y, width, height, base64: STANDARD.encode(bytes), mime_type, alt: properties(node).and_then(|node| node.attribute("descr")).unwrap_or("").into(), crop });
     }
     if node.has_tag_name((P, "cxnSp")) {
         let connection = |tag| node.descendants().find(|node| node.has_tag_name((A, tag))).and_then(|node| Some(Connection { element_id: format!("shape-{}", node.attribute("id")?), site: node.attribute("idx")?.parse().ok()? }));
         let line = shape_properties(node).and_then(|node| child(node, A, "ln"));
-        return Ok(Element::Connector { id, x, y, width, height, color: line.map_or_else(|| "586563".into(), |line| solid(line, "586563")), stroke_width: line.map_or(1.0, |line| numeric(line, "w", 9525.0) / 9525.0), arrow: line.and_then(|line| child(line, A, "tailEnd")).is_some_and(|tail| tail.attribute("type").is_some_and(|value| value != "none")), flip_v: transform(node).and_then(|node| node.attribute("flipV")) == Some("1"), start: connection("stCxn"), end: connection("endCxn"), routing: None });
+        return Ok(Element::Connector { visual: None, id, x, y, width, height, color: line.map_or_else(|| "586563".into(), |line| solid(line, "586563")), stroke_width: line.map_or(1.0, |line| numeric(line, "w", 9525.0) / 9525.0), arrow: line.and_then(|line| child(line, A, "tailEnd")).is_some_and(|tail| tail.attribute("type").is_some_and(|value| value != "none")), flip_v: transform(node).and_then(|node| node.attribute("flipV")) == Some("1"), start: connection("stCxn"), end: connection("endCxn"), routing: None });
     }
     if node.has_tag_name((P, "graphicFrame")) {
         if let Some(table) = node.descendants().find(|node| node.has_tag_name((A, "tbl"))) {
             let rows = table.children().filter(|node| node.has_tag_name((A, "tr"))).map(|row| row.children().filter(|node| node.has_tag_name((A, "tc"))).map(|cell| child(cell, A, "txBody").map(paragraph_text).unwrap_or_default()).collect()).collect();
             let size = table.descendants().find(|node| node.has_tag_name((A, "rPr"))).map_or(20.0, |node| numeric(node, "sz", 1500.0) / 75.0);
-            return Ok(Element::Table { id, x, y, width, height, rows, font_size: size });
+            return Ok(Element::Table { id, x, y, width, height, rows, font_size: size, format: Default::default() });
         }
         return read_chart(package, part, node, (&id, [x, y, width, height]));
     }
@@ -104,12 +104,12 @@ fn read_element(package: &Package, part: &str, node: Node<'_, '_>, scale: (f64, 
             let text = paragraph_text(body);
             if !text.is_empty() {
                 let style = run_properties(body);
-                return Ok(Element::Text { id, x, y, width, height, text, font_size: style.map_or(24.0, |node| numeric(node, "sz", 1800.0) / 75.0), color: style.map_or_else(|| "202525".into(), |node| solid(node, "202525")), bold: style.and_then(|node| node.attribute("b")) == Some("1"), format: Default::default() });
+                return Ok(Element::Text { visual: None, id, x, y, width, height, text, font_size: style.map_or(24.0, |node| numeric(node, "sz", 1800.0) / 75.0), color: style.map_or_else(|| "202525".into(), |node| solid(node, "202525")), bold: style.and_then(|node| node.attribute("b")) == Some("1"), format: Default::default() });
             }
         }
         let properties = shape_properties(node).ok_or_else(|| Error::Unsupported("shape properties missing".into()))?;
         if child(properties, A, "prstGeom").and_then(|node| node.attribute("prst")) != Some("rect") { return Err(Error::Unsupported("non-rectangle geometry".into())); }
-        return Ok(Element::Rect { id, x, y, width, height, fill: solid(properties, "FFFFFF") });
+        return Ok(Element::Rect { visual: None, id, x, y, width, height, fill: solid(properties, "FFFFFF") });
     }
     Err(Error::Unsupported("unsupported visual object".into()))
 }
@@ -133,7 +133,7 @@ pub fn import_pptx(bytes: Vec<u8>) -> Result<ImportedDeck> {
     if !native_width.is_finite() || !native_height.is_finite() || native_width <= 0.0 || native_height <= 0.0 { return Err(Error::Invalid("invalid slide dimensions".into())); }
     let scale = (1280.0 / native_width, 720.0 / native_height);
     let paths = slide_paths(&package)?;
-    if paths.is_empty() || paths.len() > 32 { return Err(Error::Limit("visual import supports 1-32 slides".into())); }
+    if paths.is_empty() || paths.len() > crate::limits::LARGE.slides { return Err(Error::Limit("visual import supports 1-256 slides".into())); }
     let mut slides = Vec::new(); let mut objects = Vec::new();
     let mut warnings = vec!["Import preview is approximate: unsupported objects, master content, mixed-run formatting and effects may be absent. Original package bytes remain preserved; do not treat this preview as Office visual parity.".into()];
     for (index, part) in paths.iter().enumerate() {
@@ -145,7 +145,7 @@ pub fn import_pptx(bytes: Vec<u8>) -> Result<ImportedDeck> {
         for node in tree.children().filter(|node| node.is_element() && !["nvGrpSpPr", "grpSpPr", "extLst"].contains(&node.tag_name().name())) {
             match read_element(&package, part, node, scale) {
                 Ok(element) => {
-                    let probe = Deck { version: 1, title: "Import".into(), width: 1280, height: 720, slides: vec![Slide { id: slide_id.clone(), title: "Import".into(), background: "FFFFFF".into(), elements: vec![element.clone()], notes: String::new(), layout_id: None, inherit_background: false, hide_master_graphics: false, native_source_id: None }], design: None };
+                    let probe = Deck { version: 1, title: "Import".into(), width: 1280, height: 720, slides: vec![Slide { id: slide_id.clone(), title: "Import".into(), background: "FFFFFF".into(), elements: vec![element.clone()], notes: String::new(), notes_paragraphs: Vec::new(), layout_id: None, inherit_background: false, hide_master_graphics: false, native_source_id: None, review: None }], design: None, embedded_fonts: Vec::new(), auxiliary_design: None };
                     if !matches!(element, Element::Connector { .. }) && validate_deck(&probe).is_err() { warnings.push(format!("{part} / {} preserved but not previewed: geometry or content outside scene limits", element.bounds().0)); continue; }
                     let mut fields = vec!["x".into(), "y".into(), "width".into(), "height".into()];
                     if matches!(element, Element::Text { .. }) && text_is_writable(node) { fields.push("text".into()); }
@@ -159,9 +159,9 @@ pub fn import_pptx(bytes: Vec<u8>) -> Result<ImportedDeck> {
         let background = child(common, P, "bg").and_then(|node| child(node, P, "bgPr")).map_or_else(|| "FFFFFF".into(), |node| solid(node, "FFFFFF"));
         let notes = relationship_targets(&package, part, "notesSlide").ok().and_then(|targets| targets.values().next().cloned()).and_then(|path| package.text(&path).ok()).and_then(|value| parse(value).ok()).map(|document| document.descendants().filter(|node| node.has_tag_name((P, "txBody"))).map(paragraph_text).collect::<Vec<_>>().join("\n")).unwrap_or_default();
         let title = common.attribute("name").filter(|title| title.chars().count() <= 120).map(String::from).unwrap_or_else(|| format!("Imported slide {}", index + 1));
-        slides.push(Slide { id: slide_id, title, background, elements, notes, layout_id: None, inherit_background: false, hide_master_graphics: false, native_source_id: None });
+        slides.push(Slide { id: slide_id, title, background, elements, notes, notes_paragraphs: Vec::new(), layout_id: None, inherit_background: false, hide_master_graphics: false, native_source_id: None, review: None });
     }
-    let deck = Deck { version: 1, title: "Imported presentation".into(), width: 1280, height: 720, slides, design: None };
+    let deck = Deck { version: 1, title: "Imported presentation".into(), width: 1280, height: 720, slides, design: None, embedded_fonts: Vec::new(), auxiliary_design: None };
     validate_deck(&deck)?;
     Ok(ImportedDeck { deck, source_sha256, warnings, objects })
 }

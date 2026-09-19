@@ -1,12 +1,55 @@
 ﻿# Windows Setup And Start Menu
 
-Date: 2026-09-16. Windows setup uses the existing Tauri CLI 2.11.4 and its NSIS template. The parts/guided-authoring refresh below is local and uncommitted; it does not authorize signing, a project license, a GitHub push or binary publication.
+Date: 2026-09-19. Windows setup uses the existing Tauri CLI 2.11.4 and its NSIS template. The authorized regular desktop update is complete. Ordinary commit/push to the existing public `murasamelabo/AISlide` repository's `main` branch is authorized but still pending; the publication owner must record the actual SHA after pushing. Signing, choosing a project license, force push, visibility changes and release/binary publication are not authorized by this update. See the [current completion ledger](../planning/editing-completion.md).
+
+## Current Verified Update
+
+The regular per-user desktop update completed at **2026-09-19T07:02:09Z**. NSIS exited 0, reused the existing HKCU installation at `%LOCALAPPDATA%/AISlide Studio`, and preserved the Start Menu shortcut targeting the installed application with no arguments. The actual shortcut then opened a visible, responding application using its normal profile, without remote debugging or test environment flags; that normal window was left open.
+
+| Artifact | Bytes | SHA-256 |
+| --- | --- | --- |
+| Unsigned debug x64 GNU NSIS installer | 122,860,638 | `14ae220acfc81b5cdb10c1f353bd7a873e2ab61535d009c13b168f79f2311127` |
+| Source bundle executable | 951,846,400 | `4aefdcdcade347c2685f2b7966974526891c80603050dcce1c5ceb1e824527b5` |
+| Installed executable | 951,846,400 | `5f2790e7c399e8f55368796fadb4b0ddfa35d874810387ec7769f7fd8d8fcc84` |
+
+The installed executable differs from the bundle by exactly three bytes at offsets **173108712, 173108713, 173108714**: Tauri's `__TAURI_BUNDLE_TYPE_VAR_UNK` becomes `__TAURI_BUNDLE_TYPE_VAR_NSS`. All other bytes are identical; normalizing only that marker reproduces the source bundle SHA. This is the expected NSIS bundle marker, not an unexplained payload mismatch. The installed application is an x64 Windows GUI executable. The separate development-native executable used for the six-test native gate is not this bundle payload.
+
+`npm run setup:build -- --debug --no-sign` succeeded on Windows 11 ARM64 with x64 GNU. Native unit tests passed **14/14**; the current native group passed **6/6**, with no skips. The final isolated installed lifecycle passed **5/5**, no skips, in **169.6 seconds**, including the actual test-owned Start Menu launch, running-app guards, shortcut/registration removal and unrelated-file retention. After the regular update, the installed binary passed a separate **4/4** bounded native group using isolated fixtures, including recovery across distinct processes/fresh WebViews and restart Undo/Redo. These counts describe separate gates, not an additive product-coverage total.
+
+An earlier lifecycle reached the 180-second deadline while test-only packaging took about 112 seconds for the roughly 1GB debug payload. Only the **installed-test lifecycle** deadline was raised to **300 seconds**; no product timeout was changed. A later teardown exposed incomplete exit synchronization. The test now pins the exact owned process by PID and executable path, awaits `WaitForExit`, and awaits the actual NSIS worker using `/S` and `_?=<destination>`. Both synchronization changes together passed the existing five tests without weakening assertions or adding retries/skips. The old failure did not record worker exit status, so the individual contribution of application-exit timing versus the self-copy worker is not proven. The final run left no new owned temporary files, aliases, shortcuts or related processes; pre-existing test artifacts were left untouched.
+
+Selected settings and recovery-store content hashes remained unchanged across installation and isolated tests, **before normal launch**. The WebView inventory was also unchanged. Model weights are not bundled or modified; existing model preservation was checked by size, timestamp and first/last 64KiB samples, not full-file hashes. Normal startup can legitimately update its own profile, so the pre-launch preservation proof is not a claim that all user-data bytes remain frozen afterward. No automatic downgrade or executable-only rollback was performed.
+
+Local evidence names below are not public download links:
+
+- `.artifacts/bounded-native-20260919-8Cwlpf/setup-build/execution.json`: successful build and installer/bundle hashes.
+- `.artifacts/completion-native-20260919-6d914e/unit/command.log` and `.artifacts/bounded-native-20260919-8Cwlpf/native-full/execution.json`: 14 unit and six current native passes.
+- `.artifacts/installer-teardown-tkidbE/final-gates.json` and its `command.log`: final isolated 5/5, duration, frozen artifact hashes and owned cleanup.
+- `.artifacts/regular-desktop-update-20260919-1556-9e283c/final-proof.json`: regular update, three-byte payload comparison, preservation, installed 4/4 and normal Start Menu launch.
+
+This remains an unsigned **debug x64** build tested on Windows 11 ARM64. Release/signing, native ARM64/MSVC, broad upgrade compatibility and missing-WebView2 setup remain unqualified. Model weights and generated verification artifacts are not publication payloads. The completion ledger separately records the limited Office qualification; installation tests do not establish Office visual parity.
+
+The checkpoint sections from Editing Expansion through Lucide Catalog Refresh below are **HISTORICAL**. Their package sizes, test counts, authorization and statements about not updating the regular installation apply only to those earlier runs, not to the completed update above.
+
+## Editing Expansion
+
+**HISTORICAL: 2026-09-18 checkpoint, superseded by Current Verified Update.** The unsigned debug x64 installer was **95,174,769 bytes**, SHA-256 `7b17ed14074ae9b8c4c4a026f169a5c768d8247200ac66a89d63f658d73d1a94`.
+
+It used the standard local setup output path described below, which now holds the current package rather than these historical bytes.
+
+`npm run setup:build -- --debug --no-sign` completed with the [28-item editing expansion](../planning/editing-expansion.md). Native unit tests passed 5/5, the embedded WebView workflow passed, and the isolated installed lifecycle passed all 5 cases in 158 seconds. The test used a random product name, temporary directory and WebView profile; it did not install or update the regular AISlide application. The actual Start Menu launch, icon/part/preset editing, Undo, 0.000px pending move/resize preview displacement, running-app install/uninstall guards, shortcut/registration removal and unrelated-file retention passed.
+
+The isolated installed test used the preceding 95,149,633-byte package (`e6ed887168026ddd61a7e3b803dc5a2725c0b1d9ba2984faa44b6ae51937afab`). The final package above was rebuilt after the Sunburst-only native boundary/legacy-encoding fix, with no packaging or UI code changes. The final core passed 444 tests, Node passed 66, and the rebuilt ordinary desktop passed the complete WebView workflow again in 50 seconds. The installed lifecycle was not repeated for this final XML-only change; its fresh generated/edited Sunburst files passed Office and schema checks separately.
+
+An initial installed run reached its unchanged 180-second deadline. After adding stage timings, the same lifecycle passed: test-only rebundling took about 94 seconds, installation 26 seconds, and the remaining checks/cleanup completed within the deadline. No timeout, assertion or app guard was relaxed. This is a single successful current lifecycle, not a sustained installation-performance guarantee.
+
+Save and close AISlide before manually running setup. The build remains unsigned and debug-only on Windows 11 ARM64 using x64 GNU. Release/signing, native ARM64/MSVC, broad upgrade compatibility and missing-WebView2 setup remain unqualified. The earlier checkpoint evidence below is historical.
 
 ## Parts And Guided Authoring
 
-The current installer includes the revised horizontal/vertical flows, trees and cycles, relationship-label and Japanese Venn fixes, and the shared core's four authoring profiles. The existing standalone MCP server exposes guide retrieval and validated creation; the desktop continues to use Parts library for direct insertion. See [parts verification](parts-library.md#2026-09-16-refresh) and [guided authoring](../authoring/README.md).
+The preceding installer included the revised horizontal/vertical flows, trees and cycles, relationship-label and Japanese Venn fixes, and the shared core's four authoring profiles. The existing standalone MCP server exposes guide retrieval and validated creation; the desktop continues to use Parts library for direct insertion. These remain included in the editing expansion. See [parts verification](parts-library.md#2026-09-16-refresh) and [guided authoring](../authoring/README.md).
 
-The current regular installer is **83,341,220 bytes**, SHA-256 `c5280adc1d4a4a874bf7df5b7b2bf25654605cec2aed2a3c6f3fa9859f6262b7`. `npm run setup:build -- --debug --no-sign` succeeded. All five `npm run test:setup:installed` cases passed against the newly built core: the test-owned actual Start Menu launch retrieved all four profiles, inserted a segmented cycle, checked four filled polygon segments, and undid it. Existing icon/master operations, pending move/resize stability, GUI-subsystem checks and install/uninstall safety gates also passed. Native unit tests passed all four cases.
+That installer was **83,341,220 bytes**, SHA-256 `c5280adc1d4a4a874bf7df5b7b2bf25654605cec2aed2a3c6f3fa9859f6262b7`, superseded above. `npm run setup:build -- --debug --no-sign` succeeded. All five `npm run test:setup:installed` cases passed against that core: the test-owned actual Start Menu launch retrieved all four profiles, inserted a segmented cycle, checked four filled polygon segments, and undid it. Existing icon/master operations, pending move/resize stability, GUI-subsystem checks and install/uninstall safety gates also passed. Native unit tests passed all four cases.
 
 This remains an unsigned debug x64 build tested on Windows 11 ARM64. Save and exit the normal AISlide application, then run setup to update it. No regular installation, user window or presentation was modified by the isolated tests. Console-free startup and earlier drag improvements remain included. Release, signing, native ARM64/MSVC and missing-WebView2 qualification remain separate work.
 

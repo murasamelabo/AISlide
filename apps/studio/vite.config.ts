@@ -25,11 +25,11 @@ export default defineConfig({
           for await (const chunk of request) {
             const buffer = Buffer.from(chunk)
             length += buffer.length
-            if (length > MAX_REQUEST_BYTES) throw new Error('Request exceeds 4 MiB')
+            if (length > MAX_REQUEST_BYTES) throw new Error('Request exceeds 96 MiB')
             chunks.push(buffer)
           }
           const value = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-          request.setTimeout(coreTimeout(value) + 5000, () => { controller.abort(); request.destroy() })
+          request.setTimeout(coreTimeout(value, length) + 5000, () => { controller.abort(); request.destroy() })
           const result = await requestCore(value, { signal: controller.signal })
           response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
         } catch (error) {

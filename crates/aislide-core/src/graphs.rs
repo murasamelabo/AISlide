@@ -168,12 +168,12 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
 
 fn text(id: String, rect: [f64; 4], label: &str, size: f64, color: &str, alignment: TextAlign, bold: bool) -> Element {
     let [x, y, width, height] = rect;
-    Element::Text { id, x, y, width, height, text: label.into(), font_size: size, color: color.into(), bold, format: TextFormat { alignment, vertical: VerticalAlign::Middle, font_family: Some("@minor".into()), ..Default::default() } }
+    Element::Text { visual: None, id, x, y, width, height, text: label.into(), font_size: size, color: color.into(), bold, format: TextFormat { alignment, vertical: VerticalAlign::Middle, font_family: Some("@minor".into()), ..Default::default() } }
 }
 
 fn shape(id: String, rect: [f64; 4], preset: &str, fill: &str, stroke: &str) -> Element {
     let [x, y, width, height] = rect;
-    Element::Shape { id, x, y, width, height, preset: preset.into(), fill: fill.into(), stroke: stroke.into(), stroke_width: 1.5, rotation: 0.0, text: String::new(), font_size: 18.0, color: "@dk1".into(), bold: false, format: Default::default() }
+    Element::Shape { visual: None, id, x, y, width, height, preset: preset.into(), fill: fill.into(), stroke: stroke.into(), stroke_width: 1.5, rotation: 0.0, text: String::new(), font_size: 18.0, color: "@dk1".into(), bold: false, format: Default::default() }
 }
 
 fn resolved_port(node: &GraphNode, port: Port, other: &GraphNode) -> Port {
@@ -227,7 +227,7 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
         let left = points.iter().map(|point| point[0]).fold(f64::INFINITY, f64::min); let top = points.iter().map(|point| point[1]).fold(f64::INFINITY, f64::min);
         let width = (points.iter().map(|point| point[0]).fold(f64::NEG_INFINITY, f64::max) - left).max(0.01); let height = (points.iter().map(|point| point[1]).fold(f64::NEG_INFINITY, f64::max) - top).max(0.01);
         let points = points.into_iter().map(|point| [((point[0] - left) / width * 1e6).round() / 1e6, ((point[1] - top) / height * 1e6).round() / 1e6]).collect();
-        children.push(Element::Connector { id: format!("{prefix}-e-{}", edge.id), x: left, y: top, width, height, color: edge.color.clone(), stroke_width: 2.0, arrow: edge.arrow, flip_v: false,
+        children.push(Element::Connector { visual: None, id: format!("{prefix}-e-{}", edge.id), x: left, y: top, width, height, color: edge.color.clone(), stroke_width: 2.0, arrow: edge.arrow, flip_v: false,
             start: Some(Connection { element_id: format!("{prefix}-n-{}", source.id), site: start.2 }), end: Some(Connection { element_id: format!("{prefix}-n-{}", target.id), site: end.2 }), routing: Some(crate::model::ConnectorRouting { points, start_arrow: edge.start_arrow, dashed: edge.dashed }) });
     }
     for node in &spec.nodes {
@@ -260,7 +260,7 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
         children.push(label);
     }
     crate::layout::fit_part_text(&mut children, theme)?;
-    let result = Element::Group { id: id.into(), x: 64.0, y: 144.0, width: WIDTH, height: HEIGHT, view_width: WIDTH, view_height: HEIGHT, children };
+    let result = Element::Group { visual: None, id: id.into(), x: 64.0, y: 144.0, width: WIDTH, height: HEIGHT, view_width: WIDTH, view_height: HEIGHT, children };
     validate_elements(std::slice::from_ref(&result), (1280.0, 720.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
     Ok(result)
 }

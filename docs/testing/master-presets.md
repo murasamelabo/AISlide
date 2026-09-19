@@ -50,7 +50,7 @@ Preset application retains the original masters/layouts and existing slide text,
 
 A default authored deck has two masters and eleven layouts after applying a preset: its original one/four plus the preset one/seven. Switching styles replaces that preset set instead of repeatedly adding masters. Custom elements added alongside preset elements and additional custom layouts remain. Edited or removed generated template elements, foreign master IDs, conflicting custom IDs and insufficient capacity fail before committing; they are not silently overwritten. Numerical comparison allows only the small coordinate rounding required by native PPTX serialization.
 
-The existing limits remain eight masters and thirty-two layouts. Reopened native packages cannot gain arbitrary new master/layout parts. Consequently, a presentation without an existing preset master must receive its preset before first export, or be created anew; an already preset-based PPTX supports compatible preset replacement after reopening. Unsupported native or imported changes still fail closed. A saved preset is ordinary PresentationML, not a cached scene that overrides PowerPoint edits.
+The existing limits remain eight masters and thirty-two layouts. The 2026-09-18 editing expansion supports adding/removing/reassigning represented native master/layout parts by identity, including adding a preset after reopening. Referenced removals, unknown relationships and unrepresentable changes still fail closed. Existing preset-template ownership and modified-content guards continue to apply. A saved preset is ordinary PresentationML, not a cached scene that overrides PowerPoint edits. See the [current editing scope](../planning/editing-expansion.md) and [owner-theme contract](../authoring/master-fields-themes.md).
 
 ## Shared Interfaces
 
@@ -67,7 +67,7 @@ Use [the shared API reference](../api.md) and [SDK guide](../../packages/client/
 
 The current corrected samples are under `.artifacts/master-presets-TjlBv4/`. Earlier `.artifacts/master-presets-BXp44U/` samples exposed PowerPoint retaining original font sizes when only a part's outer group was scaled; they are not the final samples. The fitted-canvas regression now covers header/subtitle spacing, native reopen and subsequent updates. PowerPoint inspection uses disposable copies and verifies the source hash afterward, never the source file itself.
 
-## Verified Results
+## Historical 2026-09-16 Results
 
 This checkpoint has **251 distinct passing tests**: Rust workspace/CLI 140; Node bridge, SDK, MCP, extraction, generation and icon metadata 33; Studio browser 64; generation browser 4; native unit 4; native WebView 1; and setup configuration/installed lifecycle 5. The full browser run passed 62 cases; two keyboard-focus checks needed actual Tab navigation after the sample fixture clicked Save, then both passed unchanged application code. The native test likewise gained an explicit unsaved-content confirmation after creating the sample. No protection or focus policy was weakened.
 

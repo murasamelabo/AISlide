@@ -51,9 +51,11 @@ impl Package {
             if entry.size() > MAX_PART_BYTES as u64 {
                 return Err(Error::Limit("archive part > 16 MiB".into()));
             }
+            let remaining = MAX_TOTAL_BYTES - total;
+            if entry.size() > remaining as u64 { return Err(Error::Limit("expanded archive budget".into())); }
             let mut data = Vec::new();
             Read::by_ref(&mut entry)
-                .take(MAX_PART_BYTES as u64 + 1)
+                .take(MAX_PART_BYTES.min(remaining) as u64 + 1)
                 .read_to_end(&mut data)?;
             total += data.len();
             if data.len() > MAX_PART_BYTES || total > MAX_TOTAL_BYTES {

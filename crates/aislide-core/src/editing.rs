@@ -73,14 +73,14 @@ fn identity(id: &str) -> Result<()> {
 }
 
 fn blank(id: String, title: String, layout_id: Option<String>) -> Slide {
-    Slide { id, title, background: "@lt1".into(), elements: Vec::new(), notes: String::new(), layout_id, inherit_background: false, hide_master_graphics: false, native_source_id: None }
+    Slide { id, title, background: "@lt1".into(), elements: Vec::new(), notes: String::new(), notes_paragraphs: Vec::new(), layout_id, inherit_background: false, hide_master_graphics: false, native_source_id: None, review: None }
 }
 
 pub fn create(id: String, title: String) -> Result<Document> {
     valid_text(&title, 200)?;
     let design = crate::design::Design::default();
     let layout = design.layouts.iter().find(|layout| layout.elements.is_empty()).map(|layout| layout.id.clone());
-    let deck = Deck { version: 1, title, width: 1280, height: 720, slides: vec![blank("slide-1".into(), "Slide 1".into(), layout)], design: Some(design) };
+    let deck = Deck { version: 1, title, width: 1280, height: 720, slides: vec![blank("slide-1".into(), "Slide 1".into(), layout)], design: Some(design), embedded_fonts: Vec::new(), auxiliary_design: None };
     crate::document::create(id, deck, Vec::new(), Vec::new(), None)
 }
 
@@ -133,7 +133,7 @@ pub fn slides(document: &Document, expected_revision: u64, operations: &[SlideOp
                 let index = locate(slide_id)?; deck.slides[index].title = title.clone();
             }
         }
-        if deck.slides.len() > 32 { return Err(Error::Limit("presentation exceeds 32 slides".into())); }
+        if deck.slides.len() > document.capacity_profile.limits().slides { return Err(Error::Limit(format!("presentation exceeds {} slides", document.capacity_profile.limits().slides))); }
     }
     crate::document::transact(document, Transaction { expected_revision, expected_hash: document.hash.clone(), operations: serde_json::from_value(json!([
         {"op":"replace","path":"/deck","value":deck}, {"op":"add","path":"/parts","value":parts},

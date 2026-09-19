@@ -47,7 +47,18 @@ fn read_value(node: Node<'_, '_>, depth: usize) -> Result<Value> {
     }
 }
 
+fn validate_resources(metadata: &Metadata) -> Result<()> {
+    if metadata.sources.len() > 8 || metadata.bindings.len() > 4096
+        || metadata.identities.len() > crate::limits::MAX_PROVENANCE_IDENTITIES
+        || metadata.identities.iter().any(|entry| entry.objects.len() > crate::limits::STANDARD.elements_per_slide)
+        || metadata.identities.iter().map(|entry| entry.objects.len()).sum::<usize>() > crate::limits::STANDARD.elements_total {
+        return Err(Error::Limit("provenance resources".into()));
+    }
+    Ok(())
+}
+
 fn encode(metadata: &Metadata) -> Result<Vec<u8>> {
+    validate_resources(metadata)?;
     let mut writer = XmlWriter::new(Options { indent: xmlwriter::Indent::None, ..Options::default() });
     writer.start_element("m:provenance"); writer.write_attribute("xmlns:m", NS); write_value(&mut writer, &serde_json::to_value(metadata)?); writer.end_element();
     let bytes = writer.end_document().into_bytes();
@@ -70,7 +81,7 @@ pub(crate) fn read(package: &Package) -> Result<Option<(String, Metadata)>> {
         if children.len() != 1 { return Err(Error::Invalid("provenance root must contain one object".into())); }
         let value: Metadata = serde_json::from_value(read_value(children[0], 0)?)?;
         if value.version != 1 { return Err(Error::Unsupported("provenance version".into())); }
-        if value.sources.len() > 8 || value.bindings.len() > 4096 || value.identities.len() > 72 || value.identities.iter().any(|entry| entry.objects.len() > 256) { return Err(Error::Limit("provenance resources".into())); }
+        validate_resources(&value)?;
         found = Some((path.clone(), value));
     }
     Ok(found)
