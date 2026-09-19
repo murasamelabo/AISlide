@@ -1,6 +1,6 @@
 ﻿# Windows Setup And Start Menu
 
-Date: 2026-09-19. Windows setup uses the existing Tauri CLI 2.11.4 and its NSIS template. The authorized regular desktop update is complete. Ordinary commit/push to the existing public `murasamelabo/AISlide` repository's `main` branch is authorized but still pending; the publication owner must record the actual SHA after pushing. Signing, choosing a project license, force push, visibility changes and release/binary publication are not authorized by this update. See the [current completion ledger](../planning/editing-completion.md).
+Date: 2026-09-19. Windows setup uses the existing Tauri CLI 2.11.4 and its NSIS template. The authorized regular desktop update is complete. Implementation commit [54548846b1f651adc2ff070f73f122d63aaa77e2](https://github.com/murasamelabo/AISlide/commit/54548846b1f651adc2ff070f73f122d63aaa77e2) was normally pushed to the existing public `murasamelabo/AISlide` repository's `main` branch, and the remote SHA matched. Signing, choosing a project license, force push, visibility changes and release/binary publication are not authorized by this update. See the [current completion ledger](../planning/editing-completion.md).
 
 ## Current Verified Update
 

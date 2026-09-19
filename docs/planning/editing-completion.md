@@ -1,6 +1,6 @@
 ﻿# 限定対応の追加開発
 
-開始日: 2026-09-18。更新日: 2026-09-19。既存の[28項目の実装記録](editing-expansion.md)を引き継ぐ。限定範囲の実装・最終製品検証・通常Windowsデスクトップ更新を完了した。既存Publicリポジトリ `murasamelabo/AISlide` の `main` への通常commit/pushは許可済みだが未実施。以下の限定検証を任意PPTXの完全互換や全制約の解消とは扱わない。
+開始日: 2026-09-18。更新日: 2026-09-19。既存の[28項目の実装記録](editing-expansion.md)を引き継ぐ。限定範囲の実装・最終製品検証・通常Windowsデスクトップ更新・通常commit/pushを完了した。既存Publicリポジトリ `murasamelabo/AISlide` の `main` に実装コミット [54548846b1f651adc2ff070f73f122d63aaa77e2](https://github.com/murasamelabo/AISlide/commit/54548846b1f651adc2ff070f73f122d63aaa77e2) を公開し、GitHub上のSHA一致を確認した。以下の限定検証を任意PPTXの完全互換や全制約の解消とは扱わない。
 
 ## 依頼と境界
 
@@ -68,9 +68,9 @@
 | native単体・実機 | 単体14件PASS。最新security修正後の実機6件PASS・skip 0 | `.artifacts/completion-native-20260919-6d914e/unit/command.log`、`.artifacts/bounded-native-20260919-8Cwlpf/native-full/execution.json` |
 | setup build・分離installed | unsigned debug x64 GNU build成功。installed最終5/5 PASS・skip 0、169.6秒 | `.artifacts/bounded-native-20260919-8Cwlpf/setup-build/execution.json`、`.artifacts/installer-teardown-tkidbE/final-gates.json` と同所 `command.log` |
 | Office | 上記3版の限定確認PASS、histogram例外は未解消 | `.artifacts/final-office-20260919-7e9c41/handoff.json` |
-| 公開前確認 | installed最終記録では384 source/configのencoding不一致0。並行編集文書の最終BOM・機密・依存条件・公開対象確認は公開担当の残ゲート | `.artifacts/installer-teardown-tkidbE/final-gates.json`。過去のencoding結果を以後の文書編集へ流用しない |
+| 公開前確認 | 384 source/configのencoding不一致0。実装コミット178ファイル・index 3,945,996 bytesを検査し、作業ツリーとの一致・機密パターン・差分検査を確認 | `.artifacts/publication-final-4o8q1g/index-summary.json`。モデル・資料・私的パス・バイナリの混入なし。全面security／依存監査の認証ではない |
 | 通常Windows更新 | 2026-09-19T07:02:09Z完了。NSIS exit 0、既存HKCU先・引数なしStart Menu起動・設定保持・installed native 4/4 PASS | `.artifacts/regular-desktop-update-20260919-1556-9e283c/final-proof.json`。[更新とhash](../testing/windows-setup.md#current-verified-update) |
-| 通常commit/push | 許可済み `murasamelabo/AISlide` の `main` への通常公開待ち | commit SHA・remote一致は未記入。公開担当がpush完了後に実SHAを記録する |
+| 通常commit/push | `murasamelabo/AISlide` の `main` へ通常push済み、実装SHA一致 | `54548846b1f651adc2ff070f73f122d63aaa77e2`。`.artifacts/publication-final-4o8q1g/feature-push.json`。本記録は後続の文書専用コミットで追加し、hosted CIの成功はローカル合格から推定しない |
 
 実機6件の通常ビルドは1,015,062,016 bytes、SHA-256 `7792a18c7524f428ff51687d918f17b287c69289da4da603a29d814f39520c00`。setup元バイナリおよびインストール済みバイナリとは別成果物として記録する。分離installed試験の300秒は約1GBのdebug payloadを含む試験ライフサイクル専用で、製品のtimeout変更ではない。終了同期の修正と過去の失敗の因果限界は[setup記録](../testing/windows-setup.md#current-verified-update)を参照。
 
@@ -78,8 +78,8 @@
 
 - [x] 限定範囲の実装と5件のレビュー修正を統合し、製品コードを固定する。
 - [x] 最終コードで対象テスト、Rust workspace、Node、Studio build/lint、ブラウザー、ネイティブ、必要な限定Office確認を完了し、上表へ結果を記録する。
-- [ ] 公開担当が並行編集文書を含む最終文字コード、機密情報、公開対象、元ファイル非変更、依存ライセンスを確認する。生成資料・モデル重みは公開しない。
-- [ ] 許可済みの範囲を既存Publicリポジトリ `murasamelabo/AISlide` の `main` へ通常commit/pushし、実SHAとGitHub上の一致を記録する。force push・visibility変更・ライセンス選択・リリース公開は行わない。
+- [x] 並行編集文書を含む最終文字コード、機密パターン、公開対象、元ファイル非変更、追加した主要依存のライセンス表記を確認した。生成資料・モデル重みは公開しない。
+- [x] 許可済みの範囲を既存Publicリポジトリ `murasamelabo/AISlide` の `main` へ通常commit/pushし、実装SHAとGitHub上の一致を記録した。force push・visibility変更・ライセンス選択・リリース公開は行わない。
 - [x] 稼働中アプリと未保存作業を保護し、通常のユーザー単位セットアップでデスクトップを更新する。
 - [x] インストール先バイナリ、引数なしStart Menu起動、通常プロファイルで表示・応答するウィンドウを確認し開いたまま残す。設定・回復ストアの内容保持はinstallと分離試験後、通常起動前まで確認済み。通常起動後の正当なプロファイル更新まで不変とはしない。
 
