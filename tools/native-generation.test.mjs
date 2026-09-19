@@ -135,6 +135,110 @@ async function nativeSaveDialog(processId, action, destination = '') {
   return JSON.parse(stdout);
 }
 
+test('native owned canvas fit and wheel preserve the viewport and page geometry', { timeout: 90_000, skip: process.platform !== 'win32' }, async (context) => {
+  const recovery = await ownedRecovery(context);
+  const owned = await launchOwnedNative(context, recovery, 'http://127.0.0.1:1/v1');
+  const { page, app } = owned;
+  const artifactRoot = resolve(import.meta.dirname, '..', '.artifacts');
+  await mkdir(artifactRoot, { recursive: true });
+  const output = await mkdtemp(join(artifactRoot, 'native-canvas-fit-'));
+  const proof = { pid: app.pid, profile: owned.profile, recovery: recovery.directory, browser: owned.browser.version(), output, measurements: [], wheel: [] };
+  const toggle = page.getByRole('button', { name: 'Toggle inspector', exact: true });
+  const zoom = page.getByRole('combobox', { name: 'Zoom', exact: true });
+  const stage = page.locator('.slide-stage');
+  const logicalPage = stage.locator('.slide-page');
+  async function checkFit(label, width, height) {
+    await expect(zoom).toHaveValue('fit');
+    let measured;
+    try {
+      await expect.poll(async () => {
+        measured = await stage.evaluate(element => {
+          const bounds = node => {
+            const box = node.getBoundingClientRect();
+            return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height };
+          };
+          const viewport = element.closest('.canvas-scroll');
+          return { slide: bounds(element), viewport: bounds(viewport), heading: bounds(document.querySelector('.canvas-heading')),
+            footer: bounds(document.querySelector('.canvas-footer')), notes: bounds(document.querySelector('.notes-preview')),
+            innerWidth, innerHeight, documentWidth: document.documentElement.scrollWidth,
+            scrollLeft: viewport.scrollLeft, scrollTop: viewport.scrollTop, browserScale: visualViewport?.scale };
+        });
+        const { slide, viewport, heading, footer, notes } = measured;
+        return measured.innerWidth === 1200 && measured.innerHeight === 768 && measured.documentWidth <= 1200
+          && slide.width > 0 && slide.height > 0 && Math.abs(slide.width / slide.height - width / height) < 0.01
+          && slide.left >= viewport.left + 1 && slide.right <= viewport.right - 1
+          && slide.top >= Math.max(viewport.top + 1, heading.bottom, 0)
+          && slide.bottom <= Math.min(viewport.bottom - 1, footer.top, 768)
+          && footer.bottom <= notes.top + 1 && notes.bottom <= 769;
+      }, { message: `${label}: Fit must keep the slide, footer and notes within the native viewport`, timeout: 5000 }).toBe(true);
+      await expect(logicalPage).toHaveCSS('width', `${width}px`);
+      await expect(logicalPage).toHaveCSS('height', `${height}px`);
+    } finally {
+      proof.measurements.push({ label, ...measured });
+      console.log('NATIVE_CANVAS_FIT_BOUNDS', JSON.stringify({ label, ...measured }));
+      await page.screenshot({ path: join(output, `${label}.png`) });
+    }
+    return measured;
+  }
+  try {
+    await page.setViewportSize({ width: 1200, height: 768 });
+    assert.deepEqual(await page.evaluate(() => ({ width: innerWidth, height: innerHeight })), { width: 1200, height: 768 });
+    await page.getByRole('button', { name: 'Add rectangle', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+    await page.evaluate(() => document.fonts.ready);
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    await toggle.click();
+    await checkFit('16-9-hidden-initial', 1280, 720);
+    await toggle.click();
+    for (const [preset, width, height] of [['16:9', 1280, 720], ['4:3', 960, 720]]) {
+      if (preset !== '16:9') {
+        await page.getByRole('button', { name: 'Document setup', exact: true }).click();
+        const dialog = page.getByRole('dialog', { name: 'Document setup', exact: true });
+        await dialog.getByRole('combobox', { name: 'Preset', exact: true }).selectOption(preset);
+        await dialog.getByRole('button', { name: 'Apply page size', exact: true }).click();
+        await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+        await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
+      }
+      for (const hidden of [false, true]) {
+        await expect(toggle).toHaveAttribute('aria-pressed', String(!hidden));
+        const label = `${preset.replace(':', '-')}-${hidden ? 'hidden' : 'shown'}`;
+        const fit = await checkFit(label, width, height);
+        const content = await logicalPage.innerHTML();
+        const operations = [];
+        const observe = request => {
+          if (request.method() === 'POST' && request.url().includes('core_request')) operations.push(request.postDataJSON());
+        };
+        page.on('request', observe);
+        try {
+          await stage.hover();
+          await page.mouse.wheel(0, -120);
+          await expect(zoom).not.toHaveValue('fit');
+          const enlarged = Number(await zoom.inputValue());
+          assert.ok(enlarged > fit.slide.width / width, 'Wheel up must increase canvas zoom');
+          await expect.poll(async () => (await stage.boundingBox()).width).toBeGreaterThan(fit.slide.width);
+          await page.mouse.wheel(0, 120);
+          await expect.poll(async () => Number(await zoom.inputValue())).toBeLessThan(enlarged);
+          const reduced = Number(await zoom.inputValue());
+          await zoom.selectOption('fit');
+          const restored = await checkFit(`${label}-wheel-restored`, width, height);
+          assert.equal(restored.browserScale, fit.browserScale);
+          assert.deepEqual([restored.scrollLeft, restored.scrollTop], [0, 0]);
+          assert.equal(await logicalPage.innerHTML(), content, 'Viewport gestures must not change slide content');
+          assert.deepEqual(operations, [], 'Viewport gestures must not issue native document operations');
+          proof.wheel.push({ label, initial: fit.slide.width / width, enlarged, reduced, operations });
+        } finally {
+          page.off('request', observe);
+        }
+        await toggle.click();
+      }
+    }
+  } finally {
+    await writeFile(join(output, 'proof.json'), JSON.stringify(proof, null, 2));
+    console.log('NATIVE_CANVAS_FIT_PROOF', JSON.stringify(proof));
+    await owned.stop();
+  }
+});
+
 test('native owned direct print shows a real dialog and cancels without a job', { timeout: 90_000, skip: process.platform !== 'win32' }, async (context) => {
   const recovery = await ownedRecovery(context);
   const owned = await launchOwnedNative(context, recovery, 'http://127.0.0.1:1/v1');

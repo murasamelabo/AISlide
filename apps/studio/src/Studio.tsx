@@ -1,4 +1,4 @@
-﻿import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useRef, useState } from 'react'
+﻿import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode, MouseEvent as ReactMouseEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Presentation, FileJson2, FolderOpen, Download, Undo2, Redo2, Copy, Trash2, Type, Square, ChevronLeft, ChevronRight, X, Check, Layers, FileText, Table2, AlertCircle, PanelRight, ArrowUp, ArrowDown, Save, Sparkles, ChartNoAxesCombined, ImagePlus, Workflow, Replace, Database, FileInput, ScanLine, Shapes, Palette, LayoutTemplate, RotateCcw } from 'lucide-react'
 import { core, decodeBase64, downloadBytes, downloadPresentation, fileBase64, fileAssets, svgAsset } from './api'
@@ -161,6 +161,11 @@ export default function Studio() {
   const [patch, setPatch] = useState('')
   const [panel, setPanel] = useState<'elements' | 'notes'>('elements')
   const [zoom, setZoom] = useState('fit')
+  const canvasViewport = useRef<HTMLDivElement>(null)
+  const slideStage = useRef<HTMLDivElement>(null)
+  const canvasPointers = useRef(new Set<number>())
+  const zoomAnchor = useRef<{ x: number; y: number; cursorX: number; cursorY: number } | null>(null)
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 })
   const [showInspector, setShowInspector] = useState(true)
   const [filename, setFilename] = useState('Untitled presentation.pptx')
   const [savedHash, setSavedHash] = useState<string | null>(null)
@@ -184,6 +189,11 @@ export default function Studio() {
   const pictureTarget = useRef<string | null>(null)
   const activeOperation = useRef(false)
   const deck = documentState?.deck
+  const pageWidth = deck?.width ?? 1280
+  const pageHeight = deck?.height ?? 720
+  const fitScale = Math.max(0.001, Math.min(canvasSize.width / pageWidth, canvasSize.height / pageHeight))
+  const viewScale = zoom === 'fit' ? fitScale : Number(zoom)
+  const zoomPresets = ['0.1', '0.25', '0.5', '0.75', '1', '1.5', '2', '3', '4']
   const report = documentState?.report
   const slide = deck?.slides[slideIndex]
   const element = slide?.elements.find((item) => item.id === selected)
@@ -219,6 +229,71 @@ export default function Studio() {
     }).catch((reason) => { if (!disposed) setError(String(reason)) })
     return () => { disposed = true }
   }, [])
+
+  useEffect(() => {
+    const viewport = canvasViewport.current
+    if (!viewport) return
+    const observer = new ResizeObserver(([entry]) => setCanvasSize({ width: entry.contentRect.width, height: entry.contentRect.height }))
+    observer.observe(viewport)
+    return () => observer.disconnect()
+  }, [])
+
+  const wheelZoom = useEffectEvent((event: WheelEvent) => {
+    const viewport = canvasViewport.current
+    const stage = slideStage.current
+    if (!viewport || !stage || !slide || busy || modal || event.defaultPrevented || event.shiftKey || event.deltaY === 0 || Math.abs(event.deltaX) >= Math.abs(event.deltaY) || canvasPointers.current.size) return
+    if (event.target instanceof globalThis.Element && event.target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="spinbutton"],.inline-editor')) return
+    event.preventDefault()
+    const bounds = stage.getBoundingClientRect()
+    const viewportBounds = viewport.getBoundingClientRect()
+    const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1)
+    const next = Math.min(4, Math.max(0.1, viewScale * Math.exp(Math.max(-1, Math.min(1, -delta * 0.002)))))
+    if (String(next) === zoom) return
+    zoomAnchor.current = { x: (event.clientX - bounds.left) / bounds.width, y: (event.clientY - bounds.top) / bounds.height, cursorX: event.clientX - viewportBounds.left, cursorY: event.clientY - viewportBounds.top }
+    setZoom(String(next))
+  })
+  useEffect(() => {
+    const viewport = canvasViewport.current
+    if (!viewport) return
+    const wheel = (event: WheelEvent) => wheelZoom(event)
+    const down = (event: PointerEvent) => { canvasPointers.current.add(event.pointerId) }
+    const up = (event: PointerEvent) => { canvasPointers.current.delete(event.pointerId) }
+    const clear = () => canvasPointers.current.clear()
+    viewport.addEventListener('wheel', wheel, { passive: false })
+    viewport.addEventListener('pointerdown', down, true)
+    window.addEventListener('pointerup', up, true)
+    window.addEventListener('pointercancel', up, true)
+    window.addEventListener('lostpointercapture', up, true)
+    window.addEventListener('blur', clear)
+    return () => {
+      viewport.removeEventListener('wheel', wheel)
+      viewport.removeEventListener('pointerdown', down, true)
+      window.removeEventListener('pointerup', up, true)
+      window.removeEventListener('pointercancel', up, true)
+      window.removeEventListener('lostpointercapture', up, true)
+      window.removeEventListener('blur', clear)
+      clear()
+    }
+  }, [])
+  useLayoutEffect(() => {
+    const viewport = canvasViewport.current
+    const stage = slideStage.current
+    const anchor = zoomAnchor.current
+    zoomAnchor.current = null
+    if (!viewport || !stage) return
+    if (zoom === 'fit') { viewport.scrollTo(0, 0); return }
+    if (!anchor) return
+    const bounds = stage.getBoundingClientRect()
+    const viewportBounds = viewport.getBoundingClientRect()
+    viewport.scrollLeft += bounds.left + anchor.x * bounds.width - viewportBounds.left - anchor.cursorX
+    viewport.scrollTop += bounds.top + anchor.y * bounds.height - viewportBounds.top - anchor.cursorY
+  }, [zoom, canvasSize.width, canvasSize.height, pageWidth, pageHeight])
+  function chooseZoom(value: string) {
+    const viewport = canvasViewport.current
+    zoomAnchor.current = viewport && value !== 'fit' ? { x: 0.5, y: 0.5, cursorX: viewport.clientWidth / 2, cursorY: viewport.clientHeight / 2 } : null
+    if (value === 'fit') viewport?.scrollTo(0, 0)
+    setZoom(value)
+  }
 
   useEffect(() => {
     recoveryMounted.current = true
@@ -682,13 +757,12 @@ export default function Studio() {
       <Tool label="Validate layout" disabled={disable} onClick={() => void run(async () => { setLayoutReport(await core<LayoutReport>({ op: 'measure_layout', deck })); setModal('layout') })}><ScanLine size={18} /></Tool>
       <Tool label="Fonts" disabled={disable || hasDrafts || importedMode} onClick={() => setModal('fonts')}><Type size={18} /></Tool>
       <Tool label="PPTX details" disabled={disable || !hasOrigin} onClick={() => setModal('import')}><AlertCircle size={18} /></Tool>
-      <select aria-label="Zoom" className="zoom-select" value={zoom} onChange={(event) => setZoom(event.target.value)}><option value="fit">Fit</option><option value="0.75">75%</option><option value="1">100%</option></select>
+      <select aria-label="Zoom" className="zoom-select" value={zoom} onChange={(event) => chooseZoom(event.target.value)}><option value="fit">Fit</option>{zoom !== 'fit' && !zoomPresets.includes(zoom) && <option value={zoom}>{Math.round(Number(zoom) * 100)}%</option>}{zoomPresets.map((value) => <option key={value} value={value}>{Math.round(Number(value) * 100)}%</option>)}</select>
       <Tool label="Toggle inspector" pressed={showInspector} disabled={busy || hasDrafts} onClick={() => setShowInspector(!showInspector)}><PanelRight size={18} /></Tool>
     </div>
 
     <SelectionTools elements={selection} disabled={disable || hasDrafts || Boolean(modal)} canPaste={Boolean(clipboard)} onCommand={(operation) => { void selectionCommand(operation) }} onCombine={(input) => { void combineShapes(input) }} canApplyFormat={Boolean(formatClipboard && formatClipboard.session === panelSession)} onCopyFormat={(paragraph, run) => { void copyFormat(paragraph, run) }} onApplyFormat={() => { void applyFormat() }} />
     {selectionWarnings.length > 0 && <details className="selection-warning" open><summary>Selection metadata warnings</summary><ul>{selectionWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></details>}
-    {error && !modal && !nameDialog && !pendingReplacement && <div className="error-strip" role="alert"><AlertCircle size={17} />{error}<button aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
 
     <div className={`workbench ${showInspector ? '' : 'inspector-hidden'}`}>
       <aside className="slide-list" aria-label="Slides">
@@ -706,8 +780,8 @@ export default function Studio() {
         void importDropped([...event.dataTransfer.files], location)
       }}>
         <div className="canvas-heading"><span>{String(slideIndex + 1).padStart(2, '0')} <span className="slash">/</span> {String(deck?.slides.length ?? 0).padStart(2, '0')}</span><h2>{slide?.title.split('\n')[0] ?? 'Opening report'}</h2><span className="native-badge">NATIVE OBJECTS</span></div>
-        <div className="canvas-scroll">
-          <div className="slide-stage" style={{ width: zoom === 'fit' ? '100%' : `${(deck?.width ?? 1280) * Number(zoom)}px` }}>
+        <div className="canvas-scroll" ref={canvasViewport}>
+          <div className="slide-stage" ref={slideStage} style={{ width: pageWidth * viewScale }}>
             {slide ? <SlideSurface key={documentState?.id} slide={slide} pageNumber={slideIndex + 1} design={deck?.design} width={deck?.width} height={deck?.height} selected={selected} selectedIds={selectedIds} onSelectMany={selectMany} onSelectionTransform={selectionCommand} onEdit={editOnSlide} onDraftChange={setInlineDraft} onBusy={setInlineWorking} disabled={documentBusy} editRequest={editRequest} onContextMenu={(position, id) => openContext(id ? 'element' : 'canvas', position, slide.id, id)} onSelect={busy || hasDrafts ? undefined : selectElement} onMove={(id, x, y) => {
               const original = slide.elements.find((item) => item.id === id)
               if (original && !busy) return replaceElement({ ...original, x, y })
@@ -718,7 +792,10 @@ export default function Studio() {
           </div>
         </div>
         <div className="canvas-footer"><span>{selected ? `${element?.type ?? ''} / ${selected}` : 'No selection'}</span><div><Tool label="Previous slide" disabled={busy || hasDrafts || slideIndex === 0} onClick={() => changeSlide(slideIndex - 1)}><ChevronLeft size={17} /></Tool><Tool label="Next slide" disabled={busy || hasDrafts || !deck || slideIndex === deck.slides.length - 1} onClick={() => changeSlide(slideIndex + 1)}><ChevronRight size={17} /></Tool></div></div>
-        <div className="notes-preview"><FileText size={16} /><span>{slide?.notes.split('\n')[0]}</span></div>
+        <div className="notes-preview"><div className="canvas-messages">
+          {error && !modal && !nameDialog && !pendingReplacement && <div className="error-strip" role="alert"><AlertCircle size={17} /><span>{error}</span><Tool label="Dismiss error" onClick={() => setError('')}><X size={16} /></Tool></div>}
+          <div className="notes-line"><FileText size={16} /><span>{slide?.notes.split('\n')[0]}</span></div>
+        </div></div>
       </main>
 
       {showInspector && <aside className="inspector" aria-label="Inspector">
