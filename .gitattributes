@@ -1,2 +1,3 @@
 ﻿crates/aislide-core/src/parts/world-land.geojson -text
 crates/aislide-core/src/architecture-icons.json -text
+apps/studio/public/lucide-LICENSE.txt text eol=lf
