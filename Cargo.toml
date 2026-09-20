@@ -1,5 +1,5 @@
 ﻿[workspace]
-members = ["crates/aislide-core", "crates/aislide-cli"]
+members = ["crates/aislide-core", "crates/aislide-cli", "crates/aislide-platform"]
 exclude = ["apps/studio/src-tauri"]
 resolver = "2"
 

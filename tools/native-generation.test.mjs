@@ -79,6 +79,7 @@ async function launchOwnedNative(context, recovery, endpoint) {
 }
 
 async function nativeSaveDialog(processId, action, destination = '') {
+  const execute = async action => {
   const { stdout } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
     $ErrorActionPreference = 'Stop'
     Set-StrictMode -Version Latest
@@ -107,6 +108,10 @@ async function nativeSaveDialog(processId, action, destination = '') {
       return $true
     }
     [void][AISlideDialogTest]::EnumWindows($enumerate, [IntPtr]::Zero)
+    if ($env:AISLIDE_TEST_ACTION -eq 'probe' -and $handles.Count -eq 0) {
+      @{ ready = $false; dialogs = 0; filenamePresent = $false; password = $false } | ConvertTo-Json -Compress
+      exit 0
+    }
     if ($handles.Count -ne 1) { throw "Expected one native save dialog owned by the test process, found $($handles.Count)" }
     $controls = @{}
     $children = [AISlideDialogTest+Callback]{ param($handle, $data)
@@ -117,6 +122,14 @@ async function nativeSaveDialog(processId, action, destination = '') {
       return $true
     }
     [void][AISlideDialogTest]::EnumChildWindows($handles[0], $children, [IntPtr]::Zero)
+    if ($env:AISLIDE_TEST_ACTION -eq 'probe') {
+      $filenamePresent = $controls.ContainsKey(1001)
+      $password = $filenamePresent -and (([AISlideDialogTest]::GetWindowLong($controls[1001], -16) -band 0x20) -ne 0)
+      $buttonsReady = $controls.ContainsKey(1) -and $controls.ContainsKey(2)
+      if ($buttonsReady) { $buttonsReady = [AISlideDialogTest]::IsWindowEnabled($controls[1]) -and [AISlideDialogTest]::IsWindowEnabled($controls[2]) }
+      @{ ready = $filenamePresent -and (-not $password) -and $buttonsReady; dialogs = $handles.Count; filenamePresent = $filenamePresent; password = $password; controls = @($controls.Keys) } | ConvertTo-Json -Compress
+      exit 0
+    }
     if (-not $controls.ContainsKey(1001) -or ([AISlideDialogTest]::GetWindowLong($controls[1001], -16) -band 0x20)) { throw 'Expected a non-password filename field' }
     $text = [System.Text.StringBuilder]::new(4096)
     $result = [UIntPtr]::Zero
@@ -133,6 +146,14 @@ async function nativeSaveDialog(processId, action, destination = '') {
     @{ filename = $filename } | ConvertTo-Json -Compress
   `], { windowsHide: true, env: { ...process.env, AISLIDE_TEST_PID: String(processId), AISLIDE_TEST_ACTION: action, AISLIDE_TEST_DESTINATION: destination } });
   return JSON.parse(stdout);
+  };
+  await expect.poll(async () => {
+    const readiness = await execute('probe');
+    console.log('NATIVE_SAVE_DIALOG_READINESS', JSON.stringify({ processId, action, ...readiness }));
+    assert.equal(readiness.password, false, 'The owned save filename field must not be a password');
+    return readiness.ready;
+  }, { timeout: 5000, message: 'The owned native save dialog must finish creating its non-password filename field and buttons' }).toBe(true);
+  return execute(action);
 }
 
 test('native owned canvas fit and wheel preserve the viewport and page geometry', { timeout: 90_000, skip: process.platform !== 'win32' }, async (context) => {
@@ -147,7 +168,7 @@ test('native owned canvas fit and wheel preserve the viewport and page geometry'
   const zoom = page.getByRole('combobox', { name: 'Zoom', exact: true });
   const stage = page.locator('.slide-stage');
   const logicalPage = stage.locator('.slide-page');
-  async function checkFit(label, width, height) {
+  async function checkFit(label, width, height, minimumHeight = 0) {
     await expect(zoom).toHaveValue('fit');
     let measured;
     try {
@@ -165,18 +186,20 @@ test('native owned canvas fit and wheel preserve the viewport and page geometry'
         });
         const { slide, viewport, heading, footer, notes } = measured;
         return measured.innerWidth === 1200 && measured.innerHeight === 768 && measured.documentWidth <= 1200
-          && slide.width > 0 && slide.height > 0 && Math.abs(slide.width / slide.height - width / height) < 0.01
+          && slide.width > 0 && slide.height > 0 && slide.height >= minimumHeight && Math.abs(slide.width / slide.height - width / height) < 0.01
           && slide.left >= viewport.left + 1 && slide.right <= viewport.right - 1
           && slide.top >= Math.max(viewport.top + 1, heading.bottom, 0)
           && slide.bottom <= Math.min(viewport.bottom - 1, footer.top, 768)
           && footer.bottom <= notes.top + 1 && notes.bottom <= 769;
-      }, { message: `${label}: Fit must keep the slide, footer and notes within the native viewport`, timeout: 5000 }).toBe(true);
+      }, { message: `${label}: Fit must keep the slide, footer and notes within the native viewport with slide height >= ${minimumHeight}px`, timeout: 5000 }).toBe(true);
       await expect(logicalPage).toHaveCSS('width', `${width}px`);
       await expect(logicalPage).toHaveCSS('height', `${height}px`);
     } finally {
       proof.measurements.push({ label, ...measured });
       console.log('NATIVE_CANVAS_FIT_BOUNDS', JSON.stringify({ label, ...measured }));
-      await page.screenshot({ path: join(output, `${label}.png`) });
+      if (!label.endsWith('-wheel-restored') && !['16-9-shown', '16-9-hidden'].includes(label)) {
+        await page.screenshot({ path: join(output, `${label}.png`) });
+      }
     }
     return measured;
   }
@@ -187,9 +210,65 @@ test('native owned canvas fit and wheel preserve the viewport and page geometry'
     await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
     await page.evaluate(() => document.fonts.ready);
     await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    await checkFit('16-9-shown-initial', 1280, 720, 300);
     await toggle.click();
-    await checkFit('16-9-hidden-initial', 1280, 720);
+    await checkFit('16-9-hidden-initial', 1280, 720, 300);
     await toggle.click();
+    const panelOperations = [];
+    const observePanels = request => {
+      if (request.method() === 'POST' && request.url().includes('core_request')) panelOperations.push(request.postDataJSON());
+    };
+    const documentContent = () => logicalPage.evaluate(element => {
+      const content = element.cloneNode(true);
+      for (const handle of content.querySelectorAll('.resize-handle')) handle.remove();
+      return content.innerHTML;
+    });
+    const contentBeforePanels = await documentContent();
+    page.on('request', observePanels);
+    try {
+      for (const [name, selector, horizontal, vertical, dimension, expected] of [
+        ['Slide list width', '.slide-list', 56, 0, 'width', 248],
+        ['Inspector width', '.inspector', -40, 0, 'width', 328],
+        ['Notes height', '.notes-preview', 0, -80, 'height', 124],
+      ]) {
+        const handle = page.getByRole('separator', { name, exact: true });
+        const box = await handle.boundingBox();
+        assert.ok(box, `${name} must be visible`);
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(box.x + box.width / 2 + horizontal, box.y + box.height / 2 + vertical, { steps: 8 });
+        await page.mouse.up();
+        await expect(handle).toHaveAttribute('aria-valuenow', String(expected));
+        await expect.poll(async () => (await page.locator(selector).boundingBox())[dimension]).toBeCloseTo(expected, 0);
+      }
+      await page.getByRole('separator', { name: 'Slide list width', exact: true }).press('ArrowRight');
+      await expect(page.getByRole('separator', { name: 'Slide list width', exact: true })).toHaveAttribute('aria-valuenow', '256');
+      await checkFit('16-9-resized-panels', 1280, 720);
+      assert.equal(await documentContent(), contentBeforePanels, 'Pane resizing must preserve real slide content and object geometry');
+      assert.deepEqual(panelOperations, [], 'Pane resizing must not issue native document operations');
+    } finally {
+      page.off('request', observePanels);
+    }
+    const preferences = await page.evaluate(() => JSON.parse(localStorage.getItem('aislide.workspace-panels.v1')));
+    assert.deepEqual(preferences, { slides: 256, inspector: 328, notes: 124 });
+    await page.evaluate(() => localStorage.setItem('workspace-test-unrelated', 'retained'));
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+    for (const [name, selector, dimension, expected] of [
+      ['Slide list width', '.slide-list', 'width', preferences.slides],
+      ['Inspector width', '.inspector', 'width', preferences.inspector],
+      ['Notes height', '.notes-preview', 'height', preferences.notes],
+    ]) {
+      await expect(page.getByRole('separator', { name, exact: true })).toHaveAttribute('aria-valuenow', String(expected));
+      await expect.poll(async () => (await page.locator(selector).boundingBox())[dimension]).toBeCloseTo(expected, 0);
+    }
+    await page.getByRole('button', { name: 'Reset workspace layout', exact: true }).click();
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('aislide.workspace-panels.v1'))), { slides: 192, inspector: 288, notes: 44 });
+    assert.equal(await page.evaluate(() => localStorage.getItem('workspace-test-unrelated')), 'retained');
+    await page.getByRole('button', { name: 'Add rectangle', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+    await checkFit('16-9-reset-panels', 1280, 720, 300);
+    proof.panels = { preferences, reloaded: true, reset: true, unrelatedPreferencePreserved: true, documentOperations: panelOperations };
     for (const [preset, width, height] of [['16:9', 1280, 720], ['4:3', 960, 720]]) {
       if (preset !== '16:9') {
         await page.getByRole('button', { name: 'Document setup', exact: true }).click();
@@ -761,4 +840,198 @@ test('native bounded previews, modern controls and private recovery process rest
     console.log('NATIVE_RESTART_PROOF', JSON.stringify({ ...committed, firstPid: first.app.pid, secondPid: second.app.pid, differentWebViewProfiles: true, privateRecovery: true }));
     await second.stop();
   });
+});
+
+test('native owned cloud architecture icons preserve original images and nested edits', { timeout: 120_000, skip: process.platform !== 'win32' || process.env.AISLIDE_NATIVE_CLOUD_ICON_TEST !== '1' }, async (context) => {
+  const recovery = await ownedRecovery(context);
+  const owned = await launchOwnedNative(context, recovery, 'http://127.0.0.1:1/v1');
+  const { page, app } = owned;
+  page.setDefaultTimeout(5000);
+  const artifactRoot = resolve(import.meta.dirname, '..', '.artifacts');
+  await mkdir(artifactRoot, { recursive: true });
+  const output = await mkdtemp(join(artifactRoot, 'native-cloud-icons-'));
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const proof = { pid: app.pid, profile: owned.profile, recovery: recovery.directory, browser: owned.browser.version(), output, stage: 'catalog', passed: false, errors };
+  async function nativeRequest(request) {
+    return page.evaluate(async request => {
+      let timer;
+      try {
+        return await Promise.race([
+          window.__TAURI_INTERNALS__.invoke('core_request', { operationId: crypto.randomUUID(), request }),
+          new Promise((resolveRequest, reject) => { timer = setTimeout(() => reject(new Error(`Native ${request.op} did not complete within 5 seconds`)), 5000); }),
+        ]);
+      } finally { clearTimeout(timer); }
+    }, request);
+  }
+  try {
+    const catalog = await nativeRequest({ op: 'architecture_icons' });
+    assert.equal(catalog.configured, true, catalog.message || 'Opt-in native cloud test requires explicitly provisioned local official packs; it never downloads assets');
+    assert.equal(catalog.icons.length, 1498);
+    const providers = [['azure', 645], ['aws', 808], ['gcp', 45]];
+    for (const [provider, count] of providers) assert.equal(catalog.icons.filter(icon => icon.provider === provider).length, count);
+    const metadata = catalog.icons.find(icon => icon.id === 'azure/service-resource/10076-icon-service-application-gateways');
+    assert.ok(metadata, 'The pinned Azure Application Gateways catalog entry must exist');
+    proof.catalog = { count: catalog.icons.length, providers, selected: metadata.id };
+    await page.setViewportSize({ width: 1200, height: 768 });
+    await page.evaluate(() => {
+      window.nativeCloudErrors = [];
+      window.addEventListener('error', event => window.nativeCloudErrors.push(event.message));
+    });
+    await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+    await expect(dialog.getByRole('button', { name: 'Add service icon', exact: true })).toBeVisible();
+    await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+    const initial = {
+      version: 1, title: 'Native cloud architecture', subtitle: '',
+      groups: [
+        { id: 'root', label: 'Virtual network', x: 24, y: 104, width: 520, height: 360, fill: '@lt2', stroke: '@dk2' },
+        { id: 'subnet', label: 'Subnet', parent: 'root', x: 40, y: 152, width: 488, height: 296, fill: '@lt2', stroke: '@dk2' },
+      ],
+      nodes: [{ id: 'external', label: 'External client', kind: 'rectangle', x: 960, y: 128, width: 160, height: 80, fill: '@lt1', stroke: '@accent1', color: '@dk1', font_size: 18 }], edges: [],
+    };
+    const endpoint = await page.evaluate(() => window.__TAURI_INTERNALS__.convertFileSrc('core_request', 'ipc'));
+    async function changeGraph(action) {
+      await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+      const completed = (async () => {
+        const response = await page.waitForResponse(response => response.url() === endpoint
+          && response.request().method() === 'POST'
+          && response.request().postDataJSON().request?.op === 'create_graph'
+          && response.request().postDataJSON().request.id === 'graph-preview'
+          && response.request().postDataJSON().request.spec.title === initial.title);
+        assert.equal(response.ok(), true, 'Native graph preview transport must succeed');
+        assert.equal(await response.finished(), null, 'Native graph preview body must finish');
+      })();
+      await Promise.all([completed, action()]);
+      await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+      await expect(dialog.getByRole('alert')).toHaveCount(0);
+    }
+    async function graphJson() {
+      await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+      return JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue());
+    }
+    const canvas = () => changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+    await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+    await dialog.getByLabel('Graph JSON', { exact: true }).fill(JSON.stringify(initial));
+    await canvas();
+    await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+    const assets = await nativeRequest({ op: 'architecture_icon_assets', ids: [metadata.id] });
+    assert.equal(assets.icons.length, 1);
+    const original = assets.icons[0];
+    assert.equal(original.id, metadata.id);
+    assert.equal(original.mime_type, 'image/png');
+    assert.ok(original.width > 0 && original.height > 0);
+    const originalBytes = Buffer.from(original.base64, 'base64');
+    assert.equal(originalBytes.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+    const { createHash } = await import('node:crypto');
+    proof.image = { id: original.id, width: original.width, height: original.height, bytes: originalBytes.length, sha256: createHash('sha256').update(originalBytes).digest('hex') };
+    const imageSource = `data:image/png;base64,${original.base64}`;
+    proof.stage = 'picker';
+    await dialog.getByRole('button', { name: 'Select group subnet', exact: true }).click();
+    await expect(dialog.getByLabel('Group parent', { exact: true })).toHaveValue('root');
+    await dialog.getByRole('button', { name: 'Add service icon', exact: true }).click();
+    const picker = dialog.getByRole('region', { name: 'New service icon', exact: true });
+    for (const [provider, count] of providers) {
+      await picker.getByLabel('Icon provider', { exact: true }).selectOption(provider);
+      await expect(picker.getByLabel('Icon category', { exact: true }).locator('option').first()).toHaveText(`All icons (${count})`);
+      await expect(picker.getByLabel('Icon color', { exact: true })).toHaveCount(0);
+      await expect(picker.getByLabel('Icon stroke width', { exact: true })).toHaveCount(0);
+    }
+    await picker.getByLabel('Icon provider', { exact: true }).selectOption('azure');
+    await picker.getByLabel('Search icons', { exact: true }).fill(metadata.name);
+    await picker.getByRole('button', { name: `${metadata.name} icon`, exact: true }).click();
+    const preview = picker.locator('.asset-preview img');
+    await expect(preview).toHaveJSProperty('complete', true);
+    await expect(preview).toHaveJSProperty('naturalWidth', original.width);
+    await expect(preview).toHaveJSProperty('naturalHeight', original.height);
+    await expect(picker.getByRole('button', { name: 'Insert icon', exact: true })).toBeEnabled();
+    await page.evaluate(() => document.fonts.ready);
+    await page.screenshot({ path: join(output, 'cloud-picker.png') });
+    await changeGraph(() => picker.getByRole('button', { name: 'Insert icon', exact: true }).click());
+    await expect(picker).toHaveCount(0);
+    await expect(dialog.getByLabel('Node presentation', { exact: true })).toHaveValue('icon');
+    const inserted = await graphJson();
+    assert.equal(inserted.nodes.length, 2);
+    assert.deepEqual(inserted.groups, initial.groups);
+    const service = inserted.nodes.find(node => node.id !== 'external');
+    assert.equal(service.label, metadata.name);
+    assert.equal(service.group, 'subnet');
+    assert.equal(service.presentation, 'icon');
+    assert.equal(service.icon.base64, original.base64);
+    assert.equal(service.icon.mime_type, 'image/png');
+    assert.equal(service.icon.alt, metadata.name);
+    const subnet = initial.groups[1];
+    assert.ok(service.x >= subnet.x + 8 && service.y >= subnet.y + 40
+      && service.x + service.width <= subnet.x + subnet.width - 8
+      && service.y + service.height <= subnet.y + subnet.height - 8, 'The new service must be inside its selected nested boundary');
+    await canvas();
+    const serviceNode = dialog.locator(`.react-flow__node[data-id="${service.id}"]`);
+    await expect(serviceNode.locator('.graph-node-icon img')).toHaveAttribute('src', imageSource);
+    await expect(serviceNode.locator('.preset-shape')).toHaveCount(0);
+    await expect(serviceNode.locator('.react-flow__handle')).toHaveCount(4);
+    await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+    await expect(serviceNode).toHaveCount(0);
+    assert.deepEqual(await graphJson(), initial);
+    await canvas();
+    await changeGraph(() => dialog.getByRole('button', { name: 'Redo diagram edit', exact: true }).click());
+    assert.deepEqual(await graphJson(), inserted);
+    await canvas();
+    proof.stage = 'nested-edit';
+    await dialog.getByLabel('Connect from', { exact: true }).selectOption(service.id);
+    await dialog.getByLabel('Connect to', { exact: true }).selectOption('external');
+    await changeGraph(() => dialog.getByRole('button', { name: 'Connect nodes', exact: true }).click());
+    await expect(dialog.locator('.react-flow__edge')).toHaveCount(1);
+    const connected = await graphJson();
+    assert.equal(connected.edges.length, 1);
+    assert.equal(connected.edges[0].source, service.id);
+    assert.equal(connected.edges[0].target, 'external');
+    await canvas();
+    await dialog.getByRole('button', { name: 'Select group root', exact: true }).click();
+    const rootBoundary = dialog.locator('.react-flow__node[data-id="root"]');
+    await rootBoundary.focus();
+    await changeGraph(() => rootBoundary.press('ArrowRight'));
+    const moved = await graphJson();
+    const expected = structuredClone(connected);
+    for (const group of expected.groups) group.x += 8;
+    expected.nodes.find(node => node.id === service.id).x += 8;
+    assert.deepEqual(moved, expected, 'Moving the root must move each descendant once, preserving the external node, connection and original PNG');
+    await canvas();
+    await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+    assert.deepEqual(await graphJson(), connected);
+    await canvas();
+    await changeGraph(() => dialog.getByRole('button', { name: 'Redo diagram edit', exact: true }).click());
+    assert.deepEqual(await graphJson(), moved);
+    await changeGraph(() => dialog.getByRole('tab', { name: 'Preview', exact: true }).click());
+    const rendered = dialog.locator('.graph-native-preview').getByRole('img', { name: metadata.name, exact: true });
+    await expect(rendered).toHaveAttribute('src', imageSource);
+    await expect(rendered).toHaveJSProperty('complete', true);
+    await expect(rendered).toHaveJSProperty('naturalWidth', original.width);
+    await page.evaluate(() => document.fonts.ready);
+    await page.screenshot({ path: join(output, 'nested-preview.png') });
+    proof.stage = 'slide-insertion';
+    await dialog.getByRole('button', { name: 'Insert graph', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    const slideImage = page.locator('.slide-stage').getByRole('img', { name: metadata.name, exact: true });
+    await expect(slideImage).toHaveAttribute('src', imageSource);
+    await expect(slideImage).toHaveJSProperty('naturalWidth', original.width);
+    await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+    await page.getByRole('button', { name: 'Edit graph', exact: true }).click();
+    await expect(dialog.locator('.graph-fitted-label')).toHaveCount(4);
+    assert.deepEqual(await graphJson(), moved, 'Inserted native slide metadata must remain editable without changing original image bytes');
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+    proof.windowErrors = await page.evaluate(() => window.nativeCloudErrors);
+    assert.deepEqual(proof.windowErrors, [], 'Native workflow must not emit window errors, including ResizeObserver loops');
+    assert.deepEqual(errors, []);
+    proof.stage = 'complete';
+    proof.passed = true;
+    proof.checks = { originalPngPreserved: true, nestedLevels: 2, serviceCreationUndoRedo: true, descendantMovedOnce: true, moveUndoRedo: true, connections: moved.edges.length, editableSlideMetadata: true };
+  } catch (error) {
+    proof.error = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    await owned.stop();
+    proof.hostExited = app.exitCode !== null || app.signalCode !== null;
+    await writeFile(join(output, 'proof.json'), JSON.stringify(proof, null, 2), { flag: 'wx' });
+    console.log('NATIVE_CLOUD_PROOF', JSON.stringify(proof));
+  }
 });

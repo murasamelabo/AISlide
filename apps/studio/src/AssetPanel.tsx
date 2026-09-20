@@ -1,8 +1,8 @@
-﻿import { useRef, useState } from 'react'
+﻿import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { Database, Server, Cloud, Globe, Router, Monitor, Smartphone, Folder, FileText, Mail, User, Users, ShieldCheck, LockKeyhole, KeyRound, Check, CircleAlert, Search, Settings, Workflow, Network, GitBranch, ArrowRight, ArrowLeftRight, Calendar, Clock, ChartNoAxesCombined, Building2, Briefcase, Layers, Link, MessageSquare, Upload, Download, HardDrive, Bell, ClipboardPaste } from 'lucide-react'
 import {
-  icons as lucideIcons, ChevronLeft, ChevronRight,
+  icons as lucideIcons, ChevronLeft, ChevronRight, RefreshCw,
   Cpu, MemoryStick, CircuitBoard, Bot, BrainCircuit, Sparkles, Terminal, CodeXml, Braces, Container, Blocks, GitPullRequest,
   Wifi, EthernetPort, RadioTower, Cable, Satellite, CloudUpload, CloudDownload, Plug,
   Fingerprint, ScanFace, ShieldAlert, Eye, ScanLine, ChartColumn, ChartPie, TrendingUp, Gauge, Target,
@@ -10,8 +10,9 @@ import {
   CreditCard, Wallet, Receipt, ShoppingCart, Store, Factory, Package, Truck, Warehouse, MapPin, Route, Plane, Ship, TrainFront,
   GraduationCap, BookOpen, FlaskConical, Microscope, Stethoscope, HeartPulse, Leaf, Recycle,
 } from 'lucide-react'
-import type { AssetInput } from './types'
-import { fileAssets, svgAsset } from './api'
+import { AislideClient } from '../../../packages/client/index.mjs'
+import type { ArchitectureIconAsset, ArchitectureIconCatalog, ArchitectureIconProviderId, AssetInput, GraphIcon } from './types'
+import { core, fileAssets, svgAsset } from './api'
 import { Tool } from './Tool'
 import categoryData from './lucide-categories.json'
 
@@ -78,12 +79,27 @@ const icons = Object.entries(lucideIcons).map(([id, icon]) => {
 }).sort((left, right) => left.order - right.order)
 const iconsPerPage = 60
 const categories = Object.entries(metadata.categories).map(([id, name]) => ({ id, name, count: icons.filter((icon) => icon.categories.includes(id)).length })).sort((left, right) => left.name.localeCompare(right.name, 'en'))
+const client = new AislideClient(core)
+let iconReads: Promise<void> = Promise.resolve()
 
-export function AssetPanel({ onInsert, onBusy, maxFiles = 8, showSize = true }: { onInsert: (assets: AssetInput[]) => Promise<void>; onBusy: (busy: boolean) => void; maxFiles?: number; showSize?: boolean }) {
+function queueIconRead(read: () => Promise<void>) {
+  const pending = iconReads.then(read)
+  iconReads = pending.catch(() => {})
+  return pending
+}
+
+export function AssetPanel({ onInsert, onBusy, maxFiles = 8, showSize = true }: { onInsert: (assets: AssetInput[], preparedIcon?: GraphIcon) => Promise<void>; onBusy: (busy: boolean) => void; maxFiles?: number; showSize?: boolean }) {
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('all')
   const [iconPage, setIconPage] = useState(0)
   const [selected, setSelected] = useState(icons[0])
+  const [provider, setProvider] = useState<'lucide' | ArchitectureIconProviderId>('lucide')
+  const [catalog, setCatalog] = useState<ArchitectureIconCatalog | null>(null)
+  const [catalogError, setCatalogError] = useState('')
+  const [reload, setReload] = useState(0)
+  const [pendingReads, setPendingReads] = useState(0)
+  const [cloudSelection, setCloudSelection] = useState<ArchitectureIconAsset | null>(null)
+  const [cloudPage, setCloudPage] = useState<{ key: string; images: ArchitectureIconAsset[]; loading: boolean; error: string }>({ key: '', images: [], loading: false, error: '' })
   const [color, setColor] = useState('#0017c1')
   const [size, setSize] = useState(showSize ? 96 : 48)
   const [stroke, setStroke] = useState(2)
@@ -98,29 +114,92 @@ export function AssetPanel({ onInsert, onBusy, maxFiles = 8, showSize = true }: 
     setIconPage(value)
     iconGrid.current?.scrollTo({ top: 0 })
   }
-  async function insert(action: () => Promise<AssetInput[]>) {
+  async function insert(action: () => Promise<AssetInput[]>, preparedIcon?: GraphIcon) {
     if (gate.current) return
     gate.current = true; setBusy(true); onBusy(true); setError('')
-    try { const assets = await action(); if (assets.length > maxFiles) throw new Error(`Select at most ${maxFiles} asset${maxFiles === 1 ? '' : 's'}`); await onInsert(assets) }
+    try { await iconReads; const assets = await action(); if (assets.length > maxFiles) throw new Error(`Select at most ${maxFiles} asset${maxFiles === 1 ? '' : 's'}`); await onInsert(assets, preparedIcon) }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
     finally { gate.current = false; setBusy(false); onBusy(false) }
   }
+  const isCloud = provider !== 'lucide'
   const terms = query.trim().toLowerCase().split(/[\s_-]+/).filter(Boolean)
   const matches = icons.filter((entry) => (category === 'all' || entry.categories.includes(category)) && terms.every((term) => `${entry.name} ${entry.id} ${entry.tags}`.toLowerCase().includes(term)))
   const offset = iconPage * iconsPerPage
   const visibleIcons = matches.slice(offset, offset + iconsPerPage)
+  const cloudEntries = catalog?.icons.filter((entry) => entry.provider === provider) ?? []
+  const cloudCategories = [...new Set(cloudEntries.flatMap((entry) => entry.categories))].sort((left, right) => left.localeCompare(right, 'en'))
+  const cloudMatches = cloudEntries.filter((entry) => (category === 'all' || entry.categories.includes(category)) && terms.every((term) => `${entry.name} ${entry.id} ${entry.aliases.join(' ')}`.toLowerCase().includes(term)))
+  const visibleCloudIcons = cloudMatches.slice(offset, offset + iconsPerPage)
+  const cloudPageKey = mode === 'library' && isCloud ? visibleCloudIcons.map((entry) => entry.id).join('\n') : ''
+  const cloudImages = new Map((cloudPage.key === cloudPageKey ? cloudPage.images : []).map((image) => [image.id, image]))
+  const matchCount = isCloud ? cloudMatches.length : matches.length
+  const providerInfo = catalog?.providers.find((entry) => entry.id === provider)
+  const libraryError = isCloud ? catalogError || (catalog && !catalog.configured ? catalog.message : cloudPage.key === cloudPageKey ? cloudPage.error : '') : ''
+  const reportBusy = useEffectEvent((value: boolean) => onBusy(value))
+  useEffect(() => {
+    reportBusy(busy || pendingReads > 0)
+    return () => reportBusy(false)
+  }, [busy, pendingReads])
+  useEffect(() => {
+    if (provider === 'lucide' || catalog) return
+    let obsolete = false
+    void queueIconRead(async () => {
+      if (obsolete) return
+      setPendingReads((value) => value + 1)
+      try {
+        const result = await client.architectureIcons()
+        if (!obsolete) setCatalog(result)
+      } catch (reason) {
+        if (!obsolete) setCatalogError(reason instanceof Error ? reason.message : String(reason))
+      } finally { setPendingReads((value) => value - 1) }
+    })
+    return () => { obsolete = true }
+  }, [provider, catalog, reload])
+  useEffect(() => {
+    if (!catalog?.configured || !cloudPageKey) return
+    let obsolete = false
+    void queueIconRead(async () => {
+      if (obsolete) return
+      setPendingReads((value) => value + 1)
+      setCloudPage({ key: cloudPageKey, images: [], loading: true, error: '' })
+      try {
+        const result = await client.architectureIconAssets(cloudPageKey.split('\n'))
+        if (!obsolete) setCloudPage({ key: cloudPageKey, images: result.icons, loading: false, error: '' })
+      } catch (reason) {
+        if (!obsolete) setCloudPage({ key: cloudPageKey, images: [], loading: false, error: reason instanceof Error ? reason.message : String(reason) })
+      } finally { setPendingReads((value) => value - 1) }
+    })
+    return () => { obsolete = true }
+  }, [catalog?.configured, cloudPageKey, reload])
+  function changeProvider(value: 'lucide' | ArchitectureIconProviderId) {
+    setProvider(value); setCategory('all'); setQuery(''); goToIconPage(0); setCloudSelection(null); setCatalogError(''); setError('')
+  }
+  function refreshCloudIcons() {
+    setCatalog(null); setCloudSelection(null); setCatalogError(''); setReload((value) => value + 1)
+  }
+  function insertSelected() {
+    if (mode === 'library' && isCloud) {
+      if (!cloudSelection) return
+      const { base64, mime_type, alt } = cloudSelection
+      const preparedIcon = { base64, mime_type, alt }
+      void insert(async () => [{ id: `asset-${crypto.randomUUID().slice(0, 8)}`, ...preparedIcon, size }], preparedIcon)
+    } else void insert(async () => [svgAsset(mode === 'library' ? renderToStaticMarkup(<selected.icon size={24} color={color} strokeWidth={stroke} />) : svg, size, mode === 'library' ? `${selected.name} (Lucide)` : 'Imported SVG icon')])
+  }
   return <div className="asset-panel">
     <div className="asset-toolbar"><div className="asset-modes" role="group" aria-label="Asset source"><button type="button" className="secondary" aria-pressed={mode === 'library'} disabled={busy} onClick={() => setMode('library')}>Icons</button><button type="button" className="secondary" aria-pressed={mode === 'svg'} disabled={busy} onClick={() => setMode('svg')}><ClipboardPaste size={17} />SVG</button></div><button type="button" className="secondary" disabled={busy} onClick={() => input.current?.click()}><Upload size={17} />Import files</button><input ref={input} type="file" multiple={maxFiles > 1} hidden accept=".svg,.png,.jpg,.jpeg,.emf,.wmf,image/svg+xml,image/png,image/jpeg,image/emf,image/wmf" aria-label="Import asset files" onChange={(event) => { const files = [...event.target.files ?? []]; event.target.value = ''; if (files.length) void insert(() => fileAssets(files, size)) }} /></div>
     <div className="asset-body">
       <section className="asset-library" aria-label="Asset library">{mode === 'library' ? <>
-        <div className="asset-filters"><label className="field">Search icons<input autoFocus={maxFiles === 1} aria-label="Search icons" value={query} disabled={busy} onChange={(event) => { setQuery(event.target.value); goToIconPage(0) }} /></label><label className="field">Category<select aria-label="Icon category" value={category} disabled={busy} onChange={(event) => { setCategory(event.target.value); goToIconPage(0) }}><option value="all">All icons ({icons.length})</option>{categories.map((entry) => <option key={entry.id} value={entry.id}>{entry.name} ({entry.count})</option>)}</select></label></div>
-        <div ref={iconGrid} className="icon-grid">{visibleIcons.map((entry) => <button type="button" key={entry.id} data-icon-name={entry.id} className={entry.id === selected.id ? 'active' : ''} aria-label={`${entry.name} icon`} aria-pressed={entry.id === selected.id} title={entry.name} disabled={busy} onClick={() => setSelected(entry)}><entry.icon size={28} /><span>{entry.name}</span></button>)}</div>
-        <nav className="icon-pagination" aria-label="Icon pages"><Tool label="Previous icon page" disabled={busy || iconPage === 0} onClick={() => goToIconPage(iconPage - 1)}><ChevronLeft size={20} /></Tool><span aria-live="polite">{matches.length ? offset + 1 : 0}-{Math.min(offset + iconsPerPage, matches.length)} / {matches.length}</span><Tool label="Next icon page" disabled={busy || offset + iconsPerPage >= matches.length} onClick={() => goToIconPage(iconPage + 1)}><ChevronRight size={20} /></Tool></nav>
-        {!matches.length && <p role="status">No matching icons</p>}
+        <div className="asset-filters"><label className="field">Provider<select aria-label="Icon provider" value={provider} disabled={busy} onChange={(event) => changeProvider(event.target.value as typeof provider)}><option value="lucide">Lucide</option><option value="azure">Microsoft Azure / Entra</option><option value="aws">Amazon Web Services</option><option value="gcp">Google Cloud</option></select></label><label className="field">Search icons<input autoFocus={maxFiles === 1} aria-label="Search icons" value={query} disabled={busy} onChange={(event) => { setQuery(event.target.value); goToIconPage(0) }} /></label><label className="field">Category<select aria-label="Icon category" value={category} disabled={busy} onChange={(event) => { setCategory(event.target.value); goToIconPage(0) }}><option value="all">All icons ({isCloud ? cloudEntries.length : icons.length})</option>{isCloud ? cloudCategories.map((entry) => <option key={entry} value={entry}>{entry} ({cloudEntries.filter((icon) => icon.categories.includes(entry)).length})</option>) : categories.map((entry) => <option key={entry.id} value={entry.id}>{entry.name} ({entry.count})</option>)}</select></label></div>
+        <div ref={iconGrid} className="icon-grid" aria-busy={isCloud && (pendingReads > 0 || !catalog && !catalogError)}>{isCloud ? visibleCloudIcons.map((entry) => {
+          const image = cloudImages.get(entry.id)
+          return <button type="button" key={entry.id} data-icon-name={entry.id} className={entry.id === cloudSelection?.id ? 'active' : ''} aria-label={`${entry.name} icon`} aria-pressed={entry.id === cloudSelection?.id} title={entry.name} disabled={busy || !image} onClick={() => { if (image) setCloudSelection(image) }}>{image ? <img src={`data:${image.mime_type};base64,${image.base64}`} width={28} height={28} style={{ objectFit: 'contain' }} alt="" /> : <Cloud size={28} aria-hidden="true" />}<span>{entry.name}</span></button>
+        }) : visibleIcons.map((entry) => <button type="button" key={entry.id} data-icon-name={entry.id} className={entry.id === selected.id ? 'active' : ''} aria-label={`${entry.name} icon`} aria-pressed={entry.id === selected.id} title={entry.name} disabled={busy} onClick={() => setSelected(entry)}><entry.icon size={28} /><span>{entry.name}</span></button>)}</div>
+        <nav className="icon-pagination" aria-label="Icon pages"><Tool label="Previous icon page" disabled={busy || iconPage === 0} onClick={() => goToIconPage(iconPage - 1)}><ChevronLeft size={20} /></Tool><span aria-live="polite">{matchCount ? offset + 1 : 0}-{Math.min(offset + iconsPerPage, matchCount)} / {matchCount}</span><Tool label="Next icon page" disabled={busy || offset + iconsPerPage >= matchCount} onClick={() => goToIconPage(iconPage + 1)}><ChevronRight size={20} /></Tool></nav>
+        {!matchCount && (!isCloud || catalog) && <p>No matching icons</p>}
       </> : <label className="field">SVG markup<textarea className="code-input" aria-label="SVG markup" rows={12} maxLength={262144} disabled={busy} value={svg} onChange={(event) => setSvg(event.target.value)} /></label>}</section>
-      <fieldset className="asset-properties" disabled={busy}><legend className="visually-hidden">Asset properties</legend>{mode === 'library' && <><div className="asset-preview"><selected.icon size={96} color={color} strokeWidth={stroke} aria-label={selected.name} /></div><strong>{selected.name}</strong><label className="field">Icon color<input type="color" aria-label="Icon color" value={color} onChange={(event) => setColor(event.target.value)} /></label><label className="field">Stroke width<input aria-label="Icon stroke width" type="number" min={1} max={4} step={0.5} value={stroke} onChange={(event) => setStroke(event.currentTarget.valueAsNumber)} /></label></>}{showSize && <label className="field">Size (px)<input aria-label="Asset size" type="number" min={8} max={640} required value={Number.isFinite(size) ? size : ''} onChange={(event) => setSize(event.currentTarget.valueAsNumber)} /></label>}</fieldset>
+      <fieldset className="asset-properties" disabled={busy}><legend className="visually-hidden">Asset properties</legend>{mode === 'library' && (isCloud ? <><div className="asset-preview">{cloudSelection && <img src={`data:${cloudSelection.mime_type};base64,${cloudSelection.base64}`} width={96} height={96} style={{ objectFit: 'contain' }} alt={cloudSelection.alt} />}</div><strong>{cloudSelection?.alt ?? 'No selection'}</strong>{providerInfo && <a href={providerInfo.terms_url} target="_blank" rel="noreferrer">Official terms</a>}<Tool label="Refresh cloud icons" disabled={busy} onClick={refreshCloudIcons}><RefreshCw size={20} /></Tool></> : <><div className="asset-preview"><selected.icon size={96} color={color} strokeWidth={stroke} aria-label={selected.name} /></div><strong>{selected.name}</strong><label className="field">Icon color<input type="color" aria-label="Icon color" value={color} onChange={(event) => setColor(event.target.value)} /></label><label className="field">Stroke width<input aria-label="Icon stroke width" type="number" min={1} max={4} step={0.5} value={stroke} onChange={(event) => setStroke(event.currentTarget.valueAsNumber)} /></label></>)}{showSize && <label className="field">Size (px)<input aria-label="Asset size" type="number" min={8} max={640} required value={Number.isFinite(size) ? size : ''} onChange={(event) => setSize(event.currentTarget.valueAsNumber)} /></label>}</fieldset>
     </div>
-    {error && <p className="error asset-error" role="alert">{error}</p>}
-    <footer className="asset-actions"><span role="status">{busy ? 'Importing asset' : mode === 'library' ? `${matches.length} icons` : 'SVG'}</span><button className="primary" disabled={busy || !Number.isFinite(size) || size < 8 || size > 640 || mode === 'svg' && !svg.trim() || mode === 'library' && (!Number.isFinite(stroke) || stroke < 1 || stroke > 4)} onClick={() => void insert(async () => [svgAsset(mode === 'library' ? renderToStaticMarkup(<selected.icon size={24} color={color} strokeWidth={stroke} />) : svg, size, mode === 'library' ? `${selected.name} (Lucide)` : 'Imported SVG icon')])}><Check size={17} />{mode === 'library' ? 'Insert icon' : 'Insert SVG'}</button></footer>
+    {(error || mode === 'library' && libraryError) && <p className="error asset-error" role="alert">{error || libraryError}</p>}
+    <footer className="asset-actions"><span role="status">{busy ? 'Importing asset' : mode === 'library' ? isCloud && !catalog && !catalogError ? 'Loading icons' : `${matchCount} icons` : 'SVG'}</span><button className="primary" disabled={busy || pendingReads > 0 || !Number.isFinite(size) || size < 8 || size > 640 || mode === 'svg' && !svg.trim() || mode === 'library' && (isCloud ? !cloudSelection || !catalog?.configured : !Number.isFinite(stroke) || stroke < 1 || stroke > 4)} onClick={insertSelected}><Check size={17} />{mode === 'library' ? 'Insert icon' : 'Insert SVG'}</button></footer>
   </div>
 }

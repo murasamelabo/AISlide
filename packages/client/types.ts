@@ -169,12 +169,13 @@ export type BestPracticeGuide = { version: 1; profile_id: AuthoringProfile; titl
 export type BestPracticeProfiles = { version: 1; profiles: { id: AuthoringProfile; title: string; language: 'en'; default_primary: string }[] }
 
 export type GraphNodeKind = 'rectangle' | 'rounded_rectangle' | 'ellipse' | 'diamond' | 'cylinder' | 'cloud'
+export type GraphPresentation = 'card' | 'icon'
 export type GraphPort = 'auto' | 'top' | 'left' | 'bottom' | 'right'
 export type GraphRoute = 'straight' | 'elbow'
 export type GraphIcon = { base64: string; mime_type: 'image/png' | 'image/jpeg'; alt?: string }
-export type GraphNode = { id: string; label: string; kind?: GraphNodeKind; x: number; y: number; width?: number; height?: number; fill?: string; stroke?: string; color?: string; font_size?: number; group?: string | null; icon?: GraphIcon | null }
+export type GraphNode = { id: string; label: string; kind?: GraphNodeKind; presentation?: GraphPresentation; x: number; y: number; width?: number; height?: number; fill?: string; stroke?: string; color?: string; font_size?: number; group?: string | null; icon?: GraphIcon | null }
 export type GraphEdge = { id: string; source: string; target: string; source_port?: GraphPort; target_port?: GraphPort; label?: string; route?: GraphRoute; color?: string; arrow?: boolean; start_arrow?: boolean; dashed?: boolean }
-export type GraphGroup = { id: string; label: string; x: number; y: number; width: number; height: number; fill?: string; stroke?: string }
+export type GraphGroup = { id: string; label: string; x: number; y: number; width: number; height: number; fill?: string; stroke?: string; parent?: string | null; icon?: GraphIcon | null }
 export type GraphSpec = { version: 1; title: string; subtitle?: string; nodes: GraphNode[]; edges?: GraphEdge[]; groups?: GraphGroup[] }
 export type GraphAlignment = 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom'
 export type GraphOperation =
@@ -185,9 +186,17 @@ export type GraphOperation =
   | { op: 'remove'; ids: string[] }
   | { op: 'align'; ids: string[]; alignment: GraphAlignment }
   | { op: 'layout'; columns: number }
-export type GraphCatalog = { version: 1; shapes: GraphNodeKind[]; ports: GraphPort[]; routes: GraphRoute[]; limits: { nodes: number; edges: number; groups: number; rendered_elements: number }; canvas: { width: number; height: number; content_top: number }; schema: unknown; operation_schema: unknown; examples: { id: string; name: string; spec: GraphSpec }[] }
+export type GraphCatalog = { version: 1; shapes: GraphNodeKind[]; ports: GraphPort[]; routes: GraphRoute[]; limits: { nodes: number; edges: number; groups: number; group_depth?: number; rendered_elements: number }; canvas: { width: number; height: number; content_top: number }; schema: unknown; operation_schema: unknown; examples: { id: string; name: string; spec: GraphSpec }[] }
 
 export type SearchOptions = { query: string; case_sensitive?: boolean; whole_word?: boolean; include_notes?: boolean; include_masters?: boolean; max_matches?: number }
+export type ArchitectureIconProviderId = 'azure' | 'aws' | 'gcp'
+export type ArchitectureIconArchive = { id: string; url: string; sha256: string; bytes: number }
+export type ArchitectureIconProvider = { id: ArchitectureIconProviderId; name: string; terms_url: string; notice: string; archives: ArchitectureIconArchive[] }
+export type ArchitectureIconSource = { archive_id: string; entry: string; sha256: string }
+export type ArchitectureIconEntry = { id: string; provider: ArchitectureIconProviderId; name: string; kind: string; categories: string[]; aliases: string[]; source: ArchitectureIconSource; png_sha256: string; png_bytes: number; width: number; height: number }
+export type ArchitectureIconCatalog = { version: 1; release: string; configured: boolean; message: string; providers: ArchitectureIconProvider[]; icons: ArchitectureIconEntry[] }
+export type ArchitectureIconAsset = { id: string; base64: string; mime_type: 'image/png'; alt: string; width: number; height: number }
+export type ArchitectureIconAssets = { icons: ArchitectureIconAsset[] }
 export type TextMatch = { path: string; start: number; end: number; expected: string; snippet: string }
 export type TextReplaceOptions = { search: SearchOptions; replacement: string; replace_all?: boolean; selected?: TextMatch[] | null }
 export type FormatTextInput = { id: string; start: number; end: number; style: RunStyle }

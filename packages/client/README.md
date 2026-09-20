@@ -141,7 +141,35 @@ await session.undo();
 
 `client.createGraph({id,spec,theme?})` previews native elements; `client.transformGraph(spec,operations)` validates a candidate without modifying a session. Use `updateGraph` for a complete specification or `applyGraph` for node/edge/boundary operations. Both preserve root placement and reject stale metadata. Limits are in the [API contract](../../docs/api.md#architecture-graphs). A full official-MCP example is [tools/graphs-demo.mjs](../../tools/graphs-demo.mjs).
 
-For an icon on an existing node, prepare the bytes using the graph-specific helper and replace the complete node specification:
+### Local Cloud Icon Catalog
+
+`client.architectureIcons(options?)` returns all 1,498 compiled metadata entries, vendor notices and provenance even when the local pack is unavailable. `configured` means only that the local acknowledgment matches this exact catalog; it does not certify every image or grant redistribution rights. Setup is an explicit operator action described in the [cloud icon guide](../../docs/authoring/cloud-icons.md), never an API download.
+
+```js
+const catalog = await client.architectureIcons();
+if (!catalog.configured) throw new Error(catalog.message);
+const { icons } = await client.architectureIconAssets(['azure/entra/microsoft-entra-id']);
+const { base64, mime_type, alt } = icons[0];
+const icon = { base64, mime_type, alt };
+const preview = await client.createGraph({ id: 'identity-graph', spec: {
+    version: 1, title: 'Synthetic identity boundary',
+    groups: [
+      { id: 'cloud', label: 'Cloud', x: 24, y: 88, width: 700, height: 400, icon },
+      { id: 'identity', label: 'Identity', parent: 'cloud', x: 48, y: 144, width: 600, height: 300 },
+    ],
+    nodes: [{ id: 'entra', label: alt, presentation: 'icon', icon, group: 'identity',
+      x: 80, y: 200, width: 160, height: 140, font_size: 16 }],
+  },
+});
+```
+
+`presentation: 'icon'` requires an icon; omitted presentation keeps legacy Card output. Boundary `parent` and `icon` are optional, with at most 16 boundaries/four levels; all coordinates above are absolute, not parent-relative. Containment reserves 40px for the heading and 8px side/bottom padding. Ancestor moves affect descendants once; removal promotes children without moving their absolute bounds. Nested grid rejects. Native pictures, editable labels and connection anchors stay separate within one root, not nested PowerPoint groups. Use `session.addGraph` to commit; the resulting PPTX reopens offline without the pack. Limits remain in the [graph contract](../../docs/api.md#architecture-graphs).
+
+Asset requests accept 1..60 distinct catalog IDs, preserve requested order and original PNG bytes (including 512px sources), and return `{ icons: ArchitectureIconAsset[] }`. Each asset adds `id`, actual `width` and `height`; pass only `base64`, `mime_type` and the full-service-name `alt` to strict `GraphIcon` inputs. Do not send the original PNG through `createGraphIcon`, which can thumbnail it. Read-only MCP tools are `architecture_icons` and `architecture_icon_assets` with the same limits.
+
+Every batch verifies local consent and all selected size/hash/PNG/dimension checks before returning any assets. Limits are 1 MiB per PNG and 4 MiB total raw PNG bytes before Base64 encoding; oversized batches must be split. Existing transport/profile response limits still apply. No request can supply paths, provider URLs or alternate manifests. The host-only `AISLIDE_ICON_PACK_ROOT` selects an absolute local version directory; all ancestor symlinks and Windows reparse points are rejected. These portable path and opened-file checks are not an adversarial directory-handle sandbox; keep the cache user-owned and free from concurrent hostile modification. Runtime performs no network or file writes.
+
+For a custom icon on an existing node, prepare the bytes using the graph-specific helper and replace the complete node specification:
 
 ```js
 const icon = await client.createGraphIcon({
@@ -155,7 +183,7 @@ await session.applyGraph(slideId, {
 await session.undo();
 ```
 
-The helper accepts supplied SVG/PNG/JPEG bytes and returns PNG/JPEG `GraphIcon` data fitted to 256px; it neither fetches a URL nor mutates the session. SVG is not retained as editable paths. Existing small raster bytes are preserved. Set `icon: null` on a `put_node` replacement to remove the icon. Native picture fingerprints participate in stale-metadata checks. `node tools/graphs-demo.mjs --icons` exercises all six node shapes with 18 icons across five slides, native icon replacement and byte-identical Undo.
+The helper accepts supplied SVG/PNG/JPEG bytes and returns PNG/JPEG `GraphIcon` data fitted to 256px; it neither fetches a URL nor mutates the session. SVG is not retained as editable paths. Existing small raster bytes are preserved. Set `icon: null` on a complete `put_node` replacement to remove the icon; for an icon-mode node, also set `presentation: 'card'` in that same replacement. Native picture fingerprints participate in stale-metadata checks. `node tools/graphs-demo.mjs --icons` exercises all six node shapes with 18 icons across five slides, native icon replacement and byte-identical Undo.
 
 ## Design Helpers
 

@@ -48,6 +48,7 @@
     "@axe-core/playwright": "^4.11.1",
     "@playwright/test": "^1.58.0",
     "@tauri-apps/cli": "^2.11.4",
+    "fflate": "0.8.2",
     "sharp": "^0.35.4"
   }
 }

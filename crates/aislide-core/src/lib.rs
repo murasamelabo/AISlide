@@ -27,6 +27,7 @@ pub mod image_edit;
 pub mod segmentation;
 pub mod graphics;
 pub mod graphs;
+pub mod architecture_icons;
 pub mod sources;
 pub mod data_report;
 pub mod document;

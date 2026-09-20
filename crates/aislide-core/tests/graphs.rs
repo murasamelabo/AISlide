@@ -19,6 +19,250 @@ fn node_icon(color: &str) -> Value {
     json!({"base64":picture["base64"],"mime_type":picture["mime_type"],"alt":picture["alt"]})
 }
 
+fn cloud_graph() -> Value {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#007a4d"/></svg>"##;
+    let icon = execute_request(json!({"op":"create_graph_icon","base64":STANDARD.encode(svg),"mime_type":"image/svg+xml","alt":"Synthetic service"})).unwrap();
+    json!({"version":1,"title":"Synthetic cloud","nodes":[
+        {"id":"service","label":"Service\ninstance","presentation":"icon","kind":"rectangle","x":88,"y":296,"width":160,"height":120,"font_size":16,"group":"subnet","icon":icon},
+        {"id":"peer","label":"Peer","x":560,"y":320,"width":176,"height":80,"group":"vpc"}
+    ],"edges":[{"id":"traffic","source":"service","target":"peer","source_port":"right","target_port":"left"}],"groups":[
+        {"id":"subnet","label":"Subnet","parent":"vpc","x":64,"y":240,"width":400,"height":224},
+        {"id":"vpc","label":"VPC","parent":"region","x":48,"y":192,"width":920,"height":288},
+        {"id":"region","label":"Region","parent":"cloud","x":32,"y":144,"width":960,"height":344},
+        {"id":"cloud","label":"Cloud","x":16,"y":96,"width":1000,"height":408,"icon":node_icon("#0017c1")}
+    ]})
+}
+
+#[test]
+fn cloud_graph_icon_presentation_and_nested_boundaries() {
+    use sha2::{Digest, Sha256};
+    let legacy = execute_request(json!({"op":"create_graph","id":"legacy","spec":graph()})).unwrap();
+    assert_eq!(format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap())), "6f9b876b9405000bc5133294655da9600facbfc148584dcfd09a49e55670a517");
+    let spec = cloud_graph();
+    let element = execute_request(json!({"op":"create_graph","id":"cloud-test","spec":spec})).unwrap();
+    let children = element["children"].as_array().unwrap();
+    let find = |suffix: &str| children.iter().find(|child| child["id"].as_str().unwrap().ends_with(suffix)).unwrap();
+    let picture = find("-ni-service");
+    let label = find("-nt-service");
+    let anchor = find("-n-service");
+    assert_eq!(picture["base64"], spec["nodes"][0]["icon"]["base64"]);
+    assert_eq!(picture["width"], picture["height"]);
+    assert!((56.0..=96.0).contains(&picture["height"].as_f64().unwrap()));
+    assert!(picture["y"].as_f64().unwrap() + picture["height"].as_f64().unwrap() + 8.0 <= label["y"].as_f64().unwrap());
+    assert!(label["height"].as_f64().unwrap() >= 38.4);
+    assert_eq!(anchor["fill"], "none");
+    assert_eq!(anchor["stroke_width"], 0.0);
+    let edge = find("-e-traffic");
+    assert_eq!(edge["start"]["element_id"], anchor["id"]);
+    let order: Vec<_> = children.iter().filter_map(|child| child["id"].as_str()).filter(|id| id.contains("-g-")).map(|id| id.rsplit("-g-").next().unwrap()).collect();
+    assert_eq!(order, ["cloud", "region", "vpc", "subnet"]);
+    let header = find("-gi-cloud");
+    assert_eq!(header["width"].as_f64().unwrap() / header["height"].as_f64().unwrap(), 2.0);
+    assert!(header["x"].as_f64().unwrap() + header["width"].as_f64().unwrap() < find("-gt-cloud")["x"].as_f64().unwrap());
+}
+
+#[test]
+fn cloud_graph_defaults_preserve_legacy_serialization_and_flat_order() {
+    use aislide_core::graphs::{GraphPresentation, GraphSpec};
+    let mut legacy = graph();
+    legacy["groups"] = json!([
+        {"id":"second","label":"Second","x":16,"y":104,"width":300,"height":240},
+        {"id":"first","label":"First","x":500,"y":120,"width":500,"height":300}
+    ]);
+    let typed: GraphSpec = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(typed.nodes[0].presentation, GraphPresentation::Card);
+    let serialized = serde_json::to_value(&typed).unwrap();
+    assert!(serialized["nodes"].as_array().unwrap().iter().all(|node| node.get("presentation").is_none()));
+    assert!(serialized["groups"].as_array().unwrap().iter().all(|group| group.get("parent").is_none() && group.get("icon").is_none()));
+    let original = execute_request(json!({"op":"create_graph","id":"legacy-flat","spec":legacy})).unwrap();
+    for node in legacy["nodes"].as_array_mut().unwrap() { node["presentation"] = json!("card"); }
+    for group in legacy["groups"].as_array_mut().unwrap() { group["parent"] = Value::Null; group["icon"] = Value::Null; }
+    let explicit: GraphSpec = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_vec(&typed).unwrap(), serde_json::to_vec(&explicit).unwrap());
+    assert_eq!(original, execute_request(json!({"op":"create_graph","id":"legacy-flat","spec":legacy})).unwrap());
+    let boundaries: Vec<_> = original["children"].as_array().unwrap().iter().filter(|child| child["id"].as_str().unwrap().contains("-g-")).collect();
+    assert!(boundaries[0]["id"].as_str().unwrap().ends_with("-g-second"));
+    assert!(boundaries[1]["id"].as_str().unwrap().ends_with("-g-first"));
+}
+
+#[test]
+fn cloud_graph_rejects_invalid_hierarchies_namespace_collisions_and_icons() {
+    let original = cloud_graph();
+    for case in ["self", "missing", "node-parent", "cycle", "depth", "containment", "header", "node-group-id", "edge-group-id", "node-edge-id", "duplicate-group", "missing-icon", "small-icon-frame", "unknown-presentation", "group-icon", "group-icon-extra", "dashed-group"] {
+        let mut spec = original.clone();
+        match case {
+            "self" => spec["groups"][0]["parent"] = json!("subnet"),
+            "missing" => spec["groups"][0]["parent"] = json!("absent"),
+            "node-parent" => spec["groups"][0]["parent"] = json!("service"),
+            "cycle" => spec["groups"][3]["parent"] = json!("vpc"),
+            "depth" => spec["groups"].as_array_mut().unwrap().push(json!({"id":"fifth","label":"Fifth","parent":"subnet","x":80,"y":288,"width":360,"height":160})),
+            "containment" => spec["groups"][0]["x"] = json!(48),
+            "header" => spec["groups"][0]["y"] = json!(220),
+            "node-group-id" => spec["nodes"][0]["id"] = json!("subnet"),
+            "edge-group-id" => spec["edges"][0]["id"] = json!("cloud"),
+            "node-edge-id" => spec["edges"][0]["id"] = json!("peer"),
+            "duplicate-group" => spec["groups"][0]["id"] = json!("vpc"),
+            "missing-icon" => spec["nodes"][0]["icon"] = Value::Null,
+            "small-icon-frame" => spec["nodes"][0]["height"] = json!(40),
+            "unknown-presentation" => spec["nodes"][0]["presentation"] = json!("image"),
+            "group-icon" => spec["groups"][3]["icon"]["mime_type"] = json!("image/jpeg"),
+            "group-icon-extra" => spec["groups"][3]["icon"]["url"] = json!("https://example.invalid/icon.png"),
+            "dashed-group" => spec["groups"][0]["dashed"] = json!(true),
+            _ => unreachable!(),
+        }
+        assert!(execute_request(json!({"op":"create_graph","id":"invalid-cloud","spec":spec})).is_err(), "{case}");
+        assert!(execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"move","ids":["peer"],"dx":0,"dy":0}]})).is_err(), "{case}");
+    }
+    let mut excessive = original.clone();
+    for index in 0..2 { excessive["nodes"][index]["icon"] = json!({"base64":"A".repeat(800000),"mime_type":"image/png"}); }
+    for index in 0..2 { excessive["groups"][index]["icon"] = json!({"base64":"A".repeat(800000),"mime_type":"image/png"}); }
+    assert!(execute_request(json!({"op":"create_graph","id":"budget","spec":excessive})).unwrap_err().to_string().contains("3 MiB"));
+    let typed: aislide_core::graphs::GraphSpec = serde_json::from_value(original).unwrap();
+    for invalid in [f64::NAN, f64::INFINITY] {
+        assert!(aislide_core::graphs::transform(&typed, &[aislide_core::graphs::GraphOperation::Move { ids: vec!["cloud".into()], dx: invalid, dy: 0.0 }]).is_err());
+    }
+}
+
+#[test]
+fn cloud_graph_moves_descendants_once_and_removes_boundaries_without_resources() {
+    let spec = cloud_graph();
+    let moved = execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"move","ids":["cloud","region","subnet","service","peer","traffic"],"dx":8,"dy":4}]})).unwrap();
+    for collection in ["nodes", "groups"] {
+        for (before, after) in spec[collection].as_array().unwrap().iter().zip(moved[collection].as_array().unwrap()) {
+            assert_eq!(before["id"], after["id"]);
+            assert_eq!(after["x"].as_f64().unwrap(), before["x"].as_f64().unwrap() + 8.0);
+            assert_eq!(after["y"].as_f64().unwrap(), before["y"].as_f64().unwrap() + 4.0);
+        }
+    }
+    let mut replacement = spec["groups"][3].clone(); replacement["x"] = json!(24); replacement["y"] = json!(100);
+    let put = execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"put_group","group":replacement}]})).unwrap();
+    assert_eq!(put, moved);
+    replacement["width"] = json!(100);
+    assert!(execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"put_group","group":replacement}]})).is_err());
+    let mut reparent = spec["groups"][0].clone(); reparent["parent"] = json!("cloud");
+    let changed = execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"put_group","group":reparent}]})).unwrap();
+    assert_eq!(changed["groups"][0]["parent"], "cloud");
+    assert_eq!(changed["nodes"][0]["x"], 88.0);
+    assert_eq!(changed["groups"][0]["width"], 400.0);
+    for selection in [json!(["region"]), json!(["region","vpc"]), json!(["cloud"]), json!(["cloud","subnet"])] {
+        let removed = execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"remove","ids":selection}]})).unwrap();
+        assert_eq!(removed["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(removed["edges"].as_array().unwrap().len(), 1);
+        for collection in ["nodes", "groups"] {
+            for after in removed[collection].as_array().unwrap() {
+                let before = spec[collection].as_array().unwrap().iter().find(|entry| entry["id"] == after["id"]).unwrap();
+                for field in ["x", "y", "width", "height"] { assert_eq!(before[field].as_f64(), after[field].as_f64()); }
+            }
+        }
+        if selection == json!(["region","vpc"]) { assert_eq!(removed["groups"][0]["parent"], "cloud"); assert_eq!(removed["nodes"][1]["group"], "cloud"); }
+        if selection == json!(["cloud"]) { assert!(removed["groups"][2].get("parent").is_none()); }
+    }
+    let deleted = execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"remove","ids":["region","service"]}]})).unwrap();
+    assert_eq!(deleted["nodes"].as_array().unwrap().len(), 1);
+    assert!(deleted["edges"].as_array().unwrap().is_empty());
+    for operation in [json!({"op":"move","ids":["cloud"],"dx":0,"dy":20}), json!({"op":"move","ids":["unknown"],"dx":0,"dy":0}), json!({"op":"move","ids":["service","service"],"dx":0,"dy":0})] {
+        assert!(execute_request(json!({"op":"transform_graph","spec":spec,"operations":[operation]})).is_err());
+    }
+    assert!(execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"layout","columns":2}]})).unwrap_err().to_string().contains("nested"));
+}
+
+#[test]
+fn cloud_graph_limits_include_sixteen_groups_and_rendered_children() {
+    let catalog = execute_request(json!({"op":"graph_catalog"})).unwrap();
+    assert_eq!(catalog["limits"], json!({"nodes":48,"edges":64,"groups":16,"group_depth":4,"rendered_elements":256}));
+    let mut spec = graph();
+    spec["groups"] = json!((0..16).map(|index| json!({"id":format!("boundary-{index}"),"label":"Boundary","x":16,"y":104,"width":300,"height":240})).collect::<Vec<_>>());
+    execute_request(json!({"op":"create_graph","id":"sixteen","spec":spec})).unwrap();
+    spec["groups"].as_array_mut().unwrap().push(json!({"id":"excess","label":"Excess","x":16,"y":104,"width":300,"height":240}));
+    assert!(execute_request(json!({"op":"create_graph","id":"seventeen","spec":spec})).is_err());
+    spec["groups"].as_array_mut().unwrap().pop();
+    let icon = node_icon("#007a4d");
+    spec["nodes"] = json!((0..48).map(|index| json!({"id":format!("node-{index}"),"label":"Node","x":if index % 2 == 0 { 48 } else { 560 },"y":160,"width":160,"height":120,"font_size":16,"presentation":"icon","icon":icon})).collect::<Vec<_>>());
+    spec["edges"] = json!((0..64).map(|index| json!({"id":format!("edge-{index}"),"source":"node-0","target":"node-1"})).collect::<Vec<_>>());
+    execute_request(json!({"op":"create_graph","id":"within-rendered-limit","spec":spec})).unwrap();
+    for group in spec["groups"].as_array_mut().unwrap() { group["icon"] = icon.clone(); }
+    assert!(execute_request(json!({"op":"create_graph","id":"rendered-limit","spec":spec})).unwrap_err().to_string().contains("too many scene elements"));
+}
+
+#[test]
+fn cloud_graph_icon_images_preserve_source_aspect_and_all_kind_ports() {
+    use sha2::{Digest, Sha256};
+    for (format, mime) in [(image::ImageFormat::Png, "image/png"), (image::ImageFormat::Jpeg, "image/jpeg")] {
+        for (width, height) in [(512, 256), (256, 512), (256, 256)] {
+            let raster = image::RgbImage::from_pixel(width, height, image::Rgb([0, 96, 192]));
+            let mut output = std::io::Cursor::new(Vec::new()); raster.write_to(&mut output, format).unwrap();
+            let bytes = output.into_inner(); let encoded = STANDARD.encode(&bytes);
+            let mut spec = cloud_graph();
+            spec["nodes"][0]["icon"] = json!({"base64":encoded,"mime_type":mime,"alt":"Original raster"});
+            spec["groups"][3]["icon"] = spec["nodes"][0]["icon"].clone();
+            let element = execute_request(json!({"op":"create_graph","id":"aspect","spec":spec})).unwrap();
+            for picture in element["children"].as_array().unwrap().iter().filter(|child| child["type"] == "picture") {
+                assert_eq!(Sha256::digest(STANDARD.decode(picture["base64"].as_str().unwrap()).unwrap()), Sha256::digest(&bytes));
+                assert_eq!(picture["width"].as_f64().unwrap() / picture["height"].as_f64().unwrap(), width as f64 / height as f64);
+                assert!(picture["width"].as_f64().unwrap() <= 96.0 && picture["height"].as_f64().unwrap() <= 96.0);
+            }
+        }
+    }
+    for kind in ["rectangle", "rounded_rectangle", "ellipse", "diamond", "cylinder", "cloud"] {
+        let mut spec = cloud_graph(); spec["nodes"][0]["kind"] = json!(kind);
+        let icon = execute_request(json!({"op":"create_graph","id":"kind","spec":spec})).unwrap();
+        spec["nodes"][0]["presentation"] = json!("card"); spec["nodes"][0]["label"] = json!("Node");
+        let card = execute_request(json!({"op":"create_graph","id":"kind","spec":spec})).unwrap();
+        let edge = |element: &Value| element["children"].as_array().unwrap().iter().find(|child| child["type"] == "connector").unwrap().clone();
+        for field in ["x", "y", "width", "height", "routing"] { assert_eq!(edge(&icon)[field], edge(&card)[field], "{kind}"); }
+        assert_eq!(edge(&icon)["start"]["site"], edge(&card)["start"]["site"], "{kind}");
+    }
+}
+
+#[test]
+fn cloud_graph_native_roundtrip_child_update_ungroup_and_exact_undo() {
+    let spec = cloud_graph();
+    let document = execute_request(json!({"op":"create_presentation","id":"cloud-history","title":"Synthetic cloud"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_graph","document":document,"expected_revision":0,"slide_id":"slide-1","id":"architecture","spec":spec})).unwrap();
+    let saved = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"cloud-open","base64":saved["base64"]})).unwrap();
+    assert_eq!(opened["document"]["parts"][0]["stale"], false);
+    assert_eq!(opened["document"]["parts"][0]["spec"]["data"]["graph"], inserted["document"]["parts"][0]["spec"]["data"]["graph"]);
+    assert_eq!(execute_request(json!({"op":"export_presentation","document":opened["document"]})).unwrap()["base64"], saved["base64"]);
+    let updated = execute_request(json!({"op":"apply_graph","document":opened["document"],"expected_revision":0,"slide_id":"slide-1","id":"architecture","operations":[{"op":"move","ids":["cloud","region","subnet","service"],"dx":8,"dy":4},{"op":"move","ids":["service"],"dx":8,"dy":0}]})).unwrap();
+    assert_eq!(updated["document"]["revision"], 1);
+    let updated_saved = execute_request(json!({"op":"export_presentation","document":updated["document"]})).unwrap();
+    let reopened = execute_request(json!({"op":"open_presentation","id":"cloud-updated","base64":updated_saved["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["parts"][0]["stale"], false);
+    assert_eq!(reopened["document"]["parts"][0]["spec"]["data"]["graph"]["nodes"][0]["x"], 104.0);
+    let removed = execute_request(json!({"op":"apply_graph","document":reopened["document"],"expected_revision":0,"slide_id":"slide-1","id":"architecture","operations":[{"op":"remove","ids":["region","vpc"]}]})).unwrap();
+    let removed_saved = execute_request(json!({"op":"export_presentation","document":removed["document"]})).unwrap();
+    let removed_open = execute_request(json!({"op":"open_presentation","id":"cloud-ungrouped","base64":removed_saved["base64"]})).unwrap();
+    assert_eq!(removed_open["document"]["parts"][0]["stale"], false);
+    let children = removed_open["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap();
+    let edge = children.iter().find(|child| child["type"] == "connector").unwrap();
+    for (endpoint, suffix, frame) in [("start", "-n-service", [104.0, 300.0, 160.0, 120.0]), ("end", "-n-peer", [568.0, 324.0, 176.0, 80.0])] {
+        let target = children.iter().find(|child| child["id"] == edge[endpoint]["element_id"]).unwrap();
+        assert!(target["id"].as_str().unwrap().ends_with(suffix));
+        for (field, expected) in ["x", "y", "width", "height"].into_iter().zip(frame) { assert_eq!(target[field].as_f64().unwrap(), expected); }
+    }
+    let package = Package::open(STANDARD.decode(removed_saved["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let xml = package.text("ppt/slides/slide1.xml").unwrap();
+    let native = roxmltree::Document::parse(xml).unwrap();
+    let connector = native.descendants().find(|node| node.tag_name().name() == "cxnSp").unwrap();
+    for connection in ["stCxn", "endCxn"] {
+        let target_id = connector.descendants().find(|node| node.tag_name().name() == connection).unwrap().attribute("id").unwrap();
+        let target = native.descendants().find(|node| node.tag_name().name() == "sp" && node.descendants().any(|property| property.tag_name().name() == "cNvPr" && property.attribute("id") == Some(target_id))).unwrap();
+        assert!(target.descendants().any(|node| node.tag_name().name() == "prstGeom" && node.attribute("prst") == Some("rect")));
+        if connection == "stCxn" { assert!(target.descendants().any(|node| node.tag_name().name() == "noFill")); }
+    }
+    let restored_graph = &removed_open["document"]["parts"][0]["spec"]["data"]["graph"];
+    assert_eq!(restored_graph["groups"][0]["parent"], "cloud");
+    let mut expected_nodes = reopened["document"]["parts"][0]["spec"]["data"]["graph"]["nodes"].clone();
+    expected_nodes[1]["group"] = json!("cloud");
+    assert_eq!(restored_graph["nodes"], expected_nodes);
+    let undone_remove = execute_request(json!({"op":"undo_transaction","document":removed["document"],"expected_revision":1,"receipt":removed["receipt"]})).unwrap();
+    assert_eq!(execute_request(json!({"op":"export_presentation","document":undone_remove["document"]})).unwrap()["base64"], updated_saved["base64"]);
+    let undone = execute_request(json!({"op":"undo_transaction","document":updated["document"],"expected_revision":1,"receipt":updated["receipt"]})).unwrap();
+    assert_eq!(undone["document"]["hash"], opened["document"]["hash"]);
+    assert_eq!(execute_request(json!({"op":"export_presentation","document":undone["document"]})).unwrap()["base64"], saved["base64"]);
+}
+
 #[test]
 fn graph_icon_preparation_bounds_svg_png_and_jpeg_without_upscaling_rasters() {
     let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><path d="M0 0h32v16H0z" fill="#007a4d"/></svg>"##;

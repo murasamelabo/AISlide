@@ -7,6 +7,8 @@ use std::collections::BTreeSet;
 pub const WIDTH: f64 = 1152.0;
 pub const HEIGHT: f64 = 512.0;
 pub const CONTENT_TOP: f64 = 88.0;
+pub const MAX_GROUPS: usize = 16;
+pub const MAX_GROUP_DEPTH: usize = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -26,6 +28,13 @@ impl NodeKind {
     pub fn preset(self) -> &'static str {
         match self { Self::Rectangle => "rect", Self::RoundedRectangle => "roundRect", Self::Ellipse => "ellipse", Self::Diamond => "diamond", Self::Cylinder => "can", Self::Cloud => "cloud" }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphPresentation { #[default] Card, Icon }
+impl GraphPresentation {
+    fn is_card(&self) -> bool { *self == Self::Card }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -81,6 +90,7 @@ pub fn create_icon(base64: String, mime_type: &str, alt: &str) -> Result<GraphIc
 pub struct GraphNode {
     pub id: String, pub label: String,
     #[serde(default)] pub kind: NodeKind,
+    #[serde(default, skip_serializing_if = "GraphPresentation::is_card")] pub presentation: GraphPresentation,
     pub x: f64, pub y: f64,
     #[serde(default = "node_width")] pub width: f64,
     #[serde(default = "node_height")] pub height: f64,
@@ -113,6 +123,8 @@ pub struct GraphGroup {
     pub x: f64, pub y: f64, pub width: f64, pub height: f64,
     #[serde(default = "surface")] pub fill: String,
     #[serde(default = "muted")] pub stroke: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub parent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<GraphIcon>,
 }
 
 fn identity(id: &str) -> Result<()> {
@@ -129,11 +141,38 @@ fn bounds(x: f64, y: f64, width: f64, height: f64) -> Result<()> {
     Ok(())
 }
 
+fn group_ancestors<'a>(spec: &'a GraphSpec, mut parent: Option<&'a str>) -> Result<Vec<usize>> {
+    let mut ancestors = Vec::new();
+    while let Some(id) = parent {
+        let index = spec.groups.iter().position(|group| group.id == id).ok_or_else(|| Error::Invalid("unknown graph parent group".into()))?;
+        if ancestors.contains(&index) { return Err(Error::Invalid("graph group parent cycle".into())); }
+        ancestors.push(index);
+        if ancestors.len() > MAX_GROUP_DEPTH { return Err(Error::Limit("graph group depth exceeds 4".into())); }
+        parent = spec.groups[index].parent.as_deref();
+    }
+    Ok(ancestors)
+}
+
+fn ordered_group_indices(spec: &GraphSpec) -> Result<Vec<usize>> {
+    let mut indices = spec.groups.iter().enumerate().map(|(index, group)| Ok((index, group_ancestors(spec, Some(&group.id))?.len()))).collect::<Result<Vec<_>>>()?;
+    indices.sort_by_key(|entry| entry.1);
+    Ok(indices.into_iter().map(|entry| entry.0).collect())
+}
+
+fn contains(region: &GraphGroup, rect: [f64; 4]) -> bool {
+    let [x, y, width, height] = rect;
+    x >= region.x + 8.0 && y >= region.y + 40.0 && x + width <= region.x + region.width - 8.0 && y + height <= region.y + region.height - 8.0
+}
+
+fn icon_height(node: &GraphNode) -> f64 {
+    (node.height * 0.55).min(node.height - 16.0 - node.font_size * 2.5).min(96.0)
+}
+
 pub fn validate(spec: &GraphSpec) -> Result<()> {
     if spec.version != 1 { return Err(Error::Unsupported("graph version".into())); }
     valid_text(&spec.title, 80)?; valid_text(&spec.subtitle, 120)?;
-    if spec.nodes.is_empty() || spec.nodes.len() > 48 || spec.edges.len() > 64 || spec.groups.len() > 8 { return Err(Error::Limit("graph requires 1-48 nodes, at most 64 edges and 8 groups".into())); }
-    if spec.nodes.iter().filter_map(|node| node.icon.as_ref()).fold(0usize, |total, icon| total.saturating_add(icon.base64.len())) > 3 * 1024 * 1024 {
+    if spec.nodes.is_empty() || spec.nodes.len() > 48 || spec.edges.len() > 64 || spec.groups.len() > MAX_GROUPS { return Err(Error::Limit("graph requires 1-48 nodes, at most 64 edges and 16 groups".into())); }
+    if spec.nodes.iter().filter_map(|node| node.icon.as_ref()).chain(spec.groups.iter().filter_map(|group| group.icon.as_ref())).fold(0usize, |total, icon| total.saturating_add(icon.base64.len())) > 3 * 1024 * 1024 {
         return Err(Error::Limit("graph icon data exceeds the 3 MiB encoded image budget".into()));
     }
     let mut ids = BTreeSet::new();
@@ -143,19 +182,31 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
         bounds(region.x, region.y, region.width, region.height)?;
         valid_color(&region.fill)?; valid_color(&region.stroke)?;
     }
+    ordered_group_indices(spec)?;
+    for region in &spec.groups {
+        if let Some(parent) = &region.parent {
+            let ancestor = spec.groups.iter().find(|group| &group.id == parent).ok_or_else(|| Error::Invalid("unknown graph parent group".into()))?;
+            if !contains(ancestor, [region.x, region.y, region.width, region.height]) { return Err(Error::Invalid("graph group must fit inside its parent below the group label".into())); }
+        }
+        if let Some(icon) = &region.icon {
+            valid_text(&icon.alt, 500)?;
+            crate::media::inspect_raster(&icon.base64, &icon.mime_type)?;
+        }
+    }
     for node in &spec.nodes {
         identity(&node.id)?; valid_text(&node.label, 160)?;
         if !ids.insert(&node.id) { return Err(Error::Invalid("duplicate graph ID".into())); }
         bounds(node.x, node.y, node.width, node.height)?;
         valid_color(&node.fill)?; valid_color(&node.stroke)?; valid_color(&node.color)?;
         if !node.font_size.is_finite() || !(12.0..=40.0).contains(&node.font_size) { return Err(Error::Invalid("graph font size must be 12-40".into())); }
+        if node.presentation == GraphPresentation::Icon && (node.icon.is_none() || icon_height(node) <= 0.0) { return Err(Error::Invalid("icon presentation requires an icon and room for an image, gap and two-line label".into())); }
         if let Some(icon) = &node.icon {
             valid_text(&icon.alt, 500)?;
             crate::media::inspect_raster(&icon.base64, &icon.mime_type)?;
         }
         if let Some(parent) = &node.group {
             let region = spec.groups.iter().find(|region| &region.id == parent).ok_or_else(|| Error::Invalid("unknown graph group".into()))?;
-            if node.x < region.x + 8.0 || node.y < region.y + 40.0 || node.x + node.width > region.x + region.width - 8.0 || node.y + node.height > region.y + region.height - 8.0 { return Err(Error::Invalid("graph node must fit inside its group below the group label".into())); }
+            if !contains(region, [node.x, node.y, node.width, node.height]) { return Err(Error::Invalid("graph node must fit inside its group below the group label".into())); }
         }
     }
     for edge in &spec.edges {
@@ -174,6 +225,18 @@ fn text(id: String, rect: [f64; 4], label: &str, size: f64, color: &str, alignme
 fn shape(id: String, rect: [f64; 4], preset: &str, fill: &str, stroke: &str) -> Element {
     let [x, y, width, height] = rect;
     Element::Shape { visual: None, id, x, y, width, height, preset: preset.into(), fill: fill.into(), stroke: stroke.into(), stroke_width: 1.5, rotation: 0.0, text: String::new(), font_size: 18.0, color: "@dk1".into(), bold: false, format: Default::default() }
+}
+
+fn icon_picture(id: &str, icon: &GraphIcon, rect: [f64; 4]) -> Result<Element> {
+    let [left, top, box_width, box_height] = rect;
+    let mut picture = crate::media::create_picture(id, icon.base64.clone(), &icon.mime_type, &icon.alt)?;
+    if let Element::Picture { x, y, width, height, .. } = &mut picture {
+        let scale = (box_width / *width).min(box_height / *height);
+        *width *= scale; *height *= scale;
+        *x = left + (box_width - *width) / 2.0;
+        *y = top + (box_height - *height) / 2.0;
+    }
+    Ok(picture)
 }
 
 fn resolved_port(node: &GraphNode, port: Port, other: &GraphNode) -> Port {
@@ -214,9 +277,15 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
     validate(spec)?; crate::design::validate_theme(theme)?;
     let prefix = format!("{id}-{}", &format!("{:x}", Sha256::digest(crate::canonical::bytes(spec)?))[..10]);
     let mut children = vec![text(format!("{prefix}-title"), [16.0, 0.0, 1120.0, 40.0], &spec.title, 28.0, "@dk1", TextAlign::Left, true), text(format!("{prefix}-subtitle"), [16.0, 44.0, 1120.0, 26.0], &spec.subtitle, 16.0, "@dk2", TextAlign::Left, false)];
-    for region in &spec.groups {
+    for index in ordered_group_indices(spec)? {
+        let region = &spec.groups[index];
         children.push(shape(format!("{prefix}-g-{}", region.id), [region.x, region.y, region.width, region.height], "rect", &region.fill, &region.stroke));
-        children.push(text(format!("{prefix}-gt-{}", region.id), [region.x + 12.0, region.y + 8.0, region.width - 24.0, 28.0], &region.label, 18.0, "@dk1", TextAlign::Left, true));
+        let offset = if let Some(icon) = &region.icon {
+            let size = ((region.width - 24.0) / 3.0).min(32.0);
+            children.push(icon_picture(&format!("{prefix}-gi-{}", region.id), icon, [region.x + 12.0, region.y + 4.0, size, 32.0])?);
+            size + 8.0
+        } else { 0.0 };
+        children.push(text(format!("{prefix}-gt-{}", region.id), [region.x + 12.0 + offset, region.y + 8.0, region.width - 24.0 - offset, 28.0], &region.label, 18.0, "@dk1", TextAlign::Left, true));
     }
     for edge in &spec.edges {
         let source = spec.nodes.iter().find(|node| node.id == edge.source).ok_or_else(|| Error::Invalid("unknown source node".into()))?;
@@ -231,6 +300,17 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
             start: Some(Connection { element_id: format!("{prefix}-n-{}", source.id), site: start.2 }), end: Some(Connection { element_id: format!("{prefix}-n-{}", target.id), site: end.2 }), routing: Some(crate::model::ConnectorRouting { points, start_arrow: edge.start_arrow, dashed: edge.dashed }) });
     }
     for node in &spec.nodes {
+        if node.presentation == GraphPresentation::Icon {
+            let mut anchor = shape(format!("{prefix}-n-{}", node.id), [node.x, node.y, node.width, node.height], node.kind.preset(), "none", "@dk1");
+            if let Element::Shape { stroke_width, .. } = &mut anchor { *stroke_width = 0.0; }
+            children.push(anchor);
+            let height = icon_height(node);
+            let width = (node.width - 8.0).min(96.0);
+            let icon = node.icon.as_ref().ok_or_else(|| Error::Invalid("icon presentation requires an icon".into()))?;
+            children.push(icon_picture(&format!("{prefix}-ni-{}", node.id), icon, [node.x + (node.width - width) / 2.0, node.y + 4.0, width, height])?);
+            children.push(text(format!("{prefix}-nt-{}", node.id), [node.x + 4.0, node.y + 12.0 + height, node.width - 8.0, node.height - 16.0 - height], &node.label, node.font_size, &node.color, TextAlign::Center, true));
+            continue;
+        }
         children.push(shape(format!("{prefix}-n-{}", node.id), [node.x, node.y, node.width, node.height], node.kind.preset(), &node.fill, &node.stroke));
         let inset = match node.kind { NodeKind::Diamond => 0.24, NodeKind::Ellipse | NodeKind::Cloud => 0.18, _ => 0.1 };
         let mut content = [node.x + node.width * inset, node.y + node.height * inset, node.width * (1.0 - 2.0 * inset), node.height * (1.0 - 2.0 * inset)];
@@ -271,7 +351,7 @@ pub fn catalog() -> Value {
         json!({"id":"approval","name":"Approval flow","spec":{"version":1,"title":"Approval flow","subtitle":"Editable example","nodes":[{"id":"input","label":"Request","x":40,"y":220},{"id":"review","label":"Review","kind":"diamond","x":390,"y":190,"width":200,"height":140},{"id":"approve","label":"Approved","kind":"rounded_rectangle","x":830,"y":120},{"id":"revise","label":"Revise","x":830,"y":340}],"edges":[{"id":"submit","source":"input","target":"review"},{"id":"yes","source":"review","target":"approve","label":"Yes"},{"id":"no","source":"review","target":"revise","label":"No"}],"groups":[]}}),
         json!({"id":"boundary","name":"Network boundary","spec":{"version":1,"title":"Network boundary","subtitle":"Editable example","nodes":[{"id":"client","label":"Client","x":40,"y":210},{"id":"app","label":"Application","x":430,"y":210,"group":"private"},{"id":"store","label":"Storage","kind":"cylinder","x":800,"y":210,"group":"private"}],"edges":[{"id":"access","source":"client","target":"app","label":"Authorized"},{"id":"data","source":"app","target":"store"}],"groups":[{"id":"private","label":"Private network","x":370,"y":120,"width":680,"height":300}]}}),
     ];
-    json!({"version":1,"shapes":["rectangle","rounded_rectangle","ellipse","diamond","cylinder","cloud"],"ports":["auto","top","left","bottom","right"],"routes":["straight","elbow"],"limits":{"nodes":48,"edges":64,"groups":8,"rendered_elements":256},"canvas":{"width":WIDTH,"height":HEIGHT,"content_top":CONTENT_TOP},"schema":schemars::schema_for!(GraphSpec),"operation_schema":schemars::schema_for!(GraphOperation),"examples":examples})
+    json!({"version":1,"shapes":["rectangle","rounded_rectangle","ellipse","diamond","cylinder","cloud"],"ports":["auto","top","left","bottom","right"],"routes":["straight","elbow"],"limits":{"nodes":48,"edges":64,"groups":MAX_GROUPS,"group_depth":MAX_GROUP_DEPTH,"rendered_elements":256},"canvas":{"width":WIDTH,"height":HEIGHT,"content_top":CONTENT_TOP},"schema":schemars::schema_for!(GraphSpec),"operation_schema":schemars::schema_for!(GraphOperation),"examples":examples})
 }
 
 pub fn change(document: &crate::document::Document, expected_revision: u64, slide_id: &str, id: &str, spec: &GraphSpec, update: bool) -> Result<crate::document::TransactionResult> {
@@ -287,6 +367,18 @@ fn selected<'a>(spec: &GraphSpec, ids: &'a [String]) -> Result<BTreeSet<&'a str>
     let selection: BTreeSet<_> = ids.iter().map(String::as_str).collect();
     if selection.len() != ids.len() || selection.iter().any(|id| !spec.nodes.iter().any(|node| node.id == *id) && !spec.groups.iter().any(|group| group.id == *id) && !spec.edges.iter().any(|edge| edge.id == *id)) { return Err(Error::Invalid("selection contains duplicate or unknown graph IDs".into())); }
     Ok(selection)
+}
+
+fn move_entities(spec: &mut GraphSpec, selection: &BTreeSet<&str>, dx: f64, dy: f64) -> Result<()> {
+    let mut moved_groups = BTreeSet::new();
+    for group in &spec.groups {
+        if group_ancestors(spec, Some(&group.id))?.iter().any(|index| selection.contains(spec.groups[*index].id.as_str())) { moved_groups.insert(group.id.clone()); }
+    }
+    for node in &mut spec.nodes {
+        if selection.contains(node.id.as_str()) || node.group.as_ref().is_some_and(|id| moved_groups.contains(id)) { node.x += dx; node.y += dy; }
+    }
+    for group in &mut spec.groups { if moved_groups.contains(&group.id) { group.x += dx; group.y += dy; } }
+    Ok(())
 }
 
 pub fn transform(spec: &GraphSpec, operations: &[GraphOperation]) -> Result<GraphSpec> {
@@ -306,21 +398,25 @@ pub fn transform(spec: &GraphSpec, operations: &[GraphOperation]) -> Result<Grap
             GraphOperation::PutGroup { group } => {
                 if let Some(index) = next.groups.iter().position(|entry| entry.id == group.id) {
                     let old = &next.groups[index]; let dx = group.x - old.x; let dy = group.y - old.y;
-                    for node in next.nodes.iter_mut().filter(|node| node.group.as_deref() == Some(&group.id)) { node.x += dx; node.y += dy; }
+                    move_entities(&mut next, &BTreeSet::from([group.id.as_str()]), dx, dy)?;
                     next.groups[index] = group.clone();
                 } else { next.groups.push(group.clone()); }
             }
             GraphOperation::Move { ids, dx, dy } => {
                 if !dx.is_finite() || !dy.is_finite() { return Err(Error::Invalid("graph movement must be finite".into())); }
                 let selection = selected(&next, ids)?;
-                for node in &mut next.nodes { if selection.contains(node.id.as_str()) || node.group.as_deref().is_some_and(|id| selection.contains(id)) { node.x += dx; node.y += dy; } }
-                for group in &mut next.groups { if selection.contains(group.id.as_str()) { group.x += dx; group.y += dy; } }
+                move_entities(&mut next, &selection, *dx, *dy)?;
             }
             GraphOperation::Remove { ids } => {
                 let selection = selected(&next, ids)?;
+                let parents = next.groups.iter().map(|group| {
+                    let parent = group_ancestors(&next, Some(&group.id))?.into_iter().find(|index| !selection.contains(next.groups[*index].id.as_str())).map(|index| next.groups[index].id.clone());
+                    Ok((group.id.clone(), parent))
+                }).collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+                for node in &mut next.nodes { if let Some(parent) = &node.group { node.group = parents.get(parent).cloned().flatten(); } }
+                for group in &mut next.groups { if let Some(parent) = &group.parent { group.parent = parents.get(parent).cloned().flatten(); } }
                 next.nodes.retain(|node| !selection.contains(node.id.as_str()));
                 next.groups.retain(|group| !selection.contains(group.id.as_str()));
-                for node in &mut next.nodes { if node.group.as_deref().is_some_and(|id| selection.contains(id)) { node.group = None; } }
                 next.edges.retain(|edge| !selection.contains(edge.id.as_str()) && next.nodes.iter().any(|node| node.id == edge.source) && next.nodes.iter().any(|node| node.id == edge.target));
             }
             GraphOperation::Align { ids, alignment } => {
@@ -334,6 +430,7 @@ pub fn transform(spec: &GraphSpec, operations: &[GraphOperation]) -> Result<Grap
                 }
             }
             GraphOperation::Layout { columns } => {
+                if next.groups.iter().any(|group| group.parent.is_some()) { return Err(Error::Unsupported("automatic grid layout for nested graph groups; use explicit coordinates or move operations".into())); }
                 if !(1..=8).contains(columns) { return Err(Error::Invalid("grid layout requires 1-8 columns".into())); }
                 let place = |nodes: &mut Vec<&mut GraphNode>, area: [f64; 4]| -> Result<()> {
                     if nodes.is_empty() { return Ok(()); }
@@ -353,7 +450,7 @@ pub fn transform(spec: &GraphSpec, operations: &[GraphOperation]) -> Result<Grap
                 }
             }
         }
-        if next.nodes.len() > 48 || next.edges.len() > 64 || next.groups.len() > 8 { return Err(Error::Limit("graph entity count exceeded".into())); }
+        if next.nodes.len() > 48 || next.edges.len() > 64 || next.groups.len() > MAX_GROUPS { return Err(Error::Limit("graph entity count exceeded".into())); }
     }
     validate(&next)?;
     Ok(next)

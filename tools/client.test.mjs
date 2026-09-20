@@ -5,6 +5,30 @@ import { AislideClient, DocumentSession } from '../packages/client/index.mjs';
 import { requestCore } from './core-client.mjs';
 import { guidedExamples } from './guided-demo.mjs';
 
+test('architecture icon SDK preserves explicit IDs, options, response and cancellation', async () => {
+  const requests = [];
+  const catalog = { version: 1, release: '2026-09-20', configured: false, message: 'Synthetic not-installed fixture', providers: [], icons: [] };
+  const assets = { icons: [{ id: 'aws/test/service', base64: 'synthetic', mime_type: 'image/png', alt: 'Full synthetic service name', width: 512, height: 128 }] };
+  const client = new AislideClient(async (request, options) => {
+    requests.push({ request, options });
+    return request.op === 'architecture_icons' ? catalog : assets;
+  });
+  const controller = new AbortController();
+  const options = { signal: controller.signal };
+  assert.equal(await client.architectureIcons(options), catalog);
+  const ids = ['aws/test/service', 'azure/test/service'];
+  assert.equal(await client.architectureIconAssets(ids, options), assets);
+  assert.deepEqual(requests.map(({ request }) => request), [{ op: 'architecture_icons' }, { op: 'architecture_icon_assets', ids }]);
+  assert.ok(requests.every(request => request.options === options));
+  controller.abort();
+  await assert.rejects(() => client.architectureIcons(options), { name: 'AbortError' });
+  await assert.rejects(() => client.architectureIconAssets(ids, options), { name: 'AbortError' });
+  assert.equal(requests.length, 2);
+  const late = new AbortController();
+  const lateClient = new AislideClient(async () => { late.abort(); return assets; });
+  await assert.rejects(() => lateClient.architectureIconAssets(ids, { signal: late.signal }), { name: 'AbortError' });
+});
+
 test('phase6 SDK modern native workflow, exact Undo and masked inspection', async () => {
   const client = new AislideClient(requestCore);
   const session = await client.createPresentation('phase6-sdk', 'Synthetic review');

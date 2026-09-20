@@ -1,5 +1,5 @@
 ﻿import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react'
-import type { ReactNode, MouseEvent as ReactMouseEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
+import type { CSSProperties, RefObject, ReactNode, MouseEvent as ReactMouseEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Presentation, FileJson2, FolderOpen, Download, Undo2, Redo2, Copy, Trash2, Type, Square, ChevronLeft, ChevronRight, X, Check, Layers, FileText, Table2, AlertCircle, PanelRight, ArrowUp, ArrowDown, Save, Sparkles, ChartNoAxesCombined, ImagePlus, Workflow, Replace, Database, FileInput, ScanLine, Shapes, Palette, LayoutTemplate, RotateCcw } from 'lucide-react'
 import { core, decodeBase64, downloadBytes, downloadPresentation, fileBase64, fileAssets, svgAsset } from './api'
 import { SlideSurface } from './SlideSurface'
@@ -22,6 +22,7 @@ import { ThemePanel } from './ThemePanel'
 import { DesignPanel } from './DesignPanel'
 import { ColorField, TextControls } from './TextControls'
 import { Tool } from './Tool'
+import { PaneResizeHandle } from './WorkspacePanels'
 import { TextToolsPanel } from './TextToolsPanel'
 import { ObjectToolsPanel } from './ObjectToolsPanel'
 import { NotesPagePreview, ReviewPanel } from './ReviewPanel'
@@ -44,6 +45,64 @@ import type { ReplaceOptions } from '../../../packages/client/index.mjs'
 import type { AislideDocument, Deck, Element, Compiled, Exported, Report, Inspection, ProviderStatus, LayoutReport, Design, ObjectCatalog, Theme } from './types'
 
 const client = new AislideClient(core)
+type PanelSizes = { slides: number; inspector: number; notes: number }
+const panelDefaults: PanelSizes = { slides: 192, inspector: 288, notes: 44 }
+const panelStorageKey = 'aislide.workspace-panels.v1'
+const clampPanel = (value: number, minimum: number, maximum: number) => Math.round(Math.min(maximum, Math.max(minimum, value)))
+function loadPanelSizes(): PanelSizes {
+  try {
+    const stored = localStorage.getItem(panelStorageKey)
+    if (!stored || stored.length > 256) return panelDefaults
+    const parsed: unknown = JSON.parse(stored)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return panelDefaults
+    const values = parsed as Record<string, unknown>
+    if (Object.keys(values).length !== 3 || !Object.keys(panelDefaults).every(key => typeof values[key] === 'number' && Number.isFinite(values[key]))) return panelDefaults
+    return { slides: clampPanel(values.slides as number, 128, 360), inspector: clampPanel(values.inspector as number, 224, 480), notes: clampPanel(values.notes as number, 44, 360) }
+  } catch { return panelDefaults }
+}
+function storePanelSizes(sizes: PanelSizes) {
+  try { localStorage.setItem(panelStorageKey, JSON.stringify(sizes)) } catch { return }
+}
+function useWorkspacePanels(workbench: RefObject<HTMLDivElement | null>, workspace: RefObject<HTMLElement | null>, showInspector: boolean) {
+  const [preferred, setPreferred] = useState(loadPanelSizes)
+  const [bounds, setBounds] = useState({ width: 0, height: 0 })
+  useLayoutEffect(() => {
+    const outer = workbench.current
+    const inner = workspace.current
+    if (!outer || !inner) return
+    const measure = () => {
+      const width = outer.clientWidth
+      const height = inner.clientHeight
+      setBounds(previous => previous.width === width && previous.height === height ? previous : { width, height })
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(outer)
+    observer.observe(inner)
+    measure()
+    return () => observer.disconnect()
+  }, [workbench, workspace])
+  const desktop = bounds.width > 800
+  const available = Math.max(352, bounds.width - 320 - (showInspector ? 24 : 12))
+  const inspector = clampPanel(preferred.inspector, 224, Math.min(480, available - 128))
+  const slidesMax = Math.max(128, Math.min(360, available - (showInspector ? inspector : 0)))
+  const slides = clampPanel(preferred.slides, 128, slidesMax)
+  const inspectorMax = Math.max(224, Math.min(480, available - slides))
+  const notesMax = Math.max(44, Math.min(360, bounds.height - 264))
+  const notes = clampPanel(preferred.notes, 44, notesMax)
+  function change(panel: keyof PanelSizes, value: number, commit: boolean) {
+    const next = { ...preferred, [panel]: value }
+    setPreferred(next)
+    if (commit) storePanelSizes(next)
+  }
+  function reset() { setPreferred(panelDefaults); storePanelSizes(panelDefaults) }
+  return {
+    desktop, reset,
+    style: { '--slides-width': `${slides}px`, '--inspector-width': `${inspector}px`, '--notes-height': `${notes}px` } as CSSProperties,
+    slides: { value: slides, preferredValue: preferred.slides, minimum: 128, maximum: slidesMax, defaultValue: panelDefaults.slides, onChange: (value: number, commit: boolean) => change('slides', value, commit) },
+    inspector: { value: inspector, preferredValue: preferred.inspector, minimum: 224, maximum: inspectorMax, defaultValue: panelDefaults.inspector, onChange: (value: number, commit: boolean) => change('inspector', value, commit) },
+    notes: { value: notes, preferredValue: preferred.notes, minimum: 44, maximum: notesMax, defaultValue: panelDefaults.notes, onChange: (value: number, commit: boolean) => change('notes', value, commit) },
+  }
+}
 const AssetPanel = lazy(() => import('./AssetPanel').then((module) => ({ default: module.AssetPanel })))
 const GraphEditor = lazy(() => import('./GraphEditor').then((module) => ({ default: module.GraphEditor })))
 let initial: Promise<AislideDocument> | undefined
@@ -167,6 +226,9 @@ export default function Studio() {
   const zoomAnchor = useRef<{ x: number; y: number; cursorX: number; cursorY: number } | null>(null)
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 })
   const [showInspector, setShowInspector] = useState(true)
+  const workbench = useRef<HTMLDivElement>(null)
+  const workspace = useRef<HTMLElement>(null)
+  const workspacePanels = useWorkspacePanels(workbench, workspace, showInspector)
   const [filename, setFilename] = useState('Untitled presentation.pptx')
   const [savedHash, setSavedHash] = useState<string | null>(null)
   const [recoveryEnabled, setRecoveryEnabled] = useState(false)
@@ -241,7 +303,7 @@ export default function Studio() {
   const wheelZoom = useEffectEvent((event: WheelEvent) => {
     const viewport = canvasViewport.current
     const stage = slideStage.current
-    if (!viewport || !stage || !slide || busy || modal || event.defaultPrevented || event.shiftKey || event.deltaY === 0 || Math.abs(event.deltaX) >= Math.abs(event.deltaY) || canvasPointers.current.size) return
+    if (!viewport || !stage || !slide || busy || modal || event.defaultPrevented || event.shiftKey || event.deltaY === 0 || Math.abs(event.deltaX) >= Math.abs(event.deltaY) || canvasPointers.current.size || workbench.current?.querySelector('[data-resizing="true"]')) return
     if (event.target instanceof globalThis.Element && event.target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="spinbutton"],.inline-editor')) return
     event.preventDefault()
     const bounds = stage.getBoundingClientRect()
@@ -757,29 +819,32 @@ export default function Studio() {
       <Tool label="Validate layout" disabled={disable} onClick={() => void run(async () => { setLayoutReport(await core<LayoutReport>({ op: 'measure_layout', deck })); setModal('layout') })}><ScanLine size={18} /></Tool>
       <Tool label="Fonts" disabled={disable || hasDrafts || importedMode} onClick={() => setModal('fonts')}><Type size={18} /></Tool>
       <Tool label="PPTX details" disabled={disable || !hasOrigin} onClick={() => setModal('import')}><AlertCircle size={18} /></Tool>
-      <select aria-label="Zoom" className="zoom-select" value={zoom} onChange={(event) => chooseZoom(event.target.value)}><option value="fit">Fit</option>{zoom !== 'fit' && !zoomPresets.includes(zoom) && <option value={zoom}>{Math.round(Number(zoom) * 100)}%</option>}{zoomPresets.map((value) => <option key={value} value={value}>{Math.round(Number(value) * 100)}%</option>)}</select>
-      <Tool label="Toggle inspector" pressed={showInspector} disabled={busy || hasDrafts} onClick={() => setShowInspector(!showInspector)}><PanelRight size={18} /></Tool>
     </div>
 
     <SelectionTools elements={selection} disabled={disable || hasDrafts || Boolean(modal)} canPaste={Boolean(clipboard)} onCommand={(operation) => { void selectionCommand(operation) }} onCombine={(input) => { void combineShapes(input) }} canApplyFormat={Boolean(formatClipboard && formatClipboard.session === panelSession)} onCopyFormat={(paragraph, run) => { void copyFormat(paragraph, run) }} onApplyFormat={() => { void applyFormat() }} />
     {selectionWarnings.length > 0 && <details className="selection-warning" open><summary>Selection metadata warnings</summary><ul>{selectionWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></details>}
 
-    <div className={`workbench ${showInspector ? '' : 'inspector-hidden'}`}>
-      <aside className="slide-list" aria-label="Slides">
+    <div ref={workbench} style={workspacePanels.style} className={`workbench ${showInspector ? '' : 'inspector-hidden'}`}>
+      <aside id="workspace-slides" className="slide-list" aria-label="Slides">
         <div className="panel-heading"><h2>Slides</h2><span>{deck?.slides.length ?? 0}</span></div>
         <div className="thumbnails">{deck?.slides.map((item, index) => <button key={item.id} disabled={busy || hasDrafts} className={`thumbnail ${index === slideIndex ? 'active' : ''}`} aria-label={`Slide ${index + 1}: ${item.title.replaceAll('\n', ' ')}`} aria-current={index === slideIndex ? 'true' : undefined} onClick={() => changeSlide(index)} onContextMenu={(event) => handleContext(event, 'slide', item.id)} onKeyDown={(event) => handleContext(event, 'slide', item.id)}>
           <div className="thumbnail-image"><SlideSurface slide={item} pageNumber={index + 1} design={deck?.design} width={deck.width} height={deck.height} /></div><div className="thumbnail-caption"><span>{String(index + 1).padStart(2, '0')}</span><strong>{item.title.split('\n')[0]}</strong></div>
         </button>)}</div>
       </aside>
 
-      <main tabIndex={0} aria-label="Active slide canvas" className={`canvas-workspace ${assetDrag ? 'asset-drag' : ''}`} onContextMenu={(event) => handleContext(event, 'canvas', slide?.id)} onKeyDown={(event) => handleContext(event, 'canvas', slide?.id)} onDragOver={(event) => { if (disable || modal) return; if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setAssetDrag(true) } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setAssetDrag(false) }} onDrop={(event) => {
+      <PaneResizeHandle label="Slide list width" controls="workspace-slides" orientation="vertical" disabled={!workspacePanels.desktop} {...workspacePanels.slides} />
+      <main ref={workspace} tabIndex={0} aria-label="Active slide canvas" className={`canvas-workspace ${assetDrag ? 'asset-drag' : ''}`} onContextMenu={(event) => handleContext(event, 'canvas', slide?.id)} onKeyDown={(event) => handleContext(event, 'canvas', slide?.id)} onDragOver={(event) => { if (disable || modal) return; if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setAssetDrag(true) } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setAssetDrag(false) }} onDrop={(event) => {
         event.preventDefault(); setAssetDrag(false)
         if (disable || modal || pendingReplacement || nameDialog) return
         const stage = event.currentTarget.querySelector('.slide-stage')?.getBoundingClientRect()
         const location = stage ? { x: (event.clientX - stage.left) * (deck?.width ?? 1280) / stage.width, y: (event.clientY - stage.top) * (deck?.width ?? 1280) / stage.width } : undefined
         void importDropped([...event.dataTransfer.files], location)
       }}>
-        <div className="canvas-heading"><span>{String(slideIndex + 1).padStart(2, '0')} <span className="slash">/</span> {String(deck?.slides.length ?? 0).padStart(2, '0')}</span><h2>{slide?.title.split('\n')[0] ?? 'Opening report'}</h2><span className="native-badge">NATIVE OBJECTS</span></div>
+        <div className="canvas-heading"><span>{String(slideIndex + 1).padStart(2, '0')} <span className="slash">/</span> {String(deck?.slides.length ?? 0).padStart(2, '0')}</span><h2>{slide?.title.split('\n')[0] ?? 'Opening report'}</h2><div className="canvas-view-tools">
+          <select aria-label="Zoom" className="zoom-select" value={zoom} onChange={(event) => chooseZoom(event.target.value)}><option value="fit">Fit</option>{zoom !== 'fit' && !zoomPresets.includes(zoom) && <option value={zoom}>{Math.round(Number(zoom) * 100)}%</option>}{zoomPresets.map((value) => <option key={value} value={value}>{Math.round(Number(value) * 100)}%</option>)}</select>
+          <Tool label="Reset workspace layout" onClick={workspacePanels.reset}><RotateCcw size={18} /></Tool>
+          <Tool label="Toggle inspector" pressed={showInspector} disabled={busy || hasDrafts} onClick={() => setShowInspector(!showInspector)}><PanelRight size={18} /></Tool>
+        </div></div>
         <div className="canvas-scroll" ref={canvasViewport}>
           <div className="slide-stage" ref={slideStage} style={{ width: pageWidth * viewScale }}>
             {slide ? <SlideSurface key={documentState?.id} slide={slide} pageNumber={slideIndex + 1} design={deck?.design} width={deck?.width} height={deck?.height} selected={selected} selectedIds={selectedIds} onSelectMany={selectMany} onSelectionTransform={selectionCommand} onEdit={editOnSlide} onDraftChange={setInlineDraft} onBusy={setInlineWorking} disabled={documentBusy} editRequest={editRequest} onContextMenu={(position, id) => openContext(id ? 'element' : 'canvas', position, slide.id, id)} onSelect={busy || hasDrafts ? undefined : selectElement} onMove={(id, x, y) => {
@@ -792,13 +857,14 @@ export default function Studio() {
           </div>
         </div>
         <div className="canvas-footer"><span>{selected ? `${element?.type ?? ''} / ${selected}` : 'No selection'}</span><div><Tool label="Previous slide" disabled={busy || hasDrafts || slideIndex === 0} onClick={() => changeSlide(slideIndex - 1)}><ChevronLeft size={17} /></Tool><Tool label="Next slide" disabled={busy || hasDrafts || !deck || slideIndex === deck.slides.length - 1} onClick={() => changeSlide(slideIndex + 1)}><ChevronRight size={17} /></Tool></div></div>
-        <div className="notes-preview"><div className="canvas-messages">
+        <PaneResizeHandle label="Notes height" controls="workspace-notes" orientation="horizontal" direction={-1} {...workspacePanels.notes} />
+        <div id="workspace-notes" className="notes-preview"><div className="canvas-messages">
           {error && !modal && !nameDialog && !pendingReplacement && <div className="error-strip" role="alert"><AlertCircle size={17} /><span>{error}</span><Tool label="Dismiss error" onClick={() => setError('')}><X size={16} /></Tool></div>}
-          <div className="notes-line"><FileText size={16} /><span>{slide?.notes.split('\n')[0]}</span></div>
+          <div className="notes-line"><FileText size={16} /><span>{slide?.notes}</span></div>
         </div></div>
       </main>
 
-      {showInspector && <aside className="inspector" aria-label="Inspector">
+      {showInspector && <><PaneResizeHandle label="Inspector width" controls="workspace-inspector" orientation="vertical" direction={-1} disabled={!workspacePanels.desktop} {...workspacePanels.inspector} /><aside id="workspace-inspector" className="inspector" aria-label="Inspector">
         <div className="panel-tabs" role="tablist" aria-label="Inspector views"><button role="tab" disabled={busy || hasDrafts} aria-selected={panel === 'elements'} onClick={() => setPanel('elements')}><Layers size={16} />Elements</button><button role="tab" disabled={busy || hasDrafts} aria-selected={panel === 'notes'} onClick={() => setPanel('notes')}><FileText size={16} />Notes</button></div>
         {panel === 'elements' ? <>
           <div className="layer-list">{slide?.elements.map((item) => <div className="selection-layer" key={item.id}><button disabled={busy} className={selectedIds.includes(item.id) ? 'active' : ''} aria-label={`Select ${item.id}`} aria-pressed={selectedIds.includes(item.id)} onClick={(event) => selectElement(item.id, event.shiftKey || event.ctrlKey || event.metaKey)} onContextMenu={(event) => handleContext(event, 'element', slide.id, item.id)} onKeyDown={(event) => handleContext(event, 'element', slide.id, item.id)}>{item.type === 'text' ? <Type size={15} /> : item.type === 'table' ? <Table2 size={15} /> : <Square size={15} />}<span>{item.id}</span></button><Tool label={`${visualOf(item)?.hidden ? 'Show' : 'Hide'} ${item.id}`} disabled={busy || hasDrafts || item.type === 'table' || item.type === 'chart'} onClick={() => toggleLayer(item, 'hidden')}>{visualOf(item)?.hidden ? <EyeOff /> : <Eye />}</Tool><Tool label={`${visualOf(item)?.locked ? 'Unlock' : 'Lock'} ${item.id}`} disabled={busy || hasDrafts || item.type === 'table' || item.type === 'chart'} onClick={() => toggleLayer(item, 'locked')}>{visualOf(item)?.locked ? <Lock /> : <Unlock />}</Tool></div>)}</div>
@@ -809,7 +875,7 @@ export default function Studio() {
         </> : <div className="notes-panel"><h3>Speaker notes & sources</h3><Tool label="Edit speaker notes" disabled={disable} onClick={() => openEditingPanel('review')}><Pencil /></Tool>{slide?.notes_paragraphs?.length ? slide.notes_paragraphs.map((paragraph, index) => <p key={index} style={{ textAlign: paragraph.alignment ?? 'left' }}>{paragraph.runs.map((run, index) => <span key={index} style={{ fontWeight: run.style?.bold ? 700 : 400, fontStyle: run.style?.italic ? 'italic' : 'normal', textDecoration: run.style?.underline ? 'underline' : 'none' }}>{run.text}</span>)}</p>) : <p>{slide?.notes}</p>}</div>}
         <div className="validation-note"><AlertCircle size={16} /><span>Office text layout unverified</span></div>
         {panel === 'notes' && slide && deck?.auxiliary_design?.notes_master && <details><summary>Notes page</summary><NotesPagePreview slide={slide} auxiliary={deck.auxiliary_design} pageNumber={slideIndex + 1} /></details>}
-      </aside>}
+      </aside></>}
     </div>
     <footer className="status-bar"><span className={busy ? 'status busy' : 'status'}>{busy ? 'Processing' : status}</span><span>{deck?.slides.length ?? 0} slides<span className="status-divider">|</span>{deck?.width ?? 1280} x {deck?.height ?? 720}<span className="status-divider">|</span>Core 0.1</span></footer>
     {recoveryEnabled && recoveryStatus && <div className="recovery-status" role="status">{recoveryStatus}</div>}

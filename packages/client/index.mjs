@@ -101,6 +101,8 @@ export class AislideClient {
     return { session: new DocumentSession(this.#transport, result.document, this.#options(options)), validation: result.validation, profile_id: result.profile_id, model_inference: result.model_inference };
   }
   graphCatalog(options) { return this.request({ op: 'graph_catalog' }, options); }
+  architectureIcons(options) { return this.request({ op: 'architecture_icons' }, options); }
+  architectureIconAssets(ids, options) { return this.request({ op: 'architecture_icon_assets', ids }, options); }
   createGraphIcon(input, options) { return this.request({ ...input, op: 'create_graph_icon' }, options); }
   createGraph(input, options) { return this.request({ ...input, op: 'create_graph' }, options); }
   transformGraph(spec, operations, options) { return this.request({ op: 'transform_graph', spec, operations }, options); }

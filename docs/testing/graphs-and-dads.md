@@ -1,5 +1,29 @@
 ﻿# Architecture Graphs And DADS-Inspired Studio
 
+## 2026-09-20 Cloud And Workspace Qualification
+
+**Qualified candidate; publication and regular installation recorded separately.** The current NSIS candidate is built, not yet normally installed or publicly committed. Cloud icons, icon-first nodes, nested boundaries and resizable panes share the existing core/SDK/MCP contracts. See [API limits](../api.md#architecture-graphs), [cloud setup and workflow](../authoring/cloud-icons.md) and [pane behavior](workspace-ux.md#resizable-workspace-panels).
+
+| Final local gate | Result |
+| --- | --- |
+| Rust workspace | 535 passed, 6 existing ignored; interrupted earlier attempt excluded |
+| Edge, one five-file run | 80 passed, 0 failed/skipped/retries: authoring QA 34, authoring 13, page-size editing 1, graphs 15, workspace UX 17 |
+| Node | 62 passed, 1 intentional installed-lifecycle skip: client 28, MCP 6, bridge 6, cloud setup 16, Lucide 2, setup 4 |
+| Build/typecheck and lint | Passed; 0 lint errors, 5 pre-existing warnings (3 Fast Refresh, 2 unrelated BOM); bundle-size warning retained |
+| Development native, one final run | 3 passed, 0 failed/cancelled/skipped, 51,225 ms |
+
+Native checks cover Fit/wheel/pane resize and preference reload, existing authoring with a local synthetic model fixture, and cloud PNG preservation/nested editing in owned processes. One test-only save-dialog readiness repair retained original timeouts and safety checks. User settings stayed unchanged. Process-restart recovery was not in this three-test pattern. Local evidence: `.artifacts/cloud-core-final-attributable-XJ73zj/summary.json`, `.artifacts/cloud-final-browser-20260920-8b615d/handoff.md`, and `.artifacts/cloud-desktop-final-20260920-a91f7c/handoff.md`.
+
+The palette retains 1,818 Lucide entries/42 categories plus 1,498 cloud source identities (Azure 638 + Entra 7, AWS 808, GCP 45). Vendor art is optional local data, not public-source or installer payload. The original three-slide `--cloud-icons` demo has 23 nodes, 18 boundaries, 40 images, 14 connectors and 27 vendor identities; MCP verified pinned PNGs, native attachments, metadata reopen and byte-identical Undo. These are synthetic examples, not deployed-system facts or copies of user diagrams.
+
+Six earlier sample views at 1440x960/390x844 loaded 40 images and passed 82 visual checks (`.artifacts/cloud-visual-20260920-7eac91/summary.json`); that earlier CLI rendering is not pixel-equivalence proof for the final binary or Office. Deterministic routes can share the Azure corridor and overlap; there is no automatic obstacle avoidance. Logical nesting remains flat editable native objects within one graph root. Moving only a shape in Office does not move its separate label/picture. No new Office/schema-parity qualification is claimed.
+
+The final 80-case browser run and native cloud run reported no collected window/page errors, with non-suppressing collection. Earlier intermittent ResizeObserver failures remain recorded; these bounded successes do not prove universal elimination. Current filesystem-backed code/security review and regressions cover local-drive rejection and exact catalog bytes, but are not a full independent security audit or race-free filesystem sandbox.
+
+## Historical Checkpoints
+
+Everything below records earlier dated implementations, limits, hashes and reviews. Superseded limits, combined-run counts, publication/CI status and excerpt-only review notes are historical, not the current contract; original evidence is retained unchanged.
+
 Date: 2026-09-15. This report records graph authoring through shared core, Studio, SDK and MCP. The node-icon follow-up below is local and uncommitted, like the preceding [UI consistency follow-up](workspace-ux.md#ui-consistency-follow-up). Earlier checkpoint results remain separately recorded. No new commit, push or project-license selection is implied.
 
 ## Node Icons

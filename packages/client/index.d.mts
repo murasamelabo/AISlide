@@ -1,6 +1,7 @@
 ﻿import type { AislideDocument, Checkpoint, DataMapping, DataReport, Deck, Design, Element, ImportedObject, ObjectCatalog, ObjectKind, PatchOperation, PresentationExport, ProjectExport, Report, SourceBinding, SourceDocument, SourceInput, Theme } from './types'
 import type { PartCatalog, PartSpec, GraphCatalog, GraphIcon, GraphSpec, GraphOperation, SlideOperation, ElementOperation, AssetInput, DesignPreset } from './types'
 import type { AuthoringProfile, BestPracticeGuide, BestPracticeProfiles, GuidedInput, GuidedReview } from './types'
+import type { ArchitectureIconCatalog, ArchitectureIconAssets } from './types'
 import type { AuthoringCapabilities, SearchOptions, TextMatch, TextReplaceOptions, FormatTextInput, ReplaceTextContentInput, UpdateParagraphsInput, CanvasResizeInput, TemplateKind, TemplateInput, TemplateExport, ImageEditInput, EditedImage, ApplyImageEditInput, EditTableInput, SelectionOperation, ElementBundle, SelectionEditResult } from './types'
 export * from './types'
 import type { FormatTextElementInput, ReplaceElementTextInput, CommentInput, ModernCommentOperation, TableHeaders, ElementAccessibility, ReadingOrderResult, AccessibilityReport, DocumentInspection, CleanCopyOptions, CleanCopyExport } from './types'
@@ -62,6 +63,8 @@ export class AislideClient {
   validateGuidedPresentation(input: GuidedInput, options?: RequestOptions): Promise<GuidedReview>
   createGuidedPresentation(id: string, input: GuidedInput, options?: RequestOptions): Promise<{ session: DocumentSession; validation: GuidedReview; profile_id: AuthoringProfile; model_inference: false }>
   graphCatalog(options?: RequestOptions): Promise<GraphCatalog>
+  architectureIcons(options?: RequestOptions): Promise<ArchitectureIconCatalog>
+  architectureIconAssets(ids: string[], options?: RequestOptions): Promise<ArchitectureIconAssets>
   createGraphIcon(input: Pick<AssetInput, 'base64' | 'mime_type'> & { alt?: string }, options?: RequestOptions): Promise<GraphIcon>
   createGraph(input: { id: string; spec: GraphSpec; theme?: Theme }, options?: RequestOptions): Promise<Element>
   transformGraph(spec: GraphSpec, operations: GraphOperation[], options?: RequestOptions): Promise<GraphSpec>

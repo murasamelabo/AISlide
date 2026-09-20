@@ -2,6 +2,260 @@
 import { openSample, waitForCoreOperation } from './fixtures';
 import AxeBuilder from '@axe-core/playwright'
 import { readFile } from 'node:fs/promises'
+import type { Page } from '@playwright/test'
+
+async function dragWorkspacePane(page: Page, name: string, horizontal: number, vertical: number) {
+  const handle = page.getByRole('separator', { name, exact: true })
+  await handle.scrollIntoViewIfNeeded()
+  const box = (await handle.boundingBox())!
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width / 2 + horizontal, box.y + box.height / 2 + vertical, { steps: 8 })
+  await page.mouse.up()
+}
+
+async function expectWorkspaceFit(page: Page) {
+  await expect(page.getByRole('combobox', { name: 'Zoom', exact: true })).toHaveValue('fit')
+  await expect.poll(() => page.locator('.slide-stage').evaluate(stage => {
+    const slide = stage.getBoundingClientRect()
+    const viewport = stage.closest('.canvas-scroll')!.getBoundingClientRect()
+    return slide.width > 0 && slide.height > 0 && Math.abs(slide.width / slide.height - 16 / 9) < 0.01 && slide.left >= viewport.left && slide.right <= viewport.right + 1 && slide.top >= viewport.top && slide.bottom <= viewport.bottom + 1
+  })).toBe(true)
+}
+
+test('workspace panels keep a useful default canvas and expose resizing', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1200, height: 768 })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Add rectangle', exact: true }).click()
+  await page.evaluate(() => document.fonts.ready)
+  await expect.poll(async () => (await page.locator('.slide-stage').boundingBox())!.height).toBeGreaterThanOrEqual(300)
+  for (const name of ['Slide list width', 'Inspector width', 'Notes height']) {
+    await expect(page.getByRole('separator', { name, exact: true })).toBeVisible()
+  }
+  await expect.poll(async () => (await page.locator('.layer-list').boundingBox())!.height).toBeGreaterThanOrEqual(68)
+  await expectWorkspaceFit(page)
+  console.log('WORKSPACE_DEFAULT_SHOWN', await page.locator('.slide-stage').boundingBox())
+  await page.screenshot({ path: testInfo.outputPath('workspace-default-1200.png') })
+  await page.getByRole('button', { name: 'Toggle inspector', exact: true }).click()
+  await expect.poll(async () => (await page.locator('.slide-stage').boundingBox())!.height).toBeGreaterThanOrEqual(340)
+  await expectWorkspaceFit(page)
+  console.log('WORKSPACE_DEFAULT_HIDDEN', await page.locator('.slide-stage').boundingBox())
+  await page.screenshot({ path: testInfo.outputPath('workspace-inspector-hidden-1200.png') })
+})
+
+test('workspace panels drag and persist without changing documents or manual zoom', async ({ page }, testInfo) => {
+  test.setTimeout(90_000)
+  await page.setViewportSize({ width: 1200, height: 768 })
+  await openSample(page)
+  async function savedBytes() {
+    const pending = page.waitForEvent('download')
+    await page.getByRole('button', { name: 'Save PPTX', exact: true }).click()
+    return readFile((await (await pending).path())!)
+  }
+  const original = await savedBytes()
+  await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Select title', exact: true }).click()
+  const title = page.locator('.slide-stage [data-element-id="title"]')
+  const geometry = await title.getAttribute('style')
+  const requests: string[] = []
+  page.on('request', request => { if (request.url().endsWith('/api/core') && request.method() === 'POST') requests.push(request.postDataJSON().op) })
+  await page.evaluate(() => {
+    const original = Storage.prototype.setItem
+    Object.defineProperty(Storage.prototype, 'setItem', { configurable: true, value(key: string, value: string) {
+      if (key === 'aislide.workspace-panels.v1') document.documentElement.dataset.panelWrites = String(Number(document.documentElement.dataset.panelWrites ?? '0') + 1)
+      original.call(this, key, value)
+    } })
+  })
+  for (const [name, selector, horizontal, vertical, dimension, change] of [
+    ['Slide list width', '.slide-list', 80, 0, 'width', 80],
+    ['Inspector width', '.inspector', -60, 0, 'width', 60],
+    ['Notes height', '.notes-preview', 0, -120, 'height', 120],
+  ] as const) {
+    const before = (await page.locator(selector).boundingBox())![dimension]
+    await dragWorkspacePane(page, name, horizontal, vertical)
+    await expect.poll(async () => (await page.locator(selector).boundingBox())![dimension]).toBeCloseTo(before + change, 0)
+    await expectWorkspaceFit(page)
+  }
+  expect(await page.locator('html').getAttribute('data-panel-writes')).toBe('3')
+  await expect(page.locator('.notes-line span')).toHaveCSS('white-space', 'pre-wrap')
+  await expect(page.locator('.notes-line span')).toContainText('\n')
+  const zoom = page.getByRole('combobox', { name: 'Zoom', exact: true })
+  await zoom.selectOption('1')
+  await dragWorkspacePane(page, 'Slide list width', -24, 0)
+  await expect(zoom).toHaveValue('1')
+  await expect(page.locator('.slide-stage')).toHaveCSS('width', '1280px')
+  await zoom.selectOption('fit')
+  await expectWorkspaceFit(page)
+  await expect(title).toHaveClass(/selected/)
+  expect(await title.getAttribute('style')).toBe(geometry)
+  await expect(page.locator('.dirty-indicator')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeDisabled()
+  expect(requests).toEqual([])
+  expect(await savedBytes()).toEqual(original)
+  const sizes = await page.evaluate(() => JSON.parse(localStorage.getItem('aislide.workspace-panels.v1')!))
+  expect(sizes).toEqual({ slides: 248, inspector: 348, notes: 164 })
+  await page.screenshot({ path: testInfo.outputPath('workspace-resized-1200.png') })
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled()
+  for (const [selector, dimension, value] of [['.slide-list', 'width', sizes.slides], ['.inspector', 'width', sizes.inspector], ['.notes-preview', 'height', sizes.notes]] as const) {
+    await expect.poll(async () => (await page.locator(selector).boundingBox())![dimension]).toBe(value)
+  }
+})
+
+test('workspace panels keyboard bounds and reset preserve space and document shortcuts', async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 768 })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Add rectangle', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled()
+  const requests: string[] = []
+  page.on('request', request => { if (request.url().endsWith('/api/core') && request.method() === 'POST') requests.push(request.postDataJSON().op) })
+  for (const [name, key, initial] of [['Slide list width', 'ArrowRight', 192], ['Inspector width', 'ArrowLeft', 288], ['Notes height', 'ArrowUp', 44]] as const) {
+    const handle = page.getByRole('separator', { name, exact: true })
+    await handle.focus()
+    await handle.press(key)
+    await expect(handle).toHaveAttribute('aria-valuenow', String(initial + 8))
+    await handle.press(`Shift+${key}`)
+    await expect(handle).toHaveAttribute('aria-valuenow', String(initial + 40))
+    await handle.press('Home')
+    await expect(handle).toHaveAttribute('aria-valuenow', (await handle.getAttribute('aria-valuemin'))!)
+    await handle.press('End')
+    await expect(handle).toHaveAttribute('aria-valuenow', (await handle.getAttribute('aria-valuemax'))!)
+    await expectWorkspaceFit(page)
+    await handle.press('Enter')
+    await expect(handle).toHaveAttribute('aria-valuenow', String(initial))
+    await handle.press('Delete')
+    await handle.press('Control+a')
+    await handle.press('Control+z')
+  }
+  expect(requests).toEqual([])
+  await page.getByRole('separator', { name: 'Slide list width', exact: true }).press('End')
+  await page.getByRole('separator', { name: 'Inspector width', exact: true }).press('End')
+  await page.getByRole('separator', { name: 'Notes height', exact: true }).press('End')
+  const stored = await page.evaluate(() => localStorage.getItem('aislide.workspace-panels.v1'))
+  for (const width of [960, 801, 1440, 1200]) {
+    await page.setViewportSize({ width, height: 768 })
+    await expect.poll(async () => (await page.locator('.canvas-workspace').boundingBox())!.width).toBeGreaterThanOrEqual(320)
+    await expect.poll(async () => (await page.locator('.canvas-scroll').boundingBox())!.height).toBeGreaterThanOrEqual(164)
+    await expectWorkspaceFit(page)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    expect(await page.evaluate(() => localStorage.getItem('aislide.workspace-panels.v1'))).toBe(stored)
+  }
+  await page.evaluate(() => localStorage.setItem('workspace-test-unrelated', 'retained'))
+  await page.getByRole('button', { name: 'Reset workspace layout', exact: true }).click()
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('aislide.workspace-panels.v1')!))).toEqual({ slides: 192, inspector: 288, notes: 44 })
+  expect(await page.evaluate(() => localStorage.getItem('workspace-test-unrelated'))).toBe('retained')
+  const result = await new AxeBuilder({ page }).include('.pane-resize-handle').analyze()
+  expect(result.violations).toEqual([])
+})
+
+test('workspace panels cancel captured gestures without persisting or zooming', async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 768 })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Add rectangle', exact: true }).click()
+  const handle = page.getByRole('separator', { name: 'Notes height', exact: true })
+  for (const cancellation of ['Escape', 'pointercancel', 'capture', 'blur']) {
+    await handle.evaluate(node => node.addEventListener('pointerdown', event => node.setAttribute('data-test-pointer', String(event.pointerId)), { once: true }))
+    const box = (await handle.boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 - 40, { steps: 4 })
+    await expect(handle).toHaveAttribute('aria-valuenow', '84')
+    await page.mouse.wheel(0, -120)
+    await expectWorkspaceFit(page)
+    if (cancellation === 'Escape') await page.keyboard.press('Escape')
+    else if (cancellation === 'blur') await page.evaluate(() => window.dispatchEvent(new Event('blur')))
+    else await handle.evaluate((node, cancellation) => {
+      const pointerId = Number(node.getAttribute('data-test-pointer'))
+      if (cancellation === 'capture') node.releasePointerCapture(pointerId)
+      else node.dispatchEvent(new PointerEvent('pointercancel', { pointerId, bubbles: true }))
+    }, cancellation)
+    await page.mouse.up()
+    await expect(handle).toHaveAttribute('aria-valuenow', '44')
+    await expect(page.locator('.pane-resize-handle[data-resizing]')).toHaveCount(0)
+    expect(await page.evaluate(() => localStorage.getItem('aislide.workspace-panels.v1'))).toBeNull()
+    await expectWorkspaceFit(page)
+  }
+  await dragWorkspacePane(page, 'Notes height', 0, -40)
+  await expect(handle).toHaveAttribute('aria-valuenow', '84')
+  await handle.dblclick()
+  await expect(handle).toHaveAttribute('aria-valuenow', '44')
+  const slides = page.getByRole('separator', { name: 'Slide list width', exact: true })
+  await slides.press('End')
+  await page.setViewportSize({ width: 801, height: 768 })
+  await expect(slides).not.toHaveAttribute('aria-valuenow', '360')
+  const narrow = (await slides.boundingBox())!
+  await page.mouse.move(narrow.x + narrow.width / 2, narrow.y + narrow.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(narrow.x - 32, narrow.y + narrow.height / 2)
+  await page.keyboard.press('Escape')
+  await page.mouse.up()
+  await page.setViewportSize({ width: 1200, height: 768 })
+  await expect(slides).toHaveAttribute('aria-valuenow', '360')
+})
+
+test('workspace panels reject malformed preferences and clamp numeric extremes', async ({ page }) => {
+  test.setTimeout(60_000)
+  await page.setViewportSize({ width: 1200, height: 768 })
+  await page.goto('/')
+  for (const stored of ['{', 'null', '[]', '{"slides":"280","inspector":288,"notes":44}', '{"slides":1e999,"inspector":288,"notes":44}', JSON.stringify({ slides: 280, inspector: 300, notes: 120, document: 'not-layout' }), ' '.repeat(300) + '{"slides":280,"inspector":300,"notes":120}']) {
+    await page.evaluate(stored => localStorage.setItem('aislide.workspace-panels.v1', stored), stored)
+    await page.reload()
+    await expect(page.getByRole('separator', { name: 'Slide list width', exact: true })).toHaveAttribute('aria-valuenow', '192')
+    await expect(page.getByRole('separator', { name: 'Inspector width', exact: true })).toHaveAttribute('aria-valuenow', '288')
+    await expect(page.getByRole('separator', { name: 'Notes height', exact: true })).toHaveAttribute('aria-valuenow', '44')
+  }
+  await page.evaluate(() => localStorage.setItem('aislide.workspace-panels.v1', '{"slides":999999,"inspector":-999999,"notes":-1}'))
+  await page.reload()
+  await expect(page.getByRole('separator', { name: 'Slide list width', exact: true })).toHaveAttribute('aria-valuenow', '360')
+  await expect(page.getByRole('separator', { name: 'Inspector width', exact: true })).toHaveAttribute('aria-valuenow', '224')
+  await expect(page.getByRole('separator', { name: 'Notes height', exact: true })).toHaveAttribute('aria-valuenow', '44')
+  await expectWorkspaceFit(page)
+})
+
+test('workspace panels remain usable when local storage is blocked', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(window, 'localStorage', { get() { throw new DOMException('Storage blocked', 'SecurityError') } }))
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  await page.setViewportSize({ width: 1200, height: 768 })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Add rectangle', exact: true }).click()
+  await dragWorkspacePane(page, 'Slide list width', 60, 0)
+  await expect(page.getByRole('separator', { name: 'Slide list width', exact: true })).toHaveAttribute('aria-valuenow', '252')
+  await page.getByRole('button', { name: 'Reset workspace layout', exact: true }).click()
+  await expect(page.getByRole('separator', { name: 'Slide list width', exact: true })).toHaveAttribute('aria-valuenow', '192')
+  await expectWorkspaceFit(page)
+  expect(errors).toEqual([])
+})
+
+for (const viewport of [{ width: 390, height: 844 }, { width: 800, height: 600 }]) {
+  test(`workspace panels touch notes and compact controls fit at ${viewport.width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport)
+    await openSample(page)
+    await page.evaluate(() => document.fonts.ready)
+    await expect(page.getByRole('separator', { name: 'Slide list width', exact: true })).toBeHidden()
+    await expect(page.getByRole('separator', { name: 'Inspector width', exact: true })).toBeHidden()
+    const notes = page.getByRole('separator', { name: 'Notes height', exact: true })
+    await notes.scrollIntoViewIfNeeded()
+    const box = (await notes.boundingBox())!
+    const cdp = await page.context().newCDPSession(page)
+    try {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: box.x + box.width / 2, y: box.y + box.height / 2 }] })
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: box.x + box.width / 2, y: box.y + box.height / 2 - 60 }] })
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    } finally { await cdp.detach() }
+    await expect(notes).toHaveAttribute('aria-valuenow', '104')
+    await expect(page.locator('.notes-preview')).toHaveCSS('height', '104px')
+    await expectWorkspaceFit(page)
+    const undersized = await page.locator('.app-header button, .ribbon button, .canvas-view-tools button, .canvas-view-tools select').evaluateAll(buttons => buttons.filter(button => {
+      const bounds = button.getBoundingClientRect()
+      return bounds.width < 44 || bounds.height < 44
+    }).map(button => button.getAttribute('aria-label')))
+    expect(undersized).toEqual([])
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.locator('.canvas-workspace').scrollIntoViewIfNeeded()
+    await page.screenshot({ path: testInfo.outputPath(`workspace-touch-${viewport.width}.png`) })
+  })
+}
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 1200, height: 768 }, { width: 960, height: 700 }, { width: 390, height: 844 }]) {
   test(`canvas fit follows page aspect, inspector and resize at ${viewport.width}px`, async ({ page }, testInfo) => {
