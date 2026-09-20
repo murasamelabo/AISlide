@@ -1,8 +1,112 @@
 ﻿# Windows Setup And Start Menu
 
-Date: 2026-09-19. Windows setup uses the existing Tauri CLI 2.11.4 and its NSIS template. The authorized regular desktop update is complete. Implementation commit [54548846b1f651adc2ff070f73f122d63aaa77e2](https://github.com/murasamelabo/AISlide/commit/54548846b1f651adc2ff070f73f122d63aaa77e2) was normally pushed to the existing public `murasamelabo/AISlide` repository's `main` branch, and the remote SHA matched. Signing, choosing a project license, force push, visibility changes and release/binary publication are not authorized by this update. See the [current completion ledger](../planning/editing-completion.md).
+Date: 2026-09-20. Windows setup uses the existing Tauri CLI 2.11.4 and its NSIS template. The authorized regular desktop update is complete, including resizable workspace panes and local cloud architecture icons from published commit [ec88ecb4111b09c1b780da09a1908ec19f99bba2](https://github.com/murasamelabo/AISlide/commit/ec88ecb4111b09c1b780da09a1908ec19f99bba2). The source was committed and pushed before installation; this document records the subsequent actual update. No signing, project-license choice, force push, visibility change or release/binary publication was performed. See [workspace verification](workspace-ux.md#resizable-workspace-panels) and [cloud icon setup and terms](../authoring/cloud-icons.md).
 
 ## Current Verified Update
+
+The regular per-user update and normal Start Menu launch were verified at
+**2026-09-20T00:25:36Z**. A fresh process check confirmed AISlide was already
+closed. The validated NSIS installer ran once and exited 0 without elevation,
+uninstallation or terminating a user process. HKCU registration and the
+existing argument-free Start Menu shortcut still target the normal installation.
+
+| Artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| Unsigned debug x64 GNU NSIS installer | 123,020,663 | `462b08b51a0fff6159661f0afa447f1535b7ac716f1364116eee1e8199a04843` |
+| Source bundle executable | 954,322,944 | `ac9a91d6f4223330f8bd62cf091dcc9e4c0e7015e26fda7ed67de5e297811954` |
+| Installed executable | 954,322,944 | `8f44b72aa7cfb1109bde1b2c3ce393e044346c999cd1813da50702bccf2d14e6` |
+
+The installed payload differs only at the three-byte Tauri marker starting at
+offset **173431992** (`UNK` to `NSS`); every other byte matches the qualified
+source bundle. The unchanged build passed its three native scenarios again
+against the **actual installed executable: 3/3 passed**, with zero failures,
+skips or cancellations. These cover Fit/wheel and all three resizable panes,
+existing authoring/Undo/native Save-Cancel-Save/PPTX reopening, and original
+cloud PNG bytes, nested boundaries, descendant movement, connections, graph
+history and editable metadata reopening. Test-only WebView/recovery directories
+and their owned processes were cleaned before normal launch. A separate
+restart-recovery test and installer/uninstaller lifecycle were not rerun.
+
+Selected settings/recovery content hashes, WebView inventory, model metadata,
+and all **1,472 icon-pack files** remained unchanged after installation, after
+isolated tests, and immediately before normal launch. The pack comprises 1,471
+deduplicated PNGs plus its acknowledgment. Model contents were not rehashed.
+Normal startup may legitimately modify its profile afterward. The real Start
+Menu shortcut opened a visible, responding app with the normal profile and no
+test or debugging flags; it was left open. No user presentation was opened or
+overwritten. All 363 source-file snapshots, including the 40 published feature
+files and eight then-uncommitted files, stayed unchanged during installation.
+
+The preceding local gates passed: Rust **535** with six existing explicit
+ignored cases; browser **80/80**, zero skips/retries; Node **62** with one
+intentional isolated-installed-lifecycle skip; frontend build/typecheck and
+lint, with five pre-existing warnings. The native candidate and installed
+three-case results are separate executions of the same cases, not six distinct
+tests. Earlier interrupted/failed attempts remain recorded and are not counted.
+Evidence: `.artifacts/cloud-desktop-final-20260920-a91f7c/final-proof.json` and
+`.artifacts/cloud-regular-update-20260920-c4e917/final-run/final-proof.json`.
+
+The first remote Verify run for `ec88ecb` failed the existing Lucide license
+comparison because Windows checkout converted its line endings to CRLF. The
+follow-up Git attribute fixes only that license file to LF, without changing
+license text, assertions, runtime code or this installed binary. Checkout
+filters with `autocrlf=true`, `false` and `input` all retained the exact upstream
+text, and both original icon tests passed locally. This is not a claim that
+the entire remote workflow passed; its status is reported separately.
+
+The installer contains code and catalog metadata, **not vendor artwork**.
+This PC's explicitly provisioned Azure/Entra, AWS and Google Cloud pack remains
+available offline; other PCs require the separate opt-in setup and applicable
+vendor permissions. This is an unsigned debug x64 GNU build on Windows 11
+ARM64, not signed release/native ARM64/MSVC or general Office visual-parity
+qualification. Logical nested boundaries and deterministic connectors do not
+provide automatic obstacle avoidance.
+
+## Earlier Canvas Update
+
+**Historical: the Fit/wheel update below is superseded by the current cloud and
+resizable-workspace update.**
+
+The regular per-user update and normal Start Menu launch completed at
+**2026-09-19T14:25:09Z**. The app was closed before installation; no user process
+was terminated. The existing installation, shortcut target and argument-free
+launch were preserved. The updated window was visible and responding with its
+normal profile and no test/debugging flags, and was left open.
+
+| Artifact | Bytes | SHA-256 |
+| --- | --- | --- |
+| Unsigned debug x64 GNU NSIS installer | 122,824,298 | `7214528193d69ccf94c33b1b27147669fd2eb9b524579434c57349e8ce513d8f` |
+| Source bundle executable | 951,846,400 | `f5d84d88bbb082bd5c6c6b2475c20bd76c5ef8bdc6804f01b0679ae1aef5eaf2` |
+| Installed executable | 951,846,400 | `0206975886cacfd6105c7292a1504e3173ea0c77096b733752e16cac54b3e514` |
+
+NSIS exited 0. The installed payload differs only at the three-byte Tauri
+bundle marker starting at offset 173109704 (`UNK` to `NSS`); every other byte
+matches. `npm run setup:build -- --debug --no-sign` built the current source,
+whose code bodies match the published commit. Existing unrelated encoding
+edits were retained. Only the BOM removed by the bundler from the Cargo
+manifest was restored after checking that its body was unchanged.
+
+The installed binary passed **5/5 Node test entries**, with no failures or
+skips: the canvas Fit/wheel scenario and the existing bounded-preview/recovery
+group. This includes measured 1200 x 768 Fit, Inspector shown/hidden, 16:9 and
+4:3 geometry, wheel/restore behavior, and Undo/Redo across an isolated restart.
+Tests used fresh marked recovery directories and WebView profiles and cleaned
+their owned resources. The earlier separate installer/uninstaller lifecycle
+was not rerun; this update verified the actual regular installation instead.
+
+Before normal launch, selected settings and recovery content hashes and the
+WebView inventory remained unchanged across installation and isolated tests.
+Model preservation used size/timestamp inventory, not content hashes. Normal
+startup may subsequently update its profile. No presentation was modified.
+Evidence: `.artifacts/desktop-canvas-update-LWyD84/final-proof.json`, with
+`setup-build.json` and `installed-smoke.log` in that private directory.
+This remains an unsigned debug x64 build on Windows 11 ARM64, not a signed
+release or native ARM64/MSVC qualification. The histogram compatibility
+classifier is a separate repository validation tool, not a new desktop toggle.
+
+## Earlier Editing Update
+
+**Historical: superseded by the canvas update above.**
 
 The regular per-user desktop update completed at **2026-09-19T07:02:09Z**. NSIS exited 0, reused the existing HKCU installation at `%LOCALAPPDATA%/AISlide Studio`, and preserved the Start Menu shortcut targeting the installed application with no arguments. The actual shortcut then opened a visible, responding application using its normal profile, without remote debugging or test environment flags; that normal window was left open.
 
