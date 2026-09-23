@@ -109,6 +109,11 @@ enum Request {
     OpenPresentation { id: String, base64: String },
     ExportPresentation { document: crate::document::Document },
     ExportStatic { document: crate::document::Document, options: crate::export_static::ExportOptions },
+    PreviewPresentation { document: crate::document::Document, #[serde(default)] options: crate::export_static::PreviewOptions },
+    PreflightPresentation { document: crate::document::Document, #[serde(default)] options: crate::authoring_preflight::PreflightOptions },
+    PrepareDelivery { document: crate::document::Document, expected_revision: u64, expected_hash: String, #[serde(default)] options: crate::delivery::DeliveryOptions },
+    PreviewSlideRevision { document: crate::document::Document, expected_revision: u64, expected_hash: String, slide_id: String, edits: Vec<crate::slide_revision::RevisionEdit>, #[serde(default)] max_dimension: Option<u32> },
+    ApplySlideRevision { document: crate::document::Document, expected_revision: u64, expected_hash: String, slide_id: String, edits: Vec<crate::slide_revision::RevisionEdit>, candidate_hash: String },
     VerifyRecovery { document: crate::document::Document },
     VerifySessionRecovery { envelope: crate::document::SessionRecovery },
     PrepareRecovery { state: crate::recovery::State, expected_generation: u64, action: crate::recovery::Action, now_ms: u64 },
@@ -312,6 +317,11 @@ fn execute(request: Request, profile: crate::limits::CapacityProfile) -> Result<
         Request::OpenProject { base64, checkpoint } => Ok(serde_json::to_value(crate::document::open(&base64, checkpoint)?)?),
         Request::OpenPresentation { id, base64 } => crate::document::open_presentation_with_profile(id, decode(&base64)?, profile),
         Request::ExportPresentation { document } => crate::document::export_presentation(&document),
+        Request::PreviewPresentation { document, options } => Ok(serde_json::to_value(crate::export_static::preview_presentation(&document, &options)?)?),
+        Request::PreflightPresentation { document, options } => Ok(serde_json::to_value(crate::authoring_preflight::preflight_presentation(&document, &options)?)?),
+        Request::PrepareDelivery { document, expected_revision, expected_hash, options } => Ok(serde_json::to_value(crate::delivery::prepare_delivery(&document, expected_revision, &expected_hash, &options)?)?),
+        Request::PreviewSlideRevision { document, expected_revision, expected_hash, slide_id, edits, max_dimension } => Ok(serde_json::to_value(crate::slide_revision::preview_slide_revision(&document, expected_revision, &expected_hash, &slide_id, &edits, max_dimension)?)?),
+        Request::ApplySlideRevision { document, expected_revision, expected_hash, slide_id, edits, candidate_hash } => Ok(serde_json::to_value(crate::slide_revision::apply_slide_revision(&document, expected_revision, &expected_hash, &slide_id, &edits, &candidate_hash)?)?),
         Request::VerifyRecovery { document } => {
             crate::document::verify(&document)?;
             Ok(serde_json::to_value(document)?)

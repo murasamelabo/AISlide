@@ -18,6 +18,7 @@ pub struct GuidedInput {
     pub version: u32, pub profile_id: String, pub title: String, pub audience: String, pub purpose: String,
     pub governing_message: String, pub language: String,
     #[serde(default)] pub brand_color: Option<String>,
+    #[serde(default, skip_serializing_if="Option::is_none")] pub authoring: Option<Authoring>,
     pub evidence: Vec<Evidence>,
     #[serde(default)] pub issues: Vec<DecisionIssue>,
     pub slides: Vec<GuidedSlide>,
@@ -31,6 +32,49 @@ pub struct Evidence { pub id: String, pub kind: EvidenceKind, pub reference: Str
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceKind { Source, Assumption, Unknown }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct Authoring {
+    pub context: Option<AuthoringContext>,
+    pub density: Option<AuthoringDensity>,
+    pub spacing: Option<AuthoringSpacing>,
+    #[schemars(range(min=12, max=40))] pub body_font_min: Option<f64>,
+    #[schemars(range(min=28, max=64))] pub headline_font_size: Option<f64>,
+    #[schemars(length(min=1, max=100))] pub font_family: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all="snake_case")]
+pub enum AuthoringContext { Reading, Projection }
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all="snake_case")]
+pub enum AuthoringDensity { #[default] Comfortable, Compact }
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all="snake_case")]
+pub enum AuthoringSpacing { #[default] Standard, Relaxed }
+
+struct ResolvedAuthoring<'a> {
+    body_floor: f64, headline_size: f64, margin: f64, gap: f64,
+    line_spacing: u32, paragraph_spacing: u32, font_family: Option<&'a str>,
+}
+
+impl Authoring {
+    fn resolve(&self, profile: &str) -> ResolvedAuthoring<'_> {
+        let projection = self.context.unwrap_or(if profile=="event-talk" {AuthoringContext::Projection} else {AuthoringContext::Reading})==AuthoringContext::Projection;
+        let compact = self.density.unwrap_or_default()==AuthoringDensity::Compact;
+        let relaxed = self.spacing.unwrap_or_default()==AuthoringSpacing::Relaxed;
+        ResolvedAuthoring {
+            body_floor: self.body_font_min.unwrap_or(if projection {24.0} else {16.0}),
+            headline_size: self.headline_font_size.unwrap_or(if projection {40.0} else {34.0}),
+            margin: if compact {48.0} else {64.0}, gap: if relaxed {24.0} else {12.0},
+            line_spacing: if relaxed {130000} else {115000},
+            paragraph_spacing: if compact {0} else {20000}, font_family: self.font_family.as_deref(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GuidedSlide {
@@ -40,6 +84,8 @@ pub struct GuidedSlide {
     #[serde(default)] pub part: Option<PartSpec>,
     pub support: Vec<ClauseSupport>,
     #[serde(default)] pub numbers: Vec<NumberEvidence>,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    #[schemars(length(max=4000))] pub speaker_notes: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -95,6 +141,15 @@ fn checks(input:&GuidedInput)->Vec<String> {
     required(&input.purpose,600,"purpose",&mut issues);required(&input.governing_message,600,"governing_message",&mut issues);
     if !(1..=32).contains(&input.slides.len()) || input.evidence.len()>64 || input.issues.len()>6 {issues.push("Guided input exceeds slide/evidence/decision limits".into());return issues;}
     if let Some(color)=&input.brand_color {if color.len()!=6 || !color.bytes().all(|byte|byte.is_ascii_hexdigit()) {issues.push("brand_color must be a six-digit RGB value".into());}}
+    if let Some(authoring)=&input.authoring {
+        for (name,value,min,max) in [("body_font_min",authoring.body_font_min,12.0,40.0),("headline_font_size",authoring.headline_font_size,28.0,64.0)] {
+            if value.is_some_and(|value|!value.is_finite() || !(min..=max).contains(&value)) {issues.push(format!("authoring.{name} must be finite and in {min}..{max}"));}
+        }
+        if let Some(family)=&authoring.font_family {
+            required(family,100,"authoring.font_family",&mut issues);
+            if family.chars().any(char::is_control) {issues.push("authoring.font_family cannot contain control characters".into());}
+        }
+    }
     let mut evidence=BTreeMap::new();
     for entry in &input.evidence {
         required(&entry.id,40,"evidence id",&mut issues);required(&entry.reference,600,"evidence reference",&mut issues);required(&entry.statement,1200,"evidence statement",&mut issues);
@@ -115,6 +170,7 @@ fn checks(input:&GuidedInput)->Vec<String> {
     }
     let mut prior=BTreeSet::from(["governing"]);
     for (index,slide) in input.slides.iter().enumerate() {
+        if let Some(notes)=&slide.speaker_notes {if valid_text(notes,4000).is_err() {issues.push(format!("{}: speaker_notes must contain at most 4000 valid Unicode scalars",slide.id));}}
         for (name,value,maximum) in [("slide id",&slide.id,80),("section",&slide.section,80),("headline",&slide.headline,240),("question",&slide.question,240),("parent_message",&slide.parent_message,80),("transition",&slide.transition,80),("parallel_basis",&slide.parallel_basis,80)] {required(value,maximum,name,&mut issues);}
         if !prior.contains(slide.parent_message.as_str()) {issues.push(format!("{}: parent must be governing or an earlier slide",slide.id));}prior.insert(&slide.id);
         if !["causal","conditional","contrast","causal-focus","evaluation","proposal","explanation","comparison","outcome"].contains(&slide.sentence_form.as_str()) {issues.push(format!("{}: unknown sentence form",slide.id));}
@@ -179,33 +235,139 @@ fn decision_table(rows:&[Vec<String>],top:f64,height:f64,closing:bool)->Element 
     Element::Group{visual:None,id:"decision-table".into(),x:64.0,y:top,width:1152.0,height,view_width:1152.0,view_height:height,children:drawing.elements}
 }
 
+fn author_text(text: &str, format: &mut TextFormat, settings: &ResolvedAuthoring<'_>, floor: f64) {
+    use crate::rich_text::{RichParagraph, RichRun, Spacing};
+    if let Some(family)=settings.font_family {format.font_family=Some(family.into());}
+    if format.paragraphs.is_empty() {
+        format.paragraphs=text.split('\n').map(|line|RichParagraph {runs:vec![RichRun {text:line.into(),..Default::default()}],..Default::default()}).collect();
+    }
+    let last=format.paragraphs.len().saturating_sub(1);
+    for (index,paragraph) in format.paragraphs.iter_mut().enumerate() {
+        paragraph.line_spacing=Some(Spacing::Percent(settings.line_spacing));
+        paragraph.space_after=Some(Spacing::Percent(if index==last {0} else {settings.paragraph_spacing}));
+        for run in &mut paragraph.runs {
+            if let Some(size)=&mut run.style.font_size {*size=size.max(floor);}
+            if let Some(family)=settings.font_family {run.style.font_family=Some(family.into());}
+        }
+    }
+}
+
+fn author_body(element: &mut Element, settings: &ResolvedAuthoring<'_>, scale: f64, available_height: f64) {
+    let floor=settings.body_floor/scale;
+    match element {
+        Element::Text {text,font_size,format,..}|Element::Shape {text,font_size,format,..} => {
+            *font_size=font_size.max(floor);
+            author_text(text,format,settings,floor);
+        }
+        Element::Table {rows,font_size,format,..} => {
+            *font_size=font_size.max(floor);
+            for (row,values) in rows.iter().enumerate() {for (column,text) in values.iter().enumerate() {
+                let mut style=format.cell_style(row,column);
+                let run=style.text_style.get_or_insert_with(Default::default);
+                run.font_size=Some(run.font_size.unwrap_or(*font_size).max(floor));
+                if let Some(family)=settings.font_family {run.font_family=Some(family.into());}
+                author_text(text,style.text_format.get_or_insert_with(Default::default),settings,floor);
+                if let Some(cell)=format.cells.iter_mut().find(|cell|cell.row==row && cell.column==column) {cell.style=style;}
+                else {format.cells.push(crate::table_format::CellFormat {row,column,style});}
+            }}
+        }
+        Element::Group {width,height,view_width,view_height,children,..} => {
+            let child_scale=scale*(*width / *view_width).min(*height / *view_height);
+            let limits:Vec<_>=children.iter().map(|child| {
+                let (_,left,top,width,height)=child.bounds();
+                children.iter().filter(|peer|matches!(peer,Element::Text{..}|Element::Shape{..}|Element::Table{..}|Element::Chart{..}|Element::Group{..}))
+                    .map(Element::bounds).filter(|(_,peer_left,peer_top,peer_width,_)|*peer_top>=top+height && *peer_left<left+width && peer_left+peer_width>left)
+                    .map(|(_,_,peer_top,_,_)|peer_top-top).fold(*view_height-top,f64::min)
+            }).collect();
+            for (child,limit) in children.iter_mut().zip(limits) {author_body(child,settings,child_scale,limit);}
+        }
+        _ => (),
+    }
+    if let Element::Text {text,font_size,height,format,..}=element {if !text.is_empty() {
+        let size=format.paragraphs.iter().flat_map(|paragraph|&paragraph.runs).filter_map(|run|run.style.font_size).fold(*font_size,f64::max);
+        *height=height.max((size*settings.line_spacing as f64/100000.0).min(available_height));
+    }}
+}
+
+fn measurement_cells(element: &mut Element) -> Result<()> {
+    match element {
+        Element::Group {children,..} => for child in children {measurement_cells(child)?;},
+        Element::Table {id,x,y,width,height,rows,font_size,format} => {
+            let widths=crate::table_format::tracks(format.column_widths.as_ref(),rows[0].len(),*width)?;
+            let heights=crate::table_format::tracks(format.row_heights.as_ref(),rows.len(),*height)?;
+            let mut children=Vec::new();
+            for (row,values) in rows.iter().enumerate() {for (column,value) in values.iter().enumerate() {
+                let merged=format.merge_at(row,column);
+                if merged.is_some_and(|region|region.row!=row || region.column!=column) {continue;}
+                let style=format.cell_style(row,column);
+                let padding=style.padding.unwrap_or(crate::table_format::CellPadding {left:6.0,right:6.0,top:6.0,bottom:6.0});
+                let row_span=merged.map_or(1,|region|region.row_span);let col_span=merged.map_or(1,|region|region.col_span);
+                let cell_width=widths[column..column+col_span].iter().sum::<f64>()-padding.left-padding.right;
+                let cell_height=heights[row..row+row_span].iter().sum::<f64>()-padding.top-padding.bottom;
+                if cell_width<=0.0 || cell_height<=0.0 {return Err(Error::Invalid("guided table padding leaves no text area".into()));}
+                let run=style.text_style.unwrap_or_default();
+                let mut text_format=style.text_format.unwrap_or_default();
+                if let Some(family)=run.font_family {text_format.font_family=Some(family);}
+                if let Some(italic)=run.italic {text_format.italic=italic;}
+                if let Some(underline)=run.underline {text_format.underline=underline;}
+                children.push(Element::Text {
+                    id:format!("{id}-cell-{row}-{column}"),x:widths[..column].iter().sum::<f64>()+padding.left,
+                    y:heights[..row].iter().sum::<f64>()+padding.top,width:cell_width,height:cell_height,
+                    text:value.clone(),font_size:run.font_size.unwrap_or(*font_size),color:run.color.unwrap_or_else(||"@dk1".into()),
+                    bold:run.bold.unwrap_or(row==0),format:text_format,visual:None,
+                });
+            }}
+            *element=Element::Group {id:id.clone(),x:*x,y:*y,width:*width,height:*height,view_width:*width,view_height:*height,children,visual:None};
+        }
+        _ => (),
+    }
+    Ok(())
+}
+
 fn build(input:&GuidedInput,id:&str)->Result<Document> {
+    let authoring=input.authoring.as_ref().map(|settings|settings.resolve(&input.profile_id));
     let primary=input.brand_color.as_deref().unwrap_or("1976D2");
     let tint=|weight:f64|->String {(0..3).map(|index|{let channel=u8::from_str_radix(&primary[index*2..index*2+2],16).unwrap_or(0) as f64;format!("{:02X}",(channel+(255.0-channel)*weight).round() as u8)}).collect()};
     let mut design=crate::design::Design::default();
     design.theme.name=format!("Guided {}",input.profile_id);
     for (slot,value) in [("accent1",primary.to_owned()),("accent2",tint(0.28)),("accent3",tint(0.52)),("accent4",tint(0.75)),("accent5",primary.into()),("accent6","222222".into()),("dk1","222222".into()),("dk2","6B7C85".into()),("lt1","FFFFFF".into()),("lt2","EEF3F6".into())] {design.theme.colors.insert(slot.into(),value);}
     design.theme.fonts.major="Yu Gothic".into();design.theme.fonts.minor="Yu Gothic".into();design.theme.fonts.east_asian="Yu Gothic".into();
+    if let Some(family)=authoring.as_ref().and_then(|settings|settings.font_family) {
+        design.theme.fonts.major=family.into();design.theme.fonts.minor=family.into();
+        design.theme.fonts.east_asian=family.into();design.theme.fonts.complex_script=family.into();
+    }
     let design_value=json!({"theme":design.theme,"masters":[{"id":"guided-master","name":"Evidence-led briefing","background":"@lt1","elements":[]}],"layouts":[{"id":"guided-content","name":"Claim and evidence","master_id":"guided-master","background":null,"elements":[]}]});
     let mut slides=Vec::new();let mut parts=Vec::new();
     for (index,slide) in input.slides.iter().enumerate() {
         let double=if input.language=="ja" {slide.headline.chars().count()>36} else {slide.headline.chars().count()>80};
-        let body_top=if double {168.0} else {144.0};let body_height=if double {474.0} else {498.0};
+        let mut body_top=if double {168.0} else {144.0};let mut body_height=if double {474.0} else {498.0};
         let citations:Vec<_>=input.evidence.iter().filter(|entry|slide.support.iter().any(|support|support.evidence_ids.contains(&entry.id))).collect();
         let citation=citations.iter().map(|entry|format!("[{}] {}",entry.id,entry.reference)).collect::<Vec<_>>().join("; ");
         let mut elements=vec![text("section",&slide.section,[64.0,24.0,1152.0,28.0],18.0,"@accent1",true),text("headline",&slide.headline,[64.0,64.0,1152.0,if double {86.0} else {52.0}],if double {29.0} else {32.0},"@dk1",true),text("source",&citation,[64.0,658.0,1052.0,48.0],12.0,"@dk2",false),text("page",&format!("{} / {}",index+1,input.slides.len()),[1132.0,676.0,84.0,26.0],12.0,"@dk2",false)];
+        if let Some(settings)=&authoring {
+            if let Element::Text {x,width,height,font_size,format,..}=&mut elements[1] {
+                *x=settings.margin;*width=1280.0-2.0*settings.margin;*font_size=settings.headline_size;
+                *height=settings.headline_size*(2.0*settings.line_spacing as f64+settings.paragraph_spacing as f64)/100000.0+8.0;
+                if let Some(family)=settings.font_family {format.font_family=Some(family.into());}
+                body_top=(64.0+*height+settings.gap).max(144.0);
+                body_height=642.0-body_top;
+            }
+        }
         if let Some(spec)=&slide.part {
             let element_id=format!("guided-part-{}",index+1);
             let mut element=crate::parts::create_with_theme(&element_id,spec,&design.theme)?;
-            if let Element::Group{x,y,width,height,..}=&mut element {*x=64.0;*y=body_top;*width=1152.0;*height=body_height;}
-            crate::parts::state::resize_canvas(&mut element,1152.0,body_height)?;
+            let margin=authoring.as_ref().map_or(64.0,|settings|settings.margin);
+            let body_width=1280.0-2.0*margin;
+            if let Element::Group{x,y,width,height,..}=&mut element {*x=margin;*y=body_top;*width=body_width;*height=body_height;}
+            crate::parts::state::resize_canvas(&mut element,body_width,body_height)?;
             fn minimum_text(element:&mut Element) {match element {Element::Text{font_size,..}|Element::Shape{font_size,..}|Element::Table{font_size,..}=>*font_size=font_size.max(12.0),Element::Group{children,..}=>children.iter_mut().for_each(minimum_text),_=>()}}
             minimum_text(&mut element);
-            if input.profile_id=="event-talk" {
+            if input.authoring.is_none() && input.profile_id=="event-talk" {
                 let mut encoded=serde_json::to_value(&element)?;
                 if let Some(children)=encoded["children"].as_array_mut() {for child in children {if child["type"]=="text" && child["y"].as_f64().is_some_and(|value|value>70.0) && child["height"].as_f64().is_some_and(|value|value>=40.0) {child["font_size"]=json!(child["font_size"].as_f64().unwrap_or(22.0).max(22.0));}}}
                 element=serde_json::from_value(encoded)?;
             }
+            if let Some(settings)=&authoring {author_body(&mut element,settings,1.0,body_height);}
             parts.push(PartInstance{slide_id:slide.id.clone(),element_id,spec:spec.clone(),render_sha256:crate::parts::state::render_hash(&element)?,native_sha256:None,stale:false});
             elements.push(element);
         } else {
@@ -213,18 +375,44 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
             let headers=if input.language=="ja" {if closing {vec!["論点","決定事項・責任者","日程","判断基準"]} else {vec!["論点","求める決定","根拠","参照ページ"]}} else if closing {vec!["Issue","Decision / owner","Timing","Criterion"]} else {vec!["Issue","Requested decision","Evidence","Analysis pages"]};
             let mut rows=vec![headers.into_iter().map(String::from).collect()];
             for issue in &input.issues {rows.push(if closing {vec![format!("{}: {}",issue.id,issue.question),format!("{}\n{}",issue.requested_decision,issue.owner),issue.due.clone(),issue.criterion.clone()]} else {vec![format!("{}: {}",issue.id,issue.question),issue.requested_decision.clone(),issue.evidence_ids.iter().filter_map(|id|input.evidence.iter().find(|entry|&entry.id==id)).map(|entry|entry.statement.clone()).collect::<Vec<_>>().join("\n"),issue.analysis_slide_ids.iter().filter_map(|id|input.slides.iter().position(|slide|&slide.id==id)).map(|index|(index+1).to_string()).collect::<Vec<_>>().join(", ")]});}
-            elements.push(decision_table(&rows,body_top+12.0,if closing {382.0} else {452.0},closing));
+            let gap=authoring.as_ref().map_or(12.0,|settings|settings.gap);
+            let margin=authoring.as_ref().map_or(64.0,|settings|settings.margin);
+            let body_width=1280.0-2.0*margin;
+            let panel_height=authoring.as_ref().map_or(44.0,|settings|(settings.body_floor.max(14.0)*(2.0*settings.line_spacing as f64+settings.paragraph_spacing as f64)/100000.0+8.0).max(44.0));
+            let title_height=authoring.as_ref().map_or(28.0,|settings|(settings.body_floor.max(20.0)*settings.line_spacing as f64/100000.0+4.0).max(28.0));
+            let panel_top=if authoring.is_some() {642.0-panel_height} else {body_top+434.0};
+            let schedule_top=if authoring.is_some() {panel_top-gap-title_height} else {body_top+400.0};
+            let table_top=body_top+gap;
+            let table_height=if authoring.is_some() {if closing {schedule_top-gap-table_top} else {642.0-table_top}} else if closing {382.0} else {452.0};
+            if table_height<=44.0 {return Err(Error::Invalid("guided decision body has insufficient space; reduce density or headline size".into()));}
+            let mut table=decision_table(&rows,table_top,table_height,closing);
+            if let Some(settings)=&authoring {
+                if let Element::Group{x,width,..}=&mut table {*x=settings.margin;*width=body_width;}
+                crate::parts::state::resize_canvas(&mut table,body_width,table_height)?;
+            }
+            elements.push(table);
             if closing {
-                elements.push(text("schedule-title",if input.language=="ja" {"直近の実行日程"} else {"Immediate execution schedule"},[64.0,body_top+400.0,1152.0,28.0],20.0,"@dk1",true));
-                let slot=1152.0/input.issues.len() as f64;
-                for (offset,issue) in input.issues.iter().enumerate() {elements.push(Element::Rect{visual:None,id:format!("schedule-panel-{offset}"),x:64.0+offset as f64*slot,y:body_top+434.0,width:slot-12.0,height:44.0,fill:"@lt2".into()});elements.push(text(&format!("schedule-{offset}"),&format!("{} / {}\n{}",issue.id,issue.due,issue.owner),[74.0+offset as f64*slot,body_top+438.0,slot-32.0,36.0],14.0,"@dk1",false));}
+                elements.push(text("schedule-title",if input.language=="ja" {"直近の実行日程"} else {"Immediate execution schedule"},[margin,schedule_top,body_width,title_height],20.0,"@dk1",true));
+                let slot=body_width/input.issues.len() as f64;
+                for (offset,issue) in input.issues.iter().enumerate() {elements.push(Element::Rect{visual:None,id:format!("schedule-panel-{offset}"),x:margin+offset as f64*slot,y:panel_top,width:slot-12.0,height:panel_height,fill:"@lt2".into()});elements.push(text(&format!("schedule-{offset}"),&format!("{} / {}\n{}",issue.id,issue.due,issue.owner),[margin+10.0+offset as f64*slot,panel_top+4.0,slot-32.0,panel_height-8.0],14.0,"@dk1",false));}
             }
         }
-        let notes=format!("Profile: {}\nAudience: {}\nPurpose: {}\nGoverning message: {}\nLedger: {}\nEvidence: {}\nSemantic truth and Office parity require human review.",input.profile_id,input.audience,input.purpose,input.governing_message,serde_json::to_string(slide)?,serde_json::to_string(&citations)?);
+        if slide.part.is_none() {if let Some(settings)=&authoring {
+            for element in &mut elements[4..] {let bounds=element.bounds();author_body(element,settings,1.0,bounds.4);}
+        }}
+        let mut ledger=slide.clone();ledger.speaker_notes=None;
+        let mut notes=format!("Profile: {}\nAudience: {}\nPurpose: {}\nGoverning message: {}\nLedger: {}\nEvidence: {}\nSemantic truth and Office parity require human review.",input.profile_id,input.audience,input.purpose,input.governing_message,serde_json::to_string(&ledger)?,serde_json::to_string(&citations)?);
+        if let Some(speaker_notes)=&slide.speaker_notes {notes.push_str("\nSpeaker notes:\n");notes.push_str(speaker_notes);}
+        valid_text(&notes,8000).map_err(|_|Error::Limit(format!("{}: combined ledger, evidence and speaker notes exceed 8000 valid Unicode scalars",slide.id)))?;
         slides.push(json!({"id":slide.id,"title":slide.headline,"background":"@lt1","layout_id":"guided-content","inherit_background":true,"elements":elements,"notes":notes}));
     }
     let deck:Deck=serde_json::from_value(json!({"version":1,"title":input.title,"width":1280,"height":720,"design":design_value,"slides":slides}))?;
-    let measured=crate::layout::measure_layout(&deck)?;
+    let measured=if authoring.is_some() {
+        crate::model::validate_deck(&deck)?;
+        let mut measurement=deck.clone();
+        for slide in &mut measurement.slides {for element in &mut slide.elements {measurement_cells(element)?;}}
+        crate::layout::measure_layout(&measurement)?
+    } else {crate::layout::measure_layout(&deck)?};
     let measured=serde_json::to_value(measured)?;
     let errors:Vec<_>=measured["issues"].as_array().unwrap().iter().filter(|issue|issue["severity"]=="error").collect();
     if !errors.is_empty() {return Err(Error::Invalid(format!("guided layout does not fit: {}",serde_json::to_string(&errors)?)));}
@@ -247,4 +435,37 @@ pub fn create(id:&str,input:&GuidedInput)->Result<Value> {
     let (document,review)=evaluate(input,id);
     let document=document.ok_or_else(||Error::Invalid(format!("guided input is not ready: {}",review.issues.join("; "))))?;
     Ok(json!({"document":document,"validation":review,"profile_id":input.profile_id,"model_inference":false}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guided_authoring_nested_rich_and_table_floors_survive_group_scaling() {
+        let rich=json!({"type":"text","id":"rich","x":0,"y":0,"width":1500,"height":150,"text":"First\nSecond","font_size":12,"color":"@dk1","bold":false,"format":{"paragraphs":[{"runs":[{"text":"First","style":{"font_size":10,"font_family":"Old","italic":true}}]},{"runs":[{"text":"Second","style":{"bold":true}}]}]}});
+        let table=json!({"type":"table","id":"table","x":0,"y":200,"width":1500,"height":500,"rows":[["Cell"]],"font_size":12,"format":{"cells":[{"row":0,"column":0,"style":{"fill":"@accent1","text_style":{"font_size":8,"font_family":"Old"},"text_format":{"paragraphs":[{"runs":[{"text":"Cell","style":{"font_size":9,"font_family":"Old","underline":true}}]}]}}}]}});
+        let inner=json!({"type":"group","id":"inner","x":0,"y":0,"width":800,"height":400,"view_width":1600,"view_height":800,"children":[rich,table]});
+        let mut element:Element=serde_json::from_value(json!({"type":"group","id":"outer","x":0,"y":0,"width":800,"height":400,"view_width":1600,"view_height":800,"children":[inner]})).unwrap();
+        let settings:Authoring=serde_json::from_value(json!({"body_font_min":24,"font_family":"Arial","spacing":"relaxed"})).unwrap();
+        author_body(&mut element,&settings.resolve("status-report"),1.0,400.0);
+        let encoded=serde_json::to_value(&element).unwrap();
+        let rich=&encoded["children"][0]["children"][0];
+        assert_eq!(rich["font_size"],96.0);
+        assert_eq!(rich["format"]["paragraphs"][0]["runs"][0]["style"]["font_size"],96.0);
+        assert_eq!(rich["format"]["paragraphs"][0]["runs"][0]["style"]["font_family"],"Arial");
+        assert_eq!(rich["format"]["paragraphs"][0]["runs"][0]["style"]["italic"],true);
+        assert_eq!(rich["text"],"First\nSecond");
+        assert_eq!(rich["format"]["paragraphs"][0]["space_after"]["value"],20000);
+        assert_eq!(rich["format"]["paragraphs"][1]["space_after"]["value"],0);
+        let table=&encoded["children"][0]["children"][1];
+        assert_eq!(table["font_size"],96.0);
+        let style=&table["format"]["cells"][0]["style"];
+        assert_eq!(style["text_style"]["font_size"],96.0);
+        assert_eq!(style["text_format"]["paragraphs"][0]["runs"][0]["style"]["font_size"],96.0);
+        assert_eq!(style["text_format"]["paragraphs"][0]["runs"][0]["style"]["font_family"],"Arial");
+        assert_eq!(style["text_format"]["paragraphs"][0]["runs"][0]["style"]["underline"],true);
+        assert_eq!(style["fill"],"@accent1");
+        assert_eq!(table["rows"],json!([["Cell"]]));
+    }
 }

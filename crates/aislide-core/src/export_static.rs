@@ -32,6 +32,140 @@ pub const MAX_RENDER_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_SVG_BYTES: usize = 8 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewLayout {
+    #[default]
+    Pages,
+    ContactSheet,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PreviewOptions {
+    pub page_indices: Option<Vec<usize>>,
+    pub max_dimension: u32,
+    pub layout: PreviewLayout,
+    pub max_output_bytes: usize,
+}
+
+impl Default for PreviewOptions {
+    fn default() -> Self {
+        Self { page_indices: None, max_dimension: 1280, layout: PreviewLayout::Pages, max_output_bytes: 2 * 1024 * 1024 }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreviewImage {
+    pub base64: String,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub byte_length: usize,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreviewPage {
+    pub page_index: usize,
+    pub slide_id: String,
+    pub image_index: usize,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PresentationPreview {
+    pub revision: u64,
+    pub hash: String,
+    pub pages: Vec<PreviewPage>,
+    pub images: Vec<PreviewImage>,
+    pub warnings: Vec<RenderWarning>,
+    pub office_visual_parity: bool,
+}
+
+pub fn preview_presentation(document: &crate::document::Document, options: &PreviewOptions) -> Result<PresentationPreview> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    crate::document::verify(document)?;
+    let deck = &document.deck;
+    let selected = options.page_indices.clone().unwrap_or_else(|| (0..deck.slides.len()).collect());
+    if selected.is_empty() || selected.len() > 8 || selected.iter().any(|index| *index >= deck.slides.len())
+        || selected.iter().collect::<BTreeSet<_>>().len() != selected.len()
+    {
+        return Err(Error::Invalid("preview requires 1-8 unique existing page indices; select a smaller batch".into()));
+    }
+    if !(160..=1600).contains(&options.max_dimension) || options.max_output_bytes == 0 || options.max_output_bytes > 2 * 1024 * 1024 {
+        return Err(Error::Limit("preview requires 160-1600 pixels and at most 2 MiB encoded images".into()));
+    }
+    let montage = matches!(options.layout, PreviewLayout::ContactSheet);
+    let columns = if montage { (selected.len() as f64).sqrt().ceil() as u32 } else { 1 };
+    let rows = if montage { (selected.len() as u32).div_ceil(columns) } else { 1 };
+    let gap = if montage { 12 } else { 0 };
+    let cell_width = (options.max_dimension - gap * (columns + 1)) / columns;
+    let cell_height = (options.max_dimension - gap * (rows + 1)) / rows;
+    let scale = (f64::from(cell_width) / f64::from(deck.width)).min(f64::from(cell_height) / f64::from(deck.height));
+    let output = export_static(deck, &ExportOptions {
+        page_indices: Some(selected), scale: scale.max(0.01), max_output_bytes: options.max_output_bytes, ..Default::default()
+    })?;
+    let mut pages = Vec::new();
+    let mut artifacts = output.artifacts;
+    let mut remaining = options.max_output_bytes;
+    for artifact in &mut artifacts {
+        if artifact.width > cell_width || artifact.height > cell_height {
+            let pixels = image::load_from_memory_with_format(&artifact.bytes, image::ImageFormat::Png)
+                .map_err(|error| Error::Invalid(format!("preview PNG: {error}")))?.into_rgba8();
+            artifact.width = (f64::from(deck.width) * scale).floor().max(1.0) as u32;
+            artifact.height = (f64::from(deck.height) * scale).floor().max(1.0) as u32;
+            let resized = image::imageops::resize(&pixels, artifact.width, artifact.height, image::imageops::FilterType::Lanczos3);
+            let mut encoded = BoundedBytes { bytes: Vec::new(), limit: remaining };
+            image::codecs::png::PngEncoder::new(&mut encoded).write_image(resized.as_raw(), artifact.width, artifact.height, ExtendedColorType::Rgba8)
+                .map_err(|error| Error::Limit(format!("preview resize encoding: {error}")))?;
+            artifact.bytes = encoded.bytes;
+        }
+        remaining = remaining.checked_sub(artifact.bytes.len()).ok_or_else(|| Error::Limit("preview output exceeds encoded image budget".into()))?;
+    }
+    for (index, artifact) in artifacts.iter().enumerate() {
+        let page_index = artifact.page_indices[0];
+        pages.push(PreviewPage {
+            page_index, slide_id: deck.slides[page_index].id.clone(), image_index: if montage { 0 } else { index },
+            x: if montage { gap + index as u32 % columns * (artifact.width + gap) } else { 0 },
+            y: if montage { gap + index as u32 / columns * (artifact.height + gap) } else { 0 },
+            width: artifact.width, height: artifact.height,
+        });
+    }
+    if montage {
+        let width = artifacts[0].width * columns + gap * (columns + 1);
+        let height = artifacts[0].height * rows + gap * (rows + 1);
+        let mut sheet = image::RgbaImage::from_pixel(width, height, image::Rgba([238, 238, 238, 255]));
+        for (artifact, page) in artifacts.iter().zip(&pages) {
+            let pixels = image::load_from_memory_with_format(&artifact.bytes, image::ImageFormat::Png)
+                .map_err(|error| Error::Invalid(format!("preview PNG: {error}")))?.into_rgba8();
+            image::imageops::replace(&mut sheet, &pixels, i64::from(page.x), i64::from(page.y));
+        }
+        let mut encoded = BoundedBytes { bytes: Vec::new(), limit: options.max_output_bytes };
+        image::codecs::png::PngEncoder::new(&mut encoded).write_image(sheet.as_raw(), width, height, ExtendedColorType::Rgba8)
+            .map_err(|error| Error::Limit(format!("preview image encoding: {error}")))?;
+        artifacts = vec![ExportArtifact { bytes: encoded.bytes, mime_type: "image/png".into(), page_indices: pages.iter().map(|page| page.page_index).collect(), width, height }];
+    }
+    let images = artifacts.into_iter().map(|artifact| PreviewImage {
+        sha256: format!("{:x}", Sha256::digest(&artifact.bytes)), byte_length: artifact.bytes.len(),
+        base64: base64::engine::general_purpose::STANDARD.encode(artifact.bytes),
+        mime_type: artifact.mime_type, width: artifact.width, height: artifact.height,
+    }).collect();
+    let mut warnings = output.warnings;
+    if document.bindings.iter().any(|binding| binding.stale) {
+        warnings.push(RenderWarning { code: "SOURCE_BINDINGS_STALE".into(), page_index: pages[0].page_index, element_id: String::new(), message: "Preview includes stale source bindings; undo or rebind before export".into() });
+    }
+    let result = PresentationPreview { revision: document.revision, hash: document.hash.clone(), pages, images, warnings, office_visual_parity: false };
+    if serde_json::to_vec(&result)?.len() > 4 * 1024 * 1024 - 65536 {
+        return Err(Error::Limit("preview response exceeds 4 MiB; select fewer pages or reduce max_dimension".into()));
+    }
+    Ok(result)
+}
+
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]

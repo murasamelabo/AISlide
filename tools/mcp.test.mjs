@@ -5,6 +5,211 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { guidedExamples } from './guided-demo.mjs';
+
+test('P1 MCP finalization publishes a traceable new bundle without changing the session', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-finalize-mcp-'));
+  const client = new Client({ name: 'finalization-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content)); return result;
+  };
+  const metadata = result => JSON.parse(result.content[0].text);
+  try {
+    await client.connect(transport);
+    const { deck_id } = metadata(await call('create_presentation', { title: 'Synthetic delivery' }));
+    await call('update_notes', { deck_id, expected_revision: 0, slide_id: 'slide-1', notes: 'User supplied delivery notes.' });
+    const before = metadata(await call('get_session_recovery', { deck_id }));
+    const request = { deck_id, expected_revision: before.document.revision, expected_hash: before.document.hash, name: 'delivery', options: { page_indices: [0], pdf: true, preview: 'contact_sheet', notes: true, source_report: true, preflight: true, max_dimension: 640 } };
+    const response = await call('finalize_presentation', request);
+    const delivery = metadata(response);
+    assert.equal(delivery.status, 'complete');
+    assert.equal(delivery.revision, before.document.revision);
+    assert.equal(delivery.hash, before.document.hash);
+    assert.equal(response.content.filter(block => block.type === 'image').length, 1);
+    assert.deepEqual(delivery.files.map(file => file.kind).sort(), ['notes', 'pdf', 'pptx', 'preview', 'source_report']);
+    const manifestBytes = await readFile(delivery.manifest.path);
+    const manifest = JSON.parse(manifestBytes.toString('utf8'));
+    assert.equal(manifest.format, 'aislide.delivery');
+    assert.equal(manifest.document.hash, before.document.hash);
+    assert.equal(manifest.producer.name, 'aislide');
+    assert.equal(manifest.producer.transport, 'mcp-stdio');
+    assert.equal(manifest.checks.office_visual_parity, false);
+    assert.deepEqual(manifest.checks.preflight_page_indices, [0]);
+    assert.equal(manifest.multi_file_atomic, false);
+    const { createHash } = await import('node:crypto');
+    assert.equal(delivery.manifest.sha256, createHash('sha256').update(manifestBytes).digest('hex'));
+    for (const file of delivery.files) {
+      const bytes = await readFile(file.path);
+      assert.equal(bytes.length, file.bytes);
+      assert.equal(createHash('sha256').update(bytes).digest('hex'), file.sha256);
+      assert.deepEqual(file.page_indices, [0]);
+      assert.ok(manifest.files.some(entry => entry.filename === file.filename && entry.sha256 === file.sha256));
+      if (file.kind === 'pptx') assert.equal(bytes.subarray(0, 2).toString(), 'PK');
+      if (file.kind === 'notes') assert.match(bytes.toString('utf8'), /User supplied delivery notes/);
+      if (file.kind === 'source_report') assert.equal(JSON.parse(bytes.toString('utf8')).source_authenticity_verified, false);
+    }
+    assert.equal((await client.callTool({ name: 'finalize_presentation', arguments: request })).isError, true);
+    assert.deepEqual(await readFile(delivery.manifest.path), manifestBytes);
+    for (const change of [{ name: '../escape' }, { name: 'CON' }, { expected_hash: '0'.repeat(64) }, { options: { ...request.options, page_indices: [1] } }]) {
+      assert.equal((await client.callTool({ name: 'finalize_presentation', arguments: { ...request, name: 'invalid', ...change } })).isError, true);
+    }
+    assert.deepEqual(metadata(await call('get_session_recovery', { deck_id })), before);
+    assert.equal((await readdir(directory)).length, 6);
+    await writeFile(join(directory, 'collision.manifest.json'), 'Unrelated existing manifest', { flag: 'wx' });
+    const conflict = await client.callTool({ name: 'finalize_presentation', arguments: { ...request, name: 'collision', options: { preview: 'none', preflight: false } } });
+    assert.equal(conflict.isError, true);
+    const failure = metadata(conflict);
+    assert.equal(failure.code, 'BUNDLE_PUBLICATION_FAILED');
+    assert.equal(failure.status, 'not_published');
+    assert.deepEqual(failure.published_paths, []);
+    assert.deepEqual(failure.pending_filenames, ['collision.pptx', 'collision.manifest.json']);
+    assert.equal(await readFile(join(directory, 'collision.manifest.json'), 'utf8'), 'Unrelated existing manifest');
+    assert.equal((await readdir(directory)).length, 7);
+    assert.equal((await client.listTools()).tools.find(tool => tool.name === 'finalize_presentation').annotations.readOnlyHint, false);
+  } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('P0 MCP guided options, diagnostics and staged revisions form a guarded visual loop', async () => {
+  const client = new Client({ name: 'authoring-loop-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const prompts = await client.listPrompts();
+    assert.ok(prompts.prompts.some(prompt => prompt.name === 'author_presentation'));
+    const workflow = await client.getPrompt({ name: 'author_presentation' });
+    assert.match(workflow.messages[0].content.text, /preview_slide_revision/);
+    const resource = await client.readResource({ uri: 'aislide://authoring/workflow' });
+    assert.match(resource.contents[0].text, /preflight_presentation/);
+    const input = structuredClone(guidedExamples().find(input => input.profile_id === 'event-talk'));
+    input.authoring = { context: 'projection', body_font_min: 24, density: 'comfortable', spacing: 'standard' };
+    input.slides[0].speaker_notes = 'Synthetic speaker notes supplied through MCP.';
+    const review = await call('validate_guided_presentation', { input });
+    assert.equal(review.ready, true, JSON.stringify(review));
+    const created = await call('create_guided_presentation', { input });
+    const deck_id = created.deck_id;
+    const before = await call('get_session_recovery', { deck_id });
+    assert.match(before.document.deck.slides[0].notes, /Synthetic speaker notes/);
+    const slide = before.document.deck.slides[0];
+    const target = slide.elements.find(element => element.type === 'text' && element.id.endsWith('-headline')) ?? slide.elements.find(element => element.type === 'text');
+    assert.ok(target);
+    const diagnostics = await call('preflight_presentation', { deck_id, options: { page_indices: [0], min_font_size: 24 } });
+    assert.equal(diagnostics.hash, before.document.hash);
+    assert.equal(diagnostics.office_visual_parity, false);
+    assert.ok(diagnostics.checks.includes('renderer_warnings'));
+    const args = { deck_id, expected_revision: before.document.revision, expected_hash: before.document.hash, slide_id: slide.id, edits: [{ op: 'replace_text', id: target.id, text: 'Revised synthetic headline' }], max_dimension: 640 };
+    const response = await client.callTool({ name: 'preview_slide_revision', arguments: args });
+    assert.ok(!response.isError, JSON.stringify(response.content));
+    assert.equal(response.content.filter(block => block.type === 'image').length, 2);
+    const candidate = JSON.parse(response.content[0].text);
+    assert.ok(candidate.candidate_id);
+    assert.notEqual(candidate.before.images[0].sha256, candidate.after.images[0].sha256);
+    assert.ok(candidate.expires_in_seconds > 0);
+    assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
+    const other = await call('create_presentation', { title: 'Other document' });
+    assert.equal((await client.callTool({ name: 'apply_slide_revision', arguments: { deck_id: other.deck_id, candidate_id: candidate.candidate_id, expected_revision: 0, expected_hash: before.document.hash } })).isError, true);
+    const apply = { deck_id, candidate_id: candidate.candidate_id, expected_revision: before.document.revision, expected_hash: before.document.hash };
+    const applied = await call('apply_slide_revision', apply);
+    assert.equal(applied.hash, candidate.candidate_hash);
+    assert.equal(applied.revision, before.document.revision + 1);
+    assert.equal((await call('get_session_recovery', { deck_id })).past.length, before.past.length + 1);
+    assert.equal((await client.callTool({ name: 'apply_slide_revision', arguments: apply })).isError, true);
+    await call('undo', { deck_id });
+    assert.equal((await call('get_document', { deck_id })).hash, before.document.hash);
+    const current = await call('get_document', { deck_id });
+    const stale = await call('preview_slide_revision', { ...args, expected_revision: current.revision });
+    await call('update_notes', { deck_id, expected_revision: current.revision, slide_id: slide.id, notes: 'Later edit' });
+    assert.equal((await client.callTool({ name: 'apply_slide_revision', arguments: { ...apply, candidate_id: stale.candidate_id, expected_revision: current.revision } })).isError, true);
+    for (const invalid of [{ authoring: { body_font_min: 41 } }, { authoring: { unknown: true } }]) {
+      assert.equal((await client.callTool({ name: 'create_guided_presentation', arguments: { input: { ...input, ...invalid } } })).isError, true);
+    }
+    const tools = (await client.listTools()).tools;
+    for (const name of ['preflight_presentation', 'preview_slide_revision']) assert.equal(tools.find(tool => tool.name === name).annotations.readOnlyHint, true);
+    assert.equal(tools.find(tool => tool.name === 'apply_slide_revision').annotations.readOnlyHint, false);
+  } finally { await client.close(); }
+});
+
+test('P0 MCP previews return bounded images without changing documents or writing files', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-preview-mcp-'));
+  const client = new Client({ name: 'preview-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const created = await call('create_presentation', { title: 'Preview only' });
+    const deck_id = created.deck_id;
+    await call('edit_slides', { deck_id, expected_revision: 0, operations: [{ op: 'duplicate', slide_id: 'slide-1', id: 'second' }] });
+    const before = await call('get_session_recovery', { deck_id });
+    const options = { page_indices: [1, 0], max_dimension: 640, layout: 'contact_sheet' };
+    const result = await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options } });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    const metadata = JSON.parse(result.content[0].text);
+    assert.equal(metadata.revision, before.document.revision);
+    assert.equal(metadata.hash, before.document.hash);
+    assert.deepEqual(metadata.pages.map(page => page.slide_id), ['second', 'slide-1']);
+    assert.equal(metadata.office_visual_parity, false);
+    assert.equal(metadata.images.length, 1);
+    const images = result.content.filter(block => block.type === 'image');
+    assert.equal(images.length, 1);
+    assert.equal(images[0].mimeType, 'image/png');
+    const sharp = (await import('sharp')).default;
+    const decoded = await sharp(Buffer.from(images[0].data, 'base64')).metadata();
+    assert.equal(decoded.width, metadata.images[0].width);
+    assert.equal(decoded.height, metadata.images[0].height);
+    assert.ok(decoded.width <= 640 && decoded.height <= 640);
+    assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 4 * 1048576);
+    const plain = await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options, include_images: false } });
+    assert.ok(!plain.isError, JSON.stringify(plain.content));
+    assert.equal(plain.content.length, 1);
+    for (const invalid of [
+      { options: { ...options, page_indices: [0, 0] } },
+      { options: { ...options, page_indices: [2] } },
+      { options: { ...options, page_indices: Array.from({ length: 9 }, (_, index) => index) } },
+      { options: { ...options, max_dimension: 4096 } },
+      { filename: '../preview.png' },
+    ]) assert.equal((await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options, ...invalid } })).isError, true);
+    assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
+    assert.deepEqual(await readdir(directory), []);
+    const tools = (await client.listTools()).tools;
+    assert.equal(tools.find(tool => tool.name === 'preview_presentation').annotations.readOnlyHint, true);
+  } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('P0 MCP revision capacity rejects the seventeenth candidate and releases stale candidates', async () => {
+  const client = new Client({ name: 'candidate-capacity-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const { deck_id } = await call('create_presentation', { title: 'Candidate budgets' });
+    await call('apply_transaction', { deck_id, expected_revision: 0, operations: [{ op: 'add', path: '/deck/slides/0/elements/-', value: { type: 'text', id: 'target', x: 20, y: 20, width: 300, height: 60, text: 'Before', font_size: 24, color: '000000', bold: false } }] });
+    const before = await call('get_session_recovery', { deck_id });
+    const request = { deck_id, expected_revision: before.document.revision, expected_hash: before.document.hash, slide_id: 'slide-1', edits: [{ op: 'replace_text', id: 'target', text: 'After' }], max_dimension: 160, include_images: false };
+    const candidates = [];
+    for (let index = 0; index < 16; index++) candidates.push(await call('preview_slide_revision', request));
+    const rejected = await client.callTool({ name: 'preview_slide_revision', arguments: request });
+    assert.equal(rejected.isError, true); assert.match(rejected.content[0].text, /16 live/);
+    assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
+    await call('update_notes', { deck_id, expected_revision: before.document.revision, slide_id: 'slide-1', notes: 'New base' });
+    const current = await call('get_document', { deck_id });
+    const fresh = await call('preview_slide_revision', { ...request, expected_revision: current.revision, expected_hash: current.hash });
+    assert.ok(fresh.candidate_id);
+    assert.equal((await client.callTool({ name: 'apply_slide_revision', arguments: { deck_id, candidate_id: candidates[0].candidate_id, expected_revision: current.revision, expected_hash: current.hash } })).isError, true);
+    await call('close_deck', { deck_id });
+    assert.equal((await client.callTool({ name: 'apply_slide_revision', arguments: { deck_id, candidate_id: fresh.candidate_id, expected_revision: current.revision, expected_hash: current.hash } })).isError, true);
+  } finally { await client.close(); }
+});
 
 test('phase3 MCP projection and generated SVG are strict read-only helpers', async () => {
   const client = new Client({ name: 'phase3-test', version: '1.0.0' });

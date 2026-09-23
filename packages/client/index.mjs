@@ -306,6 +306,23 @@ export class DocumentSession {
   sampleSlidePixel(slideId, x, y, options) { return this.#read({ op: 'sample_slide_pixel', slide_id: slideId, x, y, document: this.#document }, options); }
   exportTemplate(kind, options) { return this.#read({ op: 'export_template', document: this.#document, kind }, options); }
   exportStatic(input = {}, options) { return this.#read({ op: 'export_static', document: this.#document, options: input }, options); }
+  previewPresentation(input = {}, options) { return this.#read({ op: 'preview_presentation', document: this.#document, options: input }, options); }
+  preflightPresentation(input = {}, options) { return this.#read({ op: 'preflight_presentation', document: this.#document, options: input }, options); }
+  prepareDelivery(input = {}, options = {}) {
+    return this.#read({ op: 'prepare_delivery', document: this.#document, expected_revision: options.expectedRevision ?? this.revision,
+      expected_hash: options.expectedHash ?? this.#document.hash, options: input }, options);
+  }
+  previewSlideRevision(slideId, edits, { maxDimension, ...options } = {}) {
+    return this.#read({ op: 'preview_slide_revision', document: this.#document, expected_revision: options.expectedRevision ?? this.revision,
+      expected_hash: options.expectedHash ?? this.#document.hash, slide_id: slideId, edits, ...(maxDimension === undefined ? {} : { max_dimension: maxDimension }) }, options);
+  }
+  applySlideRevision(slideId, edits, { expectedRevision, expectedHash, candidateHash, ...options }) {
+    return this.#run(async () => {
+      const result = await this.#request({ op: 'apply_slide_revision', document: this.#document, expected_revision: expectedRevision,
+        expected_hash: expectedHash, candidate_hash: candidateHash, slide_id: slideId, edits }, { signal: options.signal });
+      return this.#accept(result, options);
+    }, options);
+  }
   checkAccessibility(options) { return this.#read({ op: 'check_accessibility', document: this.#document }, options); }
   inspectDocument(options) { return this.#read({ op: 'inspect_document', document: this.#document }, options); }
   listFonts(options) { return this.#read({ op: 'list_fonts', deck: this.#document.deck }, options); }

@@ -6,11 +6,12 @@ import { mkdir, realpath, lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { requestCore, MAX_REQUEST_BYTES } from './core-client.mjs';
 import { CAPACITY_PROFILES, FONT_LIMITS } from '../packages/client/index.mjs';
-import { publishNewFile } from './atomic-output.mjs';
+import { publishNewFile, publishNewBundle, BundlePublicationError } from './atomic-output.mjs';
 import { publishProject } from './atomic-project.mjs';
 import { AislideClient } from '../packages/client/index.mjs';
 
-const server = new McpServer({ name: 'aislide', version: '0.1.0' });
+const serverInfo = { name: 'aislide', version: '0.1.0' };
+const server = new McpServer(serverInfo);
 const args = process.argv.slice(2);
 if (args.length !== 0 && (args.length !== 2 || args[0] !== '--output-dir')) {
 	throw new Error('Usage: node tools/mcp.mjs [--output-dir path]');
@@ -22,7 +23,10 @@ if (args[1]) {
 }
 const decks = new Map();
 const sources = new Map();
+const revisionCandidates = new Map();
+const candidateLifetimeMs = 10 * 60 * 1000;
 const client = new AislideClient(requestCore);
+const imageResult = Symbol('imageResult');
 let activeMutation = false;
 const handle = z.string().uuid();
 const shortText = z.string().max(120);
@@ -123,6 +127,17 @@ const staticOptions = z.object({
 	max_output_bytes: z.number().int().min(1).max(33554432).optional(), deny_warnings: z.boolean().optional(),
 }).strict();
 const recoveryJson = z.string().min(2).max(48 * 1048576).refine(value => Buffer.byteLength(value) <= 48 * 1048576, 'Recovery snapshot exceeds 48 MiB');
+const previewOptions = z.object({
+	page_indices: z.array(z.number().int().min(0).max(CAPACITY_PROFILES.large.slides - 1)).min(1).max(8).nullable().optional(),
+	max_dimension: z.number().int().min(160).max(1600).optional(), layout: z.enum(['pages', 'contact_sheet']).optional(),
+	max_output_bytes: z.number().int().min(1).max(2 * 1048576).optional(),
+}).strict();
+const deliveryName = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,59}$/).refine(name => !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(name), 'Reserved Windows filename');
+const deliveryOptions = z.object({
+	page_indices: previewOptions.shape.page_indices, pdf: z.boolean().optional(), preview: z.enum(['none', 'pages', 'contact_sheet']).optional(),
+	notes: z.boolean().optional(), source_report: z.boolean().optional(), preflight: z.boolean().optional(),
+	max_dimension: previewOptions.shape.max_dimension, min_font_size: z.number().min(8).max(48).optional(), max_output_bytes: z.number().int().min(1).max(32 * 1048576).optional(),
+}).strict();
 const slideId = z.string().min(1).max(80);
 const commentSchema = z.object({ id: slideId, author: z.string().min(1).max(256), initials: z.string().max(64), timestamp: z.string().min(19).max(35), text: z.string().max(8000), x: z.number().int().min(-2147483648).max(2147483647).optional(), y: z.number().int().min(-2147483648).max(2147483647).optional(), parent_id: optional(slideId), resolved: z.boolean().optional(), native_author_id: optional(z.number().int().min(0).max(4294967295)), native_index: optional(z.number().int().min(0).max(4294967295)) }).strict();
 const localCommentSchema = commentSchema.omit({ parent_id: true, native_author_id: true, native_index: true }).strict();
@@ -233,19 +248,52 @@ const partData = z.discriminatedUnion('kind', [
 	z.object({ kind: z.literal('diagram'), graph: graphSpec }).strict(),
 ]);
 const partSpec = z.object({ version: z.literal(1), preset: z.string().min(1).max(100), title: z.string().max(80), subtitle: z.string().max(120).optional(), data: partData }).strict();
+const contentHash = z.string().regex(/^[a-f0-9]{64}$/);
+const revisionIds = z.array(slideId).min(1).max(32);
+const revisionEdits = z.array(z.discriminatedUnion('op', [
+	z.object({ op: z.literal('translate'), ids: revisionIds, dx: z.number().min(-4096).max(4096), dy: z.number().min(-4096).max(4096) }).strict(),
+	z.object({ op: z.literal('align'), ids: revisionIds, alignment: z.enum(['left', 'center', 'right', 'top', 'middle', 'bottom']), relative_to: z.enum(['selection', 'page']) }).strict(),
+	z.object({ op: z.literal('set_text_frame'), id: slideId, x: padding, y: padding, width: padding.positive(), height: padding.positive() }).strict(),
+	z.object({ op: z.literal('replace_text'), id: slideId, text: z.string().max(4000) }).strict(),
+	z.object({ op: z.literal('update_part'), id: slideId, spec: partSpec }).strict(),
+	z.object({ op: z.literal('update_graph'), id: slideId, spec: graphSpec }).strict(),
+])).min(1).max(16).refine(edits => Buffer.byteLength(JSON.stringify(edits)) <= 128 * 1024, 'Revision edits exceed 128 KiB');
+const guidedAuthoring = z.object({ context: optional(z.enum(['reading', 'projection'])), density: optional(z.enum(['comfortable', 'compact'])), spacing: optional(z.enum(['standard', 'relaxed'])), body_font_min: optional(z.number().min(12).max(40)), headline_font_size: optional(z.number().min(28).max(64)), font_family: optional(z.string().trim().min(1).max(100)) }).strict();
 const authoringProfile = z.enum(['consulting-decision', 'technical-explainer', 'event-talk', 'status-report']);
 const evidenceId = z.string().min(1).max(40);
 const guidedInput = z.object({
 	version: z.literal(1), profile_id: authoringProfile, title: z.string().min(1).max(120), audience: z.string().min(1).max(240), purpose: z.string().min(1).max(600), governing_message: z.string().min(1).max(600), language: z.enum(['en', 'ja']), brand_color: z.string().regex(/^[0-9a-fA-F]{6}$/).nullable().optional(),
+	authoring: optional(guidedAuthoring),
 	evidence: z.array(z.object({ id: evidenceId, kind: z.enum(['source', 'assumption', 'unknown']), reference: z.string().min(1).max(600), statement: z.string().min(1).max(1200) }).strict()).max(64),
 	issues: z.array(z.object({ id: z.string().min(1).max(32), question: z.string().min(1).max(100), requested_decision: z.string().min(1).max(120), criterion: z.string().min(1).max(120), owner: z.string().min(1).max(48), due: z.string().min(1).max(48), evidence_ids: z.array(evidenceId).min(1).max(8), analysis_slide_ids: z.array(slideId).min(1).max(12) }).strict()).max(6).optional(),
-	slides: z.array(z.object({ id: slideId, section: z.string().min(1).max(80), headline: z.string().min(1).max(240), sentence_form: z.enum(['causal', 'conditional', 'contrast', 'causal-focus', 'evaluation', 'proposal', 'explanation', 'comparison', 'outcome']), pattern_id: z.string().min(1).max(80), question: z.string().min(1).max(240), parent_message: z.string().min(1).max(80), transition: z.string().min(1).max(80), parallel_basis: z.string().min(1).max(80), part: partSpec.nullable().optional(), support: z.array(z.object({ clause: z.string().min(1).max(240), body_paths: z.array(z.string().min(1).max(512)).min(1).max(16), evidence_ids: z.array(evidenceId).min(1).max(16) }).strict()).max(8), numbers: z.array(z.object({ path: z.string().min(1).max(512), value: z.union([partValue, z.string().max(120), z.boolean(), z.null()]), evidence_id: evidenceId }).strict()).max(256).optional() }).strict()).min(1).max(32),
+	slides: z.array(z.object({ id: slideId, section: z.string().min(1).max(80), headline: z.string().min(1).max(240), sentence_form: z.enum(['causal', 'conditional', 'contrast', 'causal-focus', 'evaluation', 'proposal', 'explanation', 'comparison', 'outcome']), pattern_id: z.string().min(1).max(80), question: z.string().min(1).max(240), parent_message: z.string().min(1).max(80), transition: z.string().min(1).max(80), parallel_basis: z.string().min(1).max(80), part: partSpec.nullable().optional(), speaker_notes: optional(z.string().max(8000).refine(value => Array.from(value).length <= 4000, 'Speaker notes exceed 4000 Unicode scalars')), support: z.array(z.object({ clause: z.string().min(1).max(240), body_paths: z.array(z.string().min(1).max(512)).min(1).max(16), evidence_ids: z.array(evidenceId).min(1).max(16) }).strict()).max(8), numbers: z.array(z.object({ path: z.string().min(1).max(512), value: z.union([partValue, z.string().max(120), z.boolean(), z.null()]), evidence_id: evidenceId }).strict()).max(256).optional() }).strict()).min(1).max(32),
 }).strict();
 
 function getDeck(id) {
 	const state = decks.get(id);
 	if (!state) throw new Error('Unknown deck handle; create or compile a deck first');
 	return state;
+}
+
+function previewResult(result, includeImages = true) {
+	return {
+		[imageResult]: true,
+		metadata: { ...result, images: result.images.map(({ base64: _base64, ...metadata }) => metadata) },
+		images: includeImages ? result.images.map(image => ({ type: 'image', data: image.base64, mimeType: image.mime_type })) : [],
+	};
+}
+
+function expireCandidates() {
+	for (const [id, candidate] of revisionCandidates) {
+		const state = decks.get(candidate.deck_id);
+		if (performance.now() >= candidate.expires || !state || state.revision !== candidate.expected_revision) revisionCandidates.delete(id);
+	}
+}
+
+function toolResponse(result) {
+	const metadata = result?.[imageResult] ? result.metadata : result;
+	const text = JSON.stringify(metadata);
+	return { content: [{ type: 'text', text }, ...(result?.[imageResult] ? result.images : [])], ...(Buffer.byteLength(text) <= 65536 ? { structuredContent: metadata } : {}) };
 }
 
 function register(name, description, inputSchema, readOnly, action) {
@@ -264,11 +312,17 @@ function register(name, description, inputSchema, readOnly, action) {
 			if (Buffer.byteLength(JSON.stringify(input), 'utf8') > budget) throw new Error('JSON input exceeds selected capacity profile');
 			if (extra.signal.aborted) throw new Error('Operation cancelled');
 			const result = await action(parameters, extra.signal, { signal: extra.signal, capacityProfile: profile });
-			const text = JSON.stringify(result);
-			const response = { content: [{ type: 'text', text }], ...(Buffer.byteLength(text) <= 65536 ? { structuredContent: result } : {}) };
-			if (Buffer.byteLength(JSON.stringify(response), 'utf8') > budget) throw new Error('JSON tool output exceeds selected capacity profile; request a smaller result');
+			if (readOnly && extra.signal.aborted) throw new Error('Operation cancelled');
+			const response = toolResponse(result);
+			if (Buffer.byteLength(JSON.stringify(response), 'utf8') > Math.min(budget, result?.[imageResult] ? 4 * 1048576 : budget)) throw new Error('JSON tool output exceeds selected capacity profile; request a smaller result');
 			return response;
 		} catch (error) {
+			if (error instanceof BundlePublicationError) {
+				const status = !error.published_paths.length ? 'not_published' : error.pending_filenames.length ? 'partially_published' : 'published_with_error';
+				return { ...toolResponse({ status, code: error.code, message: error.message, ...error.delivery_context,
+					published_paths: error.published_paths, pending_filenames: error.pending_filenames, cleanup_errors: error.cleanup_errors,
+					retry: 'Inspect published paths and manifest hashes; do not overwrite or blindly retry the same name. Use a new name for another complete delivery.', multi_file_atomic: false }), isError: true };
+			}
 			return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : 'Operation failed' }] };
 		} finally { if (!readOnly) activeMutation = false; }
 	});
@@ -425,6 +479,72 @@ register('recover_presentation', 'Verify supplied recovery JSON and create a NEW
 	if (signal.aborted) throw new Error('Operation cancelled');
 	const id = randomUUID(); decks.set(id, state);
 	return { deck_id: id, revision: state.revision, hash: state.document.hash, slides: state.document.deck.slides.length };
+});
+register('preview_presentation', 'Read selected pages as actual MCP PNG images or one contact sheet, with slide IDs, image coordinates, revision/hash and renderer warnings. 1-8 unique zero-based page indices; omission selects all only when at most eight slides exist. Maximum image edge 1600px, encoded images 2MiB, MCP response 4MiB. No files, network, document or Undo changes. include_images=false returns only metadata. Stale bindings are warned, not certified; not Office visual parity.', { deck_id: handle, options: previewOptions.optional(), include_images: z.boolean().optional() }, true, async ({ deck_id, options, include_images }, signal) => {
+	return previewResult({ deck_id, ...await getDeck(deck_id).previewPresentation(options, { signal }) }, include_images);
+});
+register('preflight_presentation', 'Read bounded visual diagnostics for 1-8 selected pages: actual renderer clipping/glyph/font warnings, transformed off-slide frames, possible text overlap, connector-label interference, small text and density. Returns slide/element IDs, scopes, bounds, evidence kind and repair suggestions. No automatic edits, external fetch, factual verification, Office parity or full accessibility certification. Backgrounds and attached connector endpoints are excluded from overlap checks. Run check_accessibility separately.', { deck_id: handle, options: z.object({ page_indices: previewOptions.shape.page_indices, min_font_size: z.number().min(8).max(48).optional() }).strict().optional() }, true, async ({ deck_id, options }, signal) => {
+	return { deck_id, ...await getDeck(deck_id).preflightPresentation(options, { signal }) };
+});
+register('finalize_presentation', 'Prepare and exclusively publish a delivery from the exact current revision/hash under the operator-approved output directory. Always includes the complete PPTX and a manifest; optional PDF/PNG preview/diagnostics select at most eight pages (zero-based). Defaults: contact sheet and preflight on, PDF/notes/source-report off. notes/source_report explicitly export plaintext metadata; PPTX already retains notes and may contain source data. All generation, byte budgets and destination names are checked before publication; manifest last. No overwrite, source mutation, automatic persistence, source freshness or Office parity guarantee. Partial failures report actual published paths; multi-file output is not crash-atomic. Returns one preview image unless include_images=false.', { ...mutationInput, expected_hash: contentHash, name: deliveryName, options: deliveryOptions.optional(), include_images: z.boolean().optional() }, false, async ({ deck_id, expected_revision, expected_hash, name, options, include_images }, signal) => {
+	if (!outputDirectory) throw new Error('Saving requires --output-dir at server startup');
+	const state = getDeck(deck_id);
+	const result = await state.prepareDelivery(options, { expectedRevision: expected_revision, expectedHash: expected_hash, signal });
+	if (signal.aborted) throw new Error('Operation cancelled');
+	if (state.revision !== expected_revision || state.document.hash !== expected_hash) throw new Error('Delivery base changed; inspect the current deck before exporting');
+	const items = result.files.map(file => {
+		const bytes = Buffer.from(file.base64, 'base64');
+		if (bytes.length !== file.byte_length || createHash('sha256').update(bytes).digest('hex') !== file.sha256) throw new Error('Core delivery artifact hash mismatch');
+		return { filename: `${name}${file.suffix}`, bytes };
+	});
+	const files = result.files.map(({ base64: _base64, suffix: _suffix, byte_length, ...file }, index) => ({ ...file, filename: items[index].filename, path: join(outputDirectory, items[index].filename), bytes: byte_length }));
+	const manifestValue = { ...result.manifest, producer: { ...result.manifest.producer, name: serverInfo.name, version: serverInfo.version, core_version: result.manifest.producer.version, transport: 'mcp-stdio' },
+		files: files.map(({ path: _path, ...file }) => file) };
+	const manifestBytes = Buffer.from(JSON.stringify(manifestValue, null, 2));
+	const manifestFilename = `${name}.manifest.json`;
+	const manifest = { filename: manifestFilename, path: join(outputDirectory, manifestFilename), bytes: manifestBytes.length, sha256: createHash('sha256').update(manifestBytes).digest('hex') };
+	items.push({ filename: manifestFilename, bytes: manifestBytes });
+	if (items.reduce((total, item) => total + item.bytes.length, 0) > (options?.max_output_bytes ?? 32 * 1048576)) throw new Error('Delivery including manifest exceeds output budget');
+	const thumbnail = result.files.find(file => file.kind === 'preview');
+	const checks = { ...result.manifest.checks, preflight_errors: result.manifest.preflight?.findings.filter(finding => finding.severity === 'error').length ?? null,
+		preflight_warnings: result.manifest.preflight?.findings.filter(finding => finding.severity === 'warning').length ?? null, render_warning_count: result.manifest.render_warnings.length };
+	const response = { [imageResult]: true, metadata: { status: 'complete', deck_id, revision: result.revision, hash: result.hash, files, manifest, checks,
+		multi_file_atomic: false, limitations: result.manifest.limitations }, images: thumbnail && include_images !== false ? [{ type: 'image', data: thumbnail.base64, mimeType: thumbnail.mime_type }] : [] };
+	if (Buffer.byteLength(JSON.stringify(toolResponse(response))) > Math.min(4 * 1048576, CAPACITY_PROFILES[state.capacityProfile].request_bytes)) throw new Error('Delivery response exceeds budget; lower max_dimension or disable images');
+	try { await publishNewBundle(outputDirectory, items, signal); }
+	catch (error) {
+		if (error instanceof BundlePublicationError) error.delivery_context = { deck_id, revision: result.revision, hash: result.hash, manifest_filename: manifestFilename };
+		throw error;
+	}
+	return response;
+});
+register('preview_slide_revision', 'Preview 1-16 typed edits on one slide without changing document/history. Returns before/after MCP PNG images, affected IDs, stale metadata impact and an opaque candidate ID valid for 10 minutes in this server process. At most 16 live candidates, edits <=128KiB. translate/align use top-level IDs; set_text_frame/replace_text accept nested IDs in their parent coordinates. Frame edits retain font size. Locked/hidden targets and unsupported native edits reject. No raw patch, XML, URLs or arbitrary paths. Apply explicitly with matching base revision/hash.', { ...mutationInput, expected_hash: contentHash, slide_id: slideId, edits: revisionEdits, max_dimension: z.number().int().min(160).max(1600).optional(), include_images: z.boolean().optional() }, true, async ({ deck_id, expected_revision, expected_hash, slide_id, edits, max_dimension, include_images }, signal) => {
+	expireCandidates();
+	if (revisionCandidates.size >= 16) throw new Error('At most 16 live revision candidates; apply, close a deck, or wait for expiry');
+	const state = getDeck(deck_id);
+	const result = await state.previewSlideRevision(slide_id, edits, { expectedRevision: expected_revision, expectedHash: expected_hash, maxDimension: max_dimension, signal });
+	if (signal.aborted) throw new Error('Operation cancelled');
+	expireCandidates();
+	if (revisionCandidates.size >= 16) throw new Error('At most 16 live revision candidates');
+	if (state.revision !== expected_revision || state.document.hash !== expected_hash || decks.get(deck_id) !== state) throw new Error('Document changed during preview; preview again');
+	const candidate_id = randomUUID();
+	const before = previewResult(result.before, include_images);
+	const after = previewResult(result.after, include_images);
+	const response = { [imageResult]: true, metadata: { ...result, deck_id, candidate_id, expires_in_seconds: candidateLifetimeMs / 1000, before: before.metadata, after: after.metadata }, images: [...before.images, ...after.images] };
+	const encoded = { content: [{ type: 'text', text: JSON.stringify(response.metadata) }, ...response.images], structuredContent: response.metadata };
+	if (Buffer.byteLength(JSON.stringify(encoded)) > Math.min(4 * 1048576, CAPACITY_PROFILES[state.capacityProfile].request_bytes)) throw new Error('Revision preview exceeds response budget; lower max_dimension');
+	revisionCandidates.set(candidate_id, { deck_id, expected_revision, expected_hash, slide_id, edits: structuredClone(edits), candidate_hash: result.candidate_hash, expires: performance.now() + candidateLifetimeMs });
+	return response;
+});
+register('apply_slide_revision', 'Apply one unexpired immutable preview candidate to the same deck and exact base revision/hash. Recomputes the core candidate and verifies its content hash, then records one Undo. No-op creates no history. Missing, consumed, stale or cross-deck candidates fail without modifying the document. Does not export files.', { ...mutationInput, expected_hash: contentHash, candidate_id: handle }, false, async ({ deck_id, expected_revision, expected_hash, candidate_id }, signal) => {
+	expireCandidates();
+	const candidate = revisionCandidates.get(candidate_id);
+	if (!candidate || candidate.deck_id !== deck_id) throw new Error('Unknown, expired or cross-deck revision candidate; preview again');
+	if (candidate.expected_revision !== expected_revision || candidate.expected_hash !== expected_hash) throw new Error('Revision candidate base mismatch; preview again');
+	const state = getDeck(deck_id);
+	await state.applySlideRevision(candidate.slide_id, candidate.edits, { expectedRevision: expected_revision, expectedHash: expected_hash, candidateHash: candidate.candidate_hash, signal });
+	revisionCandidates.delete(candidate_id);
+	return { deck_id, revision: state.revision, hash: state.document.hash, slide_id: candidate.slide_id, candidate_id, can_undo: state.canUndo };
 });
 register('export_static', 'Export selected/all pages as one multipage PDF or individual PNG/JPEG files in the approved output directory. Exact extension pdf/png/jpg must match format. Multiple images use name-page-NNN.ext in selection order. All names preflight before exclusive publication; racing partial outputs are retained and reported, never deleted. Shared core only, no Office. PDF retains outlined appearance with a positioned searchable/selectable Unicode overlay and basic reading-order/table/alt-text tags; visible text is not editable. Not PDF/UA, WCAG or Office parity certification. 8192px/32MiB core caps and stricter 4MiB JSON bundle cap apply. Does not print.', { deck_id: handle, filename: staticFilename, options: staticOptions }, false, async ({ deck_id, filename, options }, signal) => {
 	if (!outputDirectory) throw new Error('Saving requires --output-dir at server startup');
@@ -596,6 +716,7 @@ register('export_pptx', 'Save one native PPTX including optional sources/binding
 register('close_deck', 'Release the in-memory deck and its undo history. Saved files remain unchanged.', { deck_id: handle }, false, async ({ deck_id }) => {
 	getDeck(deck_id);
 	decks.delete(deck_id);
+	expireCandidates();
 	return { closed: deck_id };
 });
 
@@ -647,5 +768,21 @@ register('open_project', 'Legacy compatibility only: open an exact PPTX/checkpoi
 });
 
 server.registerResource('report-example', 'aislide://report/example', { mimeType: 'application/json' }, async () => ({ contents: [{ uri: 'aislide://report/example', mimeType: 'application/json', text: JSON.stringify(await requestCore({ op: 'sample' })) }] }));
+
+const authoringWorkflow = [
+	'Create an editable presentation using the AISlide MCP tools in this connection.',
+	'Read authoring_capabilities and best_practice_guide for the chosen profile. Establish audience, purpose, evidence and assumptions; do not invent facts or fetch imported relationships.',
+	'Use optional input.authoring for reading/projection context, density, spacing, body_font_min, headline_font_size and font_family; existing brand_color controls the palette. Add speaker_notes to each input slide when supplied.',
+	'Run validate_guided_presentation, resolve unmet checks, then create_guided_presentation. ready means compilable, not factual truth or Office parity.',
+	'Use preview_presentation for actual PNG pages or a contact_sheet; choose at most eight unique zero-based page_indices per call. Inspect the images and renderer warnings. include_images=false returns metadata only.',
+	'Run preflight_presentation for the same pages and a suitable min_font_size. Findings include geometry and readability heuristics, not guaranteed defects. Run check_accessibility separately when needed.',
+	'For an authorized correction, use preview_slide_revision with deck_id, expected_revision, expected_hash, slide_id and typed edits. Inspect before/after images, affected_ids, stale_part_ids and source_bindings_stale. No changes have been applied yet.',
+	'Apply only the agreed candidate using apply_slide_revision with the candidate_id and exact base revision/hash. Candidates expire after ten minutes, deck closure or any revision change; at most sixteen are retained. Undo reverses one applied batch. Native preservation may reject unsupported edits.',
+	'Review again, then finalize_presentation with deck_id, exact expected_revision/expected_hash and a new plain name under the operator-approved output directory. It always exports the complete PPTX and manifest. Optional PDF/previews/preflight cover selected pages only (at most eight); notes and source_report require explicit opt-in because they may contain sensitive plaintext. The PPTX itself retains notes and may include source data. Individual export_pptx/export_static remain available.',
+	'Finalization stages all files and publishes the manifest last without overwriting existing files. Return actual paths, sizes, SHA-256 hashes and check scopes. Partial failures retain published files; do not blindly retry the same name. Complete means output generation, not a visual or factual approval; Office parity remains unverified.',
+	'No automatic persistence, restart recovery, source freshness verification or background model generation is provided by this workflow.',
+].join('\n\n');
+server.registerResource('authoring-workflow', 'aislide://authoring/workflow', { mimeType: 'text/plain', description: 'Bounded visual review and scoped correction workflow' }, async () => ({ contents: [{ uri: 'aislide://authoring/workflow', mimeType: 'text/plain', text: authoringWorkflow }] }));
+server.registerPrompt('author_presentation', { description: 'Create, preview, diagnose, safely revise and export an evidence-led editable presentation with AISlide.' }, async () => ({ messages: [{ role: 'user', content: { type: 'text', text: authoringWorkflow } }] }));
 
 await server.connect(new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: MAX_REQUEST_BYTES }));

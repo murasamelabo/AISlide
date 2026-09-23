@@ -5,6 +5,104 @@ import { AislideClient, DocumentSession } from '../packages/client/index.mjs';
 import { requestCore } from './core-client.mjs';
 import { guidedExamples } from './guided-demo.mjs';
 
+test('P1 delivery preparation forwards one guarded snapshot and discards cancelled results', async () => {
+  const client = new AislideClient(requestCore);
+  const session = await client.createPresentation('delivery-sdk', 'Synthetic delivery');
+  const before = session.recoveryEnvelope;
+  const input = { preview: 'none', preflight: false, notes: true };
+  const prepared = await session.prepareDelivery(input, { expectedRevision: session.revision, expectedHash: session.document.hash });
+  assert.deepEqual(prepared.files.map(file => file.kind), ['pptx', 'notes']);
+  assert.equal(prepared.manifest.document.hash, before.document.hash);
+  assert.deepEqual(session.recoveryEnvelope, before);
+  await assert.rejects(() => session.prepareDelivery(input, { expectedRevision: 999 }), /revision|hash/i);
+  let calls = 0;
+  const cancelled = new AbortController();
+  const reader = new DocumentSession(async request => {
+    calls += 1;
+    assert.equal(request.op, 'prepare_delivery');
+    assert.deepEqual(request.options, input);
+    assert.equal(request.expected_hash, before.document.hash);
+    cancelled.abort();
+    return prepared;
+  }, before.document);
+  await assert.rejects(() => reader.prepareDelivery(input, { signal: cancelled.signal }), { name: 'AbortError' });
+  await assert.rejects(() => reader.prepareDelivery(input, { signal: cancelled.signal }), { name: 'AbortError' });
+  assert.equal(calls, 1);
+  assert.deepEqual(reader.recoveryEnvelope, before);
+});
+
+test('P0 SDK preview, diagnostics and revision calls retain state on early and late cancellation', async () => {
+  const client = new AislideClient(requestCore);
+  const session = await client.createPresentation('cancel-authoring', 'Synthetic cancellation');
+  const original = session.recoveryEnvelope;
+  const transportCalls = [];
+  const controller = new AbortController();
+  let late = false;
+  const checked = new DocumentSession(async request => {
+    transportCalls.push(request);
+    if (late) controller.abort();
+    return request.op === 'apply_slide_revision' ? { document: { ...session.document, revision: 1 }, receipt: { inverse: [], after_hash: 'candidate' } } : { revision: 0, hash: session.document.hash };
+  }, session.document);
+  const input = { page_indices: [0], max_dimension: 320 };
+  await checked.previewPresentation(input);
+  await checked.preflightPresentation({ page_indices: [0] });
+  const edits = [{ op: 'replace_text', id: 'sample', text: 'candidate' }];
+  await checked.previewSlideRevision('slide-1', edits, { maxDimension: 320, expectedRevision: 0, expectedHash: session.document.hash });
+  assert.deepEqual(transportCalls.map(request => request.op), ['preview_presentation', 'preflight_presentation', 'preview_slide_revision']);
+  assert.deepEqual(transportCalls[0].options, input);
+  assert.equal(transportCalls[2].expected_hash, session.document.hash);
+  assert.deepEqual(checked.recoveryEnvelope, original);
+  late = true;
+  await assert.rejects(() => checked.applySlideRevision('slide-1', edits, { expectedRevision: 0, expectedHash: session.document.hash, candidateHash: 'candidate', signal: controller.signal }), { name: 'AbortError' });
+  assert.deepEqual(checked.recoveryEnvelope, original);
+  const count = transportCalls.length;
+  for (const operation of [
+    () => checked.previewPresentation(input, { signal: controller.signal }),
+    () => checked.preflightPresentation({}, { signal: controller.signal }),
+    () => checked.previewSlideRevision('slide-1', edits, { signal: controller.signal }),
+    () => checked.applySlideRevision('slide-1', edits, { expectedRevision: 0, expectedHash: session.document.hash, candidateHash: 'candidate', signal: controller.signal }),
+  ]) await assert.rejects(operation, { name: 'AbortError' });
+  assert.equal(transportCalls.length, count);
+  for (const method of ['previewPresentation', 'preflightPresentation', 'previewSlideRevision']) {
+    const cancelled = new AbortController();
+    const reader = new DocumentSession(async () => { cancelled.abort(); return {}; }, session.document);
+    await assert.rejects(() => method === 'previewSlideRevision' ? reader[method]('slide-1', edits, { signal: cancelled.signal }) : reader[method]({}, { signal: cancelled.signal }), { name: 'AbortError' });
+    assert.deepEqual(reader.recoveryEnvelope, original);
+  }
+});
+
+test('P0 native revision preserves opaque slide XML, shared media and exact Undo', async () => {
+  const { unzipSync, zipSync } = await import('fflate');
+  const client = new AislideClient(requestCore);
+  const authored = await client.createPresentation('opaque-revision-author', 'Synthetic preservation');
+  const picture = await client.createAsset({ id: 'shared-picture', mime_type: 'image/svg+xml', size: 64, alt: 'Synthetic rectangle', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="red"/></svg>').toString('base64') });
+  await authored.transact([
+    { op: 'add', path: '/deck/slides/0/elements/-', value: { type: 'text', id: 'native-label', x: 30, y: 30, width: 500, height: 90, text: 'Before', font_size: 24, color: '000000', bold: false } },
+    { op: 'add', path: '/deck/slides/0/elements/-', value: { ...picture, x: 30, y: 160 } },
+  ]);
+  await authored.editSlides([{ op: 'duplicate', slide_id: 'slide-1', id: 'untouched' }]);
+  const parts = unzipSync(Buffer.from((await authored.exportPresentation()).base64, 'base64'));
+  const marker = '<p:extLst><p:ext uri="urn:aislide:test:opaque"><check:state xmlns:check="urn:aislide:test:opaque">retain-unknown-xml</check:state></p:ext></p:extLst>';
+  parts['ppt/slides/slide1.xml'] = Buffer.from(Buffer.from(parts['ppt/slides/slide1.xml']).toString('utf8').replace('</p:sld>', `${marker}</p:sld>`));
+  const original = Buffer.from(zipSync(parts));
+  const { session } = await client.openPresentation('opaque-revision', original.toString('base64'));
+  const before = session.recoveryEnvelope;
+  const slide = session.document.deck.slides[0];
+  const text = slide.elements.find(element => element.type === 'text');
+  const edits = [{ op: 'replace_text', id: text.id, text: 'After' }];
+  const candidate = await session.previewSlideRevision(slide.id, edits, { maxDimension: 320 });
+  assert.deepEqual(session.recoveryEnvelope, before);
+  await session.applySlideRevision(slide.id, edits, { expectedRevision: candidate.base_revision, expectedHash: candidate.base_hash, candidateHash: candidate.candidate_hash });
+  const changed = unzipSync(Buffer.from((await session.exportPresentation()).base64, 'base64'));
+  assert.match(Buffer.from(changed['ppt/slides/slide1.xml']).toString('utf8'), /retain-unknown-xml/);
+  const preserved = Object.keys(parts).filter(path => path.startsWith('ppt/media/') || path === 'ppt/slides/slide2.xml' || path === 'ppt/slides/_rels/slide2.xml.rels');
+  assert.ok(preserved.some(path => path.startsWith('ppt/media/')));
+  for (const path of preserved) assert.deepEqual(changed[path], parts[path], path);
+  assert.deepEqual(session.document.origin, before.document.origin);
+  await session.undo();
+  assert.deepEqual(Buffer.from((await session.exportPresentation()).base64, 'base64'), original);
+});
+
 test('architecture icon SDK preserves explicit IDs, options, response and cancellation', async () => {
   const requests = [];
   const catalog = { version: 1, release: '2026-09-20', configured: false, message: 'Synthetic not-installed fixture', providers: [], icons: [] };

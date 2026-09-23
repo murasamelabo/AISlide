@@ -46,6 +46,35 @@ The historical static gates passed 31 `export_static` and 4 `static_api` tests, 
 
 ## Document Operations
 
+### Visual Authoring Loop
+
+The shared core additionally exposes the following bounded read/preview/apply operations. See [guided authoring](authoring/README.md#visual-review-and-revisions) for limits and the complete MCP workflow.
+
+| Core operation | Inputs besides op | Result |
+| --- | --- | --- |
+| `preview_presentation` | `document`, optional `options:{page_indices,max_dimension,layout,max_output_bytes}` | `revision`, `hash`, ordered page IDs/image coordinates, PNG images with base64/size/SHA-256 and renderer warnings |
+| `preflight_presentation` | `document`, optional `options:{page_indices,min_font_size}` | Bounded findings with IDs/scopes/bounds/evidence/suggestions; no mutation |
+| `preview_slide_revision` | `document`, `expected_revision`, `expected_hash`, `slide_id`, `edits`, optional `max_dimension` | Base/candidate hashes, before/after previews, affected IDs and stale part/source impact; no mutation |
+| `apply_slide_revision` | Same base and edits, plus `candidate_hash`, without `max_dimension` | Normal atomic transaction result with one inverse Undo receipt |
+
+Previews use the existing shared static renderer. PNG budgets are 2MiB encoded/4MiB wire, 160-1600px image edges and 1-8 selected pages. Before/after images reserve 1MiB each. No partial bundle, network fetch, automatic font installation or file write is performed. Stale bindings are reported for inspection; export still rejects them. Diagnostics distinguish renderer evidence, transformed-frame geometry and readability heuristics. They are not full accessibility, semantic truth or Office visual parity certification. Unsupported rendering fails explicitly.
+
+SDK methods: `session.previewPresentation(options?,requestOptions?)`, `preflightPresentation(options?,requestOptions?)`, `previewSlideRevision(slideId,edits,{expectedRevision?,expectedHash?,maxDimension?,signal?})`, and `applySlideRevision(slideId,edits,{expectedRevision,expectedHash,candidateHash,signal?})`. Session reads serialize with writes and reject early/late cancellation. Pure core candidates carry no session authority; callers supply and recheck the base and candidate hashes.
+
+MCP substitutes `deck_id` for `document`. Preview tools return metadata in the first text block and standard MCP `image` blocks; `include_images:false` omits images. Existing JSON-only tool responses remain unchanged. `preview_slide_revision` retains only bounded edit instructions under an opaque process-local candidate ID (16 candidates, ten-minute expiry, 128KiB each). `apply_slide_revision` accepts that ID plus the exact base revision/hash rather than replacement edits. Stale/closed-deck candidates release capacity; applied candidates are single-use. No-op applies do not add history. `author_presentation` and `aislide://authoring/workflow` expose the workflow through the official MCP prompt/resource APIs.
+
+Typed edits: `translate{ids,dx,dy}`, `align{ids,alignment,relative_to}`, `set_text_frame{id,x,y,width,height}`, `replace_text{id,text}`, `update_part{id,spec}`, and `update_graph{id,spec}`. One slide, 1-16 edits and up to 32 unique targets per selection; no arbitrary JSON Patch, file path, XML or source authority. Nested text coordinates remain parent-local. Locked/hidden targets and native loss reject. Generic child edits may make managed metadata stale; the preview reports this. Existing raw `transaction` remains a separate lower-level API.
+
+### Delivery Preparation
+
+`prepare_delivery({document,expected_revision,expected_hash,options?})` returns `{revision,hash,files,manifest}` without filesystem access or document changes. SDK: `session.prepareDelivery(options?,{expectedRevision?,expectedHash?,signal?})`; the existing session read lock and early/late cancellation checks apply. Each file has `kind`, server-independent `suffix`, `mime_type`, `page_indices`, `byte_length`, `sha256`, `base64` and optional image dimensions. Native PPTX export checks, including immutable origin and stale source-binding rejection, remain authoritative.
+
+Options: `page_indices?`, `pdf:false`, `preview:"contact_sheet"` (`pages` / `none` also accepted), `notes:false`, `source_report:false`, `preflight:true`, `max_dimension:1280` (160-1600), `min_font_size:16` (8-48), and lower-only `max_output_bytes` (up to 32MiB). All options are strict. The complete PPTX is always included. Supplemental visual output/preflight is limited to eight selected pages; notes and source metadata span the whole deck. The report excludes raw source text, table rows, raw binding values and original bytes, but attributions/locators may still be sensitive. Separate plaintext notes and source-report output require explicit opt-in; the PPTX itself remains an ordinary unredacted export.
+
+MCP `finalize_presentation({deck_id,expected_revision,expected_hash,name,options?,include_images?})` prepares the same bundle, binds safe filenames, verifies hashes and budgets, then exclusively publishes beneath the startup-approved output root. At most 13 files including the manifest; 32MiB decoded total and at most 4MiB MCP response (profile limits also apply). A thumbnail plus actual file paths, hashes, sizes, check scope and manifest path are returned. `include_images:false` suppresses only the response image. Every destination is checked, all temporary files staged, and the manifest published last. Existing files are never replaced. No directory, URL or arbitrary file path is accepted from the request.
+
+The manifest format is `aislide.delivery`, version 1. It records actual producer/core versions and MCP transport, document revision/hash, file hashes, visual page scope, checks, findings and limitations. `complete` is publication success, not quality approval; preflight can report findings. No source authenticity/freshness, semantic truth, accessibility certification or Office parity is asserted. Files are not a crash-atomic group. A structured `BUNDLE_PUBLICATION_FAILED` result lists exact successful paths and pending filenames with a `not_published`, `partially_published` or `published_with_error` status. Published files are never cleaned up automatically; only owned temporary paths are removed. Cancellation after a link may leave outputs; inspect the manifest and hashes before retrying with a new name. Root checks do not establish hard immunity to hostile local path races. See [delivery workflow and example](authoring/README.md#delivery-bundles).
+
 | Operation | Request fields besides op | Result |
 | --- | --- | --- |
 | `new_document` | `id`, `deck`, optional `sources`, `bindings`, `report` | Canonical document with revision 0 and content hash |
@@ -94,6 +123,8 @@ SDK: `client.createPresentation(id,title?,options?)`, `session.editSlides(operat
 | `create_guided_presentation` | `id`, `input: GuidedInput` | New `{document,validation,profile_id,model_inference:false}`; no existing document or file is replaced |
 
 Profiles are `consulting-decision`, `technical-explainer`, `event-talk`, and `status-report`. The [guided authoring contract](authoring/README.md) defines the evidence, headline ledger, numeric JSON pointers and decision issue fields. All actual document behavior is computed in Rust; no model or source URL is contacted. `ready` means compilable input and measured text layout, not factual or semantic verification. Complete notes retain the supplied ledger/evidence and require privacy review before redistribution.
+
+Optional `input.authoring` controls reading/projection context, comfortable/compact density, standard/relaxed spacing, body font floor (12-40 scene pixels), headline size (28-64) and font family. Omission preserves legacy rendering; `{}` opts into profile defaults. Existing `brand_color` remains the palette override. Per-slide `speaker_notes` append up to 4000 Unicode scalars without dropping the evidence ledger, subject to the combined 8000-scalar limit. These are creation settings, not a retained styling policy for later part regeneration.
 
 All profiles accept `native-part` with an existing `PartSpec`. Consulting multi-page inputs require 3-6 stable issues, an opening `C02` summary and closing `C03` decision grid. Both are dedicated native templates with purpose-sized columns; analysis references must point to real body pages. The 48-item consulting catalog is selection guidance with explicit `native-template`, `composition-required`, or `guidance-only` status, not 48 implemented automatic templates.
 

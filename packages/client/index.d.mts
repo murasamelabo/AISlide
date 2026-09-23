@@ -16,7 +16,7 @@ export type CapacityLimits = Readonly<{ slides: number; elements_per_slide: numb
 export const CAPACITY_PROFILES: Readonly<Record<CapacityProfile, CapacityLimits>>
 export const FONT_LIMITS: Readonly<{ face_bytes: number; total_bytes: number; faces: number }>
 export function encodeCoreRequest(request: unknown): string
-import type { StaticExportOptions, StaticExport, VerifiedRecoveryDocument } from './types'
+import type { StaticExportOptions, StaticExport, VerifiedRecoveryDocument, PreviewOptions, PresentationPreview, PreflightOptions, PreflightReport, RevisionEdit, RevisionPreview, DeliveryOptions, PreparedDelivery } from './types'
 export type TransactionOptions = RequestOptions & { expectedRevision?: number }
 export type AssignLayoutOptions = TransactionOptions & { preserveFreeform?: boolean }
 export type ReplaceOptions = TransactionOptions & { sources?: SourceDocument[]; bindings?: SourceBinding[]; report?: Report | null }
@@ -150,6 +150,11 @@ export class DocumentSession {
   /** Return template bytes without writing a file or changing the document. */
   exportTemplate(kind: TemplateKind, options?: RequestOptions): Promise<TemplateExport>
   exportStatic(input?: StaticExportOptions, options?: RequestOptions): Promise<StaticExport>
+  previewPresentation(input?: PreviewOptions, options?: RequestOptions): Promise<PresentationPreview>
+  preflightPresentation(input?: PreflightOptions, options?: RequestOptions): Promise<PreflightReport>
+  prepareDelivery(input?: DeliveryOptions, options?: TransactionOptions & { expectedHash?: string }): Promise<PreparedDelivery>
+  previewSlideRevision(slideId: string, edits: RevisionEdit[], options?: TransactionOptions & { expectedHash?: string; maxDimension?: number }): Promise<RevisionPreview>
+  applySlideRevision(slideId: string, edits: RevisionEdit[], options: RequestOptions & { expectedRevision: number; expectedHash: string; candidateHash: string }): Promise<AislideDocument>
   addPart(slideId: string, input: { id: string; spec: PartSpec }, options?: TransactionOptions): Promise<AislideDocument>
   updatePart(slideId: string, input: { id: string; spec: PartSpec }, options?: TransactionOptions): Promise<AislideDocument>
   addGraph(slideId: string, input: { id: string; spec: GraphSpec }, options?: TransactionOptions): Promise<AislideDocument>
