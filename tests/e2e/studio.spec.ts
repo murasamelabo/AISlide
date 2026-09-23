@@ -41,6 +41,12 @@ test('small viewport remains usable and has no horizontal overflow', async ({ pa
 test('editor controls have no serious automated accessibility violations', async ({ page }) => {
   await openSample(page);
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
+  const notes = page.locator('#workspace-notes');
+  await expect(notes).toHaveAttribute('tabindex', '0');
+  await expect(notes).toHaveAccessibleName('Slide notes and messages');
+  await page.getByRole('separator', { name: 'Notes height', exact: true }).focus();
+  await page.keyboard.press('Tab');
+  await expect(notes).toBeFocused();
   const results = await new AxeBuilder({ page }).exclude('.slide-surface').analyze();
   expect(results.violations.filter((violation) => ['serious', 'critical'].includes(violation.impact ?? ''))).toEqual([]);
 });

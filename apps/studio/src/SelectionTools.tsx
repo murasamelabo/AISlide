@@ -33,7 +33,7 @@ export function SelectionTools({ elements, disabled, canPaste, onCommand, onComb
     requestAnimationFrame(() => combinationTool.current?.querySelector('button')?.focus())
   }
   const bounds = selectionBounds(elements)
-  return <div className="selection-tools" role="group" aria-label="Selection tools">
+  return <div className="selection-tools" role="group" aria-label="Selection tools" onFocusCapture={(event) => { if (event.currentTarget.contains(event.target)) event.target.scrollIntoView({ block: 'nearest', inline: 'nearest' }) }}>
     <div className="selection-tool-group" role="group" aria-label="Clipboard">
       <Tool label="Copy selection" disabled={disabled || !ids.length} onClick={() => onCommand({ op: 'copy', ids, format: 'keep_source_formatting' })}><Copy /></Tool>
       <Tool label="Cut selection" disabled={blocked} onClick={() => onCommand({ op: 'cut', ids, format: 'keep_source_formatting' })}><Scissors /></Tool>

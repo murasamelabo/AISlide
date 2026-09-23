@@ -13,4 +13,5 @@
 .studio .ribbon { flex-wrap: nowrap; overflow-x: auto; gap: 6px; }
 .studio .ribbon-group { flex-wrap: nowrap; flex-shrink: 0; }
 .studio .ribbon-space { display: none; }
+.studio .ribbon .tool, .studio .ribbon select, .selection-tools .tool, .selection-tools select { scroll-margin-inline: 8px; }
 @media (max-width: 540px) { .selection-tools { padding: 8px; gap: 4px; } .studio .ribbon { padding: 8px; } .studio .header-actions { flex-wrap: wrap; } .selection-layer { width: 100%; } }

@@ -778,7 +778,7 @@ export default function Studio() {
       }} />
     </header>
 
-    <div className="ribbon">
+    <div className="ribbon" onFocusCapture={(event) => { if (event.currentTarget.contains(event.target)) event.target.scrollIntoView({ block: 'nearest', inline: 'nearest' }) }}>
       <div className="ribbon-group"><Tool label="Undo" disabled={disable || !historyState.undo} onClick={undo}><Undo2 size={18} /></Tool><Tool label="Redo" disabled={disable || !historyState.redo} onClick={redo}><Redo2 size={18} /></Tool></div>
       <div className="ribbon-group" role="group" aria-label="Editing and review"><Tool label="Find and replace" disabled={disable} onClick={openTextTools}><Search /></Tool><Tool label="Advanced object settings" disabled={disable || !element || selectionLocked || selectedIds.length > 1} onClick={() => openEditingPanel('object-tools')}><SlidersHorizontal /></Tool><Tool label="Review document" disabled={disable} onClick={() => openEditingPanel('review')}><MessageSquare /></Tool><Tool label="Document setup" disabled={disable} onClick={() => openEditingPanel('setup')}><Settings2 /></Tool></div>
       <div className="ribbon-group"><Tool label="Add text" disabled={disable} onClick={() => addElement('text')}><Type size={19} /></Tool><Tool label="Add rectangle" disabled={disable} onClick={() => addElement('rect')}><Square size={18} /></Tool><Tool label="Add chart" disabled={disable} onClick={() => addElement('chart')}><ChartNoAxesCombined size={18} /></Tool>
@@ -858,7 +858,7 @@ export default function Studio() {
         </div>
         <div className="canvas-footer"><span>{selected ? `${element?.type ?? ''} / ${selected}` : 'No selection'}</span><div><Tool label="Previous slide" disabled={busy || hasDrafts || slideIndex === 0} onClick={() => changeSlide(slideIndex - 1)}><ChevronLeft size={17} /></Tool><Tool label="Next slide" disabled={busy || hasDrafts || !deck || slideIndex === deck.slides.length - 1} onClick={() => changeSlide(slideIndex + 1)}><ChevronRight size={17} /></Tool></div></div>
         <PaneResizeHandle label="Notes height" controls="workspace-notes" orientation="horizontal" direction={-1} {...workspacePanels.notes} />
-        <div id="workspace-notes" className="notes-preview"><div className="canvas-messages">
+        <div id="workspace-notes" className="notes-preview" role="region" aria-label="Slide notes and messages" tabIndex={0}><div className="canvas-messages">
           {error && !modal && !nameDialog && !pendingReplacement && <div className="error-strip" role="alert"><AlertCircle size={17} /><span>{error}</span><Tool label="Dismiss error" onClick={() => setError('')}><X size={16} /></Tool></div>}
           <div className="notes-line"><FileText size={16} /><span>{slide?.notes}</span></div>
         </div></div>

@@ -352,12 +352,25 @@ test('rich property drafts block save while Properties and inline preparation ca
 })
 
 for (const width of [1440, 390]) {
-  test(`editing tools fit a ${width}px viewport`, async ({ page }) => {
+  test(`editing tools remain keyboard reachable within a ${width}px viewport`, async ({ page }) => {
     await page.setViewportSize({ width, height: 960 })
     await page.goto('/')
     await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled({ timeout: 30_000 })
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-    for (const selector of ['.ribbon', '.selection-tools', '.header-actions']) expect(await page.locator(selector).evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+    expect(await page.locator('.header-actions').evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+    for (const selector of ['.ribbon', '.selection-tools']) {
+      const toolbar = page.locator(selector)
+      await expect(toolbar).toHaveCSS('overflow-x', 'auto')
+      const controls = await toolbar.locator('button:enabled, select:enabled').all()
+      expect(controls.length).toBeGreaterThan(0)
+      await controls[0].focus()
+      for (const control of controls) {
+        await expect(control).toBeFocused()
+        await expect(control).toBeInViewport({ ratio: 1 })
+        await page.keyboard.press('Tab')
+      }
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.getByRole('button', { name: 'Document setup', exact: true }).click()
     await expect(page.getByRole('dialog', { name: 'Document setup', exact: true })).toBeVisible()
     expect(await page.getByRole('dialog', { name: 'Document setup', exact: true }).evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
