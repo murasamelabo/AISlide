@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use geo::Intersects;
 use std::collections::BTreeSet;
 
 pub const WIDTH: f64 = 1152.0;
@@ -9,6 +10,7 @@ pub const HEIGHT: f64 = 512.0;
 pub const CONTENT_TOP: f64 = 88.0;
 pub const MAX_GROUPS: usize = 16;
 pub const MAX_GROUP_DEPTH: usize = 4;
+const RENDER_LAYOUT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -271,11 +273,61 @@ pub fn edge_points(source: &GraphNode, target: &GraphNode, edge: &GraphEdge) -> 
     points
 }
 
+fn relationship_label_bounds(spec: &GraphSpec, elements: &[Element], points: &[[f64; 2]], width: f64, height: f64, placed: &[[f64; 4]]) -> [f64; 4] {
+    let mut obstacles = Vec::new();
+    for node in &spec.nodes {
+        if node.presentation == GraphPresentation::Icon {
+            let suffixes = [format!("-ni-{}", node.id), format!("-nt-{}", node.id)];
+            for element in elements {
+                let (id, x, y, width, height) = element.bounds();
+                if suffixes.iter().any(|suffix| id.ends_with(suffix)) { obstacles.push([x, y, width, height]); }
+            }
+        } else { obstacles.push([node.x, node.y, node.width, node.height]); }
+    }
+    obstacles.extend(spec.groups.iter().map(|group| [group.x, group.y, group.width, 40.0]));
+    obstacles.extend(placed.iter().copied());
+    let rectangle = |bounds: [f64; 4], padding: f64| geo::Rect::new(
+        (bounds[0] - padding, bounds[1] - padding), (bounds[0] + bounds[2] + padding, bounds[1] + bounds[3] + padding));
+    let routes: Vec<_> = spec.edges.iter().flat_map(|edge| {
+        let source = spec.nodes.iter().find(|node| node.id == edge.source).expect("validated graph source");
+        let target = spec.nodes.iter().find(|node| node.id == edge.target).expect("validated graph target");
+        let route = edge_points(source, target, edge);
+        route.windows(2).map(|segment| geo::Line::new((segment[0][0], segment[0][1]), (segment[1][0], segment[1][1]))).collect::<Vec<_>>()
+    }).collect();
+    let mut segments: Vec<_> = points.windows(2).collect();
+    segments.sort_by(|left, right| {
+        let length = |segment: &[[f64; 2]]| (segment[1][0] - segment[0][0]).hypot(segment[1][1] - segment[0][1]);
+        length(right).total_cmp(&length(left))
+    });
+    let mut best = [points[0][0].clamp(0.0, WIDTH - width), points[0][1].clamp(CONTENT_TOP, HEIGHT - height), width, height];
+    let mut best_score = f64::INFINITY;
+    for segment in segments {
+        let horizontal = segment[1][0] - segment[0][0]; let vertical = segment[1][1] - segment[0][1];
+        let length = horizontal.hypot(vertical);
+        let mut normal = if length < 0.01 { [0.0, -1.0] } else { [-vertical / length, horizontal / length] };
+        if normal[1] > 0.0 || normal[1].abs() < 0.000001 && normal[0] < 0.0 { normal = [-normal[0], -normal[1]]; }
+        let clearance = (normal[0].abs() * width + normal[1].abs() * height) / 2.0 + 8.0;
+        for extra in [0.0, 16.0, 32.0, 48.0, 64.0, 96.0] {
+            for side in [1.0, -1.0] {
+                let candidate = [
+                    ((segment[0][0] + segment[1][0]) / 2.0 + normal[0] * (clearance + extra) * side - width / 2.0).clamp(0.0, WIDTH - width),
+                    ((segment[0][1] + segment[1][1]) / 2.0 + normal[1] * (clearance + extra) * side - height / 2.0).clamp(CONTENT_TOP, HEIGHT - height), width, height];
+                let area = rectangle(candidate, 3.0);
+                let route_crossings = routes.iter().filter(|line| line.intersects(&area)).count();
+                let overlaps = obstacles.iter().filter(|bounds| rectangle(**bounds, 0.0).intersects(&area)).count();
+                let score = route_crossings as f64 * 1000000.0 + overlaps as f64 * 1000.0 + extra + if side < 0.0 { 0.5 } else { 0.0 };
+                if score < best_score { best = candidate; best_score = score; }
+            }
+        }
+    }
+    best
+}
+
 pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
     valid_text(id, 40)?;
     if id.is_empty() { return Err(Error::Invalid("graph root ID is required".into())); }
     validate(spec)?; crate::design::validate_theme(theme)?;
-    let prefix = format!("{id}-{}", &format!("{:x}", Sha256::digest(crate::canonical::bytes(spec)?))[..10]);
+    let prefix = format!("{id}-{}", &format!("{:x}", Sha256::digest(crate::canonical::bytes(&(RENDER_LAYOUT_VERSION, spec))?))[..10]);
     let mut children = vec![text(format!("{prefix}-title"), [16.0, 0.0, 1120.0, 40.0], &spec.title, 28.0, "@dk1", TextAlign::Left, true), text(format!("{prefix}-subtitle"), [16.0, 44.0, 1120.0, 26.0], &spec.subtitle, 16.0, "@dk2", TextAlign::Left, false)];
     for index in ordered_group_indices(spec)? {
         let region = &spec.groups[index];
@@ -329,15 +381,15 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
         }
         children.push(text(format!("{prefix}-nt-{}", node.id), content, &node.label, node.font_size, &node.color, TextAlign::Center, true));
     }
+    let mut label_bounds = Vec::new();
     for edge in &spec.edges {
         if edge.label.is_empty() { continue; }
         let source = spec.nodes.iter().find(|node| node.id == edge.source).ok_or_else(|| Error::Invalid("unknown source node".into()))?;
         let target = spec.nodes.iter().find(|node| node.id == edge.target).ok_or_else(|| Error::Invalid("unknown target node".into()))?;
-        let start = endpoint(source, edge.source_port, target); let end = endpoint(target, edge.target_port, source);
-        let width = (edge.label.chars().count() as f64 * 12.0 + 24.0).clamp(64.0, 280.0);
-        let mut label = shape(format!("{prefix}-et-{}", edge.id), [((start.0 + end.0 - width) / 2.0).clamp(0.0, WIDTH - width), ((start.1 + end.1) / 2.0 - 16.0).clamp(CONTENT_TOP, HEIGHT - 32.0), width, 32.0], "rect", "@lt1", "@lt1");
-        if let Element::Shape { text, font_size, format, stroke_width, .. } = &mut label { *text = edge.label.clone(); *font_size = 16.0; *stroke_width = 0.0; *format = TextFormat { alignment: TextAlign::Center, vertical: VerticalAlign::Middle, font_family: Some("@minor".into()), ..Default::default() }; }
-        children.push(label);
+        let width = (edge.label.chars().map(|character| if character.is_ascii() { 9.0 } else { 16.0 }).sum::<f64>() + 8.0).clamp(48.0, 280.0);
+        let bounds = relationship_label_bounds(spec, &children, &edge_points(source, target, edge), width, 28.0, &label_bounds);
+        children.push(text(format!("{prefix}-et-{}", edge.id), bounds, &edge.label, 16.0, "@dk1", TextAlign::Center, false));
+        label_bounds.push(bounds);
     }
     crate::layout::fit_part_text(&mut children, theme)?;
     let result = Element::Group { visual: None, id: id.into(), x: 64.0, y: 144.0, width: WIDTH, height: HEIGHT, view_width: WIDTH, view_height: HEIGHT, children };

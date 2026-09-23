@@ -19,6 +19,69 @@ fn node_icon(color: &str) -> Value {
     json!({"base64":picture["base64"],"mime_type":picture["mime_type"],"alt":picture["alt"]})
 }
 
+#[test]
+fn graph_relationship_labels_are_transparent_and_clear_of_routes() {
+    for (source, target, source_port, target_port, route) in [
+        ([80, 180], [500, 180], "right", "left", "straight"),
+        ([500, 180], [80, 180], "left", "right", "straight"),
+        ([280, 100], [280, 360], "bottom", "top", "straight"),
+        ([280, 360], [280, 100], "top", "bottom", "straight"),
+        ([80, 140], [720, 360], "right", "left", "elbow"),
+        ([80, 140], [720, 360], "right", "left", "straight"),
+        ([80, 88], [270, 88], "right", "left", "straight"),
+        ([80, 180], [256, 180], "right", "left", "straight"),
+    ] {
+        let spec = json!({"version":1,"title":"Clear relationship","nodes":[
+            {"id":"source","label":"Source","x":source[0],"y":source[1],"width":176,"height":80},
+            {"id":"target","label":"Target","x":target[0],"y":target[1],"width":176,"height":80}
+        ],"edges":[{"id":"traffic","source":"source","target":"target","label":"1 HTTPS","source_port":source_port,"target_port":target_port,"route":route}]});
+        let result = execute_request(json!({"op":"create_graph","id":"clear-label","spec":spec}));
+        if source == [80, 180] && target == [256, 180] {
+            assert!(result.unwrap_err().to_string().contains("connector path must have length"));
+            continue;
+        }
+        let rendered = result.unwrap();
+        let children = rendered["children"].as_array().unwrap();
+        let label = children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-et-traffic")).unwrap();
+        assert_eq!(label["type"], "text", "Relationship labels must not have a shape background or fixed shape padding");
+        assert!(label.get("fill").is_none());
+        let left = label["x"].as_f64().unwrap(); let top = label["y"].as_f64().unwrap();
+        let right = left + label["width"].as_f64().unwrap(); let bottom = top + label["height"].as_f64().unwrap();
+        assert!(left >= 0.0 && right <= 1152.0 && top >= 88.0 && bottom <= 512.0);
+        let typed: aislide_core::graphs::GraphSpec = serde_json::from_value(spec).unwrap();
+        let points = aislide_core::graphs::edge_points(&typed.nodes[0], &typed.nodes[1], &typed.edges[0]);
+        for segment in points.windows(2) {
+            for step in 0..=200 {
+                let fraction = f64::from(step) / 200.0;
+                let horizontal = segment[0][0] + (segment[1][0] - segment[0][0]) * fraction;
+                let vertical = segment[0][1] + (segment[1][1] - segment[0][1]) * fraction;
+                assert!(horizontal < left - 2.0 || horizontal > right + 2.0 || vertical < top - 2.0 || vertical > bottom + 2.0,
+                    "Relationship label overlaps its {route} connector: {label}");
+            }
+        }
+        let connector = children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-e-traffic")).unwrap();
+        assert_eq!(connector["arrow"], true);
+        assert!(connector["start"]["element_id"].as_str().unwrap().ends_with("-n-source"));
+        assert!(connector["end"]["element_id"].as_str().unwrap().ends_with("-n-target"));
+    }
+}
+
+#[test]
+fn graph_relationship_labels_use_visible_icon_bounds_for_short_elbows() {
+    let icon = node_icon("#007a4d");
+    let spec = json!({"version":1,"title":"Short service route","nodes":[
+        {"id":"endpoint","label":"Private endpoint","presentation":"icon","icon":icon,"x":352,"y":360,"width":176,"height":128,"font_size":12},
+        {"id":"sql","label":"SQL Database","presentation":"icon","icon":icon,"x":620,"y":352,"width":152,"height":128,"font_size":12}
+    ],"edges":[{"id":"data","source":"endpoint","target":"sql","label":"3 SQL","source_port":"right","target_port":"left","route":"elbow"}]});
+    let rendered = execute_request(json!({"op":"create_graph","id":"short-label","spec":spec})).unwrap();
+    let label = rendered["children"].as_array().unwrap().iter().find(|child| child["id"].as_str().unwrap().ends_with("-et-data")).unwrap();
+    assert_eq!(label["type"], "text");
+    let center = label["y"].as_f64().unwrap() + label["height"].as_f64().unwrap() / 2.0;
+    assert!((center - 420.0).abs() <= 48.0, "Keep the label next to the short route, not below the service frames: {label}");
+    let preview = execute_request(json!({"op":"render_element_preview","element":label})).unwrap();
+    assert!(preview["warnings"].as_array().unwrap().iter().all(|warning| !warning["code"].as_str().unwrap().contains("OVERFLOW")), "The complete short label must remain visible: {}", preview["warnings"]);
+}
+
 fn cloud_graph() -> Value {
     let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#007a4d"/></svg>"##;
     let icon = execute_request(json!({"op":"create_graph_icon","base64":STANDARD.encode(svg),"mime_type":"image/svg+xml","alt":"Synthetic service"})).unwrap();
@@ -37,7 +100,7 @@ fn cloud_graph() -> Value {
 fn cloud_graph_icon_presentation_and_nested_boundaries() {
     use sha2::{Digest, Sha256};
     let legacy = execute_request(json!({"op":"create_graph","id":"legacy","spec":graph()})).unwrap();
-    assert_eq!(format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap())), "6f9b876b9405000bc5133294655da9600facbfc148584dcfd09a49e55670a517");
+    assert_eq!(format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap())), "256f078a12873dfc67e884507ea071a9ab1f8dcb7ffee599aa4bd8f5806e02ea");
     let spec = cloud_graph();
     let element = execute_request(json!({"op":"create_graph","id":"cloud-test","spec":spec})).unwrap();
     let children = element["children"].as_array().unwrap();

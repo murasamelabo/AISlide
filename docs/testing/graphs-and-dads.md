@@ -1,5 +1,15 @@
 ﻿# Architecture Graphs And DADS-Inspired Studio
 
+## 2026-09-21 Relationship Labels
+
+Relationship labels now use transparent native text instead of white-filled rectangles. The shared core selects a nearby side of the actual connector segments: above/below horizontal routes and beside vertical routes, considering visible node artwork/text, group headings and earlier labels. Routes and connector attachments are unchanged. Placement is bounded and best-effort, not general obstacle-avoiding routing. Studio consumes the same rendered label bounds and matches generated edge/label IDs exactly.
+
+The internal render-layout version participates in generated child IDs. This permits explicit updates of older managed graphs without replacing a normalized native object with an incompatible type at the same ID; unchanged presentations retain byte-identical no-op saves. Text labels also avoid the fixed shape-text padding that clipped short labels such as `3 SQL` in static previews.
+
+Final focused verification passed all **23 graph integration tests** and **16 Edge graph workflows**, with no skips or retries in the final run. Frontend build/typecheck, scoped lint and editor diagnostics passed. Regression coverage includes horizontal, vertical, reverse, diagonal and elbow routes; short icon-to-icon connections; zero-length-route rejection; full label rendering; and valid edge IDs with overlapping suffixes. Earlier axe/ResizeObserver failures remain recorded, not suppressed or counted as passes.
+
+A separate 27-slide sample copy updates only the three cloud diagrams. The other 24 slide XML parts and 31 existing media parts are byte-identical to the original; graph metadata, reopen/no-op save and Undo remain verified. AWS, Azure and GCP PNG previews show the complete labels and unobscured arrows. Evidence: `.artifacts/graph-label-fix-ms8SBq` and `.artifacts/graph-label-text-final-htdB6y`. No new Office visual-parity test, commit/push or regular desktop installation was performed for this correction.
+
 ## 2026-09-20 Cloud And Workspace Qualification
 
 **Qualified candidate; publication and regular installation recorded separately.** The current NSIS candidate is built, not yet normally installed or publicly committed. Cloud icons, icon-first nodes, nested boundaries and resizable panes share the existing core/SDK/MCP contracts. See [API limits](../api.md#architecture-graphs), [cloud setup and workflow](../authoring/cloud-icons.md) and [pane behavior](workspace-ux.md#resizable-workspace-panels).

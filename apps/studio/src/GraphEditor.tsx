@@ -29,7 +29,7 @@ const kinds: Record<GraphNodeKind, { preset: string; name: string; icon: typeof 
 const portPositions = { top: Position.Top, left: Position.Left, bottom: Position.Bottom, right: Position.Right }
 type Bounds = { x: number; y: number; width: number; height: number }
 type GraphFlowNode = Node<{ item: GraphNode | GraphGroup; boundary: boolean; theme?: Theme; label?: Element; icon?: Element; resize: (id: string, bounds: Bounds) => void }>
-type GraphFlowEdge = Edge<{ points?: [number, number][]; elbow: boolean }>
+type GraphFlowEdge = Edge<{ points?: [number, number][]; elbow: boolean; label?: Element; theme?: Theme }>
 type View = 'edit' | 'preview' | 'json'
 type IconTarget = { kind: 'new' } | { kind: 'node'; node: GraphNode } | { kind: 'group'; group: GraphGroup }
 
@@ -87,7 +87,11 @@ function GraphEdgeView({ sourceX, sourceY, targetX, targetY, sourcePosition, tar
   const stable = points && Math.abs(points[0][0] - sourceX) < 2 && Math.abs(points[0][1] - sourceY) < 2 && Math.abs(points.at(-1)![0] - targetX) < 2 && Math.abs(points.at(-1)![1] - targetY) < 2
   const fallback = data?.elbow ? getSmoothStepPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, borderRadius: 0 }) : getStraightPath({ sourceX, sourceY, targetX, targetY })
   const path = stable ? points.map(([horizontal, vertical], index) => `${index ? 'L' : 'M'}${horizontal},${vertical}`).join(' ') : fallback[0]
-  return <><BaseEdge path={path} markerEnd={markerEnd} markerStart={markerStart} style={{ ...style, strokeWidth: selected ? 3 : 2 }} />{label && <EdgeText x={(sourceX + targetX) / 2} y={(sourceY + targetY) / 2} label={label} labelStyle={{ fontSize: 16, fill: 'var(--text)' }} labelBgStyle={{ fill: 'var(--surface)' }} labelBgPadding={[8, 5]} labelBgBorderRadius={0} />}</>
+  const nativeLabel = data?.label
+  const horizontal = Math.abs(targetX - sourceX) >= Math.abs(targetY - sourceY)
+  const shiftX = points && !stable ? (sourceX + targetX - points[0][0] - points.at(-1)![0]) / 2 : 0
+  const shiftY = points && !stable ? (sourceY + targetY - points[0][1] - points.at(-1)![1]) / 2 : 0
+  return <><BaseEdge path={path} markerEnd={markerEnd} markerStart={markerStart} style={{ ...style, strokeWidth: selected ? 3 : 2 }} />{label && (nativeLabel ? <foreignObject className="graph-edge-label" x={nativeLabel.x + shiftX} y={nativeLabel.y + shiftY} width={nativeLabel.width} height={nativeLabel.height} style={{ pointerEvents: 'none', overflow: 'visible' }}><Content element={nativeLabel} theme={data?.theme} /></foreignObject> : <EdgeText x={fallback[1] + (horizontal ? 0 : String(label).length * 4.5 + 12)} y={fallback[2] - (horizontal ? 22 : 0)} label={label} labelShowBg={false} labelStyle={{ fontSize: 16, fill: 'var(--text)' }} />)}</>
 }
 const nodeTypes = { graphNode: GraphNodeView }
 const edgeTypes = { graphEdge: GraphEdgeView }
@@ -192,6 +196,7 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     selection.current = selection.current.filter((id) => [...next.nodes, ...next.edges ?? [], ...next.groups ?? []].some((entry) => entry.id === id))
     setSelected(selection.current)
     const nativeChildren = rendered?.type === 'group' ? rendered.children : []
+    const nativePrefix = nativeChildren[0]?.id.replace(/-title$/, '')
     const groups = next.groups ?? []
     const ordered = [...groups].sort((left, right) => groupAncestors(groups, left.parent).length - groupAncestors(groups, right.parent).length)
     const members: GraphFlowNode[] = ordered.map((item) => {
@@ -217,9 +222,10 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
         const vertical = other.y + (other.height ?? 80) / 2 - node.y - (node.height ?? 80) / 2
         return Math.abs(horizontal) >= Math.abs(vertical) ? horizontal >= 0 ? 'right' : 'left' : vertical >= 0 ? 'bottom' : 'top'
       }
-      const native = nativeChildren.find((entry) => entry.type === 'connector' && entry.id.endsWith(`-e-${item.id}`))
+      const native = nativeChildren.find((entry) => entry.type === 'connector' && entry.id === `${nativePrefix}-e-${item.id}`)
       const points = native?.type === 'connector' ? native.routing?.points.map(([horizontal, vertical]) => [native.x + horizontal * native.width, native.y + vertical * native.height] as [number, number]) : undefined
-      return { id: item.id, type: 'graphEdge', source: item.source, target: item.target, sourceHandle: item.source_port && item.source_port !== 'auto' ? item.source_port : automatic(source, target), targetHandle: item.target_port && item.target_port !== 'auto' ? item.target_port : automatic(target, source), label: item.label, data: { points, elbow: item.route === 'elbow' }, markerEnd: item.arrow === false ? undefined : { type: MarkerType.ArrowClosed, color: cssColor(item.color ?? '@dk2', theme) }, markerStart: item.start_arrow ? { type: MarkerType.ArrowClosed, color: cssColor(item.color ?? '@dk2', theme) } : undefined, style: { stroke: cssColor(item.color ?? '@dk2', theme), strokeDasharray: item.dashed ? '8 5' : undefined }, selected: selection.current.includes(item.id), ariaLabel: `Connection ${item.label || `${source.label} to ${target.label}`}` }
+      const label = nativeChildren.find((entry) => entry.type === 'text' && entry.id === `${nativePrefix}-et-${item.id}`)
+      return { id: item.id, type: 'graphEdge', source: item.source, target: item.target, sourceHandle: item.source_port && item.source_port !== 'auto' ? item.source_port : automatic(source, target), targetHandle: item.target_port && item.target_port !== 'auto' ? item.target_port : automatic(target, source), label: item.label, data: { points, elbow: item.route === 'elbow', label, theme }, markerEnd: item.arrow === false ? undefined : { type: MarkerType.ArrowClosed, color: cssColor(item.color ?? '@dk2', theme) }, markerStart: item.start_arrow ? { type: MarkerType.ArrowClosed, color: cssColor(item.color ?? '@dk2', theme) } : undefined, style: { stroke: cssColor(item.color ?? '@dk2', theme), strokeDasharray: item.dashed ? '8 5' : undefined }, selected: selection.current.includes(item.id), ariaLabel: `Connection ${item.label || `${source.label} to ${target.label}`}` }
     }))
     setPreview(rendered ?? null)
   }, [resize, theme])

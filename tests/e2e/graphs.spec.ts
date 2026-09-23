@@ -5,6 +5,51 @@ import { readFile } from 'node:fs/promises';
 import { icons as lucideIcons } from 'lucide-react';
 import type { ArchitectureIconCatalog, ArchitectureIconAssets } from '../../packages/client/types';
 
+test('relationship labels have no background and remain clear of connector paths', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'New presentation', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await expect(dialog.locator('.graph-edge-label')).toHaveCount(2);
+  await expect(dialog.locator('.react-flow__edge-textbg')).toHaveCount(0);
+  await expect(dialog.locator('.graph-edge-label').first()).toContainText('HTTPS');
+  await page.evaluate(() => document.fonts.ready);
+  const overlaps = await dialog.locator('.react-flow__edge').evaluateAll((edges) => edges.map((edge) => {
+    const label = edge.querySelector('.graph-edge-label')!;
+    const bounds = label.getBoundingClientRect();
+    const path = edge.querySelector<SVGPathElement>('.react-flow__edge-path')!;
+    const matrix = path.getScreenCTM()!;
+    const length = path.getTotalLength();
+    const crossing = Array.from({ length: 201 }, (_, index) => {
+      const point = path.getPointAtLength(length * index / 200);
+      const screen = new DOMPoint(point.x, point.y).matrixTransform(matrix);
+      return screen.x >= bounds.left && screen.x <= bounds.right && screen.y >= bounds.top && screen.y <= bounds.bottom;
+    }).some(Boolean);
+    return { crossing, width: bounds.width, height: bounds.height, background: getComputedStyle(label).backgroundColor };
+  }));
+  expect(overlaps).toHaveLength(2);
+  for (const label of overlaps) {
+    expect(label.crossing).toBe(false);
+    expect(label.width).toBeGreaterThan(0);
+    expect(label.height).toBeGreaterThan(0);
+    expect(label.background).toBe('rgba(0, 0, 0, 0)');
+  }
+  await dialog.getByRole('tab', { name: 'Preview', exact: true }).click();
+  await expect(dialog.locator('.graph-native-preview')).toContainText('HTTPS');
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  const input = dialog.getByLabel('Graph JSON', { exact: true });
+  const spec = JSON.parse(await input.inputValue());
+  spec.edges = [
+    { ...spec.edges[0], id: 'copy-et-request', label: 'First relationship' },
+    { ...spec.edges[1], id: 'request', label: 'Second relationship' },
+  ];
+  await input.fill(JSON.stringify(spec));
+  await dialog.getByRole('tab', { name: 'Canvas', exact: true }).click();
+  await expect(dialog.locator('.react-flow__edge[data-id="request"] .graph-edge-label')).toContainText('Second relationship');
+  await expect(dialog.locator('.react-flow__edge[data-id="copy-et-request"] .graph-edge-label')).toContainText('First relationship');
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+});
+
 test('direct service icon picker cancels without changing the graph or losing focus', async ({ page }) => {
   await openSample(page);
   await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
