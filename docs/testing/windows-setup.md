@@ -1,8 +1,70 @@
 ﻿# Windows Setup And Start Menu
 
-Date: 2026-09-20. Windows setup uses the existing Tauri CLI 2.11.4 and its NSIS template. The authorized regular desktop update is complete, including resizable workspace panes and local cloud architecture icons from published commit [ec88ecb4111b09c1b780da09a1908ec19f99bba2](https://github.com/murasamelabo/AISlide/commit/ec88ecb4111b09c1b780da09a1908ec19f99bba2). The source was committed and pushed before installation; this document records the subsequent actual update. No signing, project-license choice, force push, visibility change or release/binary publication was performed. See [workspace verification](workspace-ux.md#resizable-workspace-panels) and [cloud icon setup and terms](../authoring/cloud-icons.md).
+Date: 2026-09-23. Windows setup uses Tauri CLI 2.11.4 and its NSIS template. The regular desktop update now includes transparent relationship labels, the shared core for [MCP visual authoring and delivery bundles](../authoring/README.md), and keyboard access to notes and scrolling toolbars. Source commit [3c20560a38b72d384287dc4a078c458a3fc70e7c](https://github.com/murasamelabo/AISlide/commit/3c20560a38b72d384287dc4a078c458a3fc70e7c) was pushed before installation. No signing, project-license choice, force push, visibility change or release/binary publication was performed.
 
 ## Current Verified Update
+
+The regular current-user update and normal Start Menu launch were verified at
+**2026-09-23T04:21:59Z**. AISlide was already closed before the installer ran
+once and exited 0. No user process was terminated, no elevation or uninstall
+was used, and the existing HKCU registration and argument-free shortcut were
+preserved. The visible, responding app was left open with its normal WebView
+profile and no test or remote-debugging flags.
+
+| Artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| Unsigned debug x64 GNU NSIS installer | 123,521,080 | `6dfbad81b81e05f22a314234a4cfc8ced49de1a06baffb5a7efe21ee42e9cac9` |
+| Source bundle executable | 959,813,120 | `d6187b000823657a8b8455abd966020f651e7116184768aee8f298652b60a53d` |
+| Installed executable | 959,813,120 | `4924337bffadec60bdcb13c9c4e3d62bf538c72b93ff2fda808a38316a1181c5` |
+
+Every installed byte matches the qualified source except the expected three
+Tauri marker bytes at offset **174306440** (`UNK` to `NSS`). The candidate and
+actual installed executable each passed the same **3/3 native scenarios**:
+Fit/wheel and resizable panes; editing, Undo and native Save-Cancel-Save/PPTX
+reopening; and local cloud images, nested graph edits and metadata reopening.
+There were no failures, skips or cancellations. Test-owned processes and
+temporary WebView/recovery directories were cleaned before normal launch.
+Eight candidate screenshots decoded as nonblank; representative pane and
+nested-graph views were inspected. A separate restart-recovery scenario and
+installer/uninstaller lifecycle were not rerun.
+
+The 1,861-file preservation snapshot stayed unchanged through packaging,
+installation, isolated tests and immediately before normal launch. It covers
+settings/recovery content, selected WebView storage, WebView inventory,
+model metadata and the local icon packs. Model contents were not rehashed.
+Normal startup may subsequently modify its profile. All 366 source snapshots,
+including 11 unrelated local encoding changes, were preserved during the
+desktop update. No user presentation was opened or overwritten.
+
+The feature baseline passed Rust **559** with six existing ignored cases and
+Node **182/182**. After the keyboard correction, the four affected browser
+suites passed **79/79** without retries or skips; Studio build/typecheck and
+lint passed with nine pre-existing warnings in the local dirty worktree.
+The old toolbar tests prohibited the horizontal scrolling already documented
+in [workspace behavior](workspace-ux.md#resizable-workspace-panels). Their
+replacement checks every enabled control through real Tab navigation and
+full viewport visibility at 1440px and 390px, while retaining page, header
+and dialog overflow assertions. Notes retain the full-editor axe check and
+now have a named, keyboard-focusable region.
+
+Private evidence: `.artifacts/mcp-publish-20260923/desktop-final.json`,
+`build.json`, `candidate-native.log`, `installed-native.log`, and
+`affected-browser.stdout.log`. The earlier feature baseline is recorded in
+`.artifacts/p1-delivery-verify-xIXDIE/verification.json`. At the post-install
+check, [feature CI](https://github.com/murasamelabo/AISlide/actions/runs/35816171711)
+had passed its core, MCP, SDK, build and lint stages and was still running
+browser tests; this is not a completed remote CI approval.
+
+This remains an unsigned debug x64 GNU build on Windows 11 ARM64, not a signed
+release/native ARM64/MSVC or Office visual-parity qualification. Vendor artwork
+and model weights are not bundled. The standalone MCP server uses the updated
+repository tools and CLI; desktop installation does not restart an existing
+MCP connection or preserve its in-memory handles across a restart. Save any
+active MCP document before reconnecting to expose the new tools.
+
+## Earlier Cloud Update
+
+**Historical: the 2026-09-20 update below is superseded by the current update.**
 
 The regular per-user update and normal Start Menu launch were verified at
 **2026-09-20T00:25:36Z**. A fresh process check confirmed AISlide was already
