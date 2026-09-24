@@ -2,13 +2,14 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { chromium, expect } from '@playwright/test';
+import { strFromU8, unzipSync } from 'fflate';
 import { requestCore } from './core-client.mjs';
 import { startProviderFixture, fixtureEnvironment } from './testing/provider-fixture.mjs';
 
@@ -46,9 +47,21 @@ async function launchOwnedNative(context, recovery, endpoint) {
   await new Promise((resolveClose, reject) => reservation.close(error => error ? reject(error) : resolveClose()));
   const executable = process.env.AISLIDE_NATIVE_TEST_EXE ?? join(root, 'apps/studio/src-tauri/target/debug/aislide-studio.exe');
   const app = spawn(executable, [`--aislide-owned-test=${recovery.env.AISLIDE_TEST_RECOVERY_OWNER}`], {
-    cwd: root, stdio: 'ignore', shell: false,
+    cwd: root, stdio: ['ignore', 'ignore', 'pipe'], shell: false,
     env: { ...process.env, ...fixtureEnvironment(endpoint), ...recovery.env,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --remote-debugging-address=127.0.0.1`, WEBVIEW2_USER_DATA_FOLDER: profile },
+  });
+  let nativeErrors = '';
+  let nativePanic = false;
+  app.stderr.setEncoding('utf8');
+  app.stderr.on('data', chunk => {
+    const combined = `${nativeErrors}${chunk}`;
+    nativePanic ||= combined.includes('panicked at');
+    nativeErrors = combined.slice(-8192);
+  });
+  context.after(() => {
+    if (nativeErrors) context.diagnostic(`Owned native stderr: ${nativeErrors}`);
+    assert.equal(nativePanic, false, 'The owned native host must not panic');
   });
   const exited = new Promise(resolveClose => app.once('close', resolveClose));
   let browser;
@@ -78,14 +91,53 @@ async function launchOwnedNative(context, recovery, endpoint) {
   return { app, page, browser, profile, stop };
 }
 
-async function requestOwnedClose(application) {
+async function requestOwnedClose(application, windowClass = 'Tauri Window') {
+  assert.ok(['Tauri Window', 'Tao Thread Event Target'].includes(windowClass));
+  const ownership = application.spawnargs.find(argument => /^--aislide-owned-test=[a-f0-9-]{36}$/.test(argument));
+  assert.ok(ownership, 'Only marked test-owned applications may receive native close requests');
+  assert.equal(application.exitCode, null);
+  assert.equal(application.signalCode, null);
   await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
     $ErrorActionPreference = 'Stop'
-    Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class AISlideOwnedClose { [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool PostMessage(IntPtr handle, uint message, IntPtr word, IntPtr data); }'
+    Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Text; public static class AISlideOwnedClose {
+      public delegate bool Callback(IntPtr handle, IntPtr data);
+      [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+      [DllImport("user32.dll")] public static extern bool EnumWindows(Callback callback, IntPtr data);
+      [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
+      [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr handle, StringBuilder name, int length);
+      [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr handle, out Rect rect);
+      [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr handle);
+      [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(IntPtr handle, uint message, IntPtr word, IntPtr data, uint flags, uint timeout, out UIntPtr result);
+      [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr handle);
+    }'
     $owned = Get-Process -Id ${application.pid} -ErrorAction Stop
-    if ($owned.Path -ne '${application.spawnfile.replaceAll("'", "''")}' -or $owned.MainWindowHandle -eq 0) { throw 'Owned test window identity changed' }
-    if (-not [AISlideOwnedClose]::PostMessage($owned.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) { throw 'Owned close request failed' }
-  `], { windowsHide: true });
+    if ($owned.Path -ne '${application.spawnfile.replaceAll("'", "''")}') { throw 'Owned test process identity changed' }
+    $identity = Get-CimInstance Win32_Process -Filter 'ProcessId=${application.pid}' -ErrorAction Stop
+    if ($identity.ParentProcessId -ne ${process.pid} -or -not $identity.CommandLine.Contains('${ownership}')) { throw 'Owned test process marker or parent changed' }
+    $handles = [System.Collections.Generic.List[System.IntPtr]]::new()
+    $windows = [System.Collections.Generic.List[object]]::new()
+    $enumerate = [AISlideOwnedClose+Callback]{ param($handle, $data)
+      $ownerProcess = [uint32]0
+      [void][AISlideOwnedClose]::GetWindowThreadProcessId($handle, [ref]$ownerProcess)
+      if ($ownerProcess -eq ${application.pid}) {
+        $name = [System.Text.StringBuilder]::new(256)
+        [void][AISlideOwnedClose]::GetClassName($handle, $name, 256)
+        $windows.Add(@{ className = $name.ToString(); visible = [AISlideOwnedClose]::IsWindowVisible($handle) })
+        if ($name.ToString() -eq '${windowClass}') {
+          $bounds = [AISlideOwnedClose+Rect]::new()
+          if (-not [AISlideOwnedClose]::GetWindowRect($handle, [ref]$bounds)) { throw 'Owned window bounds unavailable' }
+          $positiveArea = $bounds.Right -gt $bounds.Left -and $bounds.Bottom -gt $bounds.Top
+          if ('${windowClass}' -ne 'Tauri Window' -or ($positiveArea -and [AISlideOwnedClose]::IsWindowVisible($handle))) { $handles.Add($handle) }
+        }
+      }
+      return $true
+    }
+    [void][AISlideOwnedClose]::EnumWindows($enumerate, [IntPtr]::Zero)
+    if ($handles.Count -ne 1) { throw ('Expected one exact owned test window: ' + ($windows | ConvertTo-Json -Compress)) }
+    $result = [UIntPtr]::Zero
+    if ([AISlideOwnedClose]::SendMessageTimeout($handles[0], 0x0010, [IntPtr]::Zero, [IntPtr]::Zero, 2, 5000, [ref]$result) -eq [IntPtr]::Zero) { throw 'Owned close request failed' }
+    if ('${windowClass}' -eq 'Tao Thread Event Target' -and -not [AISlideOwnedClose]::IsWindow($handles[0])) { throw 'The auxiliary event target must survive its close request' }
+  `], { windowsHide: true, timeout: 15000 });
 }
 
 test('native unsaved close cancels safely then discards only on explicit confirmation', { timeout: 90000, skip: process.platform !== 'win32' }, async context => {
@@ -147,20 +199,12 @@ test('native close confirmation does not inherit an earlier failed operation err
   await page.getByRole('button', { name: 'New presentation', exact: true }).click();
   await expect(page.locator('.dirty-indicator')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
-  const saveEndpoint = await page.evaluate(() => window.__TAURI_INTERNALS__.convertFileSrc('save_presentation', 'ipc'));
-  let injected = false;
-  await page.route(saveEndpoint, async route => {
-    if (route.request().method() !== 'POST' || injected) return route.continue();
-    injected = true;
-    await route.fulfill({
-      status: 200,
-      headers: { 'Content-Type': 'application/json', 'Tauri-Response': 'error', 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'Tauri-Response' },
-      body: JSON.stringify('runtime error: failed to send message to the webview'),
-    });
-  });
+  await page.getByRole('button', { name: 'Add rectangle', exact: true }).click();
+  const position = page.getByRole('spinbutton', { name: 'Element x', exact: true });
+  await position.fill('101');
+  await expect(position).toHaveValue('101');
   await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('failed to send message to the webview');
-  assert.equal(injected, true, 'The failed native save response must reach the UI');
+  await expect(page.getByRole('alert')).toHaveText('Apply or cancel the current object edits before continuing');
   await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
   await requestOwnedClose(app);
   const unsaved = page.getByRole('dialog', { name: 'Unsaved changes', exact: true });
@@ -172,17 +216,57 @@ test('native close confirmation does not inherit an earlier failed operation err
     }));
     throw error;
   });
-  injected = false;
   await unsaved.getByRole('button', { name: 'Save and continue', exact: true }).click();
-  await expect(unsaved.getByRole('alert')).toContainText('failed to send message to the webview');
-  assert.equal(injected, true, 'A new failed save inside the close dialog must remain visible');
+  await expect(unsaved.getByRole('alert')).toHaveText('Apply or cancel the current object edits before saving');
   await expect(unsaved.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled();
   assert.equal(app.exitCode, null, 'A failed save must not close the native document');
   await requestOwnedClose(app);
-  await expect(unsaved.getByRole('alert')).toContainText('failed to send message to the webview');
+  await expect(unsaved.getByRole('alert')).toHaveText('Apply or cancel the current object edits before saving');
   await unsaved.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(page.locator('.dirty-indicator')).toBeVisible();
+  await expect(position).toHaveValue('101');
   assert.equal(app.exitCode, null);
+});
+
+test('native save remains usable after an auxiliary window close request', { timeout: 90000, skip: process.platform !== 'win32' }, async context => {
+  const recovery = await ownedRecovery(context);
+  const fixture = await startProviderFixture(await requestCore({ op: 'sample' }));
+  context.after(() => fixture.close());
+  const { app, page } = await launchOwnedNative(context, recovery, fixture.endpoint);
+  await page.getByRole('button', { name: 'New presentation', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Add chart', exact: true }).click();
+  await expect(page.locator('.slide-stage .element-hitbox')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+  await requestOwnedClose(app, 'Tao Thread Event Target');
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  await nativeSaveDialog(app.pid, 'cancel').catch(async error => {
+    context.diagnostic(`Save after auxiliary close: ${await page.getByRole('alert').allTextContents()}`);
+    throw error;
+  });
+  await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+  await expect(page.locator('.dirty-indicator')).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  const destination = join(recovery.directory, 'Synthetic-dispatch-save.pptx');
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  await nativeSaveDialog(app.pid, 'save', destination);
+  await expect(page.locator('.dirty-indicator')).toHaveCount(0);
+  const archive = unzipSync(await readFile(destination));
+  const charts = Object.keys(archive).filter(name => /^ppt\/charts\/chart\d+\.xml$/.test(name));
+  assert.equal(charts.length, 1);
+  const values = await page.evaluate(xml => {
+    const document = new DOMParser().parseFromString(xml, 'application/xml');
+    const namespace = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
+    return [...document.getElementsByTagNameNS(namespace, 'numCache')].flatMap(cache => [...cache.getElementsByTagNameNS(namespace, 'v')].map(value => Number(value.textContent)));
+  }, strFromU8(archive[charts[0]]));
+  assert.deepEqual(values, [4, 7, 5]);
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles(destination);
+  await expect(page.locator('.document-name')).toContainText('Synthetic-dispatch-save.pptx');
+  await expect(page.locator('.slide-stage .element-hitbox')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await requestOwnedClose(app);
+  await expect.poll(() => app.exitCode, { timeout: 10000 }).toBe(0);
 });
 
 async function nativeSaveDialog(processId, action, destination = '') {

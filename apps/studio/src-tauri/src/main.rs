@@ -1,6 +1,8 @@
 ﻿#![cfg_attr(all(target_os = "windows", not(test)), windows_subsystem = "windows")]
 
 mod requests;
+#[cfg(windows)]
+mod windows;
 use requests::RequestGate;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
@@ -112,6 +114,8 @@ fn main() {
         .manage(RequestGate::default())
         .manage(RecoveryGate::default())
         .setup(|app| {
+            #[cfg(windows)]
+            windows::protect_event_target()?;
             app.manage(RecoveryRoot(recovery_root(app.handle()).map_err(std::io::Error::other)?));
             Ok(())
         })

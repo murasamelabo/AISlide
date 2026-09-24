@@ -2,6 +2,32 @@
 
 Date: 2026-09-23. Windows setup uses Tauri CLI 2.11.4 and its NSIS template. The regular desktop update now includes transparent relationship labels, the shared core for [MCP visual authoring and delivery bundles](../authoring/README.md), and keyboard access to notes and scrolling toolbars. Source commit [3c20560a38b72d384287dc4a078c458a3fc70e7c](https://github.com/murasamelabo/AISlide/commit/3c20560a38b72d384287dc4a078c458a3fc70e7c) was pushed before installation. No signing, project-license choice, force push, visibility change or release/binary publication was performed.
 
+## Save And Close Reliability
+
+2026-09-24 candidate fix, not yet applied to the regular installation:
+closing the internal `Tao Thread Event Target` can leave the document visible
+while breaking native save dialogs and window destruction. An isolated old
+process reproduced `Presentation save worker failed`, with a dialog-plugin
+`RecvError` panic, after an explicit close request to that helper. The actual
+user process was inspected read-only; the original trigger is not established.
+
+Windows startup now protects only that helper's `WM_CLOSE`. Other messages,
+including session-end notifications and `WM_NCDESTROY`, continue through the
+existing subclass chain. The guard does not change document close prompts,
+publication rules, or process shutdown, and cannot repair an already-broken
+running process. Preserve unsaved work before restarting; do not force-close
+or enable plaintext recovery without consent.
+
+Native save/close regression tests passed 4/4; native Rust tests passed 14/14.
+The regression synchronously closes the test-owned helper, verifies that it
+survives, cancels and retries saving, checks saved chart values, reopens the
+PPTX, and exits normally. This is not Office visual-parity qualification.
+Test automation selects the exact document window by process ownership and
+class instead of relying on `Process.MainWindowHandle` / `CloseMainWindow`,
+which can select an internal helper. Never broadcast close messages to all
+windows of a process. Private evidence is under
+`.artifacts/publish-managed-20260924/save-dispatch-*.log`.
+
 ## Current Verified Update
 
 The regular current-user update and normal Start Menu launch were verified at
