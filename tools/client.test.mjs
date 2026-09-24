@@ -153,7 +153,7 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
   const filename = fileURLToPath(new URL('../packages/client/feedback-types.mts', import.meta.url)).replaceAll('\\', '/');
   const preamble = `
     import type { DocumentSession, AislideDocument, AuthoringOptions, AuthoringOperation, Frame, Crop,
-      Connection, ConnectorRouting, ConnectorSettings, PictureInput, SlideImportInput, GraphSpec, PartSpec, GuidedAuthoring } from './index.mjs';
+      Connection, ConnectorRouting, ConnectorSettings, PictureInput, SlideImportInput, GraphSpec, PartSpec, GuidedAuthoring, PreflightFinding } from './index.mjs';
     declare const session: DocumentSession;
     declare const source: AislideDocument;
     const options: AuthoringOptions = { expectedRevision: 0, expectedHash: 'hash', signal: new AbortController().signal };
@@ -204,10 +204,12 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
       session.updatePart('slide-1', { id: 'part', spec: part }), session.addGraph('slide-1', { id: 'graph', spec: graph }),
       session.updateGraph('slide-1', { id: 'graph', spec: graph }));
     const authoring: GuidedAuthoring = { headline_style: 'keyword', slide_limit: 128 };
-    void [results, part, authoring];
+    const diagnosticLevels: PreflightFinding['severity'][] = ['info', 'warning', 'error'];
+    void [results, part, authoring, diagnosticLevels];
   `);
   assert.deepEqual(diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')), []);
   for (const invalid of [
+    "const invalid: PreflightFinding['severity'] = 'approved';",
     "session.applyOperations([{ op: 'replace', path: '/deck', value: {} }]);",
     "session.setTextStyle('slide-1', { ids: ['text'], style: { font_size: 'large' } });",
     "const invalid: GuidedAuthoring = { headline_style: 'freeform' };",

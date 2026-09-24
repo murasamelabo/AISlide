@@ -194,7 +194,8 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
         if !layout.show_title {
             if let Element::Group { children, .. } = &mut result { drop(children.drain(..2)); }
         }
-        adopt_layout(&mut result, layout, if layout.show_title { 0.0 } else { 88.0 }, if layout.show_title { 512.0 } else { 424.0 }, theme)?;
+        let content_top = if layout.show_title { 0.0 } else if category == "venn" && variant == 1 { 80.0 } else { 88.0 };
+        adopt_layout(&mut result, layout, content_top, 512.0 - content_top, theme)?;
     }
     Ok(result)
 }
@@ -311,6 +312,47 @@ pub(super) fn display(value: f64) -> String { if value.abs() >= 1e9 { format!("{
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn titleless_venn_layout_preserves_body_content_for_all_variants() {
+        use sha2::{Digest, Sha256};
+        let fingerprint = |element: &Element| format!("{:x}", Sha256::digest(serde_json::to_vec(&serde_json::to_value(element).unwrap()).unwrap()));
+        for (variant, expected_default, expected_visible) in [
+            ("balanced", "d75e70f5a945d7b4a8cea42060789663ceff760ced1b5e3fe95720b159cfa80c", "b81ec53ac088970ee9e9db9e224e1347b7a451676991f1c37698238e3647789f"),
+            ("focus", "f3306940ce484b971e1b741d476643634cdb3d6a82e0471c7b02d052411fe6f7", "7c876f58ed924df909737c0d55628297ea15eee439b22e3e4384c92a2f7fd3ee"),
+            ("labeled", "6d027d1ee9e09482b1732e1437edf9c2d9db155f50b2d749a5a05baa6f4a8f22", "62622c972e0a67136556639839b7878196a5027fb2f3696da30b5fa965c8359b"),
+        ] {
+            let spec = PartSpec {
+                version: 1, preset: format!("venn/{variant}"), title: "Synthetic title".into(), subtitle: "Synthetic subtitle".into(),
+                data: PartData::Items {
+                    items: ["A", "B", "C"].into_iter().take(if variant == "focus" { 3 } else { 2 })
+                        .map(|label| PartItem { label: label.into(), detail: String::new(), value: None }).collect(),
+                    center: "Both".into(),
+                },
+                layout: None,
+            };
+            let original = create("venn", &spec).unwrap();
+            assert_eq!(fingerprint(&original), expected_default, "{variant}: default compatibility");
+            let mut visible = spec.clone();
+            visible.layout = Some(PartLayout { x: 40.0, y: 160.0, width: 1152.0, height: 512.0, show_title: true });
+            assert_eq!(fingerprint(&create("venn", &visible).unwrap()), expected_visible, "{variant}: title-visible compatibility");
+            let Element::Group { children: original_children, .. } = &original else { panic!("expected a group") };
+            let mut positioned = spec.clone();
+            positioned.layout = Some(PartLayout { x: 40.0, y: 160.0, width: 1152.0, height: 424.0, show_title: false });
+            let Element::Group { x, y, width, height, children, .. } = create("venn", &positioned).unwrap() else { panic!("expected a group") };
+            assert_eq!([x, y, width, height], [40.0, 160.0, 1152.0, 424.0]);
+            assert_eq!(children.len(), original_children.len() - 2);
+            if variant == "focus" {
+                assert_eq!(children[0].bounds().2, 0.0);
+                assert!((children[0].bounds().4 - 296.0 * 424.0 / 432.0).abs() < 0.000001);
+            }
+            for (child, before) in children.iter().zip(&original_children[2..]) {
+                let (_, left, top, width, height) = child.bounds();
+                assert!(left >= 0.0 && top >= 0.0 && left + width <= 1152.0 && top + height <= 424.001, "{variant}: {:?}", child.bounds());
+                if let (Element::Text { text, .. }, Element::Text { text: original_text, .. }) = (child, before) { assert_eq!(text, original_text); }
+            }
+        }
+    }
 
     #[test]
     fn bounded_layout_normalizes_nested_geometry_and_absolute_tracks_without_scaling_styles() {

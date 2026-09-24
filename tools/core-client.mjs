@@ -9,7 +9,7 @@ export function coreTimeout(request, encodedBytes = 0) {
   const base = encodedBytes > 4 * 1048576 || ['verify_session_recovery', 'prepare_recovery', 'verify_recovery_record'].includes(request?.op) ? 120_000 : 20_000;
   const managed = request?.op === 'apply_operations' && Array.isArray(request.operations)
     ? request.operations.slice(0, 128).filter(operation => ['add_part', 'update_part', 'add_graph', 'update_graph'].includes(operation?.op)).length
-    : ['insert_part', 'update_part', 'insert_graph', 'update_graph', 'apply_graph'].includes(request?.op) ? 1 : 0;
+    : ['insert_part', 'update_part', 'insert_graph', 'update_graph', 'apply_graph', 'set_accessibility'].includes(request?.op) ? 1 : 0;
   return managed ? Math.min(300_000, Math.max(base, 60_000 + managed * 5_000)) : base;
 }
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');

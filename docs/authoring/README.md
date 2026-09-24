@@ -165,6 +165,69 @@ Inserting a slide with an explicit layout fills every title placeholder with
 the supplied title; an empty title clears their sample text. `rename` still
 changes only the slide's displayed title, not existing text boxes.
 
+### Visual Layout Safety
+
+Run selected-page `preflight_presentation` and inspect `preview_presentation`
+before delivery. Diagnostics do not edit the document. Findings have `info`,
+`warning` or `error` severity; information is not an automatic visual approval.
+
+- `CONTAINER_CORNER_OVERFLOW` warns when an element frame enters the curved
+  corners of a likely rounded container. Inset or shorten accent bars; do not
+  run a flush, full-height rectangular bar across a rounded card's corners.
+- `CONTAINER_PADDING` warns when text has less than 8 slide pixels of clearance
+  from a likely container's transformed rounded boundary. Enlarge or reflow
+  the layout instead of shrinking all text; the curved corners also need clearance.
+- `CONNECTOR_BADGE_OVERLAP` is informational only for a compact, opaque,
+  numbered ellipse painted after a line that crosses near its center. A
+  transparent badge, foreground line, ordinary label or grazing line retains
+  `CONNECTOR_LABEL_INTERFERENCE`, as does a soft edge on the badge or its
+  parent group. Reserve separate label, badge and node-text
+  regions, then review the actual drawing.
+
+Container ownership is inferred from the smallest earlier visible rounded
+rectangle in the same drawing scope whose rectangular frame contains the
+element frame. Rotation, flips, nested transforms and explicit corner adjustment
+are considered. Frame corners are not painted glyph/pixel bounds, and arbitrary
+shapes, partly external elements or intended overlays need human review.
+Hidden or fully transparent, unoutlined containers do not create these warnings.
+The existing 8-page, 1024-visible-object and 256-finding budgets remain.
+
+For imported or unmanaged content, use guarded edits and before/after previews
+before applying a repair. Do not silently infer semantic roles, change reading
+order, move user content or globally suppress overlap findings. These checks
+are heuristics, not Office visual parity or accessibility certification.
+
+### Regeneration Feedback
+
+`set_accessibility` now uses the finite authoring budget of 65 seconds, or
+120 seconds when the encoded request exceeds 4 MiB. Other ordinary requests
+retain their 20-second limit. Progress is opt-in through an MCP progress token:
+the server reports elapsed time every five seconds, never an invented completion
+percentage or document content, and stops on completion or cancellation.
+Use a client deadline longer than the core budget; progress does not override
+a client's hard total timeout. This is not a measured speed improvement.
+
+Create the target first, then call `set_accessibility` with its slide/element
+IDs and current revision. Accessibility is not an `apply_operations` variant
+or an inline managed-part field yet; each changed call has its own Undo.
+After a timeout, inspect the current document/recovery state before deciding
+whether to retry. Do not fall back to unmanaged groups to bypass a timeout.
+
+Apply the theme before adding managed parts or graphs. A later `apply_theme`
+can change child font/color representation and invalidate the stored render
+fingerprint. This guard prevents silently overwriting manual edits. Automatic
+regeneration of unchanged managed diagrams after theme changes is not implemented.
+
+All three Venn variants accept `layout.show_title:false`. The three-set
+`venn/focus` body starts at 80px rather than the usual 88px, so titleless
+placement maps its full 432px body into the requested frame. Default/title-visible
+generation is unchanged. Other preset clipping guards remain, including chart
+labels that enter the title band. Review intended overlaps visually; do not
+globally suppress preflight warnings because some overlaps are intentional.
+
+The reported 52-slide PowerPoint comparison and accessibility results are user
+feedback, not a new independently reproduced visual or accessibility qualification.
+
 ### Managed Batch MCP Acceptance
 
 These three stages use actual registered MCP tools and synthetic content,

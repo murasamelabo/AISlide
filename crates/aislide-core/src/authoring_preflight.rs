@@ -1,5 +1,5 @@
 ﻿use crate::{document::Document, model::{Deck, Element, TextFormat}, Error, Result};
-use kurbo::{Affine, Point, Rect};
+use kurbo::{Affine, ParamCurveNearest, Point, Rect, RoundedRect, Shape};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -58,6 +58,9 @@ struct Object<'a> {
 	characters: usize,
 	route: Vec<Point>,
 	connections: Vec<&'a str>,
+	container: Option<RoundedRect>,
+	container_item: bool,
+	numbered_badge: bool,
 }
 
 fn minimum_font(format: &TextFormat, base: f64) -> f64 {
@@ -66,12 +69,13 @@ fn minimum_font(format: &TextFormat, base: f64) -> f64 {
 		.reduce(f64::min).unwrap_or(base)
 }
 
-fn collect<'a>(elements: &'a [Element], parent: Affine, scope: &str, objects: &mut Vec<Object<'a>>) -> Result<()> {
+fn collect<'a>(elements: &'a [Element], parent: Affine, scope: &str, ancestor_soft_edge: bool, objects: &mut Vec<Object<'a>>) -> Result<()> {
 	for element in elements {
 		if element.visual().is_some_and(|style| style.hidden) { continue; }
 		if objects.len() >= 1024 { return Err(Error::Limit("visual preflight supports at most 1024 visible objects per page".into())); }
 		let (id, x, y, width, height) = element.bounds();
 		let visual = element.visual().cloned().unwrap_or_default();
+		let soft_edge = ancestor_soft_edge || visual.soft_edge.is_some_and(|radius| radius > 0.0);
 		let rotation = match element { Element::Shape { rotation, .. } => *rotation, _ => visual.rotation.unwrap_or(0.0) };
 		let transform = parent * Affine::translate((x, y)) * Affine::translate((width / 2.0, height / 2.0))
 			* Affine::rotate(rotation.to_radians())
@@ -79,6 +83,16 @@ fn collect<'a>(elements: &'a [Element], parent: Affine, scope: &str, objects: &m
 			* Affine::translate((-width / 2.0, -height / 2.0));
 		let frame = Rect::new(0.0, 0.0, width, height);
 		let bounds = transform.transform_rect_bbox(frame);
+		let painted_fill = visual.opacity.unwrap_or(1.0) > 0.0
+			&& visual.gradient.as_ref().is_none_or(|gradient| gradient.stops().iter().any(|stop| stop.opacity > 0.0));
+		let container = match element {
+			Element::Shape { preset, text, fill, stroke_width, .. } if preset == "roundRect" && text.trim().is_empty() && visual.path.is_none()
+				&& (fill != "none" && painted_fill || *stroke_width > 0.0) => {
+				let adjustment = visual.adjustments.iter().find(|adjustment| adjustment.name == "adj").map_or(16667, |adjustment| adjustment.value);
+				Some(RoundedRect::from_rect(frame, width.min(height) * f64::from(adjustment) / 100000.0))
+			}
+			_ => None,
+		};
 		let coefficients = transform.as_coeffs();
 		let scale = coefficients[0].hypot(coefficients[1]).min(coefficients[2].hypot(coefficients[3]));
 		let (text, font_size, characters) = match element {
@@ -93,14 +107,27 @@ fn collect<'a>(elements: &'a [Element], parent: Affine, scope: &str, objects: &m
 			}
 			_ => (false, None, 0),
 		};
+		let container_item = text || match element {
+			Element::Rect { fill, .. } => fill != "none" && painted_fill,
+			Element::Shape { fill, stroke_width, .. } | Element::Polygon { fill, stroke_width, .. } => fill != "none" && painted_fill || *stroke_width > 0.0,
+			Element::Picture { .. } => painted_fill,
+			Element::Table { .. } => true,
+			_ => false,
+		};
+		let numbered_badge = matches!(element, Element::Shape { preset, text, fill, .. }
+			if preset == "ellipse" && fill != "none" && !text.trim().is_empty() && text.trim().len() <= 3 && text.trim().bytes().all(|byte| byte.is_ascii_digit()))
+			&& visual.path.is_none() && !soft_edge && visual.opacity.unwrap_or(1.0) == 1.0
+			&& visual.gradient.as_ref().is_none_or(|gradient| gradient.stops().iter().all(|stop| stop.opacity == 1.0))
+			&& (16.0..=64.0).contains(&bounds.width()) && (16.0..=64.0).contains(&bounds.height())
+			&& (0.75..=1.34).contains(&(bounds.width() / bounds.height()));
 		let (route, connections) = if let Element::Connector { routing, flip_v, start, end, .. } = element {
 			let points = routing.as_ref().map(|route| route.points.clone()).unwrap_or_else(|| vec![[0.0, if *flip_v { 1.0 } else { 0.0 }], [1.0, if *flip_v { 0.0 } else { 1.0 }]]);
 			(points.into_iter().map(|point| transform * Point::new(point[0] * width, point[1] * height)).collect(),
 				start.iter().chain(end.iter()).map(|connection| connection.element_id.as_str()).collect())
 		} else { (Vec::new(), Vec::new()) };
-		objects.push(Object { id, scope: scope.into(), bounds, frame, transform, text, font_size, characters, route, connections });
+		objects.push(Object { id, scope: scope.into(), bounds, frame, transform, text, font_size, characters, route, connections, container, container_item, numbered_badge });
 		if let Element::Group { view_width, view_height, children, .. } = element {
-			collect(children, transform * Affine::scale_non_uniform(width / view_width, height / view_height), scope, objects)?;
+			collect(children, transform * Affine::scale_non_uniform(width / view_width, height / view_height), scope, soft_edge, objects)?;
 		}
 	}
 	Ok(())
@@ -116,17 +143,17 @@ fn page_objects(deck: &Deck, page: usize) -> Result<Vec<Object<'_>>> {
 				if let Some(master) = design.masters.iter().find(|master| master.id == layout.master_id) {
 					for element in &master.elements {
 						if matches!(element, Element::Text { format, .. } if format.placeholder.is_some()) { continue; }
-						collect(std::slice::from_ref(element), Affine::IDENTITY, &format!("master:{}", master.id), &mut objects)?;
+						collect(std::slice::from_ref(element), Affine::IDENTITY, &format!("master:{}", master.id), false, &mut objects)?;
 					}
 				}
 			}
 			for element in &layout.elements {
 				if matches!(element, Element::Text { format, .. } if format.placeholder.is_some()) { continue; }
-				collect(std::slice::from_ref(element), Affine::IDENTITY, &format!("layout:{}", layout.id), &mut objects)?;
+				collect(std::slice::from_ref(element), Affine::IDENTITY, &format!("layout:{}", layout.id), false, &mut objects)?;
 			}
 		}
 	}
-	collect(&slide.elements, Affine::IDENTITY, "slide", &mut objects)?;
+	collect(&slide.elements, Affine::IDENTITY, "slide", false, &mut objects)?;
 	Ok(objects)
 }
 
@@ -147,12 +174,54 @@ fn crosses_frame(start: Point, end: Point, rect: Rect) -> bool {
 	true
 }
 
+fn route_crosses_badge_center(object: &Object<'_>, connector: &Object<'_>) -> bool {
+	let inverse = object.transform.inverse();
+	let center = object.frame.center();
+	let tolerance = object.frame.width().min(object.frame.height()) * 0.15;
+	connector.route.windows(2).any(|segment| {
+		let start = inverse * segment[0];
+		let delta = inverse * segment[1] - start;
+		let length_squared = delta.hypot2();
+		if length_squared <= 1e-9 { return false; }
+		let position = ((center - start).dot(delta) / length_squared).clamp(0.0, 1.0);
+		(start + delta * position).distance(center) <= tolerance
+	})
+}
+
 fn push_finding(report: &mut PreflightReport, page: usize, slide: &str, objects: &[&Object<'_>], code: &str, severity: &str, evidence: &str, message: &str, suggestions: &[&str]) -> Result<()> {
 	if report.findings.len() >= 256 { return Err(Error::Limit("visual preflight exceeds 256 findings; select fewer pages or resolve reported density".into())); }
 	let bounds = objects.iter().map(|object| object.bounds).reduce(|first, next| first.union(next)).unwrap_or(Rect::ZERO);
 	report.findings.push(Finding { code: code.into(), severity: severity.into(), evidence: evidence.into(), page_index: page, slide_id: slide.into(),
 		element_ids: objects.iter().map(|object| object.id.into()).collect(), scopes: objects.iter().map(|object| object.scope.clone()).collect(), bounds: bounds.into(),
 		message: message.into(), suggestions: suggestions.iter().map(|suggestion| (*suggestion).into()).collect() });
+	Ok(())
+}
+
+fn container_findings(report: &mut PreflightReport, page: usize, slide: &str, objects: &[Object<'_>]) -> Result<()> {
+	for (index, object) in objects.iter().enumerate().filter(|(_, object)| object.container_item) {
+		let nearest = objects[..index].iter().filter(|container| container.container.is_some() && container.scope == object.scope).filter_map(|container| {
+			let transform = container.transform.inverse() * object.transform;
+			let frame = object.frame;
+			let corners = [(frame.x0, frame.y0), (frame.x1, frame.y0), (frame.x1, frame.y1), (frame.x0, frame.y1)].map(|point| transform * Point::from(point));
+			let local = corners.iter().skip(1).fold(Rect::from_points(corners[0], corners[0]), |bounds, point| bounds.union_pt(*point));
+			if local.x0 < -0.5 || local.y0 < -0.5 || local.x1 > container.frame.x1 + 0.5 || local.y1 > container.frame.y1 + 0.5 { return None; }
+			Some((container, corners, local))
+		}).min_by(|(left, _, _), (right, _, _)| left.bounds.area().total_cmp(&right.bounds.area()));
+		let Some((container, corners, _local)) = nearest else { continue; };
+		let Some(rounded) = &container.container else { continue; };
+		if corners.iter().any(|point| !rounded.contains(*point)) {
+			push_finding(report, page, slide, &[object, container], "CONTAINER_CORNER_OVERFLOW", "warning", "heuristic",
+				"An element frame enters the rounded corners of a likely container; inspect the actual content and intended layering",
+				&["Inset or shorten the accent to stay inside the rounded outline", "Move the label or use a rectangular container when a flush edge is intended", "Preview before applying a repair; frame corners are not painted-pixel evidence"])?;
+		} else if object.text {
+			let outline = container.transform * rounded.to_path(0.01);
+			if corners.iter().any(|point| outline.segments().any(|segment| segment.nearest(container.transform * *point, 0.01).distance_sq < 64.0 - 0.01)) {
+				push_finding(report, page, slide, &[object, container], "CONTAINER_PADDING", "warning", "heuristic",
+					"A text frame has less than 8 slide pixels of clearance from a likely rounded container boundary",
+					&["Inset the text frame without shrinking its font", "Enlarge the container or reflow the content with a preview"])?;
+			}
+		}
+	}
 	Ok(())
 }
 
@@ -167,8 +236,8 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		return Err(Error::Invalid("visual preflight minimum font size must be in 8..=48 pixels".into()));
 	}
 	let mut report = PreflightReport { revision: document.revision, hash: document.hash.clone(), page_indices: selected.clone(), findings: Vec::new(),
-		checks: ["renderer_warnings", "off_slide", "text_overlap", "connector_label_interference", "small_text", "density"].map(String::from).to_vec(),
-		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed frame bounds, not glyph intersection; intentional overlapping text needs human review", "Connector checks exclude attached endpoint nodes; backgrounds and nontext containment are not collisions", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
+		checks: ["renderer_warnings", "off_slide", "text_overlap", "connector_label_interference", "connector_badge_overlap", "container_clearance", "small_text", "density"].map(String::from).to_vec(),
+		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed frame bounds, not glyph intersection; intentional overlapping text needs human review", "Connector checks exclude attached endpoint nodes; compact opaque numbered ellipses painted over a center-crossing connector are informational, not an automatic visual approval", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
 		office_visual_parity: false, semantic_truth_verified: false };
 	for page in selected {
 		let slide = &deck.slides[page];
@@ -188,6 +257,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				if let Some(finding) = report.findings.last_mut() { finding.element_ids.push(warning.element_id); }
 			}
 		}
+		container_findings(&mut report, page, &slide.id, &objects)?;
 		for (index, object) in objects.iter().enumerate() {
 			if object.bounds.x0 < -0.5 || object.bounds.y0 < -0.5 || object.bounds.x1 > f64::from(deck.width) + 0.5 || object.bounds.y1 > f64::from(deck.height) + 0.5 {
 				push_finding(&mut report, page, &slide.id, &[object], "OFF_SLIDE", "warning", "geometry", "Transformed object extends beyond the slide", &["Move or resize the object within the slide"])?;
@@ -202,11 +272,15 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 					push_finding(&mut report, page, &slide.id, &[object, other], "TEXT_OVERLAP", "warning", "geometry", "Visible text frames overlap; confirm whether intentional", &["Move, align or reflow the text frames", "Inspect rotated text before applying a repair"])?;
 				}
 			}
-			for connector in objects.iter().filter(|candidate| !candidate.route.is_empty()) {
+			for (connector_index, connector) in objects.iter().enumerate().filter(|(_, candidate)| !candidate.route.is_empty()) {
 				if connector.scope == object.scope && connector.connections.contains(&object.id) { continue; }
 				let inverse = object.transform.inverse();
 				if connector.route.windows(2).any(|segment| crosses_frame(inverse * segment[0], inverse * segment[1], object.frame)) {
-					push_finding(&mut report, page, &slide.id, &[object, connector], "CONNECTOR_LABEL_INTERFERENCE", "warning", "geometry", "A connector crosses a text or label frame; a label fill may hide the line", &["Place the label above, below or beside the route", "Use a transparent label and keep text clear of the connector"])?;
+					if object.numbered_badge && index > connector_index && object.scope == connector.scope && route_crosses_badge_center(object, connector) {
+						push_finding(&mut report, page, &slide.id, &[object, connector], "CONNECTOR_BADGE_OVERLAP", "info", "heuristic", "A compact opaque numbered badge covers a connector near its center; this may be intentional", &["Keep the connector behind the badge", "Confirm that the number and nearby labels remain readable in the preview"])?;
+					} else {
+						push_finding(&mut report, page, &slide.id, &[object, connector], "CONNECTOR_LABEL_INTERFERENCE", "warning", "geometry", "A connector crosses a text or label frame; a label fill may hide the line", &["Place the label above, below or beside the route", "Reserve a separate label region with clearance from connectors and badges"])?;
+					}
 				}
 			}
 		}

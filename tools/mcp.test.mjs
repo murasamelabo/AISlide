@@ -83,6 +83,11 @@ function assertFeedbackWorkflow(prompt, resource) {
     /prefer apply_operations with add_part\/add_graph and explicit layouts/, /create_part\/create_graph plus add_elements ONLY as an explicit unmanaged choice/,
     /never automatically fall back.*timeout/, /128 metadata entries.*capacity limits/, /Reduce chunk size for progress and cancellation/,
     /batch update_graph has no layout field and preserves the existing PartLayout/, /corner_label.*48 Unicode scalars.*default empty/,
+    /Set theme before add_part\/add_graph/, /no automatic theme-driven regeneration/,
+    /set_accessibility after the target exists in a separate revision/, /65 seconds or 120 seconds.*opt-in MCP progress/,
+    /All three venn variants support PartSpec\.layout\.show_title=false/,
+    /Keep card text at least 8 slide pixels/, /CONTAINER_CORNER_OVERFLOW and CONTAINER_PADDING.*require preview review/,
+    /CONNECTOR_BADGE_OVERLAP is info.*not a visual approval/, /propose guarded edits and inspect before\/after previews/,
   ]) assert.match(text, pattern);
 }
 
@@ -143,6 +148,42 @@ test('managed batch MCP progress is opt-in monotonic and stops on completion or 
         fixture.onRequest = undefined;
         assert.deepEqual(await call('get_session_recovery', { deck_id: created.deck_id }), before);
       }
+    });
+  } finally { context.mock.timers.reset(); }
+});
+
+test('accessibility MCP progress stops on cancellation without changing the document', async context => {
+  context.mock.timers.enable({ apis: ['setInterval'] });
+  try {
+    await feedbackMcpFixture(async ({ registrations, call, fixture }) => {
+      const { deck_id } = await call('create_presentation', { title: 'Synthetic accessibility' });
+      const before = await call('get_session_recovery', { deck_id });
+      const started = Promise.withResolvers();
+      const pending = Promise.withResolvers();
+      const notifications = [];
+      const controller = new AbortController();
+      fixture.onRequest = async (_request, { signal }) => {
+        signal.addEventListener('abort', () => pending.reject(new Error('Operation cancelled')), { once: true });
+        started.resolve();
+        return pending.promise;
+      };
+      const tool = registrations.get('set_accessibility');
+      const input = tool.config.inputSchema.parse({ deck_id, expected_revision: 0, slide_id: 'slide-1', element_id: 'diagram', metadata: { description: 'Synthetic diagram' } });
+      const result = tool.callback(input, { signal: controller.signal, _meta: { progressToken: 0 }, sendNotification: async notification => notifications.push(notification) });
+      await started.promise;
+      await new Promise(resolve => setImmediate(resolve));
+      context.mock.timers.tick(5000);
+      await new Promise(resolve => setImmediate(resolve));
+      const beforeCancel = notifications.length;
+      controller.abort();
+      assert.equal((await result).isError, true);
+      context.mock.timers.tick(10000);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.ok(beforeCancel >= 2, 'Accessibility authoring must emit opted-in progress');
+      assert.equal(notifications.length, beforeCancel);
+      assert.ok(notifications.every(notification => notification.params.progressToken === 0 && notification.params.total === undefined));
+      fixture.onRequest = undefined;
+      assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
     });
   } finally { context.mock.timers.reset(); }
 });
@@ -1201,6 +1242,35 @@ test('P1 MCP finalization publishes a traceable new bundle without changing the 
     assert.equal((await readdir(directory)).length, 7);
     assert.equal((await client.listTools()).tools.find(tool => tool.name === 'finalize_presentation').annotations.readOnlyHint, false);
   } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('MCP layout preflight reports rounded-container warnings and informational badges without mutation', async () => {
+  const client = new Client({ name: 'layout-preflight-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic layout checks' });
+    const current = await call('get_document', { deck_id });
+    await call('apply_operations', { deck_id, expected_revision: current.revision, expected_hash: current.hash, operations: [{ op: 'add_elements', slide_id: current.deck.slides[0].id, elements: [
+      { type: 'shape', id: 'card', preset: 'roundRect', x: 40, y: 40, width: 400, height: 240, fill: 'FFFFFF', stroke: '087F73', stroke_width: 2, text: '', font_size: 16, color: '000000', bold: false },
+      { type: 'rect', id: 'accent', x: 40, y: 40, width: 8, height: 240, fill: '087F73' },
+      { type: 'connector', id: 'route', x: 100, y: 216, width: 220, height: 0.01, color: '000000', stroke_width: 2, arrow: true },
+      { type: 'shape', id: 'badge', preset: 'ellipse', x: 200, y: 200, width: 32, height: 32, fill: '087F73', stroke: '087F73', stroke_width: 1, text: '2', font_size: 12, color: 'FFFFFF', bold: true },
+    ] }] });
+    const before = await call('get_session_recovery', { deck_id });
+    const result = await call('preflight_presentation', { deck_id, options: { page_indices: [0] } });
+    assert.ok(result.checks.includes('container_clearance'));
+    assert.ok(result.findings.some(finding => finding.code === 'CONTAINER_CORNER_OVERFLOW' && finding.severity === 'warning' && finding.element_ids.join(',') === 'accent,card'));
+    assert.ok(result.findings.some(finding => finding.code === 'CONNECTOR_BADGE_OVERLAP' && finding.severity === 'info' && finding.element_ids.join(',') === 'badge,route'));
+    assert.equal(result.hash, before.document.hash);
+    assert.equal(result.office_visual_parity, false);
+    assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
+  } finally { await client.close(); }
 });
 
 test('P0 MCP guided options, diagnostics and staged revisions form a guarded visual loop', async () => {

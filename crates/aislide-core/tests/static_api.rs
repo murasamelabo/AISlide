@@ -128,6 +128,112 @@ fn authoring_preflight_reports_renderer_clipping_and_connector_label_interferenc
 }
 
 #[test]
+fn authoring_preflight_checks_rounded_container_corners_and_safe_padding() {
+    let mut deck = document()["deck"].clone();
+    deck["slides"][0]["elements"] = json!([
+        {"type":"shape","id":"card","preset":"roundRect","x":40,"y":40,"width":400,"height":240,"fill":"FFFFFF","stroke":"087F73","stroke_width":2,"text":"","font_size":16,"color":"000000","bold":false},
+        {"type":"rect","id":"accent","x":40,"y":40,"width":8,"height":240,"fill":"087F73"},
+        {"type":"text","id":"corner-title","x":46,"y":46,"width":220,"height":32,"text":"Corner label","font_size":16,"color":"000000","bold":false},
+        {"type":"text","id":"tight-curve","x":52,"y":52,"width":220,"height":32,"text":"Too close to the curve","font_size":16,"color":"000000","bold":false},
+        {"type":"text","id":"tight-padding","x":42,"y":140,"width":200,"height":32,"text":"Too close to the edge","font_size":16,"color":"000000","bold":false},
+        {"type":"text","id":"safe-title","x":92,"y":90,"width":260,"height":32,"text":"Safe title","font_size":16,"color":"000000","bold":false},
+        {"type":"polygon","id":"outline-accent","x":40,"y":40,"width":8,"height":240,"fill":"none","stroke":"087F73","stroke_width":2,"points":[[0,0],[1,0],[1,1],[0,1]]},
+        {"type":"text","id":"outside","x":500,"y":46,"width":160,"height":32,"text":"Separate label","font_size":16,"color":"000000","bold":false}
+    ]);
+    let document = execute_request(json!({"op":"new_document","id":"container-clearance","deck":deck})).unwrap();
+    let result = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+    let findings = result["findings"].as_array().unwrap();
+    for (code, id) in [("CONTAINER_CORNER_OVERFLOW", "accent"), ("CONTAINER_CORNER_OVERFLOW", "outline-accent"), ("CONTAINER_CORNER_OVERFLOW", "corner-title"), ("CONTAINER_PADDING", "tight-padding"), ("CONTAINER_PADDING", "tight-curve")] {
+        let finding = findings.iter().find(|finding| finding["code"] == code && finding["element_ids"] == json!([id, "card"])).expect(id);
+        assert_eq!(finding["severity"], "warning");
+        assert_eq!(finding["evidence"], "heuristic");
+        assert!(!finding["suggestions"].as_array().unwrap().is_empty());
+    }
+    assert!(!findings.iter().any(|finding| finding["code"].as_str().unwrap().starts_with("CONTAINER_") && finding["element_ids"].as_array().unwrap().iter().any(|id| id == "safe-title" || id == "outside")));
+    assert_eq!(execute_request(json!({"op":"verify_recovery","document":document})).unwrap(), document);
+}
+
+#[test]
+fn authoring_preflight_container_clearance_respects_transforms_visibility_and_nearest_frame() {
+    for (case, scale, rotation, gap, hidden, transparent, expected) in [
+        ("scaled-clear", 2.0, 0.0, 6.0, false, false, false),
+        ("scaled-tight", 2.0, 0.0, 2.0, false, false, true),
+        ("rotated-tight", 1.0, 30.0, 2.0, false, false, true),
+        ("hidden", 1.0, 0.0, 2.0, true, false, false),
+        ("transparent", 1.0, 0.0, 2.0, false, true, false),
+    ] {
+        let mut card = json!({"type":"shape","id":"card","preset":"roundRect","x":0,"y":0,"width":300,"height":200,"fill":"FFFFFF","stroke":"000000","stroke_width":0,"text":"","font_size":16,"color":"000000","bold":false});
+        if hidden { card["visual"] = json!({"hidden":true}); }
+        if transparent { card["visual"] = json!({"gradient":{"kind":"linear","angle":0,"stops":[{"offset":0,"color":"FFFFFF","opacity":0},{"offset":1,"color":"FFFFFF","opacity":0}]}}); }
+        let label = json!({"type":"text","id":"label","x":gap,"y":80,"width":180,"height":32,"text":"Readable label","font_size":16,"color":"000000","bold":false});
+        let mut deck = document()["deck"].clone();
+        deck["slides"][0]["elements"] = json!([{"type":"group","id":"group","x":100,"y":100,"width":300.0 * scale,"height":200.0 * scale,"view_width":300,"view_height":200,"visual":{"rotation":rotation,"flip_h":true},"children":[card,label]}]);
+        let document = execute_request(json!({"op":"new_document","id":format!("container-{case}"),"deck":deck})).unwrap();
+        let result = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+        let findings: Vec<_> = result["findings"].as_array().unwrap().iter().filter(|finding| finding["code"].as_str().unwrap().starts_with("CONTAINER_")).collect();
+        assert_eq!(findings.len(), usize::from(expected), "{case}: {result}");
+        if expected { assert_eq!(findings[0]["code"], "CONTAINER_PADDING"); }
+    }
+    let mut deck = document()["deck"].clone();
+    let outer = json!({"type":"shape","id":"outer","preset":"roundRect","x":40,"y":40,"width":500,"height":400,"fill":"FFFFFF","stroke":"000000","stroke_width":1,"text":"","font_size":16,"color":"000000","bold":false});
+    let inner = json!({"type":"shape","id":"inner","preset":"roundRect","x":100,"y":100,"width":300,"height":200,"fill":"FFFFFF","stroke":"000000","stroke_width":1,"text":"","font_size":16,"color":"000000","bold":false});
+    deck["slides"][0]["elements"] = json!([outer,inner,{"type":"text","id":"label","x":102,"y":180,"width":180,"height":32,"text":"Inner label","font_size":16,"color":"000000","bold":false}]);
+    let document = execute_request(json!({"op":"new_document","id":"nearest-container","deck":deck})).unwrap();
+    let result = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+    let finding = result["findings"].as_array().unwrap().iter().find(|finding| finding["code"] == "CONTAINER_PADDING").unwrap();
+    assert_eq!(finding["element_ids"], json!(["label","inner"]));
+}
+
+#[test]
+fn authoring_preflight_measures_perpendicular_clearance_after_nested_anisotropic_scaling() {
+    let mut deck = document()["deck"].clone();
+    deck["slides"][0]["elements"] = json!([{
+        "type":"group","id":"scaled","x":100,"y":100,"width":800,"height":400,"view_width":400,"view_height":400,"children":[{
+            "type":"group","id":"rotated","x":50,"y":50,"width":300,"height":200,"view_width":300,"view_height":200,"visual":{"rotation":45},"children":[
+                {"type":"shape","id":"card","preset":"roundRect","x":0,"y":0,"width":300,"height":200,"fill":"FFFFFF","stroke":"000000","stroke_width":1,"text":"","font_size":16,"color":"000000","bold":false},
+                {"type":"text","id":"label","x":6,"y":80,"width":180,"height":32,"text":"Perpendicular clearance","font_size":16,"color":"000000","bold":false}
+            ]
+        }]
+    }]);
+    let document = execute_request(json!({"op":"new_document","id":"skew-clearance","deck":deck})).unwrap();
+    let result = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+    assert!(result["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "CONTAINER_PADDING" && finding["element_ids"] == json!(["label","card"])), "{result}");
+}
+
+#[test]
+fn authoring_preflight_distinguishes_numbered_badges_without_hiding_real_label_interference() {
+    for (case, text, fill, opacity, foreground_route, vertical_offset, expected) in [
+        ("badge", "2", "087F73", 1.0, false, 0.0, "CONNECTOR_BADGE_OVERLAP"),
+        ("transparent", "2", "087F73", 0.5, false, 0.0, "CONNECTOR_LABEL_INTERFERENCE"),
+        ("unfilled", "2", "none", 1.0, false, 0.0, "CONNECTOR_LABEL_INTERFERENCE"),
+        ("label", "X", "087F73", 1.0, false, 0.0, "CONNECTOR_LABEL_INTERFERENCE"),
+        ("foreground", "2", "087F73", 1.0, true, 0.0, "CONNECTOR_LABEL_INTERFERENCE"),
+        ("grazing", "2", "087F73", 1.0, false, 12.0, "CONNECTOR_LABEL_INTERFERENCE"),
+        ("soft-edge", "2", "087F73", 1.0, false, 0.0, "CONNECTOR_LABEL_INTERFERENCE"),
+        ("ancestor-soft-edge", "2", "087F73", 1.0, false, 0.0, "CONNECTOR_LABEL_INTERFERENCE"),
+    ] {
+        let route = json!({"type":"connector","id":"route","x":100,"y":216.0 + vertical_offset,"width":220,"height":0.01,"color":"000000","stroke_width":2,"arrow":true});
+        let mut badge = json!({"type":"shape","id":"badge","preset":"ellipse","x":200,"y":200,"width":32,"height":32,"fill":fill,"stroke":"087F73","stroke_width":1,"text":text,"font_size":12,"color":"FFFFFF","bold":true});
+        if opacity < 1.0 { badge["visual"] = json!({"opacity":opacity}); }
+        if case == "soft-edge" { badge["visual"] = json!({"soft_edge":10}); }
+        let mut deck = document()["deck"].clone();
+        deck["slides"][0]["elements"] = if foreground_route { json!([badge, route]) } else { json!([route, badge]) };
+        if case == "ancestor-soft-edge" {
+            let badge = deck["slides"][0]["elements"].as_array_mut().unwrap().pop().unwrap();
+            deck["slides"][0]["elements"].as_array_mut().unwrap().push(json!({"type":"group","id":"blurred","x":0,"y":0,"width":400,"height":300,"view_width":400,"view_height":300,"visual":{"soft_edge":10},"children":[badge]}));
+        }
+        let document = execute_request(json!({"op":"new_document","id":format!("badge-{case}"),"deck":deck})).unwrap();
+        let result = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+        let findings: Vec<_> = result["findings"].as_array().unwrap().iter().filter(|finding| finding["code"].as_str().unwrap().starts_with("CONNECTOR_")).collect();
+        assert_eq!(findings.len(), 1, "{case}: {result}");
+        assert_eq!(findings[0]["code"], expected, "{case}");
+        assert_eq!(findings[0]["severity"], if case == "badge" { "info" } else { "warning" });
+        assert_eq!(findings[0]["element_ids"], json!(["badge", "route"]));
+        assert_eq!(execute_request(json!({"op":"verify_recovery","document":document})).unwrap(), document);
+    }
+}
+
+#[test]
 fn authoring_preflight_uses_group_transforms_and_rejects_unbounded_requests() {
     let label = json!({"type":"text","id":"nested","x":20,"y":20,"width":100,"height":40,"text":"Label","font_size":12,"color":"000000","bold":false});
     let deck = json!({"version":1,"title":"Groups","width":640,"height":360,"slides":[{"id":"slide-1","title":"Groups","background":"FFFFFF","notes":"","elements":[

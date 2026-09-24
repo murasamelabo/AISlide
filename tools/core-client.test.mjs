@@ -20,6 +20,13 @@ test('managed batch timeout scales with bounded work without changing ordinary r
   assert.equal(coreTimeout({ op: 'sample', timeout: Infinity }), 20000);
 });
 
+test('accessibility updates receive a finite authoring budget without changing ordinary requests', () => {
+  assert.equal(coreTimeout({ op: 'set_accessibility' }), 65000);
+  assert.equal(coreTimeout({ op: 'set_accessibility' }, 5 * 1048576), 120000);
+  assert.equal(coreTimeout({ op: 'set_accessibility', timeout: Infinity }), 65000);
+  assert.equal(coreTimeout({ op: 'sample' }), 20000);
+});
+
 test('an operator can select an isolated local core binary without request-controlled paths', async () => {
   const bridge = await import('./core-client.mjs');
   assert.equal(typeof bridge.coreBinary, 'function');
