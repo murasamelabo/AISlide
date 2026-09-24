@@ -4,7 +4,31 @@ Date: 2026-09-23. Windows setup uses Tauri CLI 2.11.4 and its NSIS template. The
 
 ## Save And Close Reliability
 
-2026-09-24 candidate fix, not yet applied to the regular installation:
+The regular current-user installation was updated and launched at
+**2026-09-24T07:47:37Z**, using application source commit
+`66bfd158842d0b00701acd15fee03e7030f1ff44`. The user explicitly authorized
+discarding the old process's unsaved presentation. That exact process was
+stopped after checking its executable hash and start time; its WebView exited
+before installation. No MCP process was stopped and recovery was not enabled.
+
+The installer ran once and exited 0 without elevation or uninstall. The actual
+installed executable passed the four native save/close cases, then the existing
+argument-free Start Menu shortcut launched the normal profile. Registration,
+settings, recovery, and icon contents plus model metadata were preserved across
+the update and isolated tests; normal startup can subsequently change its profile.
+
+| Artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| Unsigned debug x64 GNU installer | 131,821,238 | `a2ae6f3aa3ada3d9188140e81bc30cd16f49a102b7beabf08cb4077d68202a3f` |
+| Installed executable | 1,028,759,040 | `070f32888d7752cc955bd1249eacf6a94707f677d2082c77d689f1940b91c914` |
+
+Installed bytes match the qualified source except the expected three-byte
+`UNK` to `NSS` marker at offset 175149752. The 1,875-file preservation record
+and installed test results are in the private
+`.artifacts/publish-managed-20260924/save-desktop/desktop-final.json` evidence.
+This remains an unsigned debug x64 build, not a signed or native ARM64 release.
+
+Root cause reproduced on 2026-09-24:
 closing the internal `Tao Thread Event Target` can leave the document visible
 while breaking native save dialogs and window destruction. An isolated old
 process reproduced `Presentation save worker failed`, with a dialog-plugin
@@ -28,7 +52,9 @@ which can select an internal helper. Never broadcast close messages to all
 windows of a process. Private evidence is under
 `.artifacts/publish-managed-20260924/save-dispatch-*.log`.
 
-## Current Verified Update
+## Earlier September 23 Update
+
+**Historical: superseded by Save And Close Reliability above.**
 
 The regular current-user update and normal Start Menu launch were verified at
 **2026-09-23T04:21:59Z**. AISlide was already closed before the installer ran
