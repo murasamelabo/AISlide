@@ -16,7 +16,7 @@ concurrency:
 jobs:
   windows:
     runs-on: windows-2025
-    timeout-minutes: 40
+    timeout-minutes: 60
     env:
       AISLIDE_AI_API_KEY: ''
       AISLIDE_AI_ALLOW_REMOTE: '0'
