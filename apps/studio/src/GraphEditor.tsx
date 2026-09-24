@@ -1,7 +1,7 @@
 ﻿import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { ReactFlow, Background, Controls, Handle, Position, ConnectionMode, NodeResizer, BaseEdge, EdgeText, MarkerType, applyNodeChanges, applyEdgeChanges, getSmoothStepPath, getStraightPath } from '@xyflow/react'
 import type { Node, Edge, NodeProps, EdgeProps, NodeChange, EdgeChange, Connection } from '@xyflow/react'
-import { Square, RectangleHorizontal, Circle, Diamond, Database, Cloud, Plus, Trash2, Undo2, Redo2, AlignLeft, AlignCenterHorizontal, AlignRight, AlignStartVertical, AlignCenterVertical, AlignEndVertical, Grid2X2, Code2, Eye, MousePointer2, Copy, Check, Sticker, ArrowLeft } from 'lucide-react'
+import { Square, RectangleHorizontal, Circle, Diamond, Database, Cloud, Plus, Trash2, Undo2, Redo2, AlignLeft, AlignCenter, AlignCenterHorizontal, AlignRight, AlignStartVertical, AlignCenterVertical, AlignEndVertical, Bold, Grid2X2, Code2, Eye, MousePointer2, Copy, Check, Sticker, ArrowLeft } from 'lucide-react'
 import { AislideClient } from '../../../packages/client/index.mjs'
 import { core } from './api'
 import { Content } from './SlideSurface'
@@ -10,7 +10,7 @@ import { ColorField } from './TextControls'
 import { Tool } from './Tool'
 import { ContextMenu } from './ContextMenu'
 import type { MenuCommand, MenuPosition } from './ContextMenu'
-import { cssColor, fontFamily } from './design'
+import { cssColor } from './design'
 import type { AssetInput, GraphCatalog, GraphSpec, GraphNode, GraphEdge, GraphGroup, GraphNodeKind, GraphOperation, GraphIcon, Element, Theme } from './types'
 import '@xyflow/react/dist/style.css'
 import './graph-editor.css'
@@ -28,7 +28,7 @@ const kinds: Record<GraphNodeKind, { preset: string; name: string; icon: typeof 
 }
 const portPositions = { top: Position.Top, left: Position.Left, bottom: Position.Bottom, right: Position.Right }
 type Bounds = { x: number; y: number; width: number; height: number }
-type GraphFlowNode = Node<{ item: GraphNode | GraphGroup; boundary: boolean; theme?: Theme; label?: Element; icon?: Element; resize: (id: string, bounds: Bounds) => void }>
+type GraphFlowNode = Node<{ item: GraphNode | GraphGroup; boundary: boolean; theme?: Theme; labels: Element[]; icon?: Element; maxHeight: number; resize: (id: string, bounds: Bounds) => void }>
 type GraphFlowEdge = Edge<{ points?: [number, number][]; elbow: boolean; label?: Element; theme?: Theme }>
 type View = 'edit' | 'preview' | 'json'
 type IconTarget = { kind: 'new' } | { kind: 'node'; node: GraphNode } | { kind: 'group'; group: GraphGroup }
@@ -45,7 +45,7 @@ function groupAncestors(groups: GraphGroup[], parent?: string | null) {
 function serviceFrame(graph: GraphSpec, parent?: GraphGroup): Bounds {
   const width = 160, height = 140
   const left = parent ? parent.x + 8 : 24
-  const top = parent ? parent.y + 40 : 104
+  const top = parent ? parent.y + 40 : graph.show_title === false ? 16 : 104
   const right = parent ? parent.x + parent.width - 8 : 1128
   const bottom = parent ? parent.y + parent.height - 8 : 504
   const occupied = [...graph.nodes.filter((node) => (node.group ?? null) === (parent?.id ?? null)), ...(graph.groups ?? []).filter((group) => (group.parent ?? null) === (parent?.id ?? null))]
@@ -76,8 +76,8 @@ function GraphNodeView({ id, data, selected }: NodeProps<GraphFlowNode>) {
   return <div className={`graph-node-content ${data.boundary ? 'graph-boundary' : ''}`}>
     {(data.boundary || node.presentation !== 'icon') && <ShapeSurface preset={data.boundary ? 'rect' : kinds[node.kind ?? 'rectangle'].preset} fill={cssColor(item.fill ?? (data.boundary ? '@lt2' : '@lt1'), data.theme)} stroke={cssColor(item.stroke ?? '@accent1', data.theme)} strokeWidth={1.5} />}
     {data.icon && <div className="graph-node-icon" style={{ left: data.icon.x - item.x, top: data.icon.y - item.y, width: data.icon.width, height: data.icon.height }}><Content element={data.icon} theme={data.theme} /></div>}
-    {data.label ? <div className="graph-fitted-label" style={{ left: data.label.x - item.x, top: data.label.y - item.y, width: data.label.width, height: data.label.height }}><Content element={data.label} theme={data.theme} /></div> : <div className={`graph-node-label ${node.kind ?? 'rectangle'}`} style={{ color: cssColor(node.color ?? '@dk1', data.theme), fontFamily: fontFamily('@minor', data.theme), fontSize: data.boundary ? 18 : node.font_size ?? 18 }}>{item.label}</div>}
-    <NodeResizer isVisible={selected} minWidth={64} minHeight={40} maxWidth={1152} maxHeight={424} onResizeEnd={(_event, bounds) => data.resize(id, bounds)} />
+    {data.labels.map((label) => <div key={label.id} className={`graph-fitted-label${!data.boundary && label.id.endsWith(`-nd-${id}`) ? ' graph-node-detail' : ''}`} style={{ left: label.x - item.x, top: label.y - item.y, width: label.width, height: label.height }}><Content element={label} theme={data.theme} /></div>)}
+    <NodeResizer isVisible={selected} minWidth={64} minHeight={40} maxWidth={1152} maxHeight={data.maxHeight} onResizeEnd={(_event, bounds) => data.resize(id, bounds)} />
     {!data.boundary && Object.entries(portPositions).map(([port, position]) => <Handle key={port} id={port} type="source" position={position} style={node.kind === 'cloud' ? { top: port === 'top' ? `${1235 / 216}%` : port === 'bottom' ? `${21577 / 216}%` : '50%', bottom: 'auto', left: port === 'left' ? `${67 / 216}%` : port === 'right' ? `${21582 / 216}%` : '50%', right: 'auto', transform: 'translate(-50%, -50%)' } : undefined} title={`${item.label} ${port} connection`} aria-hidden="true" />)}
   </div>
 }
@@ -100,21 +100,42 @@ function GraphTool({ label, Icon, onClick, disabled }: { label: string; Icon: ty
   return <Tool label={label} onClick={onClick} disabled={disabled}><Icon size={20} /></Tool>
 }
 
-function GeometryFields({ item, onChange }: { item: { x: number; y: number; width?: number; height?: number }; onChange: (key: keyof Bounds, value: number) => void }) {
-  return <div className="graph-geometry">{(['x', 'y', 'width', 'height'] as const).map((field) => <label className="field" key={field}>{field}<input aria-label={`Graph ${field}`} required type="number" step={1} value={Number.isFinite(item[field]) ? item[field] : item[field] === undefined ? field === 'width' ? 176 : 80 : ''} onChange={(event) => onChange(field, event.currentTarget.valueAsNumber)} /></label>)}</div>
+function GeometryFields({ item, contentTop, onChange }: { item: { x: number; y: number; width?: number; height?: number }; contentTop: number; onChange: (key: keyof Bounds, value: number) => void }) {
+  const limits = { x: [0, 1152 - (item.width ?? 176)], y: [contentTop, 512 - (item.height ?? 80)], width: [64, 1152 - item.x], height: [40, 512 - item.y] }
+  return <div className="graph-geometry">{(['x', 'y', 'width', 'height'] as const).map((field) => <label className="field" key={field}>{field}<input aria-label={`Graph ${field}`} required type="number" step="any" min={limits[field][0]} max={limits[field][1]} value={Number.isFinite(item[field]) ? item[field] : item[field] === undefined ? field === 'width' ? 176 : 80 : ''} onChange={(event) => onChange(field, event.currentTarget.valueAsNumber)} /></label>)}</div>
 }
-function NodeProperties({ node, groups, theme, onApply, onChooseIcon }: { node: GraphNode; groups: GraphGroup[]; theme?: Theme; onApply: (node: GraphNode) => void; onChooseIcon: (node: GraphNode) => void }) {
+function NodeProperties({ node, groups, contentTop, theme, onApply, onChooseIcon }: { node: GraphNode; groups: GraphGroup[]; contentTop: number; theme?: Theme; onApply: (node: GraphNode) => void; onChooseIcon: (node: GraphNode) => void }) {
   const [draft, setDraft] = useState(node)
+  const alignment = draft.text_align ?? (draft.detail ? 'left' : 'center')
+  const detailFontSize = draft.detail_font_size ?? Math.max(12, (draft.font_size ?? 18) * 0.8)
   return <form onSubmit={(event) => { event.preventDefault(); onApply(draft) }} className="graph-properties-form">
     <label className="field">Label<textarea aria-label="Node label" required rows={3} maxLength={160} value={draft.label} onChange={(event) => setDraft({ ...draft, label: event.target.value })} /></label>
+    <label className="field">Detail<textarea aria-label="Node detail" rows={3} maxLength={480} value={draft.detail ?? ''} onChange={(event) => {
+      const detail = event.currentTarget.value
+      event.currentTarget.setCustomValidity([...detail].length > 240 ? 'Detail must contain at most 240 characters.' : '')
+      const next = { ...draft }
+      if (detail.trim()) next.detail = detail
+      else { delete next.detail; delete next.detail_font_size }
+      setDraft(next)
+    }} /></label>
+    <div className="graph-text-options" role="group" aria-label="Node text style">
+      {([['left', AlignLeft], ['center', AlignCenter], ['right', AlignRight]] as const).map(([value, Icon]) => <Tool key={value} label={`Node align ${value}`} pressed={alignment === value} onClick={() => setDraft({ ...draft, text_align: value })}><Icon size={20} /></Tool>)}
+      <Tool label="Node heading bold" pressed={draft.heading_bold !== false} onClick={() => setDraft({ ...draft, heading_bold: draft.heading_bold === false })}><Bold size={20} /></Tool>
+    </div>
     <div className="graph-node-assets">{draft.icon && <img className="graph-icon-thumbnail" src={`data:${draft.icon.mime_type};base64,${draft.icon.base64}`} alt={draft.icon.alt || 'Node icon'} />}<button type="button" className="secondary" aria-label={draft.icon ? 'Change node icon' : 'Choose node icon'} onClick={() => onChooseIcon(draft)}><Sticker size={18} />{draft.icon ? 'Change icon' : 'Choose icon'}</button>{draft.icon && <Tool label="Remove node icon" onClick={() => onApply({ ...draft, icon: null, ...(draft.presentation === 'icon' ? { presentation: 'card' as const } : {}) })}><Trash2 size={20} /></Tool>}</div>
     <label className="field">Presentation<select aria-label="Node presentation" value={draft.presentation ?? 'card'} onChange={(event) => setDraft({ ...draft, presentation: event.target.value as GraphNode['presentation'] })}><option value="card">Card</option><option value="icon" disabled={!draft.icon}>Icon</option></select></label>
     <label className="field">Shape<select aria-label="Node shape" value={draft.kind ?? 'rectangle'} onChange={(event) => setDraft({ ...draft, kind: event.target.value as GraphNodeKind })}>{Object.entries(kinds).map(([value, entry]) => <option key={value} value={value}>{entry.name}</option>)}</select></label>
-    <GeometryFields item={draft} onChange={(key, value) => setDraft({ ...draft, [key]: value })} />
+    <GeometryFields item={draft} contentTop={contentTop} onChange={(key, value) => setDraft({ ...draft, [key]: value })} />
     <label className="field">Group<select aria-label="Node group" value={draft.group ?? ''} onChange={(event) => setDraft({ ...draft, group: event.target.value || null })}><option value="">None</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.label}</option>)}</select></label>
     {draft.presentation !== 'icon' && <><ColorField label="Node fill" value={draft.fill ?? '@lt1'} theme={theme} onChange={(fill) => setDraft({ ...draft, fill })} /><ColorField label="Node outline" value={draft.stroke ?? '@accent1'} theme={theme} onChange={(stroke) => setDraft({ ...draft, stroke })} /></>}
     <ColorField label="Node text" value={draft.color ?? '@dk1'} theme={theme} onChange={(color) => setDraft({ ...draft, color })} />
-    <label className="field">Font size<input aria-label="Node font size" type="number" required min={12} max={40} value={draft.font_size ?? 18} onChange={(event) => setDraft({ ...draft, font_size: event.currentTarget.valueAsNumber })} /></label>
+    <label className="field">Font size<input aria-label="Node font size" type="number" required min={12} max={40} step="any" value={Number.isFinite(draft.font_size ?? 18) ? draft.font_size ?? 18 : ''} onChange={(event) => setDraft({ ...draft, font_size: event.currentTarget.valueAsNumber })} /></label>
+    <label className="field">Detail font size<input aria-label="Node detail font size" type="number" disabled={!draft.detail} min={12} max={Number.isFinite(draft.font_size ?? 18) ? Math.min(40, draft.font_size ?? 18) : 40} step="any" value={Number.isFinite(detailFontSize) ? detailFontSize : ''} onChange={(event) => {
+      const next = { ...draft }
+      if (event.currentTarget.value) next.detail_font_size = event.currentTarget.valueAsNumber
+      else delete next.detail_font_size
+      setDraft(next)
+    }} /></label>
     <button className="secondary" type="submit"><Check size={16} />Apply node</button>
   </form>
 }
@@ -130,14 +151,14 @@ function EdgeProperties({ edge, nodes, theme, onApply }: { edge: GraphEdge; node
     <button className="secondary" type="submit"><Check size={16} />Apply edge</button>
   </form>
 }
-function GroupProperties({ group, groups, theme, onApply, onChooseIcon }: { group: GraphGroup; groups: GraphGroup[]; theme?: Theme; onApply: (group: GraphGroup) => void; onChooseIcon: (group: GraphGroup) => void }) {
+function GroupProperties({ group, groups, contentTop, theme, onApply, onChooseIcon }: { group: GraphGroup; groups: GraphGroup[]; contentTop: number; theme?: Theme; onApply: (group: GraphGroup) => void; onChooseIcon: (group: GraphGroup) => void }) {
   const [draft, setDraft] = useState(group)
   const parents = groups.filter((entry) => entry.id !== group.id && !groupAncestors(groups, entry.parent).includes(group.id))
   return <form className="graph-properties-form" onSubmit={(event) => { event.preventDefault(); onApply(draft) }}>
     <label className="field">Label<input aria-label="Group label" required maxLength={64} value={draft.label} onChange={(event) => setDraft({ ...draft, label: event.target.value })} /></label>
     <div className="graph-node-assets">{draft.icon && <img className="graph-icon-thumbnail" src={`data:${draft.icon.mime_type};base64,${draft.icon.base64}`} alt={draft.icon.alt || 'Boundary icon'} />}<button type="button" className="secondary" aria-label={draft.icon ? 'Change group icon' : 'Choose group icon'} onClick={() => onChooseIcon(draft)}><Sticker size={18} />{draft.icon ? 'Change icon' : 'Choose icon'}</button>{draft.icon && <Tool label="Remove group icon" onClick={() => onApply({ ...draft, icon: null })}><Trash2 size={20} /></Tool>}</div>
     <label className="field">Parent<select aria-label="Group parent" value={draft.parent ?? ''} onChange={(event) => setDraft({ ...draft, parent: event.target.value || null })}><option value="">None</option>{parents.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}</select></label>
-    <GeometryFields item={draft} onChange={(key, value) => setDraft({ ...draft, [key]: value })} />
+    <GeometryFields item={draft} contentTop={contentTop} onChange={(key, value) => setDraft({ ...draft, [key]: value })} />
     <ColorField label="Group fill" value={draft.fill ?? '@lt2'} theme={theme} onChange={(fill) => setDraft({ ...draft, fill })} />
     <ColorField label="Group outline" value={draft.stroke ?? '@dk2'} theme={theme} onChange={(stroke) => setDraft({ ...draft, stroke })} />
     <button className="secondary" type="submit"><Check size={16} />Apply group</button>
@@ -167,6 +188,7 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
   const [preview, setPreview] = useState<Element | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [pendingTitle, setPendingTitle] = useState<boolean | null>(null)
   const [snap, setSnap] = useState(true)
   const [from, setFrom] = useState(spec.nodes[0]?.id ?? '')
   const [to, setTo] = useState(spec.nodes[1]?.id ?? '')
@@ -196,16 +218,18 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     selection.current = selection.current.filter((id) => [...next.nodes, ...next.edges ?? [], ...next.groups ?? []].some((entry) => entry.id === id))
     setSelected(selection.current)
     const nativeChildren = rendered?.type === 'group' ? rendered.children : []
-    const nativePrefix = nativeChildren[0]?.id.replace(/-title$/, '')
+    const nativeHash = rendered && nativeChildren[0]?.id.slice(rendered.id.length + 1).split('-')[0]
+    const nativePrefix = rendered && nativeHash ? `${rendered.id}-${nativeHash}` : undefined
+    const maxHeight = next.show_title === false ? 512 : 424
     const groups = next.groups ?? []
     const ordered = [...groups].sort((left, right) => groupAncestors(groups, left.parent).length - groupAncestors(groups, right.parent).length)
     const members: GraphFlowNode[] = ordered.map((item) => {
       const parent = groups.find((group) => group.id === item.parent)
-      return { id: item.id, type: 'graphNode', position: { x: item.x - (parent?.x ?? 0), y: item.y - (parent?.y ?? 0) }, parentId: parent?.id, extent: parent ? [[8, 40], [parent.width - 8, parent.height - 8]] : undefined, width: item.width, height: item.height, style: { width: item.width, height: item.height }, data: { item, boundary: true, theme, resize, label: nativeChildren.find((entry) => entry.id.endsWith(`-gt-${item.id}`)), icon: nativeChildren.find((entry) => entry.type === 'picture' && entry.id.endsWith(`-gi-${item.id}`)) }, selected: selection.current.includes(item.id), ariaLabel: `Group ${item.label}`, zIndex: -1 }
+      return { id: item.id, type: 'graphNode', position: { x: item.x - (parent?.x ?? 0), y: item.y - (parent?.y ?? 0) }, parentId: parent?.id, extent: parent ? [[8, 40], [parent.width - 8, parent.height - 8]] : undefined, width: item.width, height: item.height, style: { width: item.width, height: item.height }, data: { item, boundary: true, theme, resize, maxHeight, labels: nativeChildren.filter((entry) => entry.type === 'text' && entry.id === `${nativePrefix}-gt-${item.id}`), icon: nativeChildren.find((entry) => entry.type === 'picture' && entry.id === `${nativePrefix}-gi-${item.id}`) }, selected: selection.current.includes(item.id), ariaLabel: `Group ${item.label}`, zIndex: -1 }
     })
     for (const item of next.nodes) {
       const parent = next.groups?.find((group) => group.id === item.group)
-      members.push({ id: item.id, type: 'graphNode', position: { x: item.x - (parent?.x ?? 0), y: item.y - (parent?.y ?? 0) }, parentId: parent?.id, extent: parent ? [[8, 40], [parent.width - 8, parent.height - 8]] : undefined, width: item.width ?? 176, height: item.height ?? 80, style: { width: item.width ?? 176, height: item.height ?? 80 }, data: { item, boundary: false, theme, resize, label: nativeChildren.find((entry) => entry.id.endsWith(`-nt-${item.id}`)), icon: nativeChildren.find((entry) => entry.type === 'picture' && entry.id.endsWith(`-ni-${item.id}`)) }, selected: selection.current.includes(item.id), ariaLabel: `Node ${item.label}` })
+      members.push({ id: item.id, type: 'graphNode', position: { x: item.x - (parent?.x ?? 0), y: item.y - (parent?.y ?? 0) }, parentId: parent?.id, extent: parent ? [[8, 40], [parent.width - 8, parent.height - 8]] : undefined, width: item.width ?? 176, height: item.height ?? 80, style: { width: item.width ?? 176, height: item.height ?? 80 }, data: { item, boundary: false, theme, resize, maxHeight, labels: nativeChildren.filter((entry) => entry.type === 'text' && (entry.id === `${nativePrefix}-nt-${item.id}` || entry.id === `${nativePrefix}-nd-${item.id}`)), icon: nativeChildren.find((entry) => entry.type === 'picture' && entry.id === `${nativePrefix}-ni-${item.id}`) }, selected: selection.current.includes(item.id), ariaLabel: `Node ${item.label}` })
     }
     setNodes((previous) => {
       const measuredById = new Map(previous.map((entry) => [entry.id, entry.measured]))
@@ -259,6 +283,12 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); install(current.current, preview ?? undefined); if (propagateError) throw reason; return false }
     finally { gate.current = false; setBusy(false); onBusy(false) }
   }
+  async function changeTitle(showTitle: boolean) {
+    if (gate.current) return
+    setPendingTitle(showTitle)
+    try { await change({ ...current.current, show_title: showTitle }) }
+    finally { setPendingTitle(null) }
+  }
   function perform(operations: GraphOperation[]) { void change(current.current, operations) }
   function chooseIcon(target: IconTarget) {
     iconTrigger.current = menu?.anchor ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
@@ -297,7 +327,7 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     const parent = selection.current.length === 1 ? current.current.groups?.find((group) => group.id === selection.current[0]) : undefined
     if (parent && groupAncestors(current.current.groups ?? [], parent.id).length >= 4) { setError('Boundaries support at most four levels.'); return }
     if (parent && (parent.width < 96 || parent.height < 104)) { setError('Enlarge the selected boundary before adding a child boundary.'); return }
-    const group: GraphGroup = { id: `group-${crypto.randomUUID().slice(0, 8)}`, label: 'Boundary', ...(parent ? { parent: parent.id, x: parent.x + 16, y: parent.y + 48, width: parent.width - 32, height: parent.height - 64 } : { x: 24, y: 104, width: 520, height: 360 }) }
+    const group: GraphGroup = { id: `group-${crypto.randomUUID().slice(0, 8)}`, label: 'Boundary', ...(parent ? { parent: parent.id, x: parent.x + 16, y: parent.y + 48, width: parent.width - 32, height: parent.height - 64 } : { x: 24, y: current.current.show_title === false ? 16 : 104, width: 520, height: 360 }) }
     if (await change(current.current, [{ op: 'put_group', group }])) choose(group.id)
   }
   useEffect(() => { action.current = perform })
@@ -376,6 +406,7 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
   const source = spec.nodes.some((node) => node.id === from) ? from : spec.nodes[0]?.id ?? ''
   const target = spec.nodes.some((node) => node.id === to) ? to : spec.nodes[1]?.id ?? spec.nodes[0]?.id ?? ''
   const locked = busy || view !== 'edit' || Boolean(iconTarget)
+  const contentTop = spec.show_title === false ? 0 : 88
   const nested = Boolean(spec.groups?.some((group) => group.parent))
   const menuCommands: MenuCommand[] = [
     { label: 'Undo diagram edit', icon: Undo2, action: () => void restore(false), disabled: locked || !history.past.length },
@@ -386,7 +417,7 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     { label: 'Duplicate node', icon: Copy, action: () => { if (node) perform([{ op: 'put_node', node: { ...node, id: `node-${crypto.randomUUID().slice(0, 8)}`, x: node.x + 24, y: node.y + 24 } }]) }, disabled: locked || !node },
     { label: 'Delete selection', icon: Trash2, action: () => perform([{ op: 'remove', ids: selected }]), disabled: locked || !selected.length, danger: true },
     ...(['left', 'center', 'right', 'top', 'middle', 'bottom'] as const).map((alignment, index) => ({ label: `Align ${alignment}`, icon: AlignLeft, action: () => perform([{ op: 'align', ids: selected, alignment }]), disabled: locked || selected.length < 2 || selected.some((id) => !spec.nodes.some((node) => node.id === id)), separator: index === 0 })),
-    { label: 'Add rectangle node', icon: Square, action: () => perform([{ op: 'put_node', node: { id: `node-${crypto.randomUUID().slice(0, 8)}`, label: 'Rectangle', x: 64, y: 120 } }]), disabled: locked, separator: true },
+    { label: 'Add rectangle node', icon: Square, action: () => perform([{ op: 'put_node', node: { id: `node-${crypto.randomUUID().slice(0, 8)}`, label: 'Rectangle', x: 64, y: contentTop + 32 } }]), disabled: locked, separator: true },
     { label: 'Grid layout', icon: Grid2X2, action: () => perform([{ op: 'layout', columns: Math.min(4, Math.ceil(Math.sqrt(spec.nodes.length))) }]), disabled: locked || nested },
   ]
   function contextAt(target: HTMLElement, position: MenuPosition) {
@@ -411,7 +442,7 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     } else if (event.key === 'Delete' && selected.length) { event.preventDefault(); event.stopPropagation(); perform([{ op: 'remove', ids: selected }]) }
   }}>
     <div className="graph-main" hidden={Boolean(iconTarget)}>
-    <div className="graph-topbar">{(['title', 'subtitle'] as const).map((field) => <label key={field} className="field">{field === 'title' ? 'Title' : 'Subtitle'}<input aria-label={`Graph ${field}`} maxLength={field === 'title' ? 80 : 120} value={spec[field] ?? ''} disabled={locked} onFocus={() => { metadataBefore.current = current.current }} onBlur={finishMetadata} onChange={(event) => { const next = { ...current.current, [field]: event.target.value }; current.current = next; setSpec(next); setPreview(null) }} /></label>)}</div>
+    <div className="graph-topbar">{(['title', 'subtitle'] as const).map((field) => <label key={field} className="field">{field === 'title' ? 'Title' : 'Subtitle'}<input aria-label={`Graph ${field}`} maxLength={field === 'title' ? 80 : 120} value={spec[field] ?? ''} disabled={locked || spec.show_title === false} onFocus={() => { metadataBefore.current = current.current }} onBlur={finishMetadata} onChange={(event) => { const next = { ...current.current, [field]: event.target.value }; current.current = next; setSpec(next); setPreview(null) }} /></label>)}<label className="checkbox"><input aria-label="Show graph title" type="checkbox" checked={pendingTitle ?? spec.show_title !== false} disabled={locked} onChange={(event) => void changeTitle(event.currentTarget.checked)} />Show title</label></div>
     <div className="graph-toolbar" aria-label="Diagram tools">
       <GraphTool label="Undo diagram edit" Icon={Undo2} onClick={() => void restore(false)} disabled={locked || !history.past.length} /><GraphTool label="Redo diagram edit" Icon={Redo2} onClick={() => void restore(true)} disabled={locked || !history.future.length} />
       <GraphTool label="Delete graph selection" Icon={Trash2} onClick={() => perform([{ op: 'remove', ids: selected }])} disabled={locked || !selected.length} />
@@ -424,16 +455,16 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     <div className="graph-workspace">
       <fieldset className="graph-library" disabled={locked}><legend className="visually-hidden">Graph library</legend><label className="field">Example<select aria-label="Graph example" defaultValue="" onChange={(event) => { const example = catalog.examples.find((entry) => entry.id === event.target.value); if (example) void change(structuredClone(example.spec)) }}><option value="" disabled>Choose example</option>{catalog.examples.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label>
         <button type="button" className="secondary graph-add-service" aria-label="Add service icon" onClick={() => chooseIcon({ kind: 'new' })}><Sticker size={20} /><span>Add service icon</span></button>
-        <div className="graph-shapes">{Object.entries(kinds).map(([kind, entry]) => <button type="button" key={kind} aria-label={`Add ${entry.name.toLowerCase()} node`} title={`Add ${entry.name}`} onClick={() => perform([{ op: 'put_node', node: { id: `node-${crypto.randomUUID().slice(0, 8)}`, label: entry.name, kind: kind as GraphNodeKind, x: 64 + spec.nodes.length % 4 * 240, y: 120 + Math.floor(spec.nodes.length / 4) % 3 * 112 } }])}><entry.icon size={22} /><span>{entry.name}</span></button>)}</div>
+        <div className="graph-shapes">{Object.entries(kinds).map(([kind, entry]) => <button type="button" key={kind} aria-label={`Add ${entry.name.toLowerCase()} node`} title={`Add ${entry.name}`} onClick={() => perform([{ op: 'put_node', node: { id: `node-${crypto.randomUUID().slice(0, 8)}`, label: entry.name, kind: kind as GraphNodeKind, x: 64 + spec.nodes.length % 4 * 240, y: contentTop + 32 + Math.floor(spec.nodes.length / 4) % 3 * 112 } }])}><entry.icon size={22} /><span>{entry.name}</span></button>)}</div>
         <button type="button" className="secondary" onClick={() => void addGroup()}><Plus size={16} />Boundary</button>
         <div className="graph-entities">{spec.groups?.map((entry) => <button key={entry.id} type="button" className={selected.includes(entry.id) ? 'active' : ''} aria-label={`Select group ${entry.id}`} onClick={() => choose(entry.id)}>{entry.label}</button>)}{spec.nodes.map((entry) => <button type="button" key={entry.id} className={selected.includes(entry.id) ? 'active' : ''} aria-label={`Select node ${entry.id}`} onClick={() => choose(entry.id)}>{entry.label}</button>)}{spec.edges?.map((entry) => <button type="button" key={entry.id} className={selected.includes(entry.id) ? 'active' : ''} aria-label={`Select edge ${entry.id}`} onClick={() => choose(entry.id)}>{entry.label || `${entry.source} to ${entry.target}`}</button>)}</div>
       </fieldset>
       <section className="graph-canvas" role="tabpanel" id={`graph-panel-${view}`} aria-labelledby={`graph-tab-${view}`} onContextMenu={(event) => { if (locked) return; event.preventDefault(); event.stopPropagation(); contextAt(event.target as HTMLElement, { x: event.clientX, y: event.clientY, anchor: event.currentTarget }) }}>
-        {view === 'edit' && <ReactFlow<GraphFlowNode, GraphFlowEdge> nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodesChange={nodesChange} onEdgesChange={edgesChange} onSelectionChange={selectionChange} onNodeDragStop={dragStop} onConnect={connect} onReconnect={reconnect} fitView fitViewOptions={{ padding: 0.2 }} minZoom={0.25} maxZoom={2.5} nodeExtent={[[0, 88], [1152, 512]]} connectionMode={ConnectionMode.Loose} snapToGrid={snap} snapGrid={[8, 8]} deleteKeyCode={null} nodesDraggable={!busy} nodesConnectable={!busy} edgesReconnectable={!busy} elementsSelectable={!busy} colorMode="light"><Background gap={24} size={1} /><Controls showInteractive={false} /></ReactFlow>}
+        {view === 'edit' && <ReactFlow<GraphFlowNode, GraphFlowEdge> nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodesChange={nodesChange} onEdgesChange={edgesChange} onSelectionChange={selectionChange} onNodeDragStop={dragStop} onConnect={connect} onReconnect={reconnect} fitView fitViewOptions={{ padding: 0.2 }} minZoom={0.25} maxZoom={2.5} nodeExtent={[[0, contentTop], [1152, 512]]} connectionMode={ConnectionMode.Loose} snapToGrid={snap} snapGrid={[8, 8]} deleteKeyCode={null} nodesDraggable={!busy} nodesConnectable={!busy} edgesReconnectable={!busy} elementsSelectable={!busy} colorMode="light"><Background gap={24} size={1} /><Controls showInteractive={false} /></ReactFlow>}
         {view === 'preview' && (preview ? <NativePreview element={preview} theme={theme} /> : <p role="status">Rendering diagram</p>)}
         {view === 'json' && <div className="graph-json"><label className="field">Graph JSON<textarea aria-label="Graph JSON" className="code-input" maxLength={2 * 1024 * 1024} rows={20} disabled={busy} value={raw} onChange={(event) => setRaw(event.target.value)} /></label><button type="button" className="secondary" disabled={busy} onClick={() => { try { void change(JSON.parse(raw)) } catch (reason) { setError(String(reason)) } }}><Check size={16} />Validate JSON</button></div>}
       </section>
-      <fieldset className="graph-inspector" disabled={locked}><legend className="visually-hidden">Graph properties</legend>{node ? <NodeProperties key={JSON.stringify(node)} node={node} groups={spec.groups ?? []} theme={theme} onApply={(node) => perform([{ op: 'put_node', node }])} onChooseIcon={(node) => chooseIcon({ kind: 'node', node })} /> : edge ? <EdgeProperties key={JSON.stringify(edge)} edge={edge} nodes={spec.nodes} theme={theme} onApply={(edge) => perform([{ op: 'put_edge', edge }])} /> : group ? <GroupProperties key={JSON.stringify(group)} group={group} groups={spec.groups ?? []} theme={theme} onApply={(group) => perform([{ op: 'put_group', group }])} onChooseIcon={(group) => chooseIcon({ kind: 'group', group })} /> : <div className="graph-empty">{selected.length ? `${selected.length} selected` : 'No selection'}</div>}
+      <fieldset className="graph-inspector" disabled={locked}><legend className="visually-hidden">Graph properties</legend>{node ? <NodeProperties key={JSON.stringify(node)} node={node} groups={spec.groups ?? []} contentTop={contentTop} theme={theme} onApply={(node) => perform([{ op: 'put_node', node }])} onChooseIcon={(node) => chooseIcon({ kind: 'node', node })} /> : edge ? <EdgeProperties key={JSON.stringify(edge)} edge={edge} nodes={spec.nodes} theme={theme} onApply={(edge) => perform([{ op: 'put_edge', edge }])} /> : group ? <GroupProperties key={JSON.stringify(group)} group={group} groups={spec.groups ?? []} contentTop={contentTop} theme={theme} onApply={(group) => perform([{ op: 'put_group', group }])} onChooseIcon={(group) => chooseIcon({ kind: 'group', group })} /> : <div className="graph-empty">{selected.length ? `${selected.length} selected` : 'No selection'}</div>}
         <div className="graph-new-edge"><label className="field">From<select aria-label="Connect from" value={source} onChange={(event) => setFrom(event.target.value)}>{spec.nodes.map((node) => <option value={node.id} key={node.id}>{node.label}</option>)}</select></label><label className="field">To<select aria-label="Connect to" value={target} onChange={(event) => setTo(event.target.value)}>{spec.nodes.map((node) => <option value={node.id} key={node.id}>{node.label}</option>)}</select></label><button type="button" className="secondary" disabled={source === target} onClick={() => perform([{ op: 'put_edge', edge: { id: `edge-${crypto.randomUUID().slice(0, 8)}`, source, target, route: 'elbow' } }])}><Plus size={16} />Connect nodes</button></div>
       </fieldset>
     </div>

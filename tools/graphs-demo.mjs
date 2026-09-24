@@ -17,15 +17,19 @@ assert.ok(destinations.length <= 1 && destinations.every((argument) => !argument
 const directory = resolve(destinations[0] ?? `.artifacts/graphs${withCloudIcons ? '-cloud-icons' : withIcons ? '-icons' : ''}-${Date.now()}`);
 await mkdir(directory, { recursive: true });
 assert.equal((await readdir(directory)).length, 0, 'Use a new or empty output directory');
-const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: withCloudIcons && process.env.AISLIDE_ICON_PACK_ROOT !== undefined ? { AISLIDE_ICON_PACK_ROOT: process.env.AISLIDE_ICON_PACK_ROOT } : undefined });
+const environment = {};
+if (process.env.AISLIDE_CORE_BINARY !== undefined) environment.AISLIDE_CORE_BINARY = process.env.AISLIDE_CORE_BINARY;
+if (withCloudIcons && process.env.AISLIDE_ICON_PACK_ROOT !== undefined) environment.AISLIDE_ICON_PACK_ROOT = process.env.AISLIDE_ICON_PACK_ROOT;
+const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: environment });
 const client = new Client({ name: 'architecture-qualification', version: '1.0.0' });
 const calls = [];
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const call = async (name, args = {}) => {
   const started = performance.now();
-  const result = await client.callTool({ name, arguments: args });
+  let progressCount = 0;
+  const result = await client.callTool({ name, arguments: args }, undefined, { timeout: 320000, maxTotalTimeout: 320000, resetTimeoutOnProgress: true, onprogress: () => { progressCount += 1; } });
   assert.ok(!result.isError, JSON.stringify(result.content));
-  calls.push({ name, milliseconds: Math.round(performance.now() - started) });
+  calls.push({ name, milliseconds: Math.round(performance.now() - started), progress_notifications: progressCount });
   return JSON.parse(result.content[0].text);
 };
 

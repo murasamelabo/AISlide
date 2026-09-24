@@ -509,7 +509,7 @@ pub(crate) fn ensure_unprotected(package: &crate::package::Package) -> Result<()
     for (path, kind) in content_types(package)? {
         let lower = path.to_ascii_lowercase(); let kind = kind.to_ascii_lowercase();
         if lower.starts_with("_xmlsignatures/") || lower.contains("labelinfo") || lower.contains("encryption") || kind.contains("signature") || kind.contains("sensitivitylabel") { return Err(Error::Unsupported("clean-copy/field refresh does not alter signed, labelled or protected packages".into())); }
-        if path.ends_with(".xml") {
+        if lower.ends_with(".xml") || kind.ends_with("+xml") || kind == "application/xml" || kind == "text/xml" {
             let parsed = crate::pptx::parse(package.text(&path)?)?;
             if parsed.descendants().filter(|node| node.is_element()).any(|node| {
                 let namespace = node.tag_name().namespace().unwrap_or("").to_ascii_lowercase();

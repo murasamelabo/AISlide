@@ -38,6 +38,128 @@ fn assert_body_floor(element: &Value, scale: f64, floor: f64) {
 }
 
 #[test]
+fn guided_authoring_slide_limit_is_explicit_and_bounded() {
+    let mut input=authoring_brief("status-report");
+    let slide=input["slides"][0].clone();
+    input["slides"]=json!((0..32).map(|index| {
+        let mut slide=slide.clone();slide["id"]=json!(format!("slide-{index}"));slide
+    }).collect::<Vec<_>>());
+    assert_eq!(execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap()["ready"],true);
+    input["slides"]=json!((0..39).map(|index| {
+        let mut slide=slide.clone();slide["id"]=json!(format!("slide-{index}"));slide
+    }).collect::<Vec<_>>());
+    assert_eq!(execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap()["ready"],false);
+    input["authoring"]=json!({"slide_limit":39});
+    let checked=execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"],true,"{checked}");
+    let created=execute_request(json!({"op":"create_guided_presentation","id":"bounded-slides","input":input})).unwrap();
+    assert_eq!(created["document"]["deck"]["slides"].as_array().unwrap().len(),39);
+    for limit in [31,38,129] {
+        input["authoring"]["slide_limit"]=json!(limit);
+        assert_eq!(execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap()["ready"],false);
+        assert!(execute_request(json!({"op":"create_guided_presentation","id":"invalid-limit","input":input})).is_err());
+    }
+}
+
+#[test]
+fn guided_authoring_keyword_headlines_keep_support_and_numeric_checks() {
+    let mut input=brief("consulting-decision");
+    input["language"]=json!("ja");
+    input["slides"][0]["headline"]=json!("Priority");
+    input["slides"][0]["support"][0]["clause"]=json!("Priority");
+    assert_eq!(execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap()["ready"],false);
+    input["authoring"]=json!({"headline_style":"sentence"});
+    assert_eq!(execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap()["ready"],false);
+    input["authoring"]["headline_style"]=json!("keyword");
+    let checked=execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"],true,"{checked}");
+    for (path,value,expected) in [
+        ("/slides/0/support/0/clause",json!("Other"),"reconstruct"),
+        ("/slides/0/support/0/body_paths",json!(["/title"]),"body evidence"),
+        ("/slides/0/support/0/evidence_ids",json!(["missing"]),"missing evidence"),
+        ("/slides/0/parent_message",json!("missing"),"parent"),
+        ("/slides/0/numbers",json!([]),"no source"),
+        ("/slides/0/numbers/0/value",json!(13),"path/value mismatch"),
+        ("/evidence/0/kind",json!("unknown"),"missing or unknown"),
+        ("/slides/0/sentence_form",json!("unsupported"),"unknown sentence form"),
+    ] {
+        let mut invalid=input.clone();*invalid.pointer_mut(path).unwrap()=value;
+        let checked=execute_request(json!({"op":"validate_guided_presentation","input":invalid})).unwrap();
+        assert_eq!(checked["ready"],false,"{path}: {checked}");
+        assert!(checked["issues"].to_string().contains(expected),"{path}: {checked}");
+        assert!(execute_request(json!({"op":"create_guided_presentation","id":"invalid-keyword","input":invalid})).is_err());
+    }
+}
+
+#[test]
+fn guided_authoring_validation_options_preserve_legacy_typography() {
+    let input=authoring_brief("status-report");
+    let original=execute_request(json!({"op":"create_guided_presentation","id":"validation-options","input":input})).unwrap();
+    for settings in [json!({"headline_style":"sentence"}),json!({"headline_style":"keyword"}),json!({"slide_limit":32}),json!({"slide_limit":128,"headline_style":"keyword"})] {
+        let mut input=input.clone();input["authoring"]=settings;
+        let created=execute_request(json!({"op":"create_guided_presentation","id":"validation-options","input":input})).unwrap();
+        assert_eq!(created,original);
+    }
+}
+
+#[test]
+fn guided_authoring_slide_limit_rejects_invalid_types_and_accepts_upper_bound() {
+    let mut input=authoring_brief("status-report");
+    for settings in [json!({"headline_style":"title"}),json!({"slide_limit":0}),json!({"slide_limit":31}),json!({"slide_limit":129}),json!({"slide_limit":-1}),json!({"slide_limit":39.5}),json!({"slide_limit":"39"})] {
+        input["authoring"]=settings.clone();
+        let checked=execute_request(json!({"op":"validate_guided_presentation","input":input}));
+        assert!(checked.as_ref().map_or(true,|value|value["ready"]==false),"{settings}: {checked:?}");
+    }
+    let slide=input["slides"][0].clone();
+    input["authoring"]=json!({"slide_limit":128});
+    input["slides"]=json!((0..128).map(|index| {
+        let mut slide=slide.clone();slide["id"]=json!(format!("slide-{index}"));slide
+    }).collect::<Vec<_>>());
+    let checked=execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"],true,"{checked}");
+    let mut extra=slide;extra["id"]=json!("slide-128");input["slides"].as_array_mut().unwrap().push(extra);
+    assert_eq!(execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap()["ready"],false);
+}
+
+#[test]
+fn guided_authoring_keyword_only_waives_sentence_variation_in_decision_decks() {
+    let mut input=brief("consulting-decision");
+    input["issues"]=json!((1..=3).map(|index|json!({"id":format!("Q{index}"),"question":"Scope","requested_decision":"Approve pilot","criterion":"Evidence reviewed","owner":"Owner","due":"After approval","evidence_ids":["source-a"],"analysis_slide_ids":["evidence-slide"]})).collect::<Vec<_>>());
+    let template=|id:&str,pattern:&str|json!({"id":id,"section":"Decision","headline":"Priority","sentence_form":"causal","pattern_id":pattern,"question":"What should be approved?","parent_message":"governing","transition":"therefore","parallel_basis":"decision issue","support":[{"clause":"Priority","body_paths":["/issues"],"evidence_ids":["source-a"]}],"numbers":[]});
+    input["slides"]=json!([template("summary","C02"),input["slides"][0].clone(),template("closing","C03")]);
+    let checked=execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"],false);
+    assert!(checked["issues"].to_string().contains("vary sentence forms"),"{checked}");
+    input["authoring"]=json!({"headline_style":"keyword"});
+    let checked=execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"],true,"{checked}");
+    for (path,value) in [("/issues/0/analysis_slide_ids",json!(["summary"])),("/slides/0/pattern_id",json!("C03")),("/slides/2/pattern_id",json!("C02")),("/issues",json!([]))] {
+        let mut invalid=input.clone();*invalid.pointer_mut(path).unwrap()=value;
+        assert_eq!(execute_request(json!({"op":"validate_guided_presentation","input":invalid})).unwrap()["ready"],false,"{path}");
+    }
+    let headline="12 delays across 4 teams within 30 days";
+    input["slides"][1]["headline"]=json!(headline);input["slides"][1]["support"][0]["clause"]=json!(headline);
+    let checked=execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"],false);
+    assert!(checked["issues"].to_string().contains("more than two numeric claims"),"{checked}");
+}
+
+#[test]
+fn guided_authoring_graph_detail_typography_is_not_a_factual_number() {
+    let mut input=authoring_brief("status-report");
+    input["authoring"]=json!({"headline_style":"keyword"});
+    input["slides"][0]["part"]=json!({"version":1,"preset":"diagram/custom","title":"Review","data":{"kind":"diagram","graph":{"version":1,"title":"Review","show_title":false,"nodes":[{"id":"review","label":"Review","detail":"Check evidence\nConfirm scope","detail_font_size":16,"font_size":24,"text_align":"left","x":0,"y":0,"width":360,"height":200}]}}});
+    input["slides"][0]["support"][0]["body_paths"]=json!(["/data/graph/nodes/0/detail"]);
+    let created=execute_request(json!({"op":"create_guided_presentation","id":"guided-detail","input":input})).unwrap();
+    assert_eq!(created["validation"]["ready"],true);
+    assert_eq!(created["document"]["parts"][0]["stale"],false);
+    assert_eq!(created["document"]["parts"][0]["spec"]["data"]["graph"]["nodes"][0]["detail_font_size"],16.0);
+    let children=created["document"]["deck"]["slides"][0]["elements"][4]["children"].as_array().unwrap();
+    assert!(children.iter().any(|child|child["id"].as_str().unwrap().ends_with("-nd-review")));
+    assert!(children.iter().all(|child|!child["id"].as_str().unwrap().ends_with("-title")));
+}
+
+#[test]
 fn guided_authoring_defaults_distinguish_reading_and_projection() {
     for (profile, floor, headline_size) in [("status-report",16.0,34.0),("technical-explainer",16.0,34.0),("consulting-decision",16.0,34.0),("event-talk",24.0,40.0)] {
         let mut input = authoring_brief(profile);
@@ -203,7 +325,12 @@ fn guided_authoring_schema_exposes_only_the_locked_settings() {
     let definitions=schema.get("$defs").or_else(||schema.get("definitions")).unwrap();
     let settings=&definitions["Authoring"];
     assert_eq!(settings["additionalProperties"],false);
-    assert_eq!(settings["properties"].as_object().unwrap().len(),6);
+    assert_eq!(settings["properties"].as_object().unwrap().len(),8);
+    assert_eq!(settings["properties"]["slide_limit"]["minimum"],32);
+    assert_eq!(settings["properties"]["slide_limit"]["maximum"],128);
+    assert_eq!(definitions["HeadlineStyle"]["enum"],json!(["sentence","keyword"]));
+    assert_eq!(guide["limits"]["slides"],32);
+    assert_eq!(guide["limits"]["maximum_slides"],128);
     assert_eq!(settings["properties"]["body_font_min"]["minimum"],12);
     assert_eq!(settings["properties"]["body_font_min"]["maximum"],40);
     assert_eq!(settings["properties"]["headline_font_size"]["minimum"],28);

@@ -2,6 +2,8 @@
 import type { PartCatalog, PartSpec, GraphCatalog, GraphIcon, GraphSpec, GraphOperation, SlideOperation, ElementOperation, AssetInput, DesignPreset } from './types'
 import type { AuthoringProfile, BestPracticeGuide, BestPracticeProfiles, GuidedInput, GuidedReview } from './types'
 import type { ArchitectureIconCatalog, ArchitectureIconAssets } from './types'
+import type { MasterSourceInput, MasterSourceInspection, MasterImportInput, MasterImportPreview } from './types'
+import type { AuthoringOperation, Frame, Crop, ConnectorSettings, PictureInput, RunStyle, ShapeAdjustment, SlideImportInput } from './types'
 import type { AuthoringCapabilities, SearchOptions, TextMatch, TextReplaceOptions, FormatTextInput, ReplaceTextContentInput, UpdateParagraphsInput, CanvasResizeInput, TemplateKind, TemplateInput, TemplateExport, ImageEditInput, EditedImage, ApplyImageEditInput, EditTableInput, SelectionOperation, ElementBundle, SelectionEditResult } from './types'
 export * from './types'
 import type { FormatTextElementInput, ReplaceElementTextInput, CommentInput, ModernCommentOperation, TableHeaders, ElementAccessibility, ReadingOrderResult, AccessibilityReport, DocumentInspection, CleanCopyOptions, CleanCopyExport } from './types'
@@ -18,6 +20,7 @@ export const FONT_LIMITS: Readonly<{ face_bytes: number; total_bytes: number; fa
 export function encodeCoreRequest(request: unknown): string
 import type { StaticExportOptions, StaticExport, VerifiedRecoveryDocument, PreviewOptions, PresentationPreview, PreflightOptions, PreflightReport, RevisionEdit, RevisionPreview, DeliveryOptions, PreparedDelivery } from './types'
 export type TransactionOptions = RequestOptions & { expectedRevision?: number }
+export type AuthoringOptions = TransactionOptions & { expectedHash?: string }
 export type AssignLayoutOptions = TransactionOptions & { preserveFreeform?: boolean }
 export type ReplaceOptions = TransactionOptions & { sources?: SourceDocument[]; bindings?: SourceBinding[]; report?: Report | null }
 export type CoreTransport = <T>(request: unknown, options?: RequestOptions) => Promise<T>
@@ -36,6 +39,7 @@ export class AislideClient {
   proofText(input: ProofTextInput, options?: RequestOptions): Promise<ProofResult>
   inspectFont(base64: string, options?: RequestOptions): Promise<FontInfo>
   inspectPptxFonts(base64: string, options?: RequestOptions): Promise<NativeFontInspection>
+  inspectMasterSource(input: MasterSourceInput, options?: RequestOptions): Promise<MasterSourceInspection>
   capacityProfiles(options?: RequestOptions): Promise<{ default: CapacityProfile; legacy: CapacityLimits; standard: CapacityLimits; large: CapacityLimits }>
   verifySessionRecovery(envelope: SessionRecovery, options?: RequestOptions): Promise<SessionRecovery>
   recoverSession(envelope: SessionRecovery, options?: RequestOptions): Promise<DocumentSession>
@@ -91,6 +95,22 @@ export class DocumentSession {
   readonly busy: boolean
   readonly fieldWarnings: string[]
   transact(operations: PatchOperation[], options?: TransactionOptions): Promise<AislideDocument>
+  /** 1..128 typed operations, one core transaction and Undo per changed batch. Prefer add_part/add_graph for regenerable metadata; add_elements is unmanaged. add_graph accepts layout here only; update_graph retains its existing PartLayout. Core capacity and 128 total metadata entries still apply. */
+  applyOperations(operations: AuthoringOperation[], options?: AuthoringOptions): Promise<AislideDocument>
+  addElements(slideId: string, elements: Element[], options?: AuthoringOptions): Promise<AislideDocument>
+  /** Geometry only; group child geometry and absolute table tracks scale, fonts and strokes do not. */
+  setFrames(slideId: string, frames: { id: string; frame: Frame }[], options?: AuthoringOptions): Promise<AislideDocument>
+  /** Partial overlay; retains unspecified run and paragraph styles, unlike applyFormat's format-painter semantics. */
+  setTextStyle(slideId: string, input: { ids: string[]; style: RunStyle }, options?: AuthoringOptions): Promise<AislideDocument>
+  setSlideBackground(slideId: string, color: string, options?: AuthoringOptions): Promise<AislideDocument>
+  /** Replaces connector settings; omitted start/end/routing clear them. Visual properties remain unchanged. */
+  setConnector(slideId: string, input: { id: string; connector: ConnectorSettings; frame?: Frame | null }, options?: AuthoringOptions): Promise<AislideDocument>
+  setPictureCrop(slideId: string, input: { id: string; crop: Crop }, options?: AuthoringOptions): Promise<AislideDocument>
+  setHyperlink(slideId: string, input: { id: string; link: string | null }, options?: AuthoringOptions): Promise<AislideDocument>
+  setShapeAdjustment(slideId: string, input: { id: string; adjustment: ShapeAdjustment }, options?: AuthoringOptions): Promise<AislideDocument>
+  addPicture(slideId: string, input: PictureInput, options?: AuthoringOptions): Promise<AislideDocument>
+  /** Imports selected authored source slides with matching canvas in one Undo. Native source documents fail closed. */
+  importSlides(source: AislideDocument, input: SlideImportInput, options?: AuthoringOptions): Promise<AislideDocument>
   replaceDeck(deck: Deck, options?: ReplaceOptions): Promise<AislideDocument>
   updateDesign(design: Design, options?: TransactionOptions): Promise<AislideDocument>
   setMasterTheme(masterId: string, theme: Theme | null, options?: TransactionOptions): Promise<AislideDocument>
@@ -149,6 +169,8 @@ export class DocumentSession {
   applyImageEdit(slideId: string, input: ApplyImageEditInput, options?: TransactionOptions): Promise<AislideDocument>
   /** Return template bytes without writing a file or changing the document. */
   exportTemplate(kind: TemplateKind, options?: RequestOptions): Promise<TemplateExport>
+  previewMasterImport(input: MasterImportInput, options?: TransactionOptions & { expectedHash?: string }): Promise<MasterImportPreview>
+  importMasters(input: MasterImportInput, expectedCandidateHash: string, options?: TransactionOptions & { expectedHash?: string }): Promise<AislideDocument>
   exportStatic(input?: StaticExportOptions, options?: RequestOptions): Promise<StaticExport>
   previewPresentation(input?: PreviewOptions, options?: RequestOptions): Promise<PresentationPreview>
   preflightPresentation(input?: PreflightOptions, options?: RequestOptions): Promise<PreflightReport>

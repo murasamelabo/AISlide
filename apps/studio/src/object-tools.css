@@ -32,3 +32,9 @@
 .object-tools-panel .object-tools-comment { display: block; }
 .object-tools-panel .object-tools-comment p { white-space: pre-wrap; }
 @media (max-width: 380px) { .object-tools-grid { grid-template-columns: minmax(0, 1fr); } .object-tools-panel { padding: 8px; } }
+.master-import-entries { max-height: 260px; overflow-y: auto; }
+.master-import-entries > li { display: block; }
+.master-import-entries > li > span { display: block; margin-left: 28px; color: var(--muted); }
+.master-import-entries .object-tools-check { min-height: 44px; margin: 0; }
+.master-import-preview { width: 100%; min-width: 0; overflow: hidden; border: 1px solid var(--border); background: var(--surface-muted); }
+.master-import-panel .object-tools-scroll { padding-left: 24px; }

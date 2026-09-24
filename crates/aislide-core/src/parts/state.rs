@@ -15,6 +15,46 @@ pub struct PartInstance {
     #[serde(default)] pub stale:bool,
 }
 
+pub(crate) struct NativeRegenerationGuard<'a> {
+    origin: Option<&'a ImportedOrigin>,
+    original: Option<(Package, NativeDeck)>,
+    checked: BTreeSet<(String, String)>,
+}
+
+impl<'a> NativeRegenerationGuard<'a> {
+    pub(crate) fn new(document: &'a Document) -> Self {
+        Self { origin: document.origin.as_ref().filter(|origin| origin.native), original: None, checked: BTreeSet::new() }
+    }
+
+    fn check(&mut self, slide: &crate::model::Slide, id: &str) -> Result<()> {
+        let Some(origin) = self.origin else { return Ok(()); };
+        let source = slide.native_source_id.as_deref().unwrap_or(&slide.id);
+        let identity = (source.to_owned(), id.to_owned());
+        if self.checked.contains(&identity) { return Ok(()); }
+        if self.original.is_none() {
+            let package = Package::open(STANDARD.decode(&origin.base64).map_err(|_| Error::Invalid("part origin".into()))?)?;
+            let native = crate::native::read(&package)?;
+            self.original = Some((package, native));
+        }
+        if let Some((package, native)) = &self.original {
+            if let Some(binding) = native.slides.iter().find(|binding| binding.id == source) {
+                let original = native.deck.slides.iter().find(|slide| slide.id == source).and_then(|slide| slide.elements.iter().find(|element| element.bounds().0 == id));
+                if let Some(original) = original {
+                    for element in crate::model::element_list(std::slice::from_ref(original)) {
+                        if let Element::Chart { id, kind, categories, series, options, .. } = element {
+                            if !crate::native_save::chart_is_representable(package, binding, id, *kind, categories, series, options)? {
+                                return Err(Error::Unsupported("custom native chart dependencies, settings or workbook content cannot be regenerated as a managed part".into()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.checked.insert(identity);
+        Ok(())
+    }
+}
+
 pub(crate) fn render_hash(element:&Element)->Result<String> {
     let mut value=serde_json::to_value(element)?;
     if let Some(object)=value.as_object_mut() {for field in ["x","y","width","height"] {object.remove(field);}}
@@ -79,11 +119,34 @@ pub fn change(document:&Document,expected_revision:u64,slide_id:&str,id:&str,spe
     crate::document::verify(document)?;
     if document.revision!=expected_revision {return Err(Error::Conflict("stale document revision".into()));}
     let mut parts=document.parts.clone();let mut deck=document.deck.clone();
+    let mut native_guard=NativeRegenerationGuard::new(document);
+    change_in_deck(&mut deck,&mut parts,slide_id,id,spec,update,&mut native_guard)?;
+    crate::document::transact(document,Transaction {expected_revision,expected_hash:document.hash.clone(),operations:serde_json::from_value(json!([{"op":"replace","path":"/deck","value":deck},{"op":"add","path":"/parts","value":parts}]))?})
+}
+
+pub(crate) fn change_in_deck(deck:&mut Deck,parts:&mut Vec<PartInstance>,slide_id:&str,id:&str,spec:&PartSpec,update:bool,native_guard:&mut NativeRegenerationGuard<'_>)->Result<()> {
+    if !update && parts.len()>=128 {return Err(Error::Limit("more than 128 metadata parts".into()));}
     let slide=deck.slides.iter_mut().find(|slide|slide.id==slide_id).ok_or_else(||Error::Invalid("unknown part slide".into()))?;
     let fallback=crate::design::Theme::default();
-    let mut element=super::create_with_theme(id,spec,document.deck.design.as_ref().map(|design|&design.theme).unwrap_or(&fallback))?;
-    if !update {
-        let region = document.deck.design.as_ref().and_then(|design| design.layouts.iter().find(|layout| Some(&layout.id) == slide.layout_id.as_ref() && layout.id == "preset-visual-content"))
+    let existing=parts.iter().position(|part|part.slide_id==slide_id && part.element_id==id);
+    let mut effective_spec=spec.clone();
+    if update {
+        let index=existing.ok_or_else(||Error::Invalid("part metadata missing".into()))?;
+        if parts[index].stale {return Err(Error::Conflict("part metadata is stale; retain manual edits or insert a new part".into()));}
+        let current=slide.elements.iter().find(|element|element.bounds().0==id).ok_or_else(||Error::Conflict("part element missing".into()))?;
+        if render_hash(current)?!=parts[index].render_sha256 {return Err(Error::Conflict("part metadata is stale after an earlier edit in this batch".into()));}
+        if crate::model::element_list(std::slice::from_ref(current)).iter().any(|element|element.visual().is_some_and(|visual|visual.locked || visual.hidden)) {return Err(Error::Unsupported("unlock and show the managed part before updating".into()));}
+        native_guard.check(slide,id)?;
+        if let Some(layout)=&mut effective_spec.layout {
+            if parts[index].spec.layout.as_ref().is_some_and(|previous| [previous.x,previous.y,previous.width,previous.height]==[layout.x,layout.y,layout.width,layout.height]) {
+                let (_,x,y,width,height)=current.bounds();
+                layout.x=x;layout.y=y;layout.width=width;layout.height=height;
+            }
+        }
+    }
+    let mut element=super::create_with_theme(id,&effective_spec,crate::design::slide_theme(slide,deck.design.as_ref()).unwrap_or(&fallback))?;
+    if !update && effective_spec.layout.is_none() {
+        let region = deck.design.as_ref().and_then(|design| design.layouts.iter().find(|layout| Some(&layout.id) == slide.layout_id.as_ref() && layout.id == "preset-visual-content"))
             .and_then(|layout| layout.elements.iter().find(|element| element.bounds().0 == "preset-visual-region"));
         if let (Some(region), Element::Group { x, y, width, height, .. }) = (region, &mut element) {
             let (_, left, top, region_width, region_height) = region.bounds();
@@ -94,16 +157,18 @@ pub fn change(document:&Document,expected_revision:u64,slide_id:&str,id:&str,spe
             resize_canvas(&mut element, target.0, target.1)?;
         }
     }
-    let existing=parts.iter().position(|part|part.slide_id==slide_id && part.element_id==id);
     let native_sha256=existing.and_then(|index|parts[index].native_sha256.clone());
     if update {
         let index=existing.ok_or_else(||Error::Invalid("part metadata missing".into()))?;
         if parts[index].stale {return Err(Error::Conflict("part metadata is stale; retain manual edits or insert a new part".into()));}
         let current=slide.elements.iter_mut().find(|element|element.bounds().0==id).ok_or_else(||Error::Conflict("part element missing".into()))?;
-        if let Element::Group { view_width, view_height, .. } = current { resize_canvas(&mut element, *view_width, *view_height)?; }
-        if let Element::Group{x,y,width,height,..}=&mut element {let bounds=current.bounds();*x=bounds.1;*y=bounds.2;*width=bounds.3;*height=bounds.4;}
-        *current=element.clone();parts.remove(index);
+        if effective_spec.layout.is_none() {
+            if let Element::Group { view_width, view_height, .. } = current { resize_canvas(&mut element, *view_width, *view_height)?; }
+            if let Element::Group{x,y,width,height,..}=&mut element {let bounds=current.bounds();*x=bounds.1;*y=bounds.2;*width=bounds.3;*height=bounds.4;}
+        }
+        *current=element.clone();
     } else {if existing.is_some() || slide.elements.iter().any(|element|element.bounds().0==id) {return Err(Error::Conflict("part identity already exists".into()));}slide.elements.push(element.clone());}
-    parts.push(PartInstance {slide_id:slide_id.into(),element_id:id.into(),spec:spec.clone(),render_sha256:render_hash(&element)?,native_sha256,stale:false});
-    crate::document::transact(document,Transaction {expected_revision,expected_hash:document.hash.clone(),operations:serde_json::from_value(json!([{"op":"replace","path":"/deck","value":deck},{"op":"add","path":"/parts","value":parts}]))?})
+    let instance=PartInstance {slide_id:slide_id.into(),element_id:id.into(),spec:effective_spec,render_sha256:render_hash(&element)?,native_sha256,stale:false};
+    if let Some(index)=existing {parts[index]=instance;} else {parts.push(instance);}
+    Ok(())
 }

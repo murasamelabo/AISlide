@@ -27,6 +27,7 @@ import { TextToolsPanel } from './TextToolsPanel'
 import { ObjectToolsPanel } from './ObjectToolsPanel'
 import { NotesPagePreview, ReviewPanel } from './ReviewPanel'
 import { DocumentSetupPanel } from './DocumentSetupPanel'
+import { MasterImportPanel } from './MasterImportPanel'
 import { ExportPanel } from './ExportPanel'
 import { DocumentFonts, FontPanel } from './FontPanel'
 import { SessionRecoveryPanel } from './SessionRecoveryPanel'
@@ -202,7 +203,7 @@ export default function Studio() {
   const busy = documentBusy || inlineWorking || propertiesWorking
   const [error, setError] = useState('')
   const [status, setStatus] = useState('Loading local core')
-  const [modal, setModalState] = useState<'report' | 'inspect' | 'generate' | 'sources' | 'layout' | 'import' | 'insert' | 'parts' | 'graph' | 'theme' | 'design' | 'assets' | 'text-tools' | 'object-tools' | 'review' | 'setup' | 'export' | 'recovery' | 'fonts' | null>(null)
+  const [modal, setModalState] = useState<'report' | 'inspect' | 'generate' | 'sources' | 'layout' | 'import' | 'insert' | 'parts' | 'graph' | 'theme' | 'design' | 'master-import' | 'assets' | 'text-tools' | 'object-tools' | 'review' | 'setup' | 'export' | 'recovery' | 'fonts' | null>(null)
   const [templateDecision, setTemplateDecision] = useState<((approved: boolean) => void) | null>(null)
   const [graphCatalog, setGraphCatalog] = useState<GraphCatalog | null>(null)
   const [partCatalog, setPartCatalog] = useState<PartCatalog | null>(null)
@@ -810,6 +811,7 @@ export default function Studio() {
       <span className="ribbon-space" />
       <Tool label="Edit theme" disabled={disable || importedMode} onClick={() => void run(async () => { setDesignDefaults(deck?.design ?? await core<Design>({ op: 'design_defaults' })); setModal('theme') })}><Palette size={18} /></Tool>
       <Tool label="Edit masters and layouts" disabled={disable || importedMode} onClick={() => void run(async () => { setDesignDefaults(deck?.design ?? await core<Design>({ op: 'design_defaults' })); setModal('design') })}><LayoutTemplate size={18} /></Tool>
+      <Tool label="Import masters" disabled={disable || hasDrafts || importedMode} onClick={() => setModal('master-import')}><FileInput size={18} /></Tool>
       {deck?.design && slide && <><select aria-label="Slide layout" className="layout-select" disabled={disable || importedMode} value={slide.layout_id ?? deck.design.layouts[0].id} onChange={(event) => { const layout_id = event.target.value; void run(async () => apply(await core<Deck>({ op: 'assign_layout', deck, slide_id: slide.id, layout_id }))) }}>{deck.design.layouts.map((layout) => <option key={layout.id} value={layout.id}>{layout.name}</option>)}</select><Tool label="Reset layout" disabled={disable || importedMode || !slide.layout_id} onClick={() => void run(async () => apply(await core<Deck>({ op: 'assign_layout', deck, slide_id: slide.id, layout_id: slide.layout_id })))}><RotateCcw size={18} /></Tool></>}
       <Tool label="New report" disabled={disable} onClick={() => replacePresentation(async () => {
         const report = await core<Report>({ op: 'sample' }); const result = await core<Compiled>({ op: 'compile', report })
@@ -877,7 +879,7 @@ export default function Studio() {
         {panel === 'notes' && slide && deck?.auxiliary_design?.notes_master && <details><summary>Notes page</summary><NotesPagePreview slide={slide} auxiliary={deck.auxiliary_design} pageNumber={slideIndex + 1} /></details>}
       </aside></>}
     </div>
-    <footer className="status-bar"><span className={busy ? 'status busy' : 'status'}>{busy ? 'Processing' : status}</span><span>{deck?.slides.length ?? 0} slides<span className="status-divider">|</span>{deck?.width ?? 1280} x {deck?.height ?? 720}<span className="status-divider">|</span>Core 0.1</span></footer>
+    <footer className="status-bar"><span role="status" className={busy ? 'status busy' : 'status'}>{busy ? 'Processing' : status}</span><span>{deck?.slides.length ?? 0} slides<span className="status-divider">|</span>{deck?.width ?? 1280} x {deck?.height ?? 720}<span className="status-divider">|</span>Core 0.1</span></footer>
     {recoveryEnabled && recoveryStatus && <div className="recovery-status" role="status">{recoveryStatus}</div>}
     {recoveryFailure && <div className="error recovery-status" role="alert">{recoveryFailure}</div>}
     {historyBoundary && <div className="recovery-status" role="status">Undo/Redo history boundary reached (30 receipts or 4 MiB per direction). Earlier changes are no longer reversible in this session.</div>}
@@ -886,6 +888,7 @@ export default function Studio() {
     {modal === 'export' && panelSession && <Modal title="Export PDF and images" onClose={closeModal}><ExportPanel session={panelSession} pageIndex={slideIndex} onBusy={setOutputBusy} /></Modal>}
     <DocumentFonts key={documentState?.id} fonts={deck?.embedded_fonts} />
     {modal === 'fonts' && panelSession && <Modal title="Fonts" onClose={closeModal}><FontPanel session={panelSession} element={element ?? undefined} slideId={slide?.id} onDocument={setDocumentState} onBusy={setBusy} /></Modal>}
+    {modal === 'master-import' && panelSession && <Modal title="Master import" busy={busy} onClose={closeModal}><MasterImportPanel key={documentState?.id} session={panelSession} onBusy={setBusy} onCancel={closeModal} onDocument={document => { setDocumentState(document); setStatus('Masters added / Existing slides unchanged'); setModal(null) }} /></Modal>}
     {modal === 'recovery' && <Modal title="Local recovery" busy={recoveryWorking} onClose={closeModal}><SessionRecoveryPanel enabled={recoveryEnabled} onEnabledChange={changeRecoveryEnabled} onRestore={restoreRecovery} onLegacyRestore={restoreLegacyRecovery} onBusy={setRecoveryWorking} /></Modal>}
     {modal === 'object-tools' && panelSession && slide && element && <Modal title="Advanced object settings" onClose={closeModal}><ObjectToolsPanel session={panelSession} element={element} slideId={slide.id} onDocument={setDocumentState} onBusy={setBusy} /></Modal>}
     {modal === 'review' && panelSession && slide && <Modal title="Review document" onClose={closeModal}><ReviewPanel session={panelSession} slideId={slide.id} selectedId={selected} onDocument={setDocumentState} onBusy={setBusy} onExport={exportPanelBytes} onNavigate={(slideId, id) => { const index = deck?.slides.findIndex((entry) => entry.id === slideId) ?? -1; if (index >= 0) { changeSlide(index); setSelected(id); setModal(null) } }} /></Modal>}

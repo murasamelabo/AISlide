@@ -59,6 +59,7 @@ export class AislideClient {
   proofText(input, options) { return this.request({ ...input, op: 'proof_text' }, options); }
   inspectFont(base64, options) { return this.request({ op: 'inspect_font', base64 }, options); }
   inspectPptxFonts(base64, options) { return this.request({ op: 'inspect_pptx_fonts', base64 }, options); }
+  inspectMasterSource(input, options) { return this.request({ ...input, op: 'inspect_master_source' }, options); }
   capacityProfiles(options) { return this.request({ op: 'capacity_profiles' }, options); }
   async verifyRecovery(document, options) {
     const verified = structuredClone(await this.request({ op: 'verify_recovery', document }, options));
@@ -195,6 +196,25 @@ export class DocumentSession {
   async transact(operations, options = {}) {
     return this.#run(() => this.#commit(operations, options), options);
   }
+  applyOperations(operations, options) { return this.#guardedAuthor('apply_operations', { operations }, options); }
+  addElements(slideId, elements, options) { return this.applyOperations([{ op: 'add_elements', slide_id: slideId, elements }], options); }
+  setFrames(slideId, frames, options) { return this.applyOperations(frames.map(({ id, frame }) => ({ op: 'set_frame', slide_id: slideId, id, frame })), options); }
+  setTextStyle(slideId, input, options) { return this.applyOperations([{ ...input, op: 'set_text_style', slide_id: slideId }], options); }
+  setSlideBackground(slideId, color, options) { return this.applyOperations([{ op: 'set_slide_background', slide_id: slideId, color }], options); }
+  setConnector(slideId, input, options) { return this.applyOperations([{ ...input, op: 'set_connector', slide_id: slideId }], options); }
+  setPictureCrop(slideId, input, options) { return this.applyOperations([{ ...input, op: 'set_picture_crop', slide_id: slideId }], options); }
+  setHyperlink(slideId, input, options) { return this.applyOperations([{ ...input, op: 'set_hyperlink', slide_id: slideId }], options); }
+  setShapeAdjustment(slideId, input, options) { return this.applyOperations([{ ...input, op: 'set_shape_adjustment', slide_id: slideId }], options); }
+  addPicture(slideId, input, options) { return this.applyOperations([{ ...input, op: 'add_picture', slide_id: slideId }], options); }
+  importSlides(source, input, options) { return this.#guardedAuthor('import_slides', { ...input, source }, options); }
+  #guardedAuthor(op, input, options = {}) {
+    return this.#run(async () => {
+      this.#expectRevision(options);
+      const result = await this.#request({ ...input, op, document: this.#document, expected_revision: this.revision,
+        expected_hash: options.expectedHash ?? this.#document.hash }, { signal: options.signal });
+      return this.#accept(result, options);
+    }, options);
+  }
   async #commit(operations, options) {
     const result = await this.#request({ op: 'transaction', document: this.#document, transaction: {
       expected_revision: options.expectedRevision ?? this.#document.revision,
@@ -305,6 +325,18 @@ export class DocumentSession {
   copyFormat(slideId, input, options) { return this.#read({ ...input, op: 'copy_format', slide_id: slideId, document: this.#document }, options); }
   sampleSlidePixel(slideId, x, y, options) { return this.#read({ op: 'sample_slide_pixel', slide_id: slideId, x, y, document: this.#document }, options); }
   exportTemplate(kind, options) { return this.#read({ op: 'export_template', document: this.#document, kind }, options); }
+  previewMasterImport(input, options = {}) {
+    return this.#read({ op: 'preview_master_import', document: this.#document, expected_revision: options.expectedRevision ?? this.revision,
+      expected_hash: options.expectedHash ?? this.#document.hash, input }, options);
+  }
+  importMasters(input, expectedCandidateHash, options = {}) {
+    return this.#run(async () => {
+      this.#expectRevision(options);
+      const result = await this.#request({ op: 'import_masters', document: this.#document, expected_revision: this.revision,
+        expected_hash: options.expectedHash ?? this.#document.hash, input, expected_candidate_hash: expectedCandidateHash }, { signal: options.signal });
+      return this.#accept(result, options);
+    }, options);
+  }
   exportStatic(input = {}, options) { return this.#read({ op: 'export_static', document: this.#document, options: input }, options); }
   previewPresentation(input = {}, options) { return this.#read({ op: 'preview_presentation', document: this.#document, options: input }, options); }
   preflightPresentation(input = {}, options) { return this.#read({ op: 'preflight_presentation', document: this.#document, options: input }, options); }

@@ -10,6 +10,381 @@ fn deck(element: Value) -> Value {
     json!({"version":1,"title":"Parts test","width":1280,"height":720,"slides":[{"id":"slide","title":"Parts","background":"FFFFFF","notes":"Synthetic examples","elements":[element]}]})
 }
 
+fn matrix_spec(category: &str, variant: &str) -> Value {
+    json!({"version":1,"preset":format!("{category}/{variant}"),"title":"Alternatives","subtitle":"Synthetic example","data":{"kind":"matrix","rows":["Speed","Control"],"columns":["Option A","Option B"],"cells":[["High","Medium"],["Shared","Dedicated"]]}})
+}
+
+fn managed_chart_with_theme_override() -> Value {
+    let mut scene = deck(json!({})); scene["slides"][0]["elements"] = json!([]);
+    let document = execute_request(json!({"op":"new_document","id":"chart-dependency","deck":scene})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"managed","spec":column_spec()})).unwrap();
+    let saved = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+    let package = Package::open(STANDARD.decode(saved["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let mut entries = package.parts().clone();
+    entries.insert("ppt/theme/managedOverride.xml".into(), br#"<a:themeOverride xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:fontScheme name="Synthetic override"><a:majorFont><a:latin typeface="Courier New"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Courier New"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme></a:themeOverride>"#.to_vec());
+    let mut package = Package::from_parts(entries).unwrap();
+    let types = package.text("[Content_Types].xml").unwrap().replace("</Types>", "<Override PartName=\"/ppt/theme/managedOverride.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.themeOverride+xml\"/></Types>");
+    package.replace_part("[Content_Types].xml", types.into_bytes()).unwrap();
+    let relationships = package.text("ppt/charts/_rels/chart1.xml.rels").unwrap().replace("</Relationships>", "<Relationship Id=\"rIdOverride\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/themeOverride\" Target=\"../theme/managedOverride.xml\"/></Relationships>");
+    package.replace_part("ppt/charts/_rels/chart1.xml.rels", relationships.into_bytes()).unwrap();
+    let bytes = package.save().unwrap();
+    let package = Package::open(bytes.clone()).unwrap();
+    assert!(package.text("ppt/charts/_rels/chart1.xml.rels").unwrap().contains("themeOverride"));
+    let reopened = execute_request(json!({"op":"open_presentation","id":"custom-managed","base64":STANDARD.encode(&bytes)})).unwrap();
+    assert_eq!(reopened["document"]["parts"][0]["stale"], false);
+    let unchanged = execute_request(json!({"op":"export_presentation","document":reopened["document"]})).unwrap();
+    assert_eq!(STANDARD.decode(unchanged["base64"].as_str().unwrap()).unwrap(), bytes);
+    reopened["document"].clone()
+}
+
+fn assert_managed_chart_dependency_rejected(batch: bool) {
+    let document = managed_chart_with_theme_override();
+    let snapshot = document.clone();
+    let mut spec = column_spec(); spec["title"] = json!("Changed child identities");
+    let operation = json!({"op":"update_part","slide_id":"slide","id":"managed","spec":spec});
+    let request = if batch {
+        json!({"op":"apply_operations","document":document,"expected_revision":0,"expected_hash":document["hash"],"operations":[
+            {"op":"set_slide_background","slide_id":"slide","color":"ABCDEF"}, operation
+        ]})
+    } else {
+        json!({"op":"update_part","document":document,"expected_revision":0,"slide_id":"slide","id":"managed","spec":spec})
+    };
+    let result = execute_request(request);
+    if let Ok(changed) = &result {
+        let saved = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+        let package = Package::open(STANDARD.decode(saved["base64"].as_str().unwrap()).unwrap()).unwrap();
+        panic!("unsafe managed regeneration accepted (batch={batch}); new chart={}, old override retained but not attached to new chart={}",
+            package.part("ppt/charts/chart2.xml").is_ok(),
+            package.part("ppt/theme/managedOverride.xml").is_ok() && !package.text("ppt/charts/_rels/chart2.xml.rels").unwrap().contains("themeOverride"));
+    }
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("Unsupported: custom native chart"), "{error}");
+    assert_eq!(document, snapshot);
+    let saved = execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+    assert_eq!(saved["base64"], document["origin"]["base64"]);
+}
+
+#[test]
+fn managed_chart_dependency_individual_update_rejects_regeneration() {
+    assert_managed_chart_dependency_rejected(false);
+}
+
+#[test]
+fn managed_chart_dependency_batch_update_rejects_regeneration() {
+    assert_managed_chart_dependency_rejected(true);
+}
+
+#[test]
+fn managed_chart_dependency_safe_regeneration_preserves_sources_opaque_parts_and_undo() {
+    let source = execute_request(json!({"op":"ingest","input":{"format":"csv","name":"synthetic.csv","base64":STANDARD.encode(b"Label,Value\nSelected,12\n")}})).unwrap();
+    let marker = json!({"id":"source-marker","type":"text","x":10,"y":10,"width":120,"height":30,"text":"12","font_size":18,"color":"202426","bold":false});
+    let binding = json!({"slide_id":"slide","element_id":"source-marker","field":"/text","source_id":source["id"],"source_sha256":source["sha256"],"locator":"record:2/column:2","raw_value":"12","value":"12","transform":"display_scalar","stale":false});
+    let mut scene = deck(marker);
+    let mut untouched = scene["slides"][0].clone(); untouched["id"] = json!("untouched"); untouched["elements"] = json!([]);
+    scene["slides"].as_array_mut().unwrap().push(untouched);
+    let document = execute_request(json!({"op":"new_document","id":"safe-chart","deck":scene,"sources":[source],"bindings":[binding]})).unwrap();
+    let mut spec = column_spec(); spec["layout"] = json!({"x":40,"y":100,"width":576,"height":512});
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"managed","spec":spec})).unwrap();
+    let exported = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+    let mut package = Package::open(STANDARD.decode(exported["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let xml = package.text("ppt/slides/slide2.xml").unwrap().replace("</p:sld>", "<p:extLst><p:ext uri=\"urn:test:chart-control\"><v:opaque xmlns:v=\"urn:test:chart-control\" value=\"keep\"/></p:ext></p:extLst></p:sld>");
+    package.replace_part("ppt/slides/slide2.xml", xml.into_bytes()).unwrap();
+    let bytes = package.save().unwrap();
+    let original_parts = Package::open(bytes.clone()).unwrap().parts().clone();
+    let opened = execute_request(json!({"op":"open_presentation","id":"safe-reopened","base64":STANDARD.encode(&bytes)})).unwrap();
+    let before = &opened["document"];
+    assert_eq!(before["parts"][0]["stale"], false);
+    for batch in [false, true] {
+        let noop = if batch {
+            json!({"op":"apply_operations","document":before,"expected_revision":0,"expected_hash":before["hash"],"operations":[{"op":"update_part","slide_id":"slide","id":"managed","spec":spec}]})
+        } else { json!({"op":"update_part","document":before,"expected_revision":0,"slide_id":"slide","id":"managed","spec":spec}) };
+        let noop = execute_request(noop).unwrap();
+        assert_eq!(noop["document"], *before);
+        assert!(noop["receipt"].is_null());
+        assert_eq!(execute_request(json!({"op":"export_presentation","document":noop["document"]})).unwrap()["base64"], STANDARD.encode(&bytes));
+    }
+    let moved = execute_request(json!({"op":"apply_operations","document":before,"expected_revision":0,"expected_hash":before["hash"],"operations":[
+        {"op":"set_frame","slide_id":"slide","id":"managed","frame":{"x":90,"y":120,"width":576,"height":512}}
+    ]})).unwrap();
+    let mut first = spec.clone(); first["data"]["series"][0]["values"][0] = json!(44);
+    let mut second = first.clone(); second["title"] = json!("Second regeneration");
+    second["layout"]["x"] = json!(90); second["layout"]["y"] = json!(120);
+    let updated = execute_request(json!({"op":"apply_operations","document":moved["document"],"expected_revision":1,"expected_hash":moved["document"]["hash"],"operations":[
+        {"op":"update_part","slide_id":"slide","id":"managed","spec":first},
+        {"op":"update_part","slide_id":"slide","id":"managed","spec":second}
+    ]})).unwrap();
+    for field in ["sources", "bindings", "origin"] { assert_eq!(updated["document"][field], before[field], "{field}"); }
+    assert_eq!(updated["document"]["deck"]["slides"][0]["elements"][0], before["deck"]["slides"][0]["elements"][0]);
+    assert_eq!(updated["document"]["parts"][0]["spec"]["layout"]["x"], 90.0);
+    assert_eq!(updated["document"]["parts"][0]["spec"]["layout"]["y"], 120.0);
+    assert_eq!(updated["document"]["parts"][0]["stale"], false);
+    let saved = execute_request(json!({"op":"export_presentation","document":updated["document"]})).unwrap();
+    let output = Package::open(STANDARD.decode(saved["base64"].as_str().unwrap()).unwrap()).unwrap();
+    for (path, content) in &original_parts {
+        if ["ppt/slides/slide1.xml", "ppt/slides/_rels/slide1.xml.rels", "[Content_Types].xml"].contains(&path.as_str()) || path.starts_with("customXml/") { continue; }
+        assert_eq!(output.part(path).unwrap(), content, "untouched native part {path}");
+    }
+    let reopened = execute_request(json!({"op":"open_presentation","id":"safe-updated","base64":saved["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["parts"][0]["stale"], false);
+    assert_eq!(reopened["document"]["parts"][0]["spec"], updated["document"]["parts"][0]["spec"]);
+    for field in ["sources", "bindings"] { assert_eq!(reopened["document"][field], before[field], "reopened {field}"); }
+    let undo_update = execute_request(json!({"op":"undo_transaction","document":updated["document"],"expected_revision":2,"receipt":updated["receipt"]})).unwrap();
+    let undo_move = execute_request(json!({"op":"undo_transaction","document":undo_update["document"],"expected_revision":3,"receipt":moved["receipt"]})).unwrap();
+    assert_eq!(execute_request(json!({"op":"export_presentation","document":undo_move["document"]})).unwrap()["base64"], STANDARD.encode(bytes));
+}
+
+fn assert_managed_part_master_theme(batch: bool, update: bool) {
+    use aislide_core::{design::{Design, Master, SlideLayout}, parts::{PartSpec, create_with_theme}};
+    let mut design = Design::default();
+    design.theme.fonts.minor = "Arial".into();
+    let mut master_theme = design.theme.clone();
+    master_theme.fonts.major = "Courier New".into();
+    master_theme.fonts.minor = "Courier New".into();
+    design.masters.push(Master { id: "second".into(), name: "Second".into(), background: "@lt1".into(), elements: vec![], theme: Some(master_theme.clone()) });
+    design.layouts.push(SlideLayout { id: "second-layout".into(), name: "Second".into(), master_id: "second".into(), background: None, elements: vec![] });
+    for bounded in [false, true] {
+        let mut spec = column_spec();
+        spec["title"] = json!("i".repeat(if bounded { 40 } else { 80 }));
+        if bounded { spec["layout"] = json!({"x":40,"y":100,"width":576,"height":512}); }
+        let parsed: PartSpec = serde_json::from_value(spec.clone()).unwrap();
+        let expected = serde_json::to_value(create_with_theme("fitted", &parsed, &master_theme).unwrap()).unwrap();
+        let default = serde_json::to_value(create_with_theme("fitted", &parsed, &design.theme).unwrap()).unwrap();
+        assert_ne!(expected, default, "font fixture must discriminate the effective theme (bounded={bounded})");
+        let mut scene = deck(json!({})); scene["slides"][0]["elements"] = json!([]);
+        scene["design"] = serde_json::to_value(&design).unwrap();
+        for (layout, expected) in [(json!("second-layout"), &expected), (json!("blank"), &default), (Value::Null, &default)] {
+            scene["slides"][0]["layout_id"] = layout;
+            let mut document = execute_request(json!({"op":"new_document","id":"master-fit","deck":scene})).unwrap();
+            if update {
+                let mut seed = spec.clone(); seed["title"] = json!("Seed");
+                document = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"fitted","spec":seed})).unwrap()["document"].clone();
+            }
+            let request = if batch {
+                json!({"op":"apply_operations","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"operations":[
+                    {"op":if update {"update_part"} else {"add_part"},"slide_id":"slide","id":"fitted","spec":spec}
+                ]})
+            } else {
+                json!({"op":if update {"update_part"} else {"insert_part"},"document":document,"expected_revision":document["revision"],"slide_id":"slide","id":"fitted","spec":spec})
+            };
+            let changed = execute_request(request).unwrap();
+            assert_eq!(&changed["document"]["deck"]["slides"][0]["elements"][0], expected, "effective master fitting: batch={batch}, update={update}, bounded={bounded}");
+            assert_eq!(changed["document"]["parts"][0]["stale"], false);
+        }
+    }
+}
+
+#[test]
+fn managed_part_master_theme_individual_insert_matches_factory() {
+    assert_managed_part_master_theme(false, false);
+}
+
+#[test]
+fn managed_part_master_theme_individual_update_matches_factory() {
+    assert_managed_part_master_theme(false, true);
+}
+
+#[test]
+fn managed_part_master_theme_batch_insert_matches_factory() {
+    assert_managed_part_master_theme(true, false);
+}
+
+#[test]
+fn managed_part_master_theme_batch_update_matches_factory() {
+    assert_managed_part_master_theme(true, true);
+}
+
+#[test]
+fn matrix_corner_label_empty_preserves_legacy_serialization_ids_and_native_bytes() {
+    use sha2::{Digest, Sha256};
+    let mut failures = Vec::new();
+    for category in ["matrix", "contrast"] {
+        for variant in ["balanced", "focus", "labeled"] {
+            let legacy = matrix_spec(category, variant);
+            let parsed: aislide_core::parts::PartSpec = serde_json::from_value(legacy.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), legacy);
+            let original = execute_request(json!({"op":"create_part","id":"legacy-matrix","spec":legacy})).unwrap();
+            let identity = format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap()));
+            assert_eq!(original["children"][0]["id"], format!("legacy-matrix-{}-0", &identity[..10]));
+            let saved = execute_request(json!({"op":"export","deck":deck(original.clone())})).unwrap();
+            let legacy_sha256 = match (category, variant) {
+                ("matrix", "balanced") => "734a91f424f425cc19bf845d15fda9930d2576c4077bd1e877da50a78fb23c46",
+                ("matrix", "focus") => "53cb61dc15108b14e67f452bc38b3f3000fb9d33cd45f43ad2fb3a5983d9609b",
+                ("matrix", "labeled") => "a561fe30c26fb8cc7500d9f9d6cf3ba53af67b056c88edd3ebffb67ffc6c6361",
+                ("contrast", "balanced") => "aa80268e7fdf1b467538b94da817b7591a4ddf38ea8f486cc48d0ba742925d60",
+                ("contrast", "focus") => "896027bf450670dcaec293d31ade9289628ed4fe828a5f194034f9d943736325",
+                ("contrast", "labeled") => "942150c2faa44e1c3e4c7a7ef675dfc80bb1ae449f6df5aaee337fe2bdebfc34",
+                _ => unreachable!(),
+            };
+            assert_eq!(format!("{:x}", Sha256::digest(STANDARD.decode(saved["base64"].as_str().unwrap()).unwrap())), legacy_sha256, "{category}/{variant}");
+            let mut explicit = legacy.clone(); explicit["data"]["corner_label"] = json!("");
+            let parsed = match serde_json::from_value::<aislide_core::parts::PartSpec>(explicit.clone()) {
+                Ok(parsed) => parsed,
+                Err(error) => { failures.push(format!("{category}/{variant}: {error}")); continue; }
+            };
+            assert_eq!(serde_json::to_value(parsed).unwrap(), legacy);
+            let blank = execute_request(json!({"op":"create_part","id":"legacy-matrix","spec":explicit})).unwrap();
+            assert_eq!(blank, original);
+            assert_eq!(execute_request(json!({"op":"export","deck":deck(blank)})).unwrap()["base64"], saved["base64"]);
+            let mut scene = deck(json!({})); scene["slides"][0]["elements"] = json!([]);
+            let document = execute_request(json!({"op":"new_document","id":"legacy-matrix","deck":scene})).unwrap();
+            let omitted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"legacy-matrix","spec":legacy})).unwrap();
+            let explicit = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"legacy-matrix","spec":explicit})).unwrap();
+            assert_eq!(omitted, explicit);
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn matrix_corner_labels_are_editable_native_headers_without_overlap() {
+    for category in ["matrix", "contrast"] {
+        for variant in ["balanced", "focus", "labeled"] {
+            let mut spec = matrix_spec(category, variant);
+            let blank = execute_request(json!({"op":"create_part","id":"heading","spec":spec})).unwrap();
+            for label in ["Criterion", "\u{89b3}\u{70b9}"] {
+                spec["data"]["corner_label"] = json!(label);
+                let element = execute_request(json!({"op":"create_part","id":"heading","spec":spec})).unwrap();
+                let children = element["children"].as_array().unwrap();
+                if variant == "labeled" {
+                    assert_eq!(children.len(), blank["children"].as_array().unwrap().len());
+                    let table = children.iter().find(|child| child["type"] == "table").unwrap();
+                    assert_eq!(table["rows"], json!([[label,"Option A","Option B"],["Speed","High","Medium"],["Control","Shared","Dedicated"]]));
+                } else {
+                    assert_eq!(children.len(), blank["children"].as_array().unwrap().len() + 1);
+                    let heading = children.iter().find(|child| child["type"] == "text" && child["text"] == label).unwrap();
+                    for (field, expected) in [("x",24.0),("y",90.0),("width",180.0),("height",48.0)] { assert_eq!(heading[field], expected, "{field}"); }
+                    assert_eq!(heading["bold"], true);
+                    assert_eq!(heading["format"]["alignment"], "left");
+                    for other in children.iter().filter(|child| child["id"] != heading["id"]) {
+                        let left = other["x"].as_f64().unwrap(); let top = other["y"].as_f64().unwrap();
+                        let right = left + other["width"].as_f64().unwrap(); let bottom = top + other["height"].as_f64().unwrap();
+                        assert!(!(left < 204.0 && right > 24.0 && top < 138.0 && bottom > 90.0), "{category}/{variant}: {} overlaps corner", other["id"]);
+                    }
+                }
+                let measured = execute_request(json!({"op":"measure_layout","deck":deck(element.clone())})).unwrap();
+                assert!(measured["issues"].as_array().unwrap().iter().all(|issue| issue["severity"] != "error"), "{}", measured["issues"]);
+                let exported = execute_request(json!({"op":"export","deck":deck(element)})).unwrap();
+                let package = Package::open(STANDARD.decode(exported["base64"].as_str().unwrap()).unwrap()).unwrap();
+                assert!(package.text("ppt/slides/slide1.xml").unwrap().contains(&format!("<a:t>{label}</a:t>")));
+                assert!(!package.parts().keys().any(|path| path.starts_with("ppt/media/")));
+            }
+        }
+    }
+}
+
+#[test]
+fn matrix_corner_label_is_a_bounded_xml_safe_string() {
+    for category in ["matrix", "contrast"] {
+        for variant in ["balanced", "focus", "labeled"] {
+            let mut spec = matrix_spec(category, variant);
+            for label in ["i".repeat(48), "\u{e9}".repeat(48), "A <&> B".into()] {
+                spec["data"]["corner_label"] = json!(label);
+                execute_request(json!({"op":"create_part","id":"valid-corner","spec":spec})).unwrap();
+            }
+            for label in ["i".repeat(49), "\u{89b3}".repeat(49)] {
+                spec["data"]["corner_label"] = json!(label);
+                let error = execute_request(json!({"op":"create_part","id":"long-corner","spec":spec})).unwrap_err();
+                assert!(error.to_string().contains("text exceeds 48 characters"), "{error}");
+            }
+            for label in [json!("bad\u{0}text"), json!("bad\u{8}text"), json!("bad\u{fffe}text"), Value::Null, json!(42), json!({})] {
+                spec["data"]["corner_label"] = label;
+                assert!(execute_request(json!({"op":"create_part","id":"invalid-corner","spec":spec})).is_err(), "{spec}");
+            }
+        }
+    }
+    let mut invalid = column_spec(); invalid["data"]["corner_label"] = json!("Criterion");
+    assert!(execute_request(json!({"op":"create_part","id":"wrong-kind","spec":invalid})).is_err());
+}
+
+#[test]
+fn matrix_corner_labels_survive_bounded_native_update_reopen_and_undo() {
+    for category in ["matrix", "contrast"] {
+        for variant in ["balanced", "focus", "labeled"] {
+            let mut scene = deck(json!({})); scene["slides"][0]["elements"] = json!([]);
+            let document = execute_request(json!({"op":"new_document","id":"corner-state","deck":scene})).unwrap();
+            let mut spec = matrix_spec(category, variant);
+            spec["layout"] = json!({"x":40.0,"y":100.0,"width":1152.0,"height":424.0,"show_title":false});
+            spec["data"]["corner_label"] = json!("Criterion");
+            let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"corner","spec":spec})).unwrap();
+            let factory = execute_request(json!({"op":"create_part","id":"corner","spec":spec})).unwrap();
+            assert_eq!(inserted["document"]["deck"]["slides"][0]["elements"][0], factory);
+            let saved = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+            let reopened = execute_request(json!({"op":"open_presentation","id":"corner-native","base64":saved["base64"]})).unwrap();
+            assert_eq!(reopened["document"]["parts"][0]["spec"], inserted["document"]["parts"][0]["spec"]);
+            assert_eq!(reopened["document"]["parts"][0]["stale"], false);
+            assert_eq!(execute_request(json!({"op":"export_presentation","document":reopened["document"]})).unwrap()["base64"], saved["base64"]);
+            spec["data"]["corner_label"] = json!("\u{89b3}\u{70b9}");
+            let updated = execute_request(json!({"op":"update_part","document":reopened["document"],"expected_revision":0,"slide_id":"slide","id":"corner","spec":spec})).unwrap();
+            assert_eq!(updated["document"]["parts"][0]["spec"], spec);
+            assert_eq!(updated["document"]["parts"][0]["stale"], false);
+            let updated_saved = execute_request(json!({"op":"export_presentation","document":updated["document"]})).unwrap();
+            let updated_opened = execute_request(json!({"op":"open_presentation","id":"corner-updated","base64":updated_saved["base64"]})).unwrap();
+            assert_eq!(updated_opened["document"]["parts"][0]["spec"], spec);
+            assert_eq!(updated_opened["document"]["parts"][0]["stale"], false);
+            let package = Package::open(STANDARD.decode(updated_saved["base64"].as_str().unwrap()).unwrap()).unwrap();
+            assert!(package.text("ppt/slides/slide1.xml").unwrap().contains("<a:t>\u{89b3}\u{70b9}</a:t>"));
+            let undone = execute_request(json!({"op":"undo_transaction","document":updated["document"],"expected_revision":1,"receipt":updated["receipt"]})).unwrap();
+            for field in ["deck", "parts"] { assert_eq!(undone["document"][field], reopened["document"][field], "{field}"); }
+            assert_eq!(execute_request(json!({"op":"export_presentation","document":undone["document"]})).unwrap()["base64"], saved["base64"]);
+            spec["data"]["corner_label"] = json!("");
+            let cleared = execute_request(json!({"op":"update_part","document":updated_opened["document"],"expected_revision":0,"slide_id":"slide","id":"corner","spec":spec})).unwrap();
+            assert!(cleared["document"]["parts"][0]["spec"]["data"].get("corner_label").is_none());
+            assert_eq!(cleared["document"]["parts"][0]["stale"], false);
+            let factory = execute_request(json!({"op":"create_part","id":"corner","spec":spec})).unwrap();
+            assert_eq!(cleared["document"]["deck"]["slides"][0]["elements"][0], factory);
+            let restored = execute_request(json!({"op":"undo_transaction","document":inserted["document"],"expected_revision":1,"receipt":inserted["receipt"]})).unwrap();
+            for field in ["deck", "parts"] { assert_eq!(restored["document"][field], document[field], "{field}"); }
+        }
+    }
+}
+
+#[test]
+fn absent_part_layout_preserves_legacy_serialization_and_native_bytes() {
+    let legacy = column_spec();
+    let spec: aislide_core::parts::PartSpec = serde_json::from_value(legacy.clone()).unwrap();
+    #[derive(serde::Serialize)]
+    struct LegacyPartSpec<'a> {
+        version: u32, preset: &'a str, title: &'a str, subtitle: &'a str, data: &'a aislide_core::parts::PartData,
+    }
+    let old = LegacyPartSpec { version: spec.version, preset: &spec.preset, title: &spec.title, subtitle: &spec.subtitle, data: &spec.data };
+    assert_eq!(serde_json::to_vec(&spec).unwrap(), serde_json::to_vec(&old).unwrap());
+    let mut explicit = legacy.clone();
+    explicit["layout"] = Value::Null;
+    let first = execute_request(json!({"op":"create_part","id":"legacy","spec":legacy})).unwrap();
+    let second = execute_request(json!({"op":"create_part","id":"legacy","spec":explicit})).unwrap();
+    assert_eq!(first, second);
+    use sha2::{Digest, Sha256};
+    let identity = format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap()));
+    assert_eq!(first["children"][0]["id"], format!("legacy-{}-0", &identity[..10]));
+    let first = execute_request(json!({"op":"export","deck":deck(first)})).unwrap();
+    let second = execute_request(json!({"op":"export","deck":deck(second)})).unwrap();
+    assert_eq!(first["base64"], second["base64"]);
+}
+
+#[test]
+fn bounded_part_layout_removes_only_headers_and_preserves_body_font_sizes() {
+    let mut spec = column_spec();
+    spec["preset"] = json!("pie-chart/focus");
+    let legacy = execute_request(json!({"op":"create_part","id":"frame","spec":spec})).unwrap();
+    spec["layout"] = json!({"x":24,"y":36,"width":1152,"height":424,"show_title":false});
+    let bounded = execute_request(json!({"op":"create_part","id":"frame","spec":spec})).unwrap();
+    for (field, expected) in [("x",24.0),("y",36.0),("width",1152.0),("height",424.0),("view_width",1152.0),("view_height",424.0)] {
+        assert_eq!(bounded[field].as_f64().unwrap(), expected, "{field}");
+    }
+    let original = legacy["children"].as_array().unwrap();
+    let children = bounded["children"].as_array().unwrap();
+    assert_eq!(children.len(), original.len() - 2);
+    for (before, after) in original[2..].iter().zip(children) {
+        assert_eq!(after["type"], before["type"]);
+        assert_eq!(after["x"], before["x"]);
+        assert_eq!(after["y"].as_f64().unwrap(), before["y"].as_f64().unwrap() - 88.0);
+        assert_eq!(after["width"], before["width"]);
+        assert_eq!(after["height"], before["height"]);
+        assert_eq!(after["font_size"], before["font_size"]);
+        assert_ne!(after["id"], before["id"]);
+    }
+}
+
 #[test]
 fn parts_create_deterministic_native_column_charts_from_metadata() {
     let request = json!({"op":"create_part","id":"part-probe","spec":column_spec()});
@@ -24,6 +399,171 @@ fn parts_create_deterministic_native_column_charts_from_metadata() {
     assert!(package.text("ppt/charts/chart1.xml").unwrap().contains("<c:barChart"));
     assert!(package.part("ppt/embeddings/chart1.xlsx").is_ok());
     assert!(!package.parts().keys().any(|path| path.starts_with("ppt/media/")));
+}
+
+#[test]
+fn bounded_part_geometry_scales_without_blindly_scaling_text_or_strokes() {
+    let mut spec = column_spec();
+    spec["preset"] = json!("pie-chart/focus");
+    let original = execute_request(json!({"op":"create_part","id":"scaled","spec":spec})).unwrap();
+    spec["layout"] = json!({"x":0,"y":0,"width":576,"height":512});
+    let parsed: aislide_core::parts::PartSpec = serde_json::from_value(spec.clone()).unwrap();
+    assert!(parsed.layout.as_ref().unwrap().show_title);
+    let scaled = execute_request(json!({"op":"create_part","id":"scaled","spec":spec})).unwrap();
+    assert_eq!(scaled["view_width"], 576.0);
+    for (before, after) in original["children"].as_array().unwrap().iter().zip(scaled["children"].as_array().unwrap()) {
+        assert_eq!(after["x"].as_f64().unwrap(), before["x"].as_f64().unwrap() / 2.0);
+        assert_eq!(after["width"].as_f64().unwrap(), before["width"].as_f64().unwrap() / 2.0);
+        for field in ["y", "height", "font_size", "stroke_width", "format"] { assert_eq!(after[field], before[field], "{field}"); }
+    }
+    spec["layout"] = json!({"x":2000,"y":2000,"width":1152,"height":512});
+    let large = execute_request(json!({"op":"create_part","id":"large","spec":spec})).unwrap();
+    assert_eq!(large["x"], 2000.0);
+    assert!(execute_request(json!({"op":"validate","deck":deck(large)})).is_err());
+    spec["layout"] = json!({"x":0,"y":0,"width":4096,"height":4096});
+    assert!(execute_request(json!({"op":"create_part","id":"maximum","spec":spec})).is_ok());
+}
+
+#[test]
+fn bounded_part_layout_rejects_invalid_frames_and_body_clipping() {
+    for layout in [
+        json!({"x":-1,"y":0,"width":1152,"height":512}),
+        json!({"x":0,"y":-1,"width":1152,"height":512}),
+        json!({"x":0,"y":0,"width":0,"height":512}),
+        json!({"x":0,"y":0,"width":1152,"height":0}),
+        json!({"x":0,"y":0,"width":4097,"height":512}),
+        json!({"x":3000,"y":0,"width":1152,"height":512}),
+        json!({"x":0,"y":4000,"width":1152,"height":512}),
+        json!({"x":0,"y":0,"width":1152,"height":512,"clip":true}),
+        json!({"x":0,"y":0,"width":20,"height":20}),
+    ] {
+        let mut spec = column_spec(); spec["layout"] = layout;
+        assert!(execute_request(json!({"op":"create_part","id":"invalid","spec":spec})).is_err(), "{spec}");
+    }
+    let mut spec = column_spec();
+    spec["layout"] = json!({"x":0,"y":0,"width":1152,"height":424,"show_title":false});
+    let error = execute_request(json!({"op":"create_part","id":"clipped","spec":spec})).unwrap_err();
+    assert!(error.to_string().contains("title band"));
+    let mut parsed: aislide_core::parts::PartSpec = serde_json::from_value(spec).unwrap();
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        parsed.layout.as_mut().unwrap().width = invalid;
+        assert!(aislide_core::parts::create("nonfinite", &parsed).is_err());
+    }
+}
+
+#[test]
+fn bounded_custom_graph_layout_handles_both_original_title_modes() {
+    let mut graph = json!({"version":1,"title":"Services","subtitle":"Synthetic","nodes":[
+        {"id":"api","label":"API","detail":"Receives requests","font_size":24,"detail_font_size":16,"text_align":"left","heading_bold":false,"x":40,"y":120,"width":320,"height":160},
+        {"id":"data","label":"Data","x":600,"y":120,"width":320,"height":160}
+    ],"edges":[{"id":"call","source":"api","target":"data"}],"groups":[]});
+    let mut spec = json!({"version":1,"preset":"diagram/custom","title":"Services","subtitle":"Synthetic","data":{"kind":"diagram","graph":graph},"layout":{"x":10,"y":20,"width":1152,"height":424,"show_title":false}});
+    let element = execute_request(json!({"op":"create_part","id":"graph-frame","spec":spec})).unwrap();
+    let children = element["children"].as_array().unwrap();
+    assert!(!children.iter().any(|child| child["text"] == "Services" || child["text"] == "Synthetic"));
+    let node = children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-n-api")).unwrap();
+    assert_eq!(node["y"], 32.0);
+    let heading = children.iter().find(|child| child["text"] == "API").unwrap();
+    assert_eq!(heading["font_size"], 24.0);
+    assert_eq!(heading["bold"], false);
+    assert_eq!(heading["format"]["alignment"], "left");
+    let detail = children.iter().find(|child| child["text"] == "Receives requests").unwrap();
+    assert_eq!(detail["font_size"], 16.0);
+    let connector = children.iter().find(|child| child["type"] == "connector").unwrap();
+    assert_eq!(connector["start"]["element_id"], node["id"]);
+    let mut shifted = spec.clone(); shifted["layout"]["x"] = json!(30);
+    let shifted = execute_request(json!({"op":"create_part","id":"graph-frame","spec":shifted})).unwrap();
+    assert_ne!(shifted["children"][0]["id"], element["children"][0]["id"]);
+    graph["show_title"] = json!(false);
+    graph["nodes"][0]["y"] = json!(0);
+    graph["nodes"][1]["y"] = json!(400);
+    graph["nodes"][1]["height"] = json!(80);
+    graph["edges"] = json!([]);
+    spec["data"]["graph"] = graph.clone();
+    spec["layout"]["height"] = json!(512);
+    let untitled = execute_request(json!({"op":"create_part","id":"untitled","spec":spec})).unwrap();
+    for (id, expected) in [("api",0.0),("data",400.0)] {
+        let node = untitled["children"].as_array().unwrap().iter().find(|child| child["id"].as_str().unwrap().ends_with(&format!("-n-{id}"))).unwrap();
+        assert_eq!(node["y"], expected);
+    }
+    let mut scene = deck(json!({})); scene["slides"][0]["elements"] = json!([]);
+    let document = execute_request(json!({"op":"new_document","id":"graph-metadata","deck":scene})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"untitled","spec":spec})).unwrap();
+    assert_eq!(inserted["document"]["parts"][0]["spec"]["data"]["graph"]["show_title"], false);
+    assert_eq!(inserted["document"]["parts"][0]["spec"]["data"]["graph"]["nodes"][1]["y"], 400.0);
+    assert_eq!(inserted["document"]["parts"][0]["stale"], false);
+    spec["layout"]["show_title"] = json!(true);
+    assert!(execute_request(json!({"op":"create_part","id":"reserved-band","spec":spec})).is_err());
+}
+
+#[test]
+fn bounded_parts_preserve_metadata_sources_markers_and_frames_through_update_undo_and_native_reopen() {
+    let source = execute_request(json!({"op":"ingest","input":{"format":"csv","name":"selected.csv","base64":STANDARD.encode(b"Label,Value\nSelected,12\n")}})).unwrap();
+    let marker = json!({"id":"source-marker","type":"text","x":10,"y":10,"width":120,"height":30,"text":"12","font_size":18,"color":"202426","bold":false});
+    let binding = json!({"slide_id":"slide","element_id":"source-marker","field":"/text","source_id":source["id"],"source_sha256":source["sha256"],"locator":"record:2/column:2","raw_value":"12","value":"12","transform":"display_scalar","stale":false});
+    let document = aislide_core::document::create("bounded-state".into(), serde_json::from_value(deck(marker)).unwrap(), vec![serde_json::from_value(source).unwrap()], vec![serde_json::from_value(binding).unwrap()], None).unwrap();
+    let document = serde_json::to_value(document).unwrap();
+    let mut spec = column_spec(); spec["layout"] = json!({"x":40,"y":100,"width":576,"height":512});
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"bounded","spec":spec})).unwrap();
+    let factory = execute_request(json!({"op":"create_part","id":"bounded","spec":spec})).unwrap();
+    assert_eq!(inserted["document"]["deck"]["slides"][0]["elements"][1], factory);
+    let moved = execute_request(json!({"op":"transaction","document":inserted["document"],"transaction":{"expected_revision":1,"expected_hash":inserted["document"]["hash"],"operations":[
+        {"op":"replace","path":"/deck/slides/0/elements/1/x","value":90},
+        {"op":"replace","path":"/deck/slides/0/elements/1/y","value":120},
+        {"op":"replace","path":"/deck/slides/0/elements/1/width","value":768}
+    ]}})).unwrap();
+    assert_eq!(moved["document"]["parts"][0]["stale"], false);
+    spec["title"] = json!("Updated"); spec["data"]["series"][0]["values"][0] = json!(44);
+    let updated = execute_request(json!({"op":"update_part","document":moved["document"],"expected_revision":2,"slide_id":"slide","id":"bounded","spec":spec})).unwrap();
+    let stored = &updated["document"]["parts"][0]["spec"];
+    assert_eq!(stored["layout"]["x"], 90.0);
+    assert_eq!(stored["layout"]["y"], 120.0);
+    assert_eq!(stored["layout"]["width"], 768.0);
+    assert_eq!(updated["document"]["parts"][0]["stale"], false);
+    let regenerated = execute_request(json!({"op":"create_part","id":"bounded","spec":stored})).unwrap();
+    assert_eq!(updated["document"]["deck"]["slides"][0]["elements"][1], regenerated);
+    for field in ["sources", "bindings"] { assert_eq!(updated["document"][field], document[field], "{field}"); }
+    assert_eq!(updated["document"]["deck"]["slides"][0]["elements"][0], document["deck"]["slides"][0]["elements"][0]);
+    let undone = execute_request(json!({"op":"undo_transaction","document":updated["document"],"expected_revision":3,"receipt":updated["receipt"]})).unwrap();
+    for field in ["deck", "parts", "sources", "bindings"] { assert_eq!(undone["document"][field], moved["document"][field], "{field}"); }
+    spec = stored.clone(); spec["layout"]["x"] = json!(250); spec["layout"]["width"] = json!(576);
+    let reframed = execute_request(json!({"op":"update_part","document":updated["document"],"expected_revision":3,"slide_id":"slide","id":"bounded","spec":spec})).unwrap();
+    let factory = execute_request(json!({"op":"create_part","id":"bounded","spec":spec})).unwrap();
+    assert_eq!(reframed["document"]["deck"]["slides"][0]["elements"][1], factory);
+    let mut invalid = spec.clone(); invalid["layout"]["height"] = json!(1);
+    assert!(execute_request(json!({"op":"update_part","document":reframed["document"],"expected_revision":4,"slide_id":"slide","id":"bounded","spec":invalid})).is_err());
+    let saved = execute_request(json!({"op":"export_presentation","document":reframed["document"]})).unwrap();
+    let reopened = execute_request(json!({"op":"open_presentation","id":"bounded-native","base64":saved["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["parts"][0]["stale"], false);
+    assert_eq!(reopened["document"]["parts"][0]["spec"], reframed["document"]["parts"][0]["spec"]);
+    for field in ["sources", "bindings"] { assert_eq!(reopened["document"][field], document[field], "{field}"); }
+    assert_eq!(reopened["document"]["deck"]["slides"][0]["elements"][0]["text"], "12");
+    assert_eq!(execute_request(json!({"op":"export_presentation","document":reopened["document"]})).unwrap()["base64"], saved["base64"]);
+    spec["title"] = json!("Native edit");
+    let native_update = execute_request(json!({"op":"update_part","document":reopened["document"],"expected_revision":0,"slide_id":"slide","id":"bounded","spec":spec})).unwrap();
+    assert_eq!(native_update["document"]["parts"][0]["stale"], false);
+    assert_eq!(native_update["document"]["bindings"], document["bindings"]);
+    let restored = execute_request(json!({"op":"undo_transaction","document":native_update["document"],"expected_revision":1,"receipt":native_update["receipt"]})).unwrap();
+    assert_eq!(restored["document"]["deck"], reopened["document"]["deck"]);
+}
+
+#[test]
+fn explicit_part_layout_bypasses_automatic_visual_region_resizing() {
+    let mut design = aislide_core::design::Design::default();
+    design.layouts[0].id = "preset-visual-content".into();
+    design.layouts[0].elements.push(serde_json::from_value(json!({"id":"preset-visual-region","type":"rect","x":100,"y":100,"width":700,"height":400,"fill":"FFFFFF"})).unwrap());
+    let mut scene = deck(json!({})); scene["slides"][0]["elements"] = json!([]);
+    scene["design"] = serde_json::to_value(design).unwrap();
+    scene["slides"][0]["layout_id"] = json!("preset-visual-content");
+    let document = execute_request(json!({"op":"new_document","id":"explicit-region","deck":scene})).unwrap();
+    let mut spec = column_spec(); spec["preset"] = json!("pie-chart/focus");
+    spec["layout"] = json!({"x":24,"y":36,"width":1152,"height":424,"show_title":false});
+    let factory = execute_request(json!({"op":"create_part","id":"explicit","spec":spec})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"explicit","spec":spec})).unwrap();
+    assert_eq!(inserted["document"]["deck"]["slides"][0]["elements"][0], factory);
+    assert_eq!(inserted["document"]["parts"][0]["stale"], false);
+    let updated = execute_request(json!({"op":"update_part","document":inserted["document"],"expected_revision":1,"slide_id":"slide","id":"explicit","spec":spec})).unwrap();
+    assert_eq!(updated["document"]["deck"], inserted["document"]["deck"]);
 }
 
 #[test]

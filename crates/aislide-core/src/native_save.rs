@@ -14,12 +14,16 @@ pub(crate) fn check_duplicate(document: &crate::document::Document, slide_id: &s
     let native = crate::native::read(&package)?;
     let binding = document.deck.slides.iter().position(|slide| slide.id == slide_id).and_then(|index| native.slides.get(index))
         .or_else(|| native.slides.iter().find(|part| part.id == slide_id)).ok_or_else(|| Error::Unsupported("native individual copy source cannot be verified".into()))?;
+    let fallback = crate::design::Theme::default();
+    check_copy_element(&package, binding, element, document.deck.design.as_ref().map(|design| &design.theme).unwrap_or(&fallback), (9525.0, 9525.0))
+}
+
+pub(crate) fn check_copy_element(package: &Package, binding: &NativePart, element: &Element, theme: &crate::design::Theme, scale: (f64, f64)) -> Result<()> {
     let numeric = binding.nodes.get(element.bounds().0).ok_or_else(|| Error::Unsupported("native individual copy identity cannot be verified".into()))?;
     let xml = package.text(&binding.path)?; let parsed = parse(xml)?;
     let node = parsed.descendants().find(|node| is_shape(*node) && properties(*node).and_then(|node| node.attribute("id")) == Some(numeric)).ok_or_else(|| Error::Invalid("native element missing".into()))?;
     let ids = binding.nodes.iter().map(|(id, numeric)| Ok((id.as_str(), numeric.parse::<usize>().map_err(|_| Error::Invalid("native shape identity".into()))?))).collect::<Result<BTreeMap<_, _>>>()?;
-    let fallback = crate::design::Theme::default();
-    let generated = crate::pptx::element_xml(element, ids[element.bounds().0], &ids, document.deck.design.as_ref().map(|design| &design.theme).unwrap_or(&fallback));
+    let generated = scaled_element(element, &ids, theme, scale)?;
     fn copy_value(node: Node<'_, '_>) -> serde_json::Value {
         let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), if attribute.namespace() == Some(crate::native::R) { "resource" } else { attribute.value() })).collect();
         let children: Vec<_> = node.children().filter_map(|node| {
@@ -31,8 +35,20 @@ pub(crate) fn check_duplicate(document: &crate::document::Document, slide_id: &s
     }
     if copy_value(node) != copy_value(parse(&generated)?.root_element()) { return Err(Error::Unsupported("native object has formatting not represented by an individual copy; duplicate its slide instead".into())); }
     for descendant in crate::model::element_list(std::slice::from_ref(element)) {
+        if let Element::Text { id, format, .. } | Element::Shape { id, format, .. } = descendant {
+            let numeric = binding.nodes.get(id).ok_or_else(|| Error::Invalid("native text identity missing".into()))?;
+            let text_node = node.descendants().find(|node| is_shape(*node) && properties(*node).and_then(|node| node.attribute("id")) == Some(numeric)).ok_or_else(|| Error::Invalid("native text missing".into()))?;
+            for link in text_node.descendants().filter(|node| node.has_tag_name((A, "hlinkClick"))) {
+                let relation = link.attribute((crate::native::R, "id")).ok_or_else(|| Error::Unsupported("native hyperlink identity missing".into()))?;
+                let relationships = parse(package.text(&relations_path(&binding.path))?)?;
+                let targets: Vec<_> = relationships.root_element().children().filter(|node| node.has_tag_name((crate::native::REL, "Relationship")) && node.attribute("Id") == Some(relation)).collect();
+                if targets.len() != 1 || targets[0].attribute("TargetMode") != Some("External") || targets[0].attribute("Type") != Some(format!("{}/hyperlink", crate::native::R).as_str()) || targets[0].attribute("Target") != format.hyperlink.as_deref() {
+                    return Err(Error::Unsupported("native text has hyperlink destinations not represented by an individual copy".into()));
+                }
+            }
+        }
         if let Element::Chart { id, kind, categories, series, options, .. } = descendant {
-            if !chart_is_representable(&package, binding, id, *kind, categories, series, options)? { return Err(Error::Unsupported("native chart or workbook has content not represented by an individual copy; duplicate its slide instead".into())); }
+            if !chart_is_representable(package, binding, id, *kind, categories, series, options)? { return Err(Error::Unsupported("native chart or workbook has content not represented by an individual copy; duplicate its slide instead".into())); }
         }
     }
     Ok(())
@@ -48,7 +64,7 @@ fn xml_value(node: Node<'_, '_>) -> serde_json::Value {
     serde_json::json!({"namespace":node.tag_name().namespace(),"name":node.tag_name().name(),"attributes":attributes,"children":children})
 }
 
-fn chart_is_representable(package: &Package, binding: &NativePart, id: &str, kind: crate::model::ChartKind, categories: &[String], series: &[crate::model::ChartSeries], options: &crate::model::ChartOptions) -> Result<bool> {
+pub(crate) fn chart_is_representable(package: &Package, binding: &NativePart, id: &str, kind: crate::model::ChartKind, categories: &[String], series: &[crate::model::ChartSeries], options: &crate::model::ChartOptions) -> Result<bool> {
     let document = parse(package.text(&binding.path)?)?;
     let numeric = binding.nodes.get(id).ok_or_else(|| Error::Invalid("native chart identity missing".into()))?;
     let node = document.descendants().find(|node| is_shape(*node) && properties(*node).and_then(|node| node.attribute("id")) == Some(numeric)).ok_or_else(|| Error::Invalid("native chart missing".into()))?;
@@ -56,10 +72,15 @@ fn chart_is_representable(package: &Package, binding: &NativePart, id: &str, kin
     let relation = node.descendants().find(|node| node.has_tag_name((namespace, "chart"))).and_then(|node| node.attribute((crate::native::R, "id"))).ok_or_else(|| Error::Invalid("native chart relationship missing".into()))?;
     let targets = crate::pptx::relationship_targets(package, &binding.path, if kind.is_extended() { "chartEx" } else { "chart" })?;
     let path = targets.get(relation).ok_or_else(|| Error::Invalid("native chart target missing".into()))?;
+    let relationships = parse(package.text(&relations_path(path))?)?;
+    let entries: Vec<_> = relationships.root_element().children().filter(|node| node.is_element()).collect();
+    let kinds: &[&str] = if kind.is_extended() { &["package", "chartStyle", "chartColorStyle"] } else { &["package"] };
+    if !relationships.root_element().has_tag_name((crate::native::REL, "Relationships")) || relationships.root_element().attributes().len() != 0
+        || entries.len() != kinds.len() || entries.iter().any(|node| !node.has_tag_name((crate::native::REL, "Relationship"))
+            || node.attributes().any(|attribute| attribute.namespace().is_some() || !["Id", "Type", "Target", "TargetMode"].contains(&attribute.name()))
+            || node.attribute("TargetMode").is_some_and(|mode| mode != "Internal") || node.children().any(|child| child.is_element()))
+        || kinds.iter().any(|kind| entries.iter().filter(|node| node.attribute("Type") == Some(&*crate::pptx::relationship_type(kind))).count() != 1) { return Ok(false); }
     if kind.is_extended() {
-        let relationships = parse(package.text(&relations_path(path))?)?;
-        let entries: Vec<_> = relationships.root_element().children().filter(|node| node.is_element()).collect();
-        if entries.len() != 3 || entries.iter().any(|node| !node.has_tag_name((crate::native::REL, "Relationship")) || node.attributes().any(|attribute| attribute.namespace().is_some() || !["Id", "Type", "Target", "TargetMode"].contains(&attribute.name()))) { return Ok(false); }
         for (relation, bytes) in [("chartStyle", crate::chart_extended::style()), ("chartColorStyle", crate::chart_extended::color_style())] {
             let targets = crate::pptx::relationship_targets(package, path, relation)?;
             if targets.len() != 1 { return Ok(false); }

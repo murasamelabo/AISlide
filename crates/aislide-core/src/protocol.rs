@@ -61,6 +61,8 @@ enum Request {
     CreatePresentation { id: String, title: String },
     EditSlides { document: crate::document::Document, expected_revision: u64, operations: Vec<crate::editing::SlideOperation> },
     EditElements { document: crate::document::Document, expected_revision: u64, slide_id: String, operations: Vec<crate::editing::ElementOperation> },
+    ApplyOperations { document: crate::document::Document, expected_revision: u64, expected_hash: String, operations: Vec<crate::authoring_batch::Operation> },
+    ImportSlides { document: crate::document::Document, expected_revision: u64, expected_hash: String, source: crate::document::Document, source_slide_ids: Vec<String>, prefix: String, #[serde(default)] after: Option<String> },
     SearchText { deck: Deck, options: crate::text_ops::SearchOptions },
     ImportProofingDictionary { language: String, format: crate::proofing::DictionaryFormat, content: String },
     CopyFormat { document: crate::document::Document, slide_id: String, id: String, #[serde(default)] paragraph_index: usize, #[serde(default)] run_index: usize },
@@ -96,6 +98,9 @@ enum Request {
     EditSelection { document: crate::document::Document, expected_revision: u64, slide_id: String, operation: crate::selection::SelectionOperation, #[serde(default)] clipboard: Option<crate::selection::ElementBundle> },
     ResizeCanvas { document: crate::document::Document, expected_revision: u64, width: u32, height: u32, mode: crate::canvas::ResizeMode },
     ImportTemplate { id: String, kind: crate::authoring_ops::TemplateKind, base64: String },
+    InspectMasterSource { kind: crate::master_import::SourceKind, base64: String },
+    PreviewMasterImport { document: crate::document::Document, expected_revision: u64, expected_hash: String, input: crate::master_import::MasterImportInput },
+    ImportMasters { document: crate::document::Document, expected_revision: u64, expected_hash: String, input: crate::master_import::MasterImportInput, expected_candidate_hash: String },
     ExportTemplate { document: crate::document::Document, kind: crate::authoring_ops::TemplateKind },
     EditImage { base64: String, mime_type: String, params: crate::image_edit::ImageEditParams },
     SegmentationStatus {},
@@ -243,6 +248,11 @@ fn execute(request: Request, profile: crate::limits::CapacityProfile) -> Result<
         Request::CreatePresentation { id, title } => Ok(serde_json::to_value(crate::editing::create(id, title)?)?),
         Request::EditSlides { document, expected_revision, operations } => Ok(serde_json::to_value(crate::editing::slides(&document, expected_revision, &operations)?)?),
         Request::EditElements { document, expected_revision, slide_id, operations } => Ok(serde_json::to_value(crate::editing::elements(&document, expected_revision, &slide_id, &operations)?)?),
+        Request::ApplyOperations { document, expected_revision, expected_hash, operations } => Ok(serde_json::to_value(crate::authoring_batch::apply_operations(&document, expected_revision, &expected_hash, &operations)?)?),
+        Request::ImportSlides { document, expected_revision, expected_hash, mut source, source_slide_ids, prefix, after } => {
+            source.capacity_profile = profile;
+            Ok(serde_json::to_value(crate::slide_import::import(&document, expected_revision, &expected_hash, &source, &source_slide_ids, &prefix, after.as_deref())?)?)
+        }
         Request::SearchText { deck, options } => Ok(serde_json::to_value(crate::text_ops::search(&deck, &options)?)?),
         Request::ImportProofingDictionary { language, format, content } => Ok(serde_json::to_value(crate::proofing::import(&language, format, &content)?)?),
         Request::CopyFormat { document, slide_id, id, paragraph_index, run_index } => Ok(serde_json::to_value(crate::authoring_ops::copy_format(&document, &slide_id, &id, paragraph_index, run_index)?)?),
@@ -301,6 +311,9 @@ fn execute(request: Request, profile: crate::limits::CapacityProfile) -> Result<
         Request::EditSelection { document, expected_revision, slide_id, operation, clipboard } => Ok(serde_json::to_value(crate::authoring_ops::edit_selection(&document, expected_revision, &slide_id, &operation, clipboard.as_ref())?)?),
         Request::ResizeCanvas { document, expected_revision, width, height, mode } => Ok(serde_json::to_value(crate::authoring_ops::resize_canvas(&document, expected_revision, width, height, mode)?)?),
         Request::ImportTemplate { id, kind, base64 } => Ok(serde_json::to_value(crate::authoring_ops::import_template(id, kind, decode(&base64)?)?)?),
+        Request::InspectMasterSource { kind, base64 } => crate::master_import::inspect(kind, &base64, profile),
+        Request::PreviewMasterImport { document, expected_revision, expected_hash, input } => crate::master_import::preview(&document, expected_revision, &expected_hash, &input),
+        Request::ImportMasters { document, expected_revision, expected_hash, input, expected_candidate_hash } => Ok(serde_json::to_value(crate::master_import::import(&document, expected_revision, &expected_hash, &input, &expected_candidate_hash)?)?),
         Request::ExportTemplate { document, kind } => {
             let mut result = encoded(crate::authoring_ops::export_template(&document, kind)?)?;
             result["filename"] = json!(match kind { crate::authoring_ops::TemplateKind::Potx => "template.potx", crate::authoring_ops::TemplateKind::Thmx => "template.thmx" });

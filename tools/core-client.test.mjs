@@ -1,7 +1,35 @@
 ﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { requestCore, MAX_REQUEST_BYTES } from './core-client.mjs';
+import { requestCore, coreTimeout, MAX_REQUEST_BYTES } from './core-client.mjs';
 import { CAPACITY_PROFILES } from '../packages/client/index.mjs';
+
+test('managed batch timeout scales with bounded work without changing ordinary requests', () => {
+  const batch = count => ({ op: 'apply_operations', operations: Array.from({ length: count }, () => ({ op: 'add_part' })) });
+  assert.equal(coreTimeout({ op: 'sample' }), 20000);
+  assert.equal(coreTimeout({ op: 'apply_operations', operations: [{ op: 'set_frame' }] }), 20000);
+  assert.equal(coreTimeout({ op: 'transaction' }, 4 * 1048576 + 1), 120000);
+  assert.equal(coreTimeout({ op: 'verify_session_recovery' }), 120000);
+  assert.equal(coreTimeout(batch(1)), 65000);
+  assert.equal(coreTimeout(batch(21)), 165000);
+  assert.equal(coreTimeout(batch(128)), 300000);
+  assert.equal(coreTimeout(batch(129)), 300000);
+  assert.equal(coreTimeout(batch(1), 5 * 1048576), 120000);
+  for (const op of ['insert_part', 'update_part', 'insert_graph', 'update_graph', 'apply_graph']) assert.equal(coreTimeout({ op }), 65000);
+  for (const op of ['generate', 'text_assist', 'segment_image']) assert.equal(coreTimeout({ op }), 310000);
+  assert.equal(coreTimeout({ op: 'apply_operations', operations: null }), 20000);
+  assert.equal(coreTimeout({ op: 'sample', timeout: Infinity }), 20000);
+});
+
+test('an operator can select an isolated local core binary without request-controlled paths', async () => {
+  const bridge = await import('./core-client.mjs');
+  assert.equal(typeof bridge.coreBinary, 'function');
+  const selected = process.platform === 'win32' ? 'C:\\isolated\\aislide.exe' : '/isolated/aislide';
+  assert.equal(bridge.coreBinary(selected), selected);
+  assert.match(bridge.coreBinary(''), /target[\\/]debug[\\/]aislide/);
+  for (const value of ['relative/aislide', '\\\\server\\share\\aislide.exe', '//server/share/aislide', 'https://example.test/aislide']) {
+    assert.throws(() => bridge.coreBinary(value), /absolute local path/i);
+  }
+});
 
 test('the bridge returns the real Rust sample', async () => {
   const report = await requestCore({ op: 'sample' });

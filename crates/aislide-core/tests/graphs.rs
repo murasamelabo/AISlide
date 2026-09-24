@@ -20,6 +20,339 @@ fn node_icon(color: &str) -> Value {
 }
 
 #[test]
+fn graph_noop_update_preserves_other_parts_order_and_receipt() {
+    let mut document = execute_request(json!({"op":"create_presentation","id":"graph-order","title":"Synthetic graph order"})).unwrap();
+    for id in ["first", "second"] {
+        let added = execute_request(json!({"op":"insert_graph","document":document,"expected_revision":document["revision"],"slide_id":"slide-1","id":id,"spec":graph()})).unwrap();
+        document = added["document"].clone();
+    }
+    for id in ["first", "second"] {
+        for operation in ["update_graph", "apply_graph"] {
+            let mut request = json!({"op":operation,"document":document,"expected_revision":document["revision"],"slide_id":"slide-1","id":id});
+            if operation == "update_graph" { request["spec"] = graph(); }
+            else { request["operations"] = json!([{"op":"move","ids":["client"],"dx":0,"dy":0}]); }
+            let unchanged = execute_request(request).unwrap();
+            assert_eq!(unchanged["document"], document, "{operation} on {id}");
+            assert!(unchanged["receipt"].is_null(), "no-op must not clear session Redo");
+        }
+    }
+}
+
+#[test]
+fn graph_updates_preserve_inserted_part_layout_and_noop_hash() {
+    let spec = graph();
+    let layout = json!({"x":24,"y":36,"width":1152,"height":424,"show_title":false});
+    let part = json!({"version":1,"preset":"diagram/custom","title":spec["title"],"subtitle":spec["subtitle"],"data":{"kind":"diagram","graph":spec},"layout":layout});
+    let document = execute_request(json!({"op":"create_presentation","id":"graph-part-layout","title":"Layout"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":"architecture","spec":part})).unwrap();
+    let before = &inserted["document"];
+    let original = &before["deck"]["slides"][0]["elements"][0];
+    assert!(original["children"].as_array().unwrap().iter().all(|child| !child["id"].as_str().unwrap().ends_with("-title")));
+    for operation in ["apply_graph", "update_graph"] {
+        let mut request = json!({"op":operation,"document":before,"expected_revision":1,"slide_id":"slide-1","id":"architecture"});
+        if operation == "apply_graph" {
+            request["operations"] = json!([{"op":"move","ids":["client"],"dx":0,"dy":0}]);
+        } else { request["spec"] = spec.clone(); }
+        let unchanged = execute_request(request).unwrap();
+        assert_eq!(unchanged["document"]["hash"], before["hash"], "{operation} must preserve content identity");
+        assert_eq!(unchanged["document"]["parts"], before["parts"], "{operation}");
+        assert_eq!(unchanged["document"]["parts"][0]["stale"], false);
+        assert_eq!(unchanged["document"]["deck"]["slides"][0]["elements"][0], *original, "{operation} must preserve all child fonts and frames");
+        let mut moved_spec = spec.clone(); moved_spec["nodes"][0]["x"] = json!(64);
+        let mut request = json!({"op":operation,"document":before,"expected_revision":1,"slide_id":"slide-1","id":"architecture"});
+        if operation == "apply_graph" {
+            request["operations"] = json!([{"op":"move","ids":["client"],"dx":16,"dy":0}]);
+        } else { request["spec"] = moved_spec; }
+        let moved = execute_request(request).unwrap();
+        assert_eq!(moved["document"]["parts"][0]["spec"]["layout"], before["parts"][0]["spec"]["layout"]);
+        assert_eq!(moved["document"]["parts"][0]["stale"], false);
+        assert_eq!(moved["document"]["parts"][0]["spec"]["data"]["graph"]["nodes"][0]["x"], 64.0);
+        let group = &moved["document"]["deck"]["slides"][0]["elements"][0];
+        for field in ["x","y","width","height","view_width","view_height"] { assert_eq!(group[field], original[field], "{field}"); }
+        let children = group["children"].as_array().unwrap();
+        assert!(children.iter().all(|child| !child["id"].as_str().unwrap().ends_with("-title")));
+        assert_eq!(children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-n-client")).unwrap()["x"], 64.0);
+        let undone = execute_request(json!({"op":"undo_transaction","document":moved["document"],"expected_revision":2,"receipt":moved["receipt"]})).unwrap();
+        for field in ["hash","deck","parts"] { assert_eq!(undone["document"][field], before[field], "{operation}: {field}"); }
+    }
+}
+
+#[test]
+fn graph_layout_updates_reject_unrelated_stale_and_invalid_metadata() {
+    let spec = graph();
+    let mut scene = deck(json!({})); scene["slides"][0]["elements"] = json!([]);
+    let mut other_slide = scene["slides"][0].clone(); other_slide["id"] = json!("other-slide");
+    scene["slides"].as_array_mut().unwrap().push(other_slide);
+    let document = execute_request(json!({"op":"new_document","id":"layout-guards","deck":scene})).unwrap();
+    let chart = json!({"version":1,"preset":"pie-chart/focus","title":"Other part","data":{"kind":"chart","categories":["One","Two"],"series":[{"name":"Synthetic","values":[1,2]}]},"layout":{"x":0,"y":0,"width":1152,"height":512,"show_title":true}});
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"other","spec":chart})).unwrap();
+    let mut part = json!({"version":1,"preset":"diagram/custom","title":spec["title"],"subtitle":spec["subtitle"],"data":{"kind":"diagram","graph":spec},"layout":{"x":40,"y":100,"width":1152,"height":512,"show_title":true}});
+    let inserted = execute_request(json!({"op":"insert_part","document":inserted["document"],"expected_revision":1,"slide_id":"other-slide","id":"architecture","spec":part})).unwrap();
+    part["layout"] = json!({"x":24,"y":36,"width":1152,"height":424,"show_title":false});
+    let inserted = execute_request(json!({"op":"insert_part","document":inserted["document"],"expected_revision":2,"slide_id":"slide","id":"architecture","spec":part})).unwrap();
+    let before = &inserted["document"];
+    let children = before["deck"]["slides"][0]["elements"][1]["children"].as_array().unwrap();
+    let heading = children.iter().position(|child| child["id"].as_str().unwrap().ends_with("-nt-client")).unwrap();
+    let stale = execute_request(json!({"op":"transaction","document":before,"transaction":{"expected_revision":3,"expected_hash":before["hash"],"operations":[
+        {"op":"replace","path":format!("/deck/slides/0/elements/1/children/{heading}/text"),"value":"Manual edit"}
+    ]}})).unwrap();
+    assert_eq!(stale["document"]["parts"][2]["stale"], true);
+    let mut invalid = before.clone(); invalid["parts"][2]["spec"]["layout"]["width"] = json!(-1);
+    let mut tampered = before.clone(); tampered["hash"] = json!("0".repeat(64));
+    for operation in ["update_graph", "apply_graph"] {
+        let request = |document: &Value, id: &str| {
+            let mut request = json!({"op":operation,"document":document,"expected_revision":document["revision"],"slide_id":"slide","id":id});
+            if operation == "update_graph" { request["spec"] = spec.clone(); }
+            else { request["operations"] = json!([{"op":"move","ids":["client"],"dx":0,"dy":0}]); }
+            request
+        };
+        let unchanged = execute_request(request(before, "architecture")).unwrap();
+        assert_eq!(unchanged["document"]["hash"], before["hash"]);
+        assert_eq!(unchanged["document"]["parts"], before["parts"]);
+        assert!(execute_request(request(before, "other")).unwrap_err().to_string().contains("managed graph metadata not found"));
+        assert!(execute_request(request(before, "missing")).is_err());
+        assert!(execute_request(request(&stale["document"], "architecture")).unwrap_err().to_string().contains("stale"));
+        assert!(execute_request(request(&invalid, "architecture")).is_err());
+        assert!(execute_request(request(&tampered, "architecture")).is_err());
+        assert_eq!(execute_request(request(before, "architecture")).unwrap()["document"]["hash"], before["hash"]);
+    }
+}
+
+#[test]
+fn graph_title_band_opt_out_preserves_defaults_and_uses_full_canvas() {
+    let original=graph();
+    let legacy=execute_request(json!({"op":"create_graph","id":"title-mode","spec":original})).unwrap();
+    let mut explicit=original.clone();explicit["show_title"]=json!(true);
+    for node in explicit["nodes"].as_array_mut().unwrap() {
+        node["detail"]=Value::Null;node["detail_font_size"]=Value::Null;node["text_align"]=Value::Null;node["heading_bold"]=json!(true);
+    }
+    assert_eq!(legacy,execute_request(json!({"op":"create_graph","id":"title-mode","spec":explicit})).unwrap());
+    let typed:aislide_core::graphs::GraphSpec=serde_json::from_value(explicit).unwrap();
+    let serialized=serde_json::to_value(typed).unwrap();
+    assert!(serialized.get("show_title").is_none());
+    for node in serialized["nodes"].as_array().unwrap() {
+        for field in ["detail","detail_font_size","text_align","heading_bold"] {assert!(node.get(field).is_none());}
+    }
+    let mut spec=original;spec["nodes"][0]["y"]=json!(0);
+    assert!(execute_request(json!({"op":"create_graph","id":"title-mode","spec":spec})).is_err());
+    spec["show_title"]=json!(false);
+    let element=execute_request(json!({"op":"create_graph","id":"title-mode","spec":spec})).unwrap();
+    let children=element["children"].as_array().unwrap();
+    assert!(children.iter().all(|child|!child["id"].as_str().unwrap().ends_with("-title") && !child["id"].as_str().unwrap().ends_with("-subtitle")));
+    for field in ["x","y","width","height","view_width","view_height"] {assert_eq!(element[field],legacy[field]);}
+    assert!(execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"move","ids":["client"],"dx":0,"dy":-1}]})).is_err());
+    let grid=json!({"version":1,"title":"Full canvas","show_title":false,"nodes":[{"id":"tall","label":"Tall","x":0,"y":0,"width":200,"height":450}]});
+    let placed=execute_request(json!({"op":"transform_graph","spec":grid,"operations":[{"op":"layout","columns":1}]})).unwrap();
+    assert_eq!(placed["nodes"][0]["y"],31.0);
+    execute_request(json!({"op":"create_graph","id":"full-grid","spec":placed})).unwrap();
+    let mut grouped=spec.clone();
+    grouped["groups"]=json!([{"id":"boundary","label":"Boundary","x":0,"y":0,"width":1100,"height":480}]);
+    grouped["nodes"][0]["y"]=json!(48);grouped["nodes"][0]["group"]=json!("boundary");
+    execute_request(json!({"op":"create_graph","id":"top-group","spec":grouped})).unwrap();
+    grouped["nodes"][0]["y"]=json!(39);
+    assert!(execute_request(json!({"op":"create_graph","id":"group-header","spec":grouped})).is_err());
+}
+
+fn detailed_graph(presentation: &str) -> Value {
+    let mut spec=graph();spec["show_title"]=json!(false);
+    let node=&mut spec["nodes"][0];
+    node["y"]=json!(0);node["width"]=json!(360);node["height"]=json!(240);node["font_size"]=json!(24);
+    node["detail"]=json!("Validate access\nRecord outcome");node["detail_font_size"]=json!(16);
+    node["presentation"]=json!(presentation);node["icon"]=node_icon("#007a4d");
+    spec
+}
+
+#[test]
+fn graph_hidden_title_relationship_labels_can_use_the_top_band() {
+    let spec=json!({"version":1,"title":"Hidden","show_title":false,"nodes":[
+        {"id":"source","label":"Source","x":0,"y":0,"width":200,"height":40},
+        {"id":"target","label":"Target","x":500,"y":0,"width":200,"height":40}
+    ],"edges":[{"id":"request","source":"source","target":"target","source_port":"right","target_port":"left","label":"HTTPS"}]});
+    let element=execute_request(json!({"op":"create_graph","id":"top-label","spec":spec})).unwrap();
+    let label=element["children"].as_array().unwrap().iter().find(|child|child["id"].as_str().unwrap().ends_with("-et-request")).unwrap();
+    assert!((0.0..88.0).contains(&label["y"].as_f64().unwrap()));
+    assert!(label["y"].as_f64().unwrap()>20.0 || label["y"].as_f64().unwrap()+label["height"].as_f64().unwrap()<20.0);
+}
+
+#[test]
+fn graph_node_detail_defaults_and_fitting_preserve_font_hierarchy() {
+    for presentation in ["card","icon"] {
+        let mut spec=detailed_graph(presentation);
+        spec["nodes"][0].as_object_mut().unwrap().remove("detail_font_size");
+        let element=execute_request(json!({"op":"create_graph","id":"detail-defaults","spec":spec})).unwrap();
+        let children=element["children"].as_array().unwrap();
+        let heading=children.iter().find(|child|child["id"].as_str().unwrap().ends_with("-nt-client")).unwrap();
+        let detail=children.iter().find(|child|child["id"].as_str().unwrap().ends_with("-nd-client")).unwrap();
+        assert_eq!(heading["bold"],true);
+        assert!((detail["font_size"].as_f64().unwrap()-19.2).abs()<0.001);
+        spec["nodes"][0]["label"]=json!("A longer heading needs to fit");
+        spec["nodes"][0]["width"]=json!(200);
+        spec["nodes"][0]["detail"]=json!("Detail");
+        let fitted=execute_request(json!({"op":"create_graph","id":"detail-fitting","spec":spec})).unwrap();
+        let children=fitted["children"].as_array().unwrap();
+        let heading=children.iter().find(|child|child["id"].as_str().unwrap().ends_with("-nt-client")).unwrap();
+        let detail=children.iter().find(|child|child["id"].as_str().unwrap().ends_with("-nd-client")).unwrap();
+        assert!(heading["font_size"].as_f64().unwrap()<24.0);
+        assert!(detail["font_size"].as_f64().unwrap()<=heading["font_size"].as_f64().unwrap());
+    }
+}
+
+#[test]
+fn bounded_graph_part_card_keeps_detail_below_final_heading() {
+    bounded_graph_part_font_hierarchy("card");
+}
+
+#[test]
+fn bounded_graph_part_icon_keeps_detail_below_final_heading() {
+    bounded_graph_part_font_hierarchy("icon");
+}
+
+fn bounded_graph_part_font_hierarchy(presentation: &str) {
+    let mut spec = detailed_graph(presentation);
+    spec["nodes"].as_array_mut().unwrap().truncate(1);
+    spec["edges"] = json!([]);
+    spec["nodes"][0]["width"] = json!(320);
+    spec["nodes"][0]["height"] = json!(300);
+    spec["nodes"][0]["detail"] = json!("Body");
+    let original = execute_request(json!({"op":"create_graph","id":"hierarchy","spec":spec})).unwrap();
+    let find = |group: &Value, suffix: &str| -> Value {
+        group["children"].as_array().unwrap().iter().find(|child| child["id"].as_str().unwrap().ends_with(suffix)).unwrap().clone()
+    };
+    assert_eq!(find(&original, "-nt-client")["font_size"], 24.0);
+    assert_eq!(find(&original, "-nd-client")["font_size"], 16.0);
+    let layout = json!({"x":24,"y":36,"width":1152,"height":256,"show_title":false});
+    let part = json!({"version":1,"preset":"diagram/custom","title":spec["title"],"subtitle":spec["subtitle"],"data":{"kind":"diagram","graph":spec},"layout":layout});
+    let bounded = execute_request(json!({"op":"create_part","id":"hierarchy","spec":part})).unwrap();
+    let assert_hierarchy = |group: &Value| {
+        let heading = find(group, "-nt-client");
+        let detail = find(group, "-nd-client");
+        let heading_size = heading["font_size"].as_f64().unwrap();
+        let detail_size = detail["font_size"].as_f64().unwrap();
+        assert!((12.0..16.0).contains(&heading_size), "expected final heading to shrink: {heading_size}");
+        assert!(detail_size >= 12.0 && detail_size <= heading_size, "{presentation}: detail {detail_size} exceeds final heading {heading_size}");
+        for child in [heading, detail] {
+            let preview = execute_request(json!({"op":"render_element_preview","element":child})).unwrap();
+            assert!(preview["warnings"].as_array().unwrap().iter().all(|warning| !warning["code"].as_str().unwrap().contains("OVERFLOW")));
+        }
+    };
+    assert_hierarchy(&bounded);
+    assert_eq!(find(&bounded, "-nt-client")["height"].as_f64().unwrap(), find(&original, "-nt-client")["height"].as_f64().unwrap() / 2.0);
+    assert_eq!(find(&bounded, "-n-client")["stroke_width"], find(&original, "-n-client")["stroke_width"]);
+    let document = execute_request(json!({"op":"create_presentation","id":"bounded-hierarchy","title":"Hierarchy"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":"hierarchy","spec":part})).unwrap();
+    let saved = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"hierarchy-open","base64":saved["base64"]})).unwrap();
+    assert_hierarchy(&opened["document"]["deck"]["slides"][0]["elements"][0]);
+    assert_eq!(opened["document"]["parts"][0]["stale"], false);
+    assert_eq!(opened["document"]["parts"][0]["spec"], inserted["document"]["parts"][0]["spec"]);
+    let mut updated_part = opened["document"]["parts"][0]["spec"].clone();
+    updated_part["data"]["graph"]["nodes"][0]["detail"] = json!("Updated body");
+    let updated = execute_request(json!({"op":"update_part","document":opened["document"],"expected_revision":0,"slide_id":"slide-1","id":"hierarchy","spec":updated_part})).unwrap();
+    assert_hierarchy(&updated["document"]["deck"]["slides"][0]["elements"][0]);
+    assert_eq!(updated["document"]["parts"][0]["spec"], updated_part);
+    assert_eq!(updated["document"]["parts"][0]["stale"], false);
+    let saved_update = execute_request(json!({"op":"export_presentation","document":updated["document"]})).unwrap();
+    let reopened = execute_request(json!({"op":"open_presentation","id":"hierarchy-reopen","base64":saved_update["base64"]})).unwrap();
+    assert_hierarchy(&reopened["document"]["deck"]["slides"][0]["elements"][0]);
+    assert_eq!(reopened["document"]["parts"][0]["stale"], false);
+    let undone = execute_request(json!({"op":"undo_transaction","document":updated["document"],"expected_revision":1,"receipt":updated["receipt"]})).unwrap();
+    assert_eq!(undone["document"]["hash"], opened["document"]["hash"]);
+    let mut too_small = part.clone(); too_small["layout"]["height"] = json!(128);
+    assert!(execute_request(json!({"op":"create_part","id":"below-floor","spec":too_small})).is_err());
+}
+
+#[test]
+fn graph_node_details_are_native_bounded_and_aligned_for_cards_and_icons() {
+    for presentation in ["card","icon"] {
+        for alignment in [None,Some("left"),Some("center"),Some("right")] {
+            let mut spec=detailed_graph(presentation);
+            if let Some(alignment)=alignment {spec["nodes"][0]["text_align"]=json!(alignment);}
+            spec["nodes"][0]["heading_bold"]=json!(false);
+            let element=execute_request(json!({"op":"create_graph","id":"details","spec":spec})).unwrap();
+            let children=element["children"].as_array().unwrap();
+            let find=|suffix:&str|children.iter().find(|child|child["id"].as_str().unwrap().ends_with(suffix)).unwrap();
+            let heading=find("-nt-client");let detail=find("-nd-client");
+            assert_eq!(heading["type"],"text");assert_eq!(detail["type"],"text");
+            assert_eq!(heading["text"],"Client");assert_eq!(detail["text"],spec["nodes"][0]["detail"]);
+            assert_eq!(heading["bold"],false);assert_eq!(detail["bold"],false);
+            assert_eq!(heading["format"]["alignment"],alignment.unwrap_or("left"));
+            assert_eq!(detail["format"]["alignment"],alignment.unwrap_or("left"));
+            assert_eq!(heading["format"]["vertical"],"top");assert_eq!(detail["format"]["vertical"],"top");
+            assert!(detail["font_size"].as_f64().unwrap()>=12.0);
+            assert!(detail["font_size"].as_f64().unwrap()<=heading["font_size"].as_f64().unwrap());
+            assert_eq!(heading["x"],detail["x"]);assert_eq!(heading["width"],detail["width"]);
+            assert!(heading["y"].as_f64().unwrap()+heading["height"].as_f64().unwrap()+8.0<=detail["y"].as_f64().unwrap());
+            assert!(detail["y"].as_f64().unwrap()+detail["height"].as_f64().unwrap()<=240.0);
+            let picture=find("-ni-client");
+            if presentation=="icon" {assert!(picture["y"].as_f64().unwrap()+picture["height"].as_f64().unwrap()+8.0<=heading["y"].as_f64().unwrap());}
+            else {assert!(picture["x"].as_f64().unwrap()+picture["width"].as_f64().unwrap()<heading["x"].as_f64().unwrap());}
+            let edge=find("-e-request");assert_eq!(edge["start"]["element_id"],find("-n-client")["id"]);
+            for label in [heading,detail] {
+                let preview=execute_request(json!({"op":"render_element_preview","element":label})).unwrap();
+                assert!(preview["warnings"].as_array().unwrap().iter().all(|warning|!warning["code"].as_str().unwrap().contains("OVERFLOW")));
+            }
+        }
+    }
+}
+
+#[test]
+fn graph_node_detail_validation_and_schema_are_bounded() {
+    for (field,value) in [("detail",json!("x".repeat(241))),("detail",json!(" ")),("detail",json!("bad\u{0001}text")),("detail_font_size",json!(11.9)),("detail_font_size",json!(40.1)),("detail_font_size",json!(25)),("text_align",json!("justify")),("heading_bold",json!("yes"))] {
+        let mut spec=detailed_graph("card");spec["nodes"][0][field]=value;
+        assert!(execute_request(json!({"op":"create_graph","id":"invalid-detail","spec":spec})).is_err(),"{field}");
+        assert!(execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"move","ids":["client"],"dx":0,"dy":0}]})).is_err(),"{field}");
+    }
+    let mut missing=graph();missing["nodes"][0]["detail_font_size"]=json!(12);
+    assert!(execute_request(json!({"op":"create_graph","id":"missing-detail","spec":missing})).is_err());
+    let mut small=detailed_graph("icon");small["nodes"][0]["height"]=json!(40);
+    assert!(execute_request(json!({"op":"create_graph","id":"small-detail","spec":small})).is_err());
+    let mut spec=detailed_graph("card");spec["nodes"][0]["detail"]=json!("\u{1f4ac}".repeat(240));
+    let mut typed:aislide_core::graphs::GraphSpec=serde_json::from_value(spec).unwrap();
+    aislide_core::graphs::validate(&typed).unwrap();
+    for invalid in [f64::NAN,f64::INFINITY,f64::NEG_INFINITY] {
+        typed.nodes[0].detail_font_size=Some(invalid);
+        assert!(aislide_core::graphs::validate(&typed).is_err());
+    }
+    let catalog=execute_request(json!({"op":"graph_catalog"})).unwrap();
+    let definitions=catalog["schema"].get("$defs").or_else(||catalog["schema"].get("definitions")).unwrap();
+    assert_eq!(definitions["GraphNode"]["properties"]["detail"]["maxLength"],240);
+    assert_eq!(definitions["GraphNode"]["properties"]["detail_font_size"]["minimum"],12);
+    assert_eq!(definitions["GraphNode"]["properties"]["detail_font_size"]["maximum"],40);
+    assert_eq!(definitions["GraphTextAlign"]["enum"],json!(["left","center","right"]));
+    assert_eq!(catalog["canvas"]["content_top_without_title"],0.0);
+}
+
+#[test]
+fn graph_node_details_and_hidden_title_roundtrip_update_and_undo() {
+    for presentation in ["card","icon"] {
+        let spec=detailed_graph(presentation);
+        let document=execute_request(json!({"op":"create_presentation","id":"detail-history","title":"Details"})).unwrap();
+        let inserted=execute_request(json!({"op":"insert_graph","document":document,"expected_revision":0,"slide_id":"slide-1","id":"architecture","spec":spec})).unwrap();
+        let saved=execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+        let opened=execute_request(json!({"op":"open_presentation","id":"detail-open","base64":saved["base64"]})).unwrap();
+        assert_eq!(opened["document"]["parts"][0]["stale"],false);
+        assert_eq!(opened["document"]["parts"][0]["spec"],inserted["document"]["parts"][0]["spec"]);
+        let children=opened["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap();
+        assert!(children.iter().any(|child|child["type"]=="text" && child["text"]=="Validate access\nRecord outcome"));
+        assert!(children.iter().all(|child|!child["id"].as_str().unwrap().ends_with("-title")));
+        for (suffix,bold) in [("-nt-client",true),("-nd-client",false)] {
+            let restored=children.iter().find(|child|child["id"].as_str().unwrap().ends_with(suffix)).unwrap();
+            assert_eq!(restored["bold"],bold);assert_eq!(restored["format"]["alignment"],"left");
+        }
+        let mut node=spec["nodes"][0].clone();node["detail"]=json!("Updated detail");node["text_align"]=json!("right");
+        let updated=execute_request(json!({"op":"apply_graph","document":opened["document"],"expected_revision":0,"slide_id":"slide-1","id":"architecture","operations":[{"op":"put_node","node":node}]})).unwrap();
+        assert_eq!(updated["document"]["parts"][0]["stale"],false);
+        let updated_saved=execute_request(json!({"op":"export_presentation","document":updated["document"]})).unwrap();
+        let reopened=execute_request(json!({"op":"open_presentation","id":"detail-updated","base64":updated_saved["base64"]})).unwrap();
+        assert_eq!(reopened["document"]["parts"][0]["stale"],false);
+        assert_eq!(reopened["document"]["parts"][0]["spec"]["data"]["graph"]["nodes"][0]["detail"],"Updated detail");
+        let undone=execute_request(json!({"op":"undo_transaction","document":updated["document"],"expected_revision":1,"receipt":updated["receipt"]})).unwrap();
+        assert_eq!(undone["document"]["hash"],opened["document"]["hash"]);
+        assert_eq!(execute_request(json!({"op":"export_presentation","document":undone["document"]})).unwrap()["base64"],saved["base64"]);
+    }
+}
+
+#[test]
 fn graph_relationship_labels_are_transparent_and_clear_of_routes() {
     for (source, target, source_port, target_port, route) in [
         ([80, 180], [500, 180], "right", "left", "straight"),

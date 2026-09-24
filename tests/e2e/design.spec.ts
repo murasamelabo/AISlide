@@ -2,10 +2,227 @@
 import sharp from 'sharp'
 import { readFile } from 'node:fs/promises'
 import { openSample } from './fixtures'
+import type { Page } from '@playwright/test'
+import type { AislideDocument, Design, MasterImportPreview, MasterSourceInspection } from '../../packages/client/index.mjs'
+
+async function masterImportSource(page: Page, kind: 'pptx' | 'potx', width = 1280) {
+  const base64 = await page.evaluate(async ({ root, kind, width }) => {
+    const { AislideClient } = await import(`${root}/packages/client/index.mjs`)
+    const apiUrl = '/src/api.ts'
+    const { core } = await import(apiUrl)
+    const client = new AislideClient(core)
+    const source = await client.createPresentation(`master-import-${crypto.randomUUID()}`, 'Synthetic import source')
+    const design: Design = await client.designDefaults()
+    design.masters[0].name = 'Synthetic source master'
+    design.masters[0].elements = [{ type: 'text', id: 'source-footer', x: 64, y: 640, width: 600, height: 48, text: 'Synthetic source footer', font_size: 24, color: '@dk1', bold: false }]
+    design.layouts = design.layouts.filter(layout => ['blank', 'title-content'].includes(layout.id))
+    design.layouts.find(layout => layout.id === 'blank')!.name = 'Source blank'
+    design.layouts.find(layout => layout.id === 'title-content')!.name = 'Source title'
+    design.layouts.find(layout => layout.id === 'title-content')!.elements.find(element => element.id === 'body')!.height = 300
+    await source.replaceDeck({ ...source.document.deck, design })
+    await source.assignLayout(source.document.deck.slides[0].id, 'title-content')
+    const deck = source.document.deck
+    const sample = deck.slides[0]
+    sample.title = 'Sample one'
+    sample.elements.push({ type: 'text', id: 'fixed-sample-text', x: 64, y: 584, width: 600, height: 44, text: 'Fixed sample text', font_size: 24, color: '@dk1', bold: false })
+    deck.slides.push({ ...structuredClone(sample), id: 'sample-two', title: 'Sample two' })
+    await source.replaceDeck(deck)
+    if (width !== deck.width) await source.resizeCanvas({ width, height: deck.height, mode: 'scale' })
+    return (kind === 'potx' ? await source.exportTemplate(kind) : await source.exportPresentation()).base64
+  }, { root: `/@fs/${process.cwd().replaceAll('\\', '/')}`, kind, width })
+  return { name: `synthetic-master-source.${kind}`, mimeType: kind === 'potx' ? 'application/vnd.openxmlformats-officedocument.presentationml.template' : 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: Buffer.from(base64, 'base64') }
+}
+
+async function savedPresentation(page: Page) {
+  const pending = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click()
+  const download = await pending
+  const bytes = await readFile((await download.path())!)
+  await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled()
+  return bytes
+}
+
+async function previewMasters(page: Page) {
+  const pending = page.waitForResponse(response => response.url().endsWith('/api/core') && response.request().postDataJSON()?.op === 'preview_master_import')
+  await page.getByRole('button', { name: 'Preview masters', exact: true }).click()
+  const response = await pending
+  expect(response.ok()).toBe(true)
+  const result = await response.json() as MasterImportPreview
+  await expect(page.getByRole('region', { name: 'Master import', exact: true })).toHaveAttribute('aria-busy', 'false')
+  await expect(page.getByRole('region', { name: 'Master import preview', exact: true })).toBeVisible()
+  return { result, request: response.request().postDataJSON() as { input: unknown; document: AislideDocument; expected_revision: number; expected_hash: string } }
+}
 
 test.beforeEach(async ({ page }) => {
   await openSample(page)
   await expect(page.getByRole('button', { name: 'Slide 12:', exact: false })).toBeVisible()
+})
+
+for (const { width, kind, mode } of [{ width: 1440, kind: 'potx', mode: 'masters' }, { width: 390, kind: 'pptx', mode: 'slides' }] as const) {
+  test(`master import appends ${kind} ${mode} with preview, Undo and reopen at ${width}px`, async ({ page }) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width, height: 960 })
+    const source = await masterImportSource(page, kind)
+    const initial = await savedPresentation(page)
+    await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: 'native-import-target.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: initial })
+    await expect(page.getByLabel('Slide layout', { exact: true })).toBeEnabled()
+    const original = await savedPresentation(page)
+    const originalLayouts = await page.getByLabel('Slide layout', { exact: true }).locator('option').evaluateAll(options => options.map(option => ({ value: (option as HTMLOptionElement).value, text: option.textContent })))
+    const originalLayout = await page.getByLabel('Slide layout', { exact: true }).inputValue()
+    const chooseSource = async () => {
+      await page.getByRole('button', { name: 'Import masters', exact: true }).click()
+      await page.getByLabel('Master source file', { exact: true }).setInputFiles(source)
+      await expect(page.getByRole('region', { name: 'Master import', exact: true })).toHaveAttribute('aria-busy', 'false')
+      await page.getByLabel('Import mode', { exact: true }).selectOption(mode)
+      await page.getByLabel('Imported master name', { exact: true }).fill('Reusable import')
+      if (mode === 'masters') await page.getByRole('checkbox', { name: 'Select Synthetic source master', exact: true }).check()
+      else {
+        await page.getByRole('checkbox', { name: 'Select Sample one', exact: true }).check()
+        await page.getByRole('checkbox', { name: 'Select Sample two', exact: true }).check()
+      }
+      await expect(page.getByLabel('Master source file', { exact: true })).toHaveValue('')
+    }
+    await chooseSource()
+    const cancelled = await previewMasters(page)
+    expect(cancelled.result.base_revision).toBe(cancelled.request.document.revision)
+    expect(cancelled.result.base_hash).toBe(cancelled.request.document.hash)
+    expect(cancelled.result.office_visual_parity).toBe(false)
+    await expect(page.locator('.dirty-indicator')).toHaveCount(0)
+    const previewRegion = page.getByRole('region', { name: 'Master import preview', exact: true })
+    await expect(page.getByLabel('Preview layout', { exact: true }).locator('option')).toHaveCount(2)
+    await page.getByLabel('Preview layout', { exact: true }).selectOption('1')
+    await expect(previewRegion.getByText(mode === 'slides' ? 'Fixed sample text' : 'Synthetic source footer', { exact: true })).toBeVisible()
+    await page.evaluate(() => document.fonts.ready)
+    await expect.poll(() => page.getByRole('dialog', { name: 'Master import', exact: true }).evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth + 1)).toBe(true)
+    await expect.poll(() => previewRegion.locator('.slide-page').evaluate(slide => {
+      const bounds = slide.getBoundingClientRect()
+      const frame = slide.closest('.master-import-preview')!.getBoundingClientRect()
+      return bounds.width > 200 && bounds.left >= frame.left && bounds.right <= frame.right + 1 && bounds.bottom <= frame.bottom + 1
+    })).toBe(true)
+    await previewRegion.screenshot({ path: `.artifacts/master-import-preview-${width}.png` })
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    expect(await savedPresentation(page)).toEqual(original)
+    await chooseSource()
+    await expect(page.getByRole('button', { name: 'Add masters', exact: true })).toBeDisabled()
+    await previewMasters(page)
+    await page.getByLabel('Imported master name', { exact: true }).fill('Reusable import revised')
+    await expect(previewRegion).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Add masters', exact: true })).toBeDisabled()
+    const prepared = await previewMasters(page)
+    const applied = page.waitForResponse(response => response.url().endsWith('/api/core') && response.request().postDataJSON()?.op === 'import_masters')
+    await page.getByRole('button', { name: 'Add masters', exact: true }).click()
+    const response = await applied
+    expect(response.ok()).toBe(true)
+    expect(response.request().postDataJSON()).toMatchObject({ input: prepared.request.input, expected_revision: prepared.result.base_revision, expected_hash: prepared.result.base_hash, expected_candidate_hash: prepared.result.candidate_hash })
+    const imported = (await response.json()).document as AislideDocument
+    expect(imported.deck.slides).toEqual(prepared.request.document.deck.slides)
+    expect(imported.deck.design!.theme).toEqual(prepared.request.document.deck.design!.theme)
+    expect(imported.deck.design!.masters.slice(0, prepared.request.document.deck.design!.masters.length)).toEqual(prepared.request.document.deck.design!.masters)
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.getByText('Masters added / Existing slides unchanged', { exact: true })).toBeVisible()
+    await expect(page.getByLabel('Slide layout', { exact: true })).toHaveValue(originalLayout)
+    await expect(page.locator('.thumbnail')).toHaveCount(12)
+    const importedBytes = await savedPresentation(page)
+    await page.getByRole('button', { name: 'Undo', exact: true }).click()
+    await expect(page.getByLabel('Slide layout', { exact: true }).locator('option')).toHaveCount(originalLayouts.length)
+    expect(await savedPresentation(page)).toEqual(original)
+    await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: 'imported-masters.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: importedBytes })
+    await expect(page.getByLabel('Slide layout', { exact: true }).locator('option')).toHaveCount(originalLayouts.length + prepared.result.layout_ids.length)
+    const master = prepared.result.design.masters.find(entry => prepared.result.master_ids.includes(entry.id))!
+    const layout = prepared.result.design.layouts.find(entry => prepared.result.layout_ids.includes(entry.id) && entry.elements.some(element => element.type === 'text' && element.format?.placeholder?.kind === 'title'))!
+    expect(layout).toBeTruthy()
+    if (mode === 'slides') {
+      const fixed = layout.elements.find(element => element.type === 'text' && element.text === 'Fixed sample text')!
+      expect(fixed).toBeTruthy()
+      expect(fixed.type === 'text' && fixed.format?.placeholder).toBeFalsy()
+    }
+    await page.getByRole('button', { name: 'Edit masters and layouts', exact: true }).click()
+    await page.getByRole('button', { name: `Master ${master.name}`, exact: true }).click()
+    await page.getByRole('button', { name: 'Add common text', exact: true }).click()
+    await page.getByLabel('Design element text', { exact: true }).fill('Imported master edited')
+    await page.getByRole('button', { name: 'Save design', exact: true }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await page.getByLabel('Slide layout', { exact: true }).selectOption(layout.id)
+    await expect(page.locator('.canvas-workspace .master-graphics').getByText('Imported master edited', { exact: true })).toBeVisible()
+    await expect(page.locator('.canvas-workspace .slide-text').filter({ hasText: 'Quarterly performance' })).toBeVisible()
+    if (mode === 'slides') await expect(page.locator('.canvas-workspace .master-graphics').getByText('Fixed sample text', { exact: true })).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+}
+
+test('master import invalidates drafts and exposes core rejections while guarding pending work', async ({ page }) => {
+  test.setTimeout(90_000)
+  const source = await masterImportSource(page, 'pptx')
+  const mismatch = await masterImportSource(page, 'potx', 960)
+  const original = await savedPresentation(page)
+  await page.getByRole('button', { name: 'Import masters', exact: true }).click()
+  await page.route('**/api/core', async route => {
+    if (route.request().postDataJSON()?.op !== 'inspect_master_source') return route.continue()
+    const response = await route.fetch()
+    expect(response.ok()).toBe(true)
+    const inspection = await response.json() as MasterSourceInspection
+    inspection.masters.push({ id: 'unavailable-fixture', name: 'Unsupported source entry', layout_count: 1, importable: false, reason: 'Synthetic unsupported relationship' })
+    await route.fulfill({ response, json: inspection })
+  })
+  await page.getByLabel('Master source file', { exact: true }).setInputFiles(source)
+  await expect(page.getByRole('checkbox', { name: 'Select Unsupported source entry', exact: true })).toBeDisabled()
+  await expect(page.getByText('Synthetic unsupported relationship', { exact: true })).toBeVisible()
+  await page.unroute('**/api/core')
+  await page.getByRole('checkbox', { name: 'Select Synthetic source master', exact: true }).check()
+  await previewMasters(page)
+  await page.getByRole('checkbox', { name: 'Select Synthetic source master', exact: true }).uncheck()
+  await expect(page.getByRole('region', { name: 'Master import preview', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Add masters', exact: true })).toBeDisabled()
+  await page.getByRole('checkbox', { name: 'Select Synthetic source master', exact: true }).check()
+  await previewMasters(page)
+  await page.getByLabel('Import mode', { exact: true }).selectOption('slides')
+  await expect(page.getByRole('button', { name: 'Add masters', exact: true })).toBeDisabled()
+  await expect(page.getByRole('region', { name: 'Master import', exact: true }).getByRole('checkbox', { checked: true })).toHaveCount(0)
+  await page.getByRole('checkbox', { name: 'Select Sample one', exact: true }).check()
+  await previewMasters(page)
+  await page.getByLabel('Master source file', { exact: true }).setInputFiles(mismatch)
+  await expect(page.getByRole('region', { name: 'Master import preview', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Add masters', exact: true })).toBeDisabled()
+  await page.getByRole('checkbox', { name: 'Select Sample one', exact: true }).check()
+  const rejected = page.waitForResponse(response => response.url().endsWith('/api/core') && response.request().postDataJSON()?.op === 'preview_master_import')
+  await page.getByRole('button', { name: 'Preview masters', exact: true }).click()
+  const rejection = await rejected
+  expect(rejection.ok()).toBe(false)
+  const reason = (await rejection.json()).error as string
+  expect(reason).toMatch(/dimension|size/i)
+  await expect(page.getByRole('alert')).toHaveText(reason)
+  await page.getByLabel('Master source file', { exact: true }).setInputFiles(source)
+  await page.getByRole('checkbox', { name: 'Select Sample one', exact: true }).check()
+  let release: () => void = () => {}
+  let observed: () => void = () => {}
+  const held = new Promise<void>(resolve => { observed = resolve })
+  const gate = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/core', async route => {
+    if (route.request().postDataJSON()?.op !== 'preview_master_import') return route.continue()
+    const response = await route.fetch()
+    observed()
+    await gate
+    await route.fulfill({ response })
+  })
+  const pendingPreview = previewMasters(page)
+  try {
+    await held
+    await expect(page.getByRole('button', { name: 'Close dialog', exact: true })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled()
+    await expect(page.getByLabel('Master source file', { exact: true })).toBeDisabled()
+    await expect(page.getByLabel('Import mode', { exact: true })).toBeDisabled()
+    await expect(page.getByLabel('Imported master name', { exact: true })).toBeDisabled()
+    await expect(page.getByRole('checkbox', { name: 'Select Sample one', exact: true })).toBeDisabled()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('dialog', { name: 'Master import', exact: true })).toBeVisible()
+  } finally { release(); await pendingPreview; await page.unroute('**/api/core') }
+  await page.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  await page.getByRole('button', { name: 'Import masters', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Master import preview', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Add masters', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  expect(await savedPresentation(page)).toEqual(original)
 })
 
 for (const width of [1440, 390]) {

@@ -5,6 +5,304 @@ import { AislideClient, DocumentSession } from '../packages/client/index.mjs';
 import { requestCore } from './core-client.mjs';
 import { guidedExamples } from './guided-demo.mjs';
 
+test('feedback SDK batches use one guarded request and one history receipt', async () => {
+  const document = { id: 'feedback', revision: 2, hash: 'a'.repeat(64), deck: { slides: [] } };
+  const changed = { ...document, revision: 3, hash: 'b'.repeat(64) };
+  const receipt = { inverse: [], after_hash: changed.hash };
+  const calls = [];
+  const controller = new AbortController();
+  const session = new DocumentSession(async (request, options) => {
+    calls.push({ request: structuredClone(request), signal: options?.signal });
+    return request.op === 'undo_transaction'
+      ? { document: { ...document, revision: 4 }, receipt }
+      : { document: changed, receipt };
+  }, document, { capacityProfile: 'standard' });
+  const operations = [{ op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' }];
+  assert.deepEqual(await session.applyOperations(operations, { expectedRevision: 2, signal: controller.signal }), changed);
+  assert.deepEqual(calls[0], { request: { op: 'apply_operations', document, expected_revision: 2, expected_hash: document.hash, operations, capacity_profile: 'standard' }, signal: controller.signal });
+  assert.equal(calls.length, 1);
+  assert.equal(session.recoveryEnvelope.past.length, 1);
+  await session.undo();
+  assert.equal(session.canUndo, false);
+  assert.equal(session.canRedo, true);
+  const before = session.recoveryEnvelope;
+  await assert.rejects(() => session.applyOperations(operations, { expectedRevision: 2 }), /conflict/i);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(session.recoveryEnvelope, before);
+});
+
+test('managed batch SDK forwards all managed variants once and preserves individual routes', async () => {
+  const document = { id: 'managed-sdk', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] }, sources: [], bindings: [], parts: [] };
+  const layout = { x: 64, y: 120, width: 1152, height: 512, show_title: false };
+  const part = { version: 1, preset: 'matrix/balanced', title: 'Synthetic', data: { kind: 'matrix', corner_label: 'Criterion', rows: ['A', 'B'], columns: ['C', 'D'], cells: [['a', 'b'], ['c', 'd']] }, layout };
+  const graph = { version: 1, title: 'Synthetic', show_title: false, nodes: [{ id: 'node', label: 'Node', x: 0, y: 0 }] };
+  const operations = [
+    { op: 'add_part', slide_id: 'slide-1', id: 'part', spec: part },
+    { op: 'update_part', slide_id: 'slide-1', id: 'part', spec: { ...part, title: 'Updated part' } },
+    { op: 'add_graph', slide_id: 'slide-1', id: 'graph', spec: graph, layout },
+    { op: 'update_graph', slide_id: 'slide-1', id: 'graph', spec: { ...graph, title: 'Updated graph' } },
+  ];
+  const changed = { ...document, revision: 1, hash: 'b'.repeat(64), parts: [
+    { slide_id: 'slide-1', element_id: 'part', spec: operations[1].spec, render_sha256: 'c'.repeat(64), stale: false },
+    { slide_id: 'slide-1', element_id: 'graph', spec: { version: 1, preset: 'diagram/custom', title: 'Updated graph', data: { kind: 'diagram', graph: operations[3].spec }, layout }, render_sha256: 'd'.repeat(64), stale: false },
+  ] };
+  const calls = [];
+  const controller = new AbortController();
+  const transport = async (request, options) => {
+    calls.push({ request: structuredClone(request), signal: options?.signal });
+    return { document: changed, receipt: { inverse: [], after_hash: changed.hash } };
+  };
+  const session = new DocumentSession(transport, document, { capacityProfile: 'standard' });
+  assert.deepEqual(await session.applyOperations(operations, { expectedRevision: 0, signal: controller.signal }), changed);
+  assert.deepEqual(calls, [{ request: { op: 'apply_operations', document, expected_revision: 0, expected_hash: document.hash, operations, capacity_profile: 'standard' }, signal: controller.signal }]);
+  assert.equal(session.recoveryEnvelope.past.length, 1);
+  for (const [method, op, spec] of [['addPart', 'insert_part', part], ['updatePart', 'update_part', part], ['addGraph', 'insert_graph', graph], ['updateGraph', 'update_graph', graph]]) {
+    calls.length = 0;
+    const legacy = new DocumentSession(transport, document);
+    await legacy[method]('slide-1', { id: 'root', spec }, { expectedRevision: 0, signal: controller.signal });
+    assert.deepEqual(calls, [{ request: { op, document, expected_revision: 0, slide_id: 'slide-1', id: 'root', spec }, signal: controller.signal }]);
+    assert.equal(legacy.recoveryEnvelope.past.length, 1);
+  }
+});
+
+test('feedback SDK convenience APIs forward complete operations without extra core validation', async () => {
+  const document = { id: 'feedback-helpers', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
+  const frame = { x: 10, y: 20, width: 300, height: 120 };
+  const element = { type: 'text', id: 'text', ...frame, text: 'Synthetic', font_size: 24, color: '@dk1', bold: false, format: { paragraphs: [{ runs: [{ text: 'Synthetic', style: { italic: true, language: 'en-US' } }] }] } };
+  const cases = [
+    ['addElements', [[element]], [{ op: 'add_elements', elements: [element] }]],
+    ['setFrames', [[{ id: 'text', frame }, { id: 'group', frame }]], [{ op: 'set_frame', id: 'text', frame }, { op: 'set_frame', id: 'group', frame }]],
+    ['setTextStyle', [{ ids: ['text'], style: { bold: false, color: '@accent1' } }], [{ op: 'set_text_style', ids: ['text'], style: { bold: false, color: '@accent1' } }]],
+    ['setSlideBackground', ['FFFFFF'], [{ op: 'set_slide_background', color: 'FFFFFF' }]],
+    ['setConnector', [{ id: 'edge', connector: { color: '@dk1', stroke_width: 2, arrow: true }, frame }], [{ op: 'set_connector', id: 'edge', connector: { color: '@dk1', stroke_width: 2, arrow: true }, frame }]],
+    ['setPictureCrop', [{ id: 'image', crop: { left: 0.1 } }], [{ op: 'set_picture_crop', id: 'image', crop: { left: 0.1 } }]],
+    ['setHyperlink', [{ id: 'text', link: null }], [{ op: 'set_hyperlink', id: 'text', link: null }]],
+    ['setShapeAdjustment', [{ id: 'shape', adjustment: { name: 'adj', value: 25000 } }], [{ op: 'set_shape_adjustment', id: 'shape', adjustment: { name: 'adj', value: 25000 } }]],
+    ['addPicture', [{ id: 'image', base64: 'c3ludGhldGlj', mime_type: 'image/png', alt: 'Synthetic', frame, crop: { top: 0.1 } }], [{ op: 'add_picture', id: 'image', base64: 'c3ludGhldGlj', mime_type: 'image/png', alt: 'Synthetic', frame, crop: { top: 0.1 } }]],
+  ];
+  for (const [method, args, operations] of cases) {
+    const calls = [];
+    const session = new DocumentSession(async request => {
+      calls.push(structuredClone(request));
+      return { document: { ...document, revision: 1 }, receipt: { inverse: [] } };
+    }, document);
+    await session[method]('slide-1', ...args, { expectedRevision: 0, expectedHash: 'b'.repeat(64) });
+    assert.deepEqual(calls, [{ op: 'apply_operations', document, expected_revision: 0, expected_hash: 'b'.repeat(64), operations: operations.map(operation => ({ ...operation, slide_id: 'slide-1' })) }], method);
+    assert.equal(session.recoveryEnvelope.past.length, 1, method);
+  }
+});
+
+test('feedback SDK slide import forwards a source snapshot with guarded history', async () => {
+  const document = { id: 'target', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
+  const source = { ...document, id: 'source', sources: [{ id: 'evidence' }], bindings: [], parts: [] };
+  const original = structuredClone(source);
+  const input = { source_slide_ids: ['slide-1'], prefix: 'merged', after: null };
+  const calls = [];
+  const session = new DocumentSession(async request => {
+    calls.push(structuredClone(request));
+    return { document: { ...document, revision: 1 }, receipt: { inverse: [] } };
+  }, document);
+  await session.importSlides(source, input, { expectedRevision: 0 });
+  assert.deepEqual(calls, [{ op: 'import_slides', document, expected_revision: 0, expected_hash: document.hash, source, ...input }]);
+  assert.deepEqual(source, original);
+  assert.equal(session.recoveryEnvelope.past.length, 1);
+});
+
+test('feedback SDK batch and import preserve state on failure cancellation and busy', async () => {
+  const document = { id: 'feedback-guards', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
+  const operations = [
+    { op: 'add_part', slide_id: 'slide-1', id: 'part', spec: { version: 1, preset: 'list-horizontal/balanced', title: 'Synthetic', data: { kind: 'items', items: [{ label: 'First' }, { label: 'Second' }] } } },
+    { op: 'add_graph', slide_id: 'slide-1', id: 'graph', spec: { version: 1, title: 'Synthetic', nodes: [{ id: 'node', label: 'Node', x: 0, y: 88 }] } },
+    { op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' },
+  ];
+  const invoke = (session, method, options) => method === 'batch' ? session.applyOperations(operations, options)
+    : session.importSlides(document, { source_slide_ids: ['slide-1'], prefix: 'copy' }, options);
+  for (const method of ['batch', 'import']) {
+    for (const mode of ['failure', 'late-cancel', 'early-cancel', 'revision']) {
+      const controller = new AbortController();
+      let calls = 0;
+      const session = new DocumentSession(async (_request, options) => {
+        calls += 1;
+        assert.equal(options.signal, controller.signal);
+        if (mode === 'failure') throw new Error('Core rejected operation');
+        controller.abort();
+        return { document: { ...document, revision: 1 }, receipt: { inverse: [] } };
+      }, document);
+      const before = session.recoveryEnvelope;
+      if (mode === 'early-cancel') controller.abort();
+      await assert.rejects(() => invoke(session, method, { signal: controller.signal, expectedRevision: mode === 'revision' ? 99 : 0 }), /cancelled|rejected|conflict/i);
+      assert.equal(calls, ['early-cancel', 'revision'].includes(mode) ? 0 : 1);
+      assert.deepEqual(session.recoveryEnvelope, before);
+      assert.equal(session.busy, false);
+    }
+    let release;
+    const session = new DocumentSession(() => new Promise(resolve => { release = resolve; }), document);
+    const pending = invoke(session, method);
+    assert.equal(session.busy, true);
+    try {
+      await assert.rejects(() => invoke(session, 'batch'), /busy/i);
+      await assert.rejects(() => invoke(session, 'import'), /busy/i);
+    } finally { release({ document, receipt: null }); await pending; }
+    assert.equal(session.busy, false);
+  }
+});
+
+test('feedback SDK types accept the new contracts and reject raw or mistyped operations', async () => {
+  const ts = (await import('typescript')).default;
+  const { fileURLToPath } = await import('node:url');
+  const filename = fileURLToPath(new URL('../packages/client/feedback-types.mts', import.meta.url)).replaceAll('\\', '/');
+  const preamble = `
+    import type { DocumentSession, AislideDocument, AuthoringOptions, AuthoringOperation, Frame, Crop,
+      Connection, ConnectorRouting, ConnectorSettings, PictureInput, SlideImportInput, GraphSpec, PartSpec, GuidedAuthoring } from './index.mjs';
+    declare const session: DocumentSession;
+    declare const source: AislideDocument;
+    const options: AuthoringOptions = { expectedRevision: 0, expectedHash: 'hash', signal: new AbortController().signal };
+    const frame: Frame = { x: 0, y: 0, width: 300, height: 150 };
+    const crop: Crop = { top: 0.1 };
+    const connection: Connection = { element_id: 'text', site: 0 };
+    const routing: ConnectorRouting = { points: [[0, 0], [1, 1]] };
+    const connector: ConnectorSettings = { color: '@dk1', stroke_width: 1, arrow: true, start: connection, end: null, routing };
+    const picture: PictureInput = { id: 'image', base64: 'synthetic', mime_type: 'image/png', alt: 'Synthetic', frame, crop };
+    const imported: SlideImportInput = { source_slide_ids: ['slide-1'], prefix: 'copy', after: null };
+    const operations: AuthoringOperation[] = [{ op: 'set_frame', slide_id: 'slide-1', id: 'text', frame }];
+  `;
+  const check = body => {
+    const sourceText = preamble + body;
+    const compilerOptions = { noEmit: true, strict: true, skipLibCheck: false, target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler };
+    const host = ts.createCompilerHost(compilerOptions);
+    const getSourceFile = host.getSourceFile.bind(host);
+    host.getSourceFile = (path, languageVersion, onError, shouldCreateNewSourceFile) => path === filename
+      ? ts.createSourceFile(filename, sourceText, languageVersion, true)
+      : getSourceFile(path, languageVersion, onError, shouldCreateNewSourceFile);
+    return ts.getPreEmitDiagnostics(ts.createProgram([filename], compilerOptions, host));
+  };
+  const diagnostics = check(`
+    const results: Promise<AislideDocument>[] = [
+      session.applyOperations(operations, options),
+      session.addElements('slide-1', [{ type: 'text', id: 'text', ...frame, text: 'Synthetic', font_size: 24, color: '@dk1', bold: false }], options),
+      session.setFrames('slide-1', [{ id: 'text', frame }], options),
+      session.setTextStyle('slide-1', { ids: ['text'], style: { bold: false } }, options),
+      session.setSlideBackground('slide-1', 'FFFFFF', options),
+      session.setConnector('slide-1', { id: 'edge', connector, frame }, options),
+      session.setPictureCrop('slide-1', { id: 'image', crop }, options),
+      session.setHyperlink('slide-1', { id: 'text', link: null }, options),
+      session.setShapeAdjustment('slide-1', { id: 'shape', adjustment: { name: 'adj', value: 25000 } }, options),
+      session.addPicture('slide-1', picture, options), session.importSlides(source, imported, options),
+    ];
+    const graph: GraphSpec = { version: 1, title: 'Synthetic', show_title: false, nodes: [{ id: 'node', label: 'Heading', detail: 'Detail', detail_font_size: 12, text_align: 'right', heading_bold: false, x: 0, y: 0, height: 512 }] };
+    const part: PartSpec = { version: 1, preset: 'synthetic', title: 'Synthetic', data: { kind: 'diagram', graph }, layout: { ...frame, show_title: false } };
+    const matrix: PartSpec = { ...part, data: { kind: 'matrix', corner_label: 'Criterion', rows: ['A', 'B'], columns: ['C', 'D'], cells: [['a', 'b'], ['c', 'd']] } };
+    const managed: AuthoringOperation[] = [
+      { op: 'add_part', slide_id: 'slide-1', id: 'part', spec: matrix },
+      { op: 'update_part', slide_id: 'slide-1', id: 'part', spec: part },
+      { op: 'add_graph', slide_id: 'slide-1', id: 'graph', spec: graph, layout: { ...frame, show_title: false } },
+      { op: 'add_graph', slide_id: 'slide-1', id: 'graph-default', spec: graph },
+      { op: 'add_graph', slide_id: 'slide-1', id: 'graph-null', spec: graph, layout: null },
+      { op: 'update_graph', slide_id: 'slide-1', id: 'graph', spec: graph },
+    ];
+    results.push(session.applyOperations(managed, options), session.addPart('slide-1', { id: 'part', spec: part }),
+      session.updatePart('slide-1', { id: 'part', spec: part }), session.addGraph('slide-1', { id: 'graph', spec: graph }),
+      session.updateGraph('slide-1', { id: 'graph', spec: graph }));
+    const authoring: GuidedAuthoring = { headline_style: 'keyword', slide_limit: 128 };
+    void [results, part, authoring];
+  `);
+  assert.deepEqual(diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')), []);
+  for (const invalid of [
+    "session.applyOperations([{ op: 'replace', path: '/deck', value: {} }]);",
+    "session.setTextStyle('slide-1', { ids: ['text'], style: { font_size: 'large' } });",
+    "const invalid: GuidedAuthoring = { headline_style: 'freeform' };",
+    "session.addPicture('slide-1', { ...picture, mime_type: 'image/svg+xml' });",
+    "session.applyOperations([{ op: 'add_part', slide_id: 'slide-1', id: 'part', spec: {} }]);",
+    "session.applyOperations([{ op: 'add_graph', slide_id: 'slide-1', id: 'graph', spec: { version: 1, title: '', nodes: [] }, layout: { ...frame, unknown: true } }]);",
+    "session.applyOperations([{ op: 'update_graph', slide_id: 'slide-1', id: 'graph', spec: { version: 1, title: '', nodes: [] }, layout: frame }]);",
+    "session.applyOperations([{ op: 'add_part', slide_id: 'slide-1', id: 'part', spec: { version: 1, preset: 'matrix', title: '', data: { kind: 'matrix', rows: [], columns: [], cells: [], corner_label: 1 } } }]);",
+    "session.addGraph('slide-1', { id: 'graph', spec: { version: 1, title: '', nodes: [] }, layout: frame });",
+  ]) assert.ok(check(invalid).length > 0, invalid);
+});
+
+test('master import SDK forwards guarded requests, capacity and one Undo', async () => {
+  const document = { id: 'master-import-sdk', revision: 2, hash: 'a'.repeat(64), deck: { slides: [] } };
+  const input = { kind: 'potx', base64: 'c3ludGhldGlj', source_sha256: 'b'.repeat(64), mode: 'masters', ids: ['master-1'], prefix: 'imported', name: 'Synthetic master' };
+  const inspection = { kind: 'potx', source_sha256: input.source_sha256, width: 1280, height: 720, masters: [], slides: [], warnings: [], office_visual_parity: false };
+  const preview = { base_revision: 2, base_hash: document.hash, source_sha256: input.source_sha256, candidate_hash: 'c'.repeat(64), design: {}, master_ids: ['imported-master-1'], layout_ids: [], preview_slides: [], warnings: [], office_visual_parity: false };
+  const changed = { ...document, revision: 3, hash: preview.candidate_hash };
+  const receipt = { inverse: [], after_hash: changed.hash };
+  const calls = [];
+  const controller = new AbortController();
+  const transport = async (request, options) => {
+    calls.push({ request: structuredClone(request), signal: options?.signal });
+    if (request.op === 'inspect_master_source') return inspection;
+    if (request.expected_revision !== (request.op === 'undo_transaction' ? 3 : 2)) throw new Error('Revision conflict');
+    if (request.op !== 'undo_transaction' && request.expected_hash !== document.hash) throw new Error('Hash conflict');
+    if (request.op === 'preview_master_import') return preview;
+    if (request.op === 'import_masters') return { document: changed, receipt };
+    assert.equal(request.op, 'undo_transaction');
+    assert.deepEqual(request.receipt, receipt);
+    return { document: { ...document, revision: 4 }, receipt: { inverse: [], after_hash: document.hash } };
+  };
+  const client = new AislideClient(transport, { capacityProfile: 'standard' });
+  assert.equal(await client.inspectMasterSource({ kind: input.kind, base64: input.base64 }, { signal: controller.signal }), inspection);
+  assert.deepEqual(calls[0].request, { op: 'inspect_master_source', kind: input.kind, base64: input.base64, capacity_profile: 'standard' });
+  const session = new DocumentSession(transport, document, { capacityProfile: 'legacy' });
+  const before = session.recoveryEnvelope;
+  assert.equal(await session.previewMasterImport(input, { signal: controller.signal }), preview);
+  assert.deepEqual(session.recoveryEnvelope, before);
+  assert.deepEqual(calls[1].request, { op: 'preview_master_import', document, expected_revision: 2, expected_hash: document.hash, input, capacity_profile: 'legacy' });
+  assert.deepEqual(await session.importMasters(input, preview.candidate_hash, { signal: controller.signal }), changed);
+  assert.deepEqual(calls[2].request, { op: 'import_masters', document, expected_revision: 2, expected_hash: document.hash, input, expected_candidate_hash: preview.candidate_hash, capacity_profile: 'legacy' });
+  assert.ok(calls.every(call => call.signal === controller.signal));
+  assert.equal(session.recoveryEnvelope.past.length, 1);
+  await session.undo();
+  assert.equal(session.document.hash, document.hash);
+  assert.equal(session.canUndo, false);
+  assert.equal(session.canRedo, true);
+  const guarded = new DocumentSession(transport, document);
+  for (const options of [{ expectedRevision: 1 }, { expectedHash: 'd'.repeat(64) }]) {
+    await assert.rejects(() => guarded.previewMasterImport(input, options), /conflict/i);
+    await assert.rejects(() => guarded.importMasters(input, preview.candidate_hash, options), /conflict/i);
+    assert.deepEqual(guarded.recoveryEnvelope.document, document);
+    assert.equal(guarded.canUndo, false);
+  }
+});
+
+test('master import SDK cancellation and busy guards retain document and history', async () => {
+  const document = { id: 'master-import-cancel', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
+  const input = { kind: 'pptx', base64: 'c3ludGhldGlj', source_sha256: 'b'.repeat(64), mode: 'slides', ids: ['slide-1'], prefix: 'imported', name: 'Synthetic slide' };
+  for (const method of ['inspect', 'preview', 'import']) {
+    const controller = new AbortController();
+    let calls = 0;
+    const transport = async (_request, options) => {
+      calls += 1;
+      assert.equal(options.signal, controller.signal);
+      controller.abort();
+      return { document: { ...document, revision: 1, hash: 'c'.repeat(64) }, receipt: { inverse: [] } };
+    };
+    const client = new AislideClient(transport);
+    const session = new DocumentSession(transport, document);
+    const before = session.recoveryEnvelope;
+    const invoke = () => method === 'inspect' ? client.inspectMasterSource({ kind: input.kind, base64: input.base64 }, { signal: controller.signal })
+      : method === 'preview' ? session.previewMasterImport(input, { signal: controller.signal })
+        : session.importMasters(input, 'c'.repeat(64), { signal: controller.signal });
+    await assert.rejects(invoke, { name: 'AbortError' });
+    await assert.rejects(invoke, { name: 'AbortError' });
+    assert.equal(calls, 1);
+    assert.equal(session.busy, false);
+    assert.deepEqual(session.recoveryEnvelope, before);
+  }
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const session = new DocumentSession(() => pending, document);
+  const before = session.recoveryEnvelope;
+  const reading = session.previewMasterImport(input);
+  assert.equal(session.busy, true);
+  try {
+    await assert.rejects(() => session.previewMasterImport(input), /busy/i);
+    await assert.rejects(() => session.importMasters(input, 'c'.repeat(64)), /busy/i);
+  } finally { release({ candidate_hash: 'c'.repeat(64) }); await reading; }
+  assert.equal(session.busy, false);
+  assert.deepEqual(session.recoveryEnvelope, before);
+});
+
 test('P1 delivery preparation forwards one guarded snapshot and discards cancelled results', async () => {
   const client = new AislideClient(requestCore);
   const session = await client.createPresentation('delivery-sdk', 'Synthetic delivery');

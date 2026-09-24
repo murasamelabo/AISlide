@@ -1,15 +1,24 @@
 ﻿import { execFile } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CAPACITY_PROFILES, encodeCoreRequest } from '../packages/client/index.mjs';
 
 export const MAX_REQUEST_BYTES = CAPACITY_PROFILES.large.request_bytes;
 export function coreTimeout(request, encodedBytes = 0) {
   if (['generate', 'text_assist', 'segment_image'].includes(request?.op)) return 310_000;
-  return encodedBytes > 4 * 1048576 || ['verify_session_recovery', 'prepare_recovery', 'verify_recovery_record'].includes(request?.op) ? 120_000 : 20_000;
+  const base = encodedBytes > 4 * 1048576 || ['verify_session_recovery', 'prepare_recovery', 'verify_recovery_record'].includes(request?.op) ? 120_000 : 20_000;
+  const managed = request?.op === 'apply_operations' && Array.isArray(request.operations)
+    ? request.operations.slice(0, 128).filter(operation => ['add_part', 'update_part', 'add_graph', 'update_graph'].includes(operation?.op)).length
+    : ['insert_part', 'update_part', 'insert_graph', 'update_graph', 'apply_graph'].includes(request?.op) ? 1 : 0;
+  return managed ? Math.min(300_000, Math.max(base, 60_000 + managed * 5_000)) : base;
 }
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const binary = join(root, 'target', 'debug', process.platform === 'win32' ? 'aislide.exe' : 'aislide');
+export function coreBinary(selected = process.env.AISLIDE_CORE_BINARY) {
+  if (!selected) return join(root, 'target', 'debug', process.platform === 'win32' ? 'aislide.exe' : 'aislide');
+  if (!isAbsolute(selected) || /^[\\/]{2}/.test(selected) || process.platform === 'win32' && !/^[A-Za-z]:[\\/]/.test(selected)) throw new Error('AISLIDE_CORE_BINARY requires an absolute local path');
+  return selected;
+}
+const binary = coreBinary();
 const active = new Set();
 
 export async function requestCore(request, { signal } = {}) {

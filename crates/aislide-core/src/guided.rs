@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const COMMON: &str = include_str!("../../../docs/authoring/common.md");
 const PATTERNS: &str = include_str!("../../../docs/authoring/consulting-patterns.json");
+const DEFAULT_SLIDE_LIMIT: usize = 32;
+const MAX_SLIDE_LIMIT: usize = 128;
 const PROFILES: &[(&str, &str, &str)] = &[
     ("consulting-decision", "Consulting and decision meetings", include_str!("../../../docs/authoring/consulting-decision.md")),
     ("technical-explainer", "Technical explanation", include_str!("../../../docs/authoring/technical-explainer.md")),
@@ -41,7 +43,14 @@ pub struct Authoring {
     #[schemars(range(min=12, max=40))] pub body_font_min: Option<f64>,
     #[schemars(range(min=28, max=64))] pub headline_font_size: Option<f64>,
     #[schemars(length(min=1, max=100))] pub font_family: Option<String>,
+    #[serde(skip_serializing_if="Option::is_none")] pub headline_style: Option<HeadlineStyle>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[schemars(range(min=32, max=128))] pub slide_limit: Option<usize>,
 }
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all="snake_case")]
+pub enum HeadlineStyle { #[default] Sentence, Keyword }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all="snake_case")]
@@ -61,6 +70,12 @@ struct ResolvedAuthoring<'a> {
 }
 
 impl Authoring {
+    fn has_typography(&self) -> bool {
+        self.context.is_some() || self.density.is_some() || self.spacing.is_some()
+            || self.body_font_min.is_some() || self.headline_font_size.is_some() || self.font_family.is_some()
+            || (self.headline_style.is_none() && self.slide_limit.is_none())
+    }
+
     fn resolve(&self, profile: &str) -> ResolvedAuthoring<'_> {
         let projection = self.context.unwrap_or(if profile=="event-talk" {AuthoringContext::Projection} else {AuthoringContext::Reading})==AuthoringContext::Projection;
         let compact = self.density.unwrap_or_default()==AuthoringDensity::Compact;
@@ -117,7 +132,7 @@ pub fn guide(id: &str) -> Result<Value> {
     let (_,title,content)=PROFILES.iter().find(|entry|entry.0==id).ok_or_else(||Error::Unsupported("unknown authoring profile".into()))?;
     let patterns:Value=if id=="consulting-decision" {serde_json::from_str(PATTERNS)?} else {json!([])};
     let automatic_patterns=if id=="consulting-decision" {vec!["native-part","C02","C03"]} else {vec!["native-part"]};
-    Ok(json!({"version":1,"profile_id":id,"title":title,"language":"en","markdown":format!("{}\n\n{}",COMMON.trim_start_matches('\u{feff}'),content.trim_start_matches('\u{feff}')),"patterns":patterns,"input_schema":schemars::schema_for!(GuidedInput),"automatic_patterns":automatic_patterns,"semantic_truth_verified":false,"limits":{"slides":32,"evidence":64,"issues":6},"creation":"Supply a structured, evidence-linked input; validate_guided_presentation before create_guided_presentation. No model call or file write."}))
+    Ok(json!({"version":1,"profile_id":id,"title":title,"language":"en","markdown":format!("{}\n\n{}\n\nAuthoring overrides: authoring.slide_limit explicitly selects {DEFAULT_SLIDE_LIMIT}..{MAX_SLIDE_LIMIT} slides (default {DEFAULT_SLIDE_LIMIT}); resource capacity limits still apply. authoring.headline_style defaults to sentence. keyword waives Japanese decision headline length and adjacent sentence-form variation only; supported sentence_form names, logical support, evidence and numeric declarations remain required. These validation-only options do not activate typography overrides.",COMMON.trim_start_matches('\u{feff}'),content.trim_start_matches('\u{feff}')),"patterns":patterns,"input_schema":schemars::schema_for!(GuidedInput),"automatic_patterns":automatic_patterns,"semantic_truth_verified":false,"limits":{"slides":DEFAULT_SLIDE_LIMIT,"maximum_slides":MAX_SLIDE_LIMIT,"evidence":64,"issues":6},"creation":"Supply a structured, evidence-linked input; validate_guided_presentation before create_guided_presentation. No model call or file write."}))
 }
 
 fn required(value:&str, maximum:usize, field:&str, issues:&mut Vec<String>) {
@@ -128,7 +143,7 @@ fn numeric_paths(value:&Value, path:&str, output:&mut Vec<(String,Value)>) {
     match value {
         Value::Number(_) => output.push((path.into(),value.clone())),
         Value::Array(values) => for (index,item) in values.iter().enumerate() {numeric_paths(item,&format!("{path}/{index}"),output);},
-        Value::Object(values) => for (key,item) in values {if !["x","y","width","height","font_size","stroke_width","version","from","to","start","end","longitude","latitude"].contains(&key.as_str()) {numeric_paths(item,&format!("{path}/{}",key.replace('~',"~0").replace('/',"~1")),output);}},
+        Value::Object(values) => for (key,item) in values {if !["x","y","width","height","font_size","detail_font_size","stroke_width","version","from","to","start","end","longitude","latitude"].contains(&key.as_str()) {numeric_paths(item,&format!("{path}/{}",key.replace('~',"~0").replace('/',"~1")),output);}},
         _ => (),
     }
 }
@@ -139,7 +154,10 @@ fn checks(input:&GuidedInput)->Vec<String> {
     if !["en","ja"].contains(&input.language.as_str()) {issues.push("language must be en or ja".into());}
     required(&input.title,120,"title",&mut issues);required(&input.audience,240,"audience",&mut issues);
     required(&input.purpose,600,"purpose",&mut issues);required(&input.governing_message,600,"governing_message",&mut issues);
-    if !(1..=32).contains(&input.slides.len()) || input.evidence.len()>64 || input.issues.len()>6 {issues.push("Guided input exceeds slide/evidence/decision limits".into());return issues;}
+    let slide_limit=input.authoring.as_ref().and_then(|settings|settings.slide_limit).unwrap_or(DEFAULT_SLIDE_LIMIT);
+    if !(DEFAULT_SLIDE_LIMIT..=MAX_SLIDE_LIMIT).contains(&slide_limit) {issues.push(format!("authoring.slide_limit must be {DEFAULT_SLIDE_LIMIT}..{MAX_SLIDE_LIMIT}"));return issues;}
+    if !(1..=slide_limit).contains(&input.slides.len()) || input.evidence.len()>64 || input.issues.len()>6 {issues.push(format!("Guided input exceeds slide/evidence/decision limits: 1..{slide_limit} slides, at most 64 evidence entries and 6 decision issues"));return issues;}
+    let sentence_headlines=input.authoring.as_ref().and_then(|settings|settings.headline_style).unwrap_or_default()==HeadlineStyle::Sentence;
     if let Some(color)=&input.brand_color {if color.len()!=6 || !color.bytes().all(|byte|byte.is_ascii_hexdigit()) {issues.push("brand_color must be a six-digit RGB value".into());}}
     if let Some(authoring)=&input.authoring {
         for (name,value,min,max) in [("body_font_min",authoring.body_font_min,12.0,40.0),("headline_font_size",authoring.headline_font_size,28.0,64.0)] {
@@ -174,14 +192,14 @@ fn checks(input:&GuidedInput)->Vec<String> {
         for (name,value,maximum) in [("slide id",&slide.id,80),("section",&slide.section,80),("headline",&slide.headline,240),("question",&slide.question,240),("parent_message",&slide.parent_message,80),("transition",&slide.transition,80),("parallel_basis",&slide.parallel_basis,80)] {required(value,maximum,name,&mut issues);}
         if !prior.contains(slide.parent_message.as_str()) {issues.push(format!("{}: parent must be governing or an earlier slide",slide.id));}prior.insert(&slide.id);
         if !["causal","conditional","contrast","causal-focus","evaluation","proposal","explanation","comparison","outcome"].contains(&slide.sentence_form.as_str()) {issues.push(format!("{}: unknown sentence form",slide.id));}
-        if input.profile_id=="consulting-decision" && index>=2 && input.slides[index-1].sentence_form==slide.sentence_form && input.slides[index-2].sentence_form==slide.sentence_form {issues.push(format!("{}: vary sentence forms across adjacent pages",slide.id));}
+        if sentence_headlines && input.profile_id=="consulting-decision" && index>=2 && input.slides[index-1].sentence_form==slide.sentence_form && input.slides[index-2].sentence_form==slide.sentence_form {issues.push(format!("{}: vary sentence forms across adjacent pages",slide.id));}
         if slide.headline.contains(['\u{2014}','\u{2015}']) || ["本ページ","この1枚","this slide"].iter().any(|word|slide.headline.to_lowercase().contains(word)) {issues.push(format!("{}: headline contains a forbidden dash or self-reference",slide.id));}
         if input.profile_id=="consulting-decision" {
             let mut count=0;let mut in_number=false;
             for character in slide.headline.chars() {if character.is_ascii_digit() || ('\u{ff10}'..='\u{ff19}').contains(&character) {if !in_number {count+=1;}in_number=true;} else if !['.',','].contains(&character) {in_number=false;}}
             if count>2 {issues.push(format!("{}: the headline contains more than two numeric claims",slide.id));}
         }
-        if input.language=="ja" && input.profile_id=="consulting-decision" {
+        if sentence_headlines && input.language=="ja" && input.profile_id=="consulting-decision" {
             let length=slide.headline.chars().filter(|character|!character.is_whitespace()).count();
             if !(30..=56).contains(&length) {issues.push(format!("{}: Japanese decision headline must contain 30-56 characters",slide.id));}
         }
@@ -325,7 +343,7 @@ fn measurement_cells(element: &mut Element) -> Result<()> {
 }
 
 fn build(input:&GuidedInput,id:&str)->Result<Document> {
-    let authoring=input.authoring.as_ref().map(|settings|settings.resolve(&input.profile_id));
+    let authoring=input.authoring.as_ref().filter(|settings|settings.has_typography()).map(|settings|settings.resolve(&input.profile_id));
     let primary=input.brand_color.as_deref().unwrap_or("1976D2");
     let tint=|weight:f64|->String {(0..3).map(|index|{let channel=u8::from_str_radix(&primary[index*2..index*2+2],16).unwrap_or(0) as f64;format!("{:02X}",(channel+(255.0-channel)*weight).round() as u8)}).collect()};
     let mut design=crate::design::Design::default();
@@ -362,7 +380,7 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
             crate::parts::state::resize_canvas(&mut element,body_width,body_height)?;
             fn minimum_text(element:&mut Element) {match element {Element::Text{font_size,..}|Element::Shape{font_size,..}|Element::Table{font_size,..}=>*font_size=font_size.max(12.0),Element::Group{children,..}=>children.iter_mut().for_each(minimum_text),_=>()}}
             minimum_text(&mut element);
-            if input.authoring.is_none() && input.profile_id=="event-talk" {
+            if authoring.is_none() && input.profile_id=="event-talk" {
                 let mut encoded=serde_json::to_value(&element)?;
                 if let Some(children)=encoded["children"].as_array_mut() {for child in children {if child["type"]=="text" && child["y"].as_f64().is_some_and(|value|value>70.0) && child["height"].as_f64().is_some_and(|value|value>=40.0) {child["font_size"]=json!(child["font_size"].as_f64().unwrap_or(22.0).max(22.0));}}}
                 element=serde_json::from_value(encoded)?;

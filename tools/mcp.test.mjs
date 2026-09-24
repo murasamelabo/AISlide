@@ -6,11 +6,1143 @@ import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { guidedExamples } from './guided-demo.mjs';
+import { registerHooks } from 'node:module';
+import { randomUUID } from 'node:crypto';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+
+const coreEnvironment = process.env.AISLIDE_CORE_BINARY ? { AISLIDE_CORE_BINARY: process.env.AISLIDE_CORE_BINARY } : undefined;
+
+async function feedbackMcpFixture(run) {
+  const registrations = new Map();
+  const resources = new Map();
+  const prompts = new Map();
+  const calls = [];
+  const key = `aislide-feedback-${randomUUID()}`;
+  const entry = new URL(`./mcp.mjs?${key}`, import.meta.url).href;
+  const fixture = {
+    McpServer: class extends McpServer {
+      registerTool(name, config, callback) { assert.equal(registrations.has(name), false, `Duplicate tool: ${name}`); registrations.set(name, { config, callback }); return super.registerTool(name, config, callback); }
+      registerResource(name, uri, config, callback) { resources.set(uri, { config, callback }); return super.registerResource(name, uri, config, callback); }
+      registerPrompt(name, config, callback) { prompts.set(name, { config, callback }); return super.registerPrompt(name, config, callback); }
+      async connect() {}
+    },
+    StdioServerTransport: class {},
+    MAX_REQUEST_BYTES: 100663296,
+    requestCore: async (request, options) => {
+      calls.push({ request: structuredClone(request), signal: options?.signal });
+      if (fixture.onRequest) return fixture.onRequest(request, options);
+      if (request.op === 'create_presentation') return { version: 1, id: request.id, revision: 0, hash: 'a'.repeat(64), sources: [], bindings: [], parts: [], deck: { version: 1, title: request.title, width: 1280, height: 720, slides: [{ id: 'slide-1', title: request.title, background: 'FFFFFF', elements: [], notes: '' }] } };
+      if (request.op === 'apply_operations' || request.op === 'import_slides') {
+        assert.equal(request.expected_hash, request.document.hash);
+        return { document: { ...request.document, revision: request.document.revision + 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] } };
+      }
+      if (request.op === 'create_object') return { type: 'text', id: request.id, x: 0, y: 0, width: 200, height: 80, text: 'Synthetic', font_size: 24, color: '@dk1', bold: false };
+      return { ready: true, op: request.op };
+    },
+  };
+  globalThis[key] = fixture;
+  const replacements = new Map([
+    ['@modelcontextprotocol/sdk/server/mcp.js', ['McpServer']],
+    ['@modelcontextprotocol/sdk/server/stdio.js', ['StdioServerTransport']],
+    ['./core-client.mjs', ['requestCore', 'MAX_REQUEST_BYTES']],
+  ]);
+  const hooks = registerHooks({ resolve(specifier, context, nextResolve) {
+    const names = context.parentURL === entry ? replacements.get(specifier) : undefined;
+    if (!names) return nextResolve(specifier, context);
+    const source = names.map(name => `export const ${name} = globalThis[${JSON.stringify(key)}].${name};`).join('\n');
+    return { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true };
+  } });
+  try {
+    await import(entry);
+    const call = async (name, input = {}, signal = new AbortController().signal) => {
+      const tool = registrations.get(name);
+      assert.ok(tool, `Missing tool: ${name}`);
+      const parsed = tool.config.inputSchema.parse(input);
+      const result = await tool.callback(parsed, { signal });
+      assert.ok(!result.isError, JSON.stringify(result.content));
+      return JSON.parse(result.content[0].text);
+    };
+    await run({ registrations, resources, prompts, calls, call, fixture });
+  } finally { hooks.deregister(); delete globalThis[key]; }
+}
+
+function assertFeedbackWorkflow(prompt, resource) {
+  const text = prompt.messages[0].content.text;
+  assert.equal(resource.contents[0].text, text);
+  for (const pattern of [
+    /typed_authoring/, /freeform.*high-volume/, /apply_operations.*complete add_elements/,
+    /1\.\.128.*one Undo/, /expected_revision and expected_hash/, /set_frame\/set_frames change geometry only/,
+    /set_text_style is a partial style update.*apply_format copies/, /Do not force a preview_slide_revision candidate for every frame/,
+    /Finish with preview_presentation and preflight_presentation/, /sentence headlines and a 32-slide limit/,
+    /headline_style="keyword"/, /slide_limit=39.*32\.\.128/, /Evidence support and numeric declarations still apply/,
+    /Consulting issues are required only for the consulting-decision profile/, /PartSpec\.layout.*show_title=false.*body box/,
+    /GraphSpec\.show_title=false.*node\.detail, text_align and heading_bold/, /12px text floor.*reject/,
+    /import_slides.*source_deck_id.*reusing matching masters/, /same canvas/,
+    /does not support arbitrary native cross-package/, /compile_report.*fixed structured-layout shortcut.*not the best path for exact recreation/,
+    /prefer apply_operations with add_part\/add_graph and explicit layouts/, /create_part\/create_graph plus add_elements ONLY as an explicit unmanaged choice/,
+    /never automatically fall back.*timeout/, /128 metadata entries.*capacity limits/, /Reduce chunk size for progress and cancellation/,
+    /batch update_graph has no layout field and preserves the existing PartLayout/, /corner_label.*48 Unicode scalars.*default empty/,
+  ]) assert.match(text, pattern);
+}
+
+test('managed batch MCP progress is opt-in monotonic and stops on completion or cancellation', async context => {
+  context.mock.timers.enable({ apis: ['setInterval'] });
+  try {
+    await feedbackMcpFixture(async ({ registrations, call, fixture }) => {
+      const created = await call('create_presentation', { title: 'Synthetic progress' });
+      const before = await call('get_session_recovery', { deck_id: created.deck_id });
+      const tool = registrations.get('apply_operations');
+      const input = tool.config.inputSchema.parse({ deck_id: created.deck_id, expected_revision: 0, expected_hash: before.document.hash, operations: [
+        { op: 'add_part', slide_id: 'slide-1', id: 'steps', spec: { version: 1, preset: 'list-horizontal/balanced', title: 'Synthetic', data: { kind: 'items', items: [{ label: 'First' }, { label: 'Next' }] } } },
+      ] });
+      for (const mode of ['success', 'cancel', 'failure', 'notification-failure', 'no-token']) {
+        const controller = new AbortController();
+        const started = Promise.withResolvers();
+        const pending = Promise.withResolvers();
+        const notifications = [];
+        fixture.onRequest = async (request, options) => {
+          started.resolve();
+          options.signal.addEventListener('abort', () => pending.reject(new Error('Operation cancelled')), { once: true });
+          await pending.promise;
+          return { document: request.document, receipt: null, changes: [] };
+        };
+        const result = tool.callback(input, {
+          signal: controller.signal,
+          ...(mode === 'no-token' ? {} : { _meta: { progressToken: 0 } }),
+          sendNotification: async notification => {
+            notifications.push(structuredClone(notification));
+            if (mode === 'notification-failure') throw new Error('Disconnected progress channel');
+          },
+        });
+        await started.promise;
+        await new Promise(resolve => setImmediate(resolve));
+        context.mock.timers.tick(5000);
+        await new Promise(resolve => setImmediate(resolve));
+        if (mode === 'no-token') assert.equal(notifications.length, 0);
+        else {
+          assert.ok(notifications.length >= 2, mode);
+          for (const notification of notifications) {
+            assert.equal(notification.method, 'notifications/progress');
+            assert.equal(notification.params.progressToken, 0);
+            assert.equal(notification.params.total, undefined);
+            assert.match(notification.params.message, /elapsed|not a completion percentage/i);
+            assert.ok(!notification.params.message.includes('Synthetic'));
+          }
+          assert.ok(notifications[1].params.progress > notifications[0].params.progress);
+        }
+        if (mode === 'cancel') controller.abort();
+        else if (mode === 'failure') pending.reject(new Error('Core operation timed out'));
+        else pending.resolve();
+        const response = await result;
+        assert.equal(Boolean(response.isError), ['cancel', 'failure'].includes(mode));
+        const count = notifications.length;
+        context.mock.timers.tick(15000);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(notifications.length, count, 'notifications stop after the request ends');
+        fixture.onRequest = undefined;
+        assert.deepEqual(await call('get_session_recovery', { deck_id: created.deck_id }), before);
+      }
+    });
+  } finally { context.mock.timers.reset(); }
+});
+
+test('managed batch MCP progress send failures do not discard a changed commit', async () => {
+  await feedbackMcpFixture(async ({ registrations, call, fixture }) => {
+    for (const synchronous of [false, true]) {
+      const { deck_id } = await call('create_presentation', { title: 'Synthetic notification failure' });
+      const before = await call('get_session_recovery', { deck_id });
+      const notificationAttempt = Promise.withResolvers();
+      let sent = 0;
+      fixture.onRequest = async request => {
+        await notificationAttempt.promise;
+        const document = structuredClone(request.document);
+        document.revision += 1;
+        document.hash = 'b'.repeat(64);
+        document.deck.slides[0].notes = 'Synthetic committed change';
+        return { document, receipt: { document_id: document.id, after_hash: document.hash, inverse: [] } };
+      };
+      const tool = registrations.get('apply_operations');
+      const input = tool.config.inputSchema.parse({ deck_id, expected_revision: 0, expected_hash: before.document.hash, operations: [
+        { op: 'add_part', slide_id: 'slide-1', id: 'part', spec: { version: 1, preset: 'list-horizontal/balanced', title: 'Synthetic', data: { kind: 'items', items: [{ label: 'Check' }, { label: 'Act' }] } } },
+      ] });
+      const response = await tool.callback(input, { signal: new AbortController().signal, _meta: { progressToken: 'changed' }, sendNotification: () => {
+        sent += 1; notificationAttempt.resolve();
+        if (synchronous) throw new Error('Synchronous notification failure');
+        return Promise.reject(new Error('Rejected notification'));
+      } });
+      assert.equal(Boolean(response.isError), false);
+      assert.equal(sent, 1);
+      fixture.onRequest = undefined;
+      const after = await call('get_session_recovery', { deck_id });
+      assert.equal(after.document.revision, 1);
+      assert.equal(after.document.deck.slides[0].notes, 'Synthetic committed change');
+      assert.equal(after.past.length, 1);
+    }
+  });
+});
+
+function assertGuidedFeedbackSchema(schema) {
+  const input = schema.properties.input;
+  const authoring = input.properties.authoring.anyOf.find(branch => branch.type === 'object');
+  const limit = authoring.properties.slide_limit.anyOf.find(branch => branch.type === 'integer');
+  const headline = authoring.properties.headline_style.anyOf.find(branch => branch.type === 'string');
+  assert.equal(input.properties.slides.maxItems, 128);
+  assert.equal(limit.minimum, 32);
+  assert.equal(limit.maximum, 128);
+  assert.deepEqual(headline.enum, ['sentence', 'keyword']);
+}
+
+test('feedback MCP stub discovery shares reasoned authoring choices without core calls', async () => {
+  await feedbackMcpFixture(async ({ registrations, resources, prompts, calls }) => {
+    assertFeedbackWorkflow(await prompts.get('author_presentation').callback(), await resources.get('aislide://authoring/workflow').callback());
+    assert.match(registrations.get('create_guided_presentation').config.description, /32 slides.*headline_style="keyword".*32\.\.128.*Evidence and numeric checks/);
+    assert.match(registrations.get('compile_report').config.description, /fixed structured layouts.*exact recreation/);
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('feedback MCP stub schemas expose bounded typed authoring and source handles', async () => {
+  await feedbackMcpFixture(async ({ registrations, calls, call }) => {
+    for (const name of ['apply_operations', 'add_elements', 'set_frames', 'set_text_style', 'set_slide_background', 'set_connector', 'set_picture_crop', 'set_hyperlink', 'set_shape_adjustment', 'import_slides', 'create_object']) {
+      const tool = registrations.get(name);
+      assert.ok(tool, name);
+      assert.equal(tool.config.annotations.openWorldHint, false);
+      assert.equal(tool.config.annotations.readOnlyHint, name === 'create_object');
+      assert.equal(z.toJSONSchema(tool.config.inputSchema, { io: 'input' }).additionalProperties, false);
+    }
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic target' });
+    const source = await call('create_presentation', { title: 'Synthetic source' });
+    const frame = { x: 0, y: 0, width: 200, height: 100 };
+    const text = { type: 'text', id: 'text', ...frame, text: 'Synthetic', font_size: 24, color: '@dk1', bold: false };
+    const operations = [
+      { op: 'add_elements', slide_id: 'slide-1', elements: [text] },
+      { op: 'set_frame', slide_id: 'slide-1', id: 'text', frame },
+      { op: 'set_text_style', slide_id: 'slide-1', ids: ['text'], style: { bold: false } },
+      { op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' },
+      { op: 'set_connector', slide_id: 'slide-1', id: 'edge', connector: { color: '@dk1', stroke_width: 2, arrow: true } },
+      { op: 'set_picture_crop', slide_id: 'slide-1', id: 'image', crop: { left: 0.1 } },
+      { op: 'set_hyperlink', slide_id: 'slide-1', id: 'text', link: null },
+      { op: 'set_shape_adjustment', slide_id: 'slide-1', id: 'shape', adjustment: { name: 'adj', value: 25000 } },
+      { op: 'add_picture', slide_id: 'slide-1', id: 'image', base64: 'c3ludGhldGlj', mime_type: 'image/png', alt: 'Synthetic', frame },
+    ];
+    const guarded = { deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), operations };
+    const batch = registrations.get('apply_operations').config.inputSchema;
+    assert.deepEqual(batch.parse(guarded), guarded);
+    for (const change of [{ operations: [] }, { operations: Array(129).fill(operations[3]) }, { expected_revision: -1 }, { expected_hash: 'invalid' }, { shell: 'no' }, { operations: [{ op: 'replace', path: '/deck', value: {} }] }]) {
+      assert.equal(batch.safeParse({ ...guarded, ...change }).success, false, JSON.stringify(change).slice(0, 100));
+    }
+    for (const operation of [
+      { ...operations[0], elements: [{ ...text, unknown: true }] },
+      { ...operations[0], elements: [] },
+      { ...operations[1], frame: { ...frame, width: 0 } },
+      { ...operations[1], frame: { ...frame, x: Infinity } },
+      { ...operations[2], ids: ['text', 'text'] },
+      { ...operations[2], style: {} },
+      { ...operations[2], style: { bold: null } },
+      { ...operations[4], connector: { ...operations[4].connector, path: 'no' } },
+      { ...operations[5], crop: { left: 2 } },
+      { ...operations[6], link: undefined },
+      { ...operations[7], adjustment: { name: 'unsupported', value: 2 } },
+      { ...operations[8], mime_type: 'image/svg+xml' },
+    ]) assert.equal(batch.safeParse({ ...guarded, operations: [operation] }).success, false, operation.op);
+    const beforeCalls = calls.length;
+    const updated = await call('apply_operations', guarded);
+    assert.equal(updated.revision, 1);
+    assert.equal(calls.length, beforeCalls + 1);
+    assert.deepEqual(calls.at(-1).request.operations, operations);
+    assert.equal(calls.at(-1).request.op, 'apply_operations');
+    assert.equal((await call('get_session_recovery', { deck_id })).past.length, 1);
+    const sourceBefore = await call('get_session_recovery', { deck_id: source.deck_id });
+    const importInput = { deck_id, expected_revision: 1, expected_hash: 'b'.repeat(64), source_deck_id: source.deck_id, source_slide_ids: ['slide-1'], prefix: 'copy', after: null };
+    const importSchema = registrations.get('import_slides').config.inputSchema;
+    for (const change of [{ source: sourceBefore.document }, { path: 'source.pptx' }, { prefix: '../copy' }, { prefix: 'x'.repeat(25) }, { source_slide_ids: [] }, { source_slide_ids: ['slide-1', 'slide-1'] }, { source_deck_id: 'invalid' }]) assert.equal(importSchema.safeParse({ ...importInput, ...change }).success, false);
+    await call('import_slides', importInput);
+    assert.deepEqual(calls.at(-1).request.source, sourceBefore.document);
+    assert.equal('source_deck_id' in calls.at(-1).request, false);
+    assert.deepEqual(await call('get_session_recovery', { deck_id: source.deck_id }), sourceBefore);
+    const unknown = { ...importInput, expected_revision: 2, source_deck_id: randomUUID() };
+    const count = calls.length;
+    await assert.rejects(() => call('import_slides', unknown), /Unknown deck handle/);
+    assert.equal(calls.length, count);
+    await call('create_object', { id: 'draft', kind: 'text' });
+    assert.equal(calls.at(-1).request.op, 'create_object');
+  });
+});
+
+test('managed batch MCP stub accepts strict parts and graphs with one guarded request', async () => {
+  await feedbackMcpFixture(async ({ registrations, calls, call }) => {
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic managed batch' });
+    const layout = { x: 64, y: 120, width: 1152, height: 512, show_title: false };
+    const part = { version: 1, preset: 'matrix-basic', title: 'Synthetic', data: { kind: 'matrix', corner_label: 'Criterion', rows: ['First', 'Second'], columns: ['A', 'B'], cells: [['a', 'b'], ['c', 'd']] }, layout };
+    const graph = { version: 1, title: 'Synthetic', show_title: false, nodes: [{ id: 'node', label: 'Heading', detail: 'Detail', x: 0, y: 0 }] };
+    const operations = [
+      { op: 'add_part', slide_id: 'slide-1', id: 'part', spec: part },
+      { op: 'update_part', slide_id: 'slide-1', id: 'part', spec: part },
+      { op: 'add_graph', slide_id: 'slide-1', id: 'graph', spec: graph, layout },
+      { op: 'update_graph', slide_id: 'slide-1', id: 'graph', spec: graph },
+    ];
+    const guarded = { deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), operations };
+    const schema = registrations.get('apply_operations').config.inputSchema;
+    assert.deepEqual(schema.parse(guarded), guarded);
+    const published = z.toJSONSchema(schema, { io: 'input' });
+    assert.equal(published.properties.operations.items.oneOf.length, 13);
+    for (const operation of operations) {
+      assert.equal(schema.safeParse({ ...guarded, operations: [operation] }).success, true);
+      assert.equal(schema.safeParse({ ...guarded, operations: [{ ...operation, unknown: true }] }).success, false);
+      assert.equal(schema.safeParse({ ...guarded, operations: [{ ...operation, spec: { ...operation.spec, unknown: true } }] }).success, false);
+      assert.equal(schema.safeParse({ ...guarded, operations: [{ ...operation, id: 'x'.repeat(41) }] }).success, false);
+    }
+    assert.equal(schema.safeParse({ ...guarded, operations: Array(128).fill(operations[0]) }).success, true);
+    for (const invalid of [[], Array(129).fill(operations[0]),
+      [{ ...operations[0], layout }],
+      [{ ...operations[0], spec: { ...part, data: { ...part.data, unknown: true } } }],
+      [{ ...operations[0], spec: { ...part, data: { ...part.data, corner_label: null } } }],
+      [{ ...operations[0], spec: { ...part, data: { ...part.data, corner_label: 'x'.repeat(49) } } }],
+      [{ ...operations[2], layout: { ...layout, width: 0 } }],
+      [{ ...operations[2], layout: { ...layout, unknown: true } }],
+      [{ ...operations[2], spec: { ...graph, nodes: [{ ...graph.nodes[0], unknown: true }] } }],
+      [{ ...operations[2], spec: { ...graph, nodes: [{ ...graph.nodes[0], icon: { base64: 'c3ludGhldGlj', mime_type: 'image/png', unknown: true } }] } }],
+      [{ ...operations[2], spec: { ...graph, edges: [{ id: 'edge', source: 'node', target: 'node', unknown: true }] } }],
+      [{ ...operations[2], spec: { ...graph, groups: [{ id: 'region', label: 'Region', x: 0, y: 0, width: 500, height: 300, unknown: true }] } }],
+      [{ ...operations[3], layout }],
+    ]) assert.equal(schema.safeParse({ ...guarded, operations: invalid }).success, false);
+    for (const value of [undefined, null]) {
+      const operation = { ...operations[2], layout: value };
+      assert.deepEqual(schema.parse({ ...guarded, operations: [operation] }).operations, [operation]);
+    }
+    const count = calls.length;
+    const changed = await call('apply_operations', guarded);
+    assert.equal(changed.revision, 1);
+    assert.equal(calls.length, count + 1);
+    assert.deepEqual(calls.at(-1).request.operations, operations);
+    assert.equal(calls.at(-1).request.op, 'apply_operations');
+    assert.equal((await call('get_session_recovery', { deck_id })).past.length, 1);
+  });
+});
+
+test('managed batch MCP stub failures cancellation busy and no-op retain state without fallback', { timeout: 10000 }, async () => {
+  await feedbackMcpFixture(async ({ calls, call, fixture }) => {
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic guarded batch' });
+    const before = await call('get_session_recovery', { deck_id });
+    const part = { version: 1, preset: 'list-horizontal/balanced', title: 'Synthetic', data: { kind: 'items', items: [{ label: 'First' }, { label: 'Second' }] } };
+    const operations = [
+      { op: 'add_part', slide_id: 'slide-1', id: 'part', spec: part },
+      { op: 'add_graph', slide_id: 'slide-1', id: 'graph', spec: { version: 1, title: 'Synthetic', nodes: [{ id: 'node', label: 'Node', x: 0, y: 88 }] } },
+    ];
+    const input = { deck_id, expected_revision: before.document.revision, expected_hash: before.document.hash, operations };
+    for (const mode of ['failure', 'timeout', 'late-cancel', 'early-cancel']) {
+      const controller = new AbortController();
+      const count = calls.length;
+      fixture.onRequest = (request, options) => {
+        assert.equal(request.op, 'apply_operations');
+        assert.deepEqual(request.operations, operations);
+        assert.equal(options.signal, controller.signal);
+        if (mode === 'failure') throw new Error('Core rejected stale metadata');
+        if (mode === 'timeout') throw new Error('Core request timed out');
+        controller.abort();
+        return { document: { ...request.document, revision: 1, hash: 'b'.repeat(64), parts: [{ spec: part }] }, receipt: { inverse: [] } };
+      };
+      if (mode === 'early-cancel') controller.abort();
+      await assert.rejects(() => call('apply_operations', input, controller.signal), /cancelled|stale|timed out/i);
+      assert.equal(calls.length, count + (mode === 'early-cancel' ? 0 : 1));
+      assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
+    }
+    let release;
+    let started;
+    const entered = new Promise(resolve => { started = resolve; });
+    fixture.onRequest = request => new Promise(resolve => { release = () => resolve({ document: request.document, receipt: null }); started(); });
+    const pending = call('apply_operations', input);
+    try {
+      await entered;
+      const count = calls.length;
+      await assert.rejects(() => call('apply_operations', input), /in progress|busy/i);
+      assert.equal(calls.length, count);
+      assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
+    } finally { release(); await pending; }
+    assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
+    fixture.onRequest = request => ({ document: request.document, receipt: null });
+    const noop = await call('apply_operations', { ...input, operations: [{ op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' }] });
+    assert.equal(noop.can_undo, false);
+    assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
+  });
+});
+
+test('managed batch MCP stub matrix corner labels share Unicode bounds and defaults across tools', async () => {
+  await feedbackMcpFixture(async ({ registrations, calls, call }) => {
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic matrix contracts' });
+    const base = { version: 1, preset: 'matrix/balanced', title: 'Synthetic', data: { kind: 'matrix', rows: ['First', 'Second'], columns: ['A', 'B'], cells: [['a', 'b'], ['c', 'd']] } };
+    const published = z.toJSONSchema(registrations.get('create_part').config.inputSchema, { io: 'input' });
+    const matrixSchema = published.properties.spec.properties.data.oneOf.find(variant => variant.properties.kind.const === 'matrix');
+    assert.equal(matrixSchema.properties.corner_label.maxLength, 48);
+    assert.equal(matrixSchema.required.includes('corner_label'), false);
+    const guided = structuredClone(guidedExamples()[0]);
+    const count = calls.length;
+    for (const category of ['matrix', 'contrast']) for (const variant of ['balanced', 'focus', 'labeled']) {
+      const spec = { ...base, preset: `${category}/${variant}` };
+      const inputs = [
+        ['create_part', part => ({ id: 'part', spec: part })],
+        ...['add_part', 'update_part'].map(name => [name, part => ({ deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'part', spec: part })]),
+        ...['add_part', 'update_part'].map(op => ['apply_operations', part => ({ deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), operations: [{ op, slide_id: 'slide-1', id: 'part', spec: part }] })]),
+        ...['validate_guided_presentation', 'create_guided_presentation'].map(name => [name, part => ({ input: { ...guided, slides: [{ ...guided.slides[0], part }] } })]),
+      ];
+      for (const [name, input] of inputs) {
+        const schema = registrations.get(name).config.inputSchema;
+        assert.deepEqual(schema.parse(input(spec)), input(spec), `${name}: omitted defaults must reach core unchanged`);
+        for (const corner_label of ['', 'Criterion', 'x'.repeat(48), '\u{20000}'.repeat(48)]) {
+          const value = input({ ...spec, data: { ...spec.data, corner_label } });
+          assert.deepEqual(schema.parse(value), value, name);
+        }
+        for (const corner_label of ['x'.repeat(49), '\u{20000}'.repeat(49), null, 3]) {
+          assert.equal(schema.safeParse(input({ ...spec, data: { ...spec.data, corner_label } })).success, false, name);
+        }
+      }
+    }
+    assert.equal(calls.length, count);
+    for (const name of ['add_graph', 'update_graph']) {
+      const schema = registrations.get(name).config.inputSchema;
+      const spec = { version: 1, title: 'Legacy', nodes: [{ id: 'node', label: 'Node', x: 0, y: 88 }] };
+      const input = { deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'graph', spec };
+      assert.deepEqual(schema.parse(input), input);
+      assert.equal(schema.safeParse({ ...input, layout: null }).success, false, name);
+      assert.equal(schema.safeParse({ ...input, expected_revision: undefined }).success, false, name);
+    }
+  });
+});
+
+test('feedback MCP stub guided graph and part schemas preserve optional field semantics', async () => {
+  await feedbackMcpFixture(async ({ registrations, calls, call }) => {
+    const graph = { version: 1, title: 'Synthetic', show_title: false, nodes: [{ id: 'node', label: 'Heading', detail: '\u{20000}'.repeat(240), detail_font_size: 12, text_align: 'left', heading_bold: false, font_size: 18, x: 0, y: 0, height: 512 }] };
+    await call('create_graph', { id: 'graph', spec: graph });
+    assert.deepEqual(calls.at(-1).request.spec, graph);
+    const graphSchema = registrations.get('create_graph').config.inputSchema;
+    for (const changes of [{ detail: ' ' }, { detail: 'x'.repeat(241) }, { detail_font_size: 41 }, { text_align: 'justify' }, { unknown: true }]) {
+      assert.equal(graphSchema.safeParse({ id: 'graph', spec: { ...graph, nodes: [{ ...graph.nodes[0], ...changes }] } }).success, false);
+    }
+    await call('transform_graph', { spec: graph, operations: [{ op: 'put_node', node: graph.nodes[0] }, { op: 'put_group', group: { id: 'region', label: 'Region', x: 0, y: 0, width: 1152, height: 512 } }] });
+    assert.equal(calls.at(-1).request.operations[1].group.height, 512);
+    const legacy = { version: 1, title: 'Legacy', nodes: [{ id: 'node', label: 'Legacy', x: 0, y: 88 }] };
+    await call('create_graph', { id: 'legacy', spec: legacy });
+    assert.deepEqual(calls.at(-1).request.spec, legacy);
+    const part = { version: 1, preset: 'process-basic', title: 'Synthetic', data: { kind: 'items', items: [{ label: 'First' }, { label: 'Second' }] }, layout: { x: 20, y: 30, width: 600, height: 300, show_title: false } };
+    await call('create_part', { id: 'part', spec: part });
+    assert.deepEqual(calls.at(-1).request.spec, part);
+    const partSchema = registrations.get('create_part').config.inputSchema;
+    for (const layout of [{ ...part.layout, width: 0 }, { ...part.layout, x: 4097 }, { ...part.layout, font_size: 12 }]) assert.equal(partSchema.safeParse({ id: 'part', spec: { ...part, layout } }).success, false);
+    const input = structuredClone(guidedExamples()[0]);
+    const evidenceIds = Array.from({ length: 16 }, (_, index) => `evidence-${index}`);
+    input.slides[0].support = [{ clause: 'Synthetic', body_paths: ['/data/items/0'], evidence_ids: evidenceIds }];
+    input.authoring = { headline_style: 'keyword', slide_limit: 128 };
+    input.slides = Array.from({ length: 128 }, (_, index) => ({ ...input.slides[0], id: `slide-${index}` }));
+    await call('validate_guided_presentation', { input });
+    assert.deepEqual(calls.at(-1).request.input.authoring, { headline_style: 'keyword', slide_limit: 128 });
+    const guidedSchema = registrations.get('validate_guided_presentation').config.inputSchema;
+    for (const name of ['validate_guided_presentation', 'create_guided_presentation']) {
+      assertGuidedFeedbackSchema(z.toJSONSchema(registrations.get(name).config.inputSchema, { io: 'input' }));
+    }
+    for (const authoring of [{ slide_limit: 31 }, { slide_limit: 129 }, { slide_limit: 32.5 }, { headline_style: 'freeform' }, { headline_style: 'keyword', unknown: true }]) assert.equal(guidedSchema.safeParse({ input: { ...input, authoring } }).success, false);
+    assert.equal(guidedSchema.safeParse({ input: { ...input, slides: [...input.slides, input.slides[0]] } }).success, false);
+  });
+});
+
+test('feedback MCP stub complete elements and ergonomic tools retain strict nested types', async () => {
+  await feedbackMcpFixture(async ({ registrations, calls, call }) => {
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic elements' });
+    const frame = { x: 20, y: 20, width: 300, height: 150 };
+    const text = { id: 'text', type: 'text', ...frame, text: 'Synthetic', font_size: 24, color: '@dk1', bold: false, format: { paragraphs: [{ runs: [{ text: 'Synthetic', style: { italic: true, color: '@accent1' } }], alignment: 'right' }] } };
+    const elements = [
+      text,
+      { id: 'rect', type: 'rect', ...frame, fill: '@accent1', visual: { opacity: 0.5 } },
+      { id: 'polygon', type: 'polygon', ...frame, points: [[0, 0], [1, 0], [0, 1]], fill: 'none', stroke: '@dk1', stroke_width: 1 },
+      { ...text, id: 'shape', type: 'shape', preset: 'roundRect', fill: '@lt1', stroke: '@dk1', stroke_width: 1, rotation: 0, visual: { adjustments: [{ name: 'adj', value: 25000 }] } },
+      { id: 'table', type: 'table', ...frame, rows: [['Synthetic']], font_size: 20, format: { cells: [{ row: 0, column: 0, style: { fill: '@lt1', text_style: { bold: true } } }] } },
+      { id: 'chart', type: 'chart', ...frame, kind: 'column', categories: ['Synthetic'], series: [{ name: 'Synthetic', values: [1], color: '@accent1' }] },
+      { id: 'picture', type: 'picture', ...frame, base64: 'c3ludGhldGlj', mime_type: 'image/png', alt: 'Synthetic', crop: { left: 0 } },
+      { id: 'edge', type: 'connector', ...frame, color: '@dk1', stroke_width: 1, arrow: true, start: { element_id: 'rect', site: 0 }, routing: { points: [[0, 0], [1, 1]] } },
+      { id: 'group', type: 'group', ...frame, view_width: 300, view_height: 150, children: [{ ...text, id: 'child' }] },
+    ];
+    const schema = registrations.get('add_elements').config.inputSchema;
+    const guarded = { deck_id, expected_revision: 0, slide_id: 'slide-1', elements };
+    assert.deepEqual(schema.parse(guarded), guarded);
+    const invalid = structuredClone(guarded);
+    invalid.elements[8].children[0].format.paragraphs[0].runs[0].style.execute = 'no';
+    assert.equal(schema.safeParse(invalid).success, false);
+    assert.equal(schema.safeParse({ ...guarded, elements: Array(129).fill(text) }).success, false);
+    const operations = [
+      ['add_elements', { elements }],
+      ['set_frame', { id: 'rect', frame }],
+      ['set_text_style', { ids: ['text'], style: { italic: false } }],
+      ['set_slide_background', { color: 'FFFFFF' }],
+      ['set_connector', { id: 'edge', connector: { color: '@dk1', stroke_width: 1, arrow: false, start: null, end: null, routing: null } }],
+      ['set_picture_crop', { id: 'picture', crop: { top: 0.1 } }],
+      ['set_hyperlink', { id: 'text', link: 'https://example.com' }],
+      ['set_shape_adjustment', { id: 'shape', adjustment: { name: 'adj', value: 10000 } }],
+      ['add_picture', { id: 'new-picture', base64: 'c3ludGhldGlj', mime_type: 'image/png', alt: 'Synthetic', frame, crop: { top: 0 } }],
+    ];
+    for (const [index, [name, input]] of operations.entries()) {
+      const count = calls.length;
+      await call(name, { deck_id, expected_revision: index, slide_id: 'slide-1', ...input });
+      assert.equal(calls.length, count + 1, name);
+      assert.equal(calls.at(-1).request.op, 'apply_operations');
+      assert.deepEqual(calls.at(-1).request.operations, [{ ...input, op: name, slide_id: 'slide-1' }]);
+    }
+    await call('set_frames', { deck_id, expected_revision: 9, slide_id: 'slide-1', frames: [{ id: 'rect', frame }, { id: 'text', frame }] });
+    assert.deepEqual(calls.at(-1).request.operations, ['rect', 'text'].map(id => ({ op: 'set_frame', slide_id: 'slide-1', id, frame })));
+    await call('add_picture', { deck_id, slide_id: 'slide-1', id: 'legacy', base64: 'c3ludGhldGlj', mime_type: 'image/png', alt: 'Synthetic' });
+    assert.equal(calls.at(-1).request.expected_revision, 10);
+    assert.equal(calls.at(-1).request.operations[0].frame, undefined);
+    const count = calls.length;
+    await assert.rejects(() => call('set_slide_background', { deck_id, expected_revision: 0, slide_id: 'slide-1', color: 'FFFFFF' }), /Revision conflict/);
+    assert.equal(calls.length, count);
+  });
+});
+
+test('managed batch MCP live 39 slides and 21 managed roots retain metadata through native updates and Undo', { timeout: 360000 }, async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-managed-batch-mcp-'));
+  const client = new Client({ name: 'managed-batch-transport-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const requests = [];
+  const progressEvents = [];
+  const request = async (name, args = {}) => {
+    requests.push(name);
+    return client.callTool({ name, arguments: args }, undefined, { signal: context.signal, timeout: 320000, resetTimeoutOnProgress: true, maxTotalTimeout: 320000, onprogress: progress => progressEvents.push({ tool: name, ...progress }) });
+  };
+  const call = async (name, args = {}) => {
+    const result = await request(name, args);
+    assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content).slice(0, 2000)}`);
+    return JSON.parse(result.content.find(content => content.type === 'text').text);
+  };
+  const guard = (deck_id, document) => ({ deck_id, expected_revision: document.revision, expected_hash: document.hash });
+  const frameOf = ({ x, y, width, height }) => ({ x, y, width, height });
+  const elementsOf = elements => elements.flatMap(element => [element, ...(element.type === 'group' ? elementsOf(element.children) : [])]);
+  const assertManaged = document => {
+    assert.equal(document.deck.slides.length, 39);
+    assert.equal(new Set(document.deck.slides.map(slide => slide.id)).size, 39);
+    assert.equal(document.parts.length, 21);
+    assert.ok(document.parts.every(part => part.stale === false));
+    assert.equal(new Set(document.parts.map(part => `${part.slide_id}/${part.element_id}`)).size, 21);
+    const elements = document.deck.slides.flatMap(slide => elementsOf(slide.elements));
+    assert.equal(new Set(elements.map(element => element.id)).size, elements.length);
+    for (const part of document.parts) {
+      const root = document.deck.slides.find(slide => slide.id === part.slide_id).elements.find(element => element.id === part.element_id);
+      assert.ok(root, part.element_id);
+      assert.equal(root.type, 'group');
+      assert.ok(root.x >= 0 && root.y >= 0 && root.x + root.width <= 1280 && root.y + root.height <= 720);
+      assert.deepEqual(frameOf(root), frameOf(part.spec.layout));
+      if (part.spec.data.kind === 'matrix') {
+        assert.equal(part.spec.data.corner_label, 'Criterion');
+        assert.ok(elementsOf([root]).some(element => element.text === 'Criterion' || element.rows?.[0]?.[0] === 'Criterion'));
+      }
+    }
+  };
+  try {
+    await client.connect(transport);
+    const tools = (await client.listTools()).tools;
+    assert.equal(new Set(tools.map(tool => tool.name)).size, tools.length);
+    const variants = tools.find(tool => tool.name === 'apply_operations').inputSchema.properties.operations.items.oneOf;
+    const operations = variants.map(variant => variant.properties.op.const).sort();
+    assert.equal(operations.length, 13);
+    const capabilities = await call('authoring_capabilities');
+    assert.deepEqual([...capabilities.typed_authoring.operations].sort(), operations);
+    assert.equal(capabilities.typed_authoring.batch_limit, 128);
+    assert.equal(capabilities.typed_authoring.one_undo, true);
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic managed assembly' });
+    const initial = await call('get_document', { deck_id });
+    await call('edit_slides', { deck_id, expected_revision: initial.revision, operations: Array.from({ length: 38 }, (_, index) => ({ op: 'insert', id: `managed-slide-${index + 2}`, title: `Synthetic ${index + 2}` })) });
+    const blank = await call('get_document', { deck_id });
+    assert.equal(blank.deck.slides.length, 39);
+    assert.ok(blank.deck.slides.every(slide => slide.elements.length === 0));
+    const sourceBytes = Buffer.from('Synthetic evidence for the managed-batch test.');
+    const ingested = await call('ingest_source', { name: 'synthetic.txt', format: 'text', base64: sourceBytes.toString('base64') });
+    await call('apply_transaction', { deck_id, expected_revision: blank.revision, operations: [{ op: 'add', path: '/sources/-', value: ingested.source }] });
+    await call('close_source', { source_id: ingested.source_id });
+    const before = await call('get_session_recovery', { deck_id });
+    const catalog = await call('part_catalog');
+    const presetIds = [
+      ...['matrix', 'contrast'].flatMap(category => ['balanced', 'focus', 'labeled'].map(variant => `${category}/${variant}`)),
+      ...['list-horizontal', 'vertical-bar-graph', 'horizontal-bar-graph', 'line-graph', 'pie-chart', 'tree', 'flow', 'vertical-flow', 'cycle', 'before-after', 'layer'].map(category => `${category}/balanced`),
+    ];
+    assert.equal(presetIds.length, 17);
+    const layout = { x: 64, y: 144, width: 1152, height: 512, show_title: false };
+    const batch = presetIds.map((preset, index) => {
+      const entry = catalog.presets.find(entry => entry.id === preset);
+      assert.ok(entry, preset);
+      const spec = { ...structuredClone(entry.example), layout: { ...layout, show_title: entry.example.data.kind === 'chart' } };
+      if (spec.data.kind === 'matrix') spec.data.corner_label = 'Criterion';
+      return { op: 'add_part', slide_id: before.document.deck.slides[index].id, id: `managed-part-${index}`, spec };
+    });
+    for (let index = 0; index < 4; index += 1) batch.push({
+      op: 'add_graph', slide_id: before.document.deck.slides[index + 17].id, id: `managed-graph-${index}`, layout,
+      spec: { version: 1, title: `Synthetic graph ${index}`, show_title: false, nodes: [
+        { id: 'source', label: 'Source', detail: 'Synthetic input', x: 40, y: 60, width: 280, height: 120 },
+        { id: 'target', label: 'Target', detail: 'Synthetic output', x: 600, y: 60, width: 280, height: 120 },
+      ], edges: [{ id: 'flow', source: 'source', target: 'target', source_port: 'right', target_port: 'left', route: 'straight', arrow: true }] },
+    });
+    assert.equal(batch.length, 21);
+    assert.ok(Buffer.byteLength(JSON.stringify(batch)) < 64 * 1024);
+    const requestCount = requests.length;
+    const progressCount = progressEvents.length;
+    const added = await call('apply_operations', { ...guard(deck_id, before.document), operations: batch });
+    assert.deepEqual(requests.slice(requestCount), ['apply_operations']);
+    const batchProgress = progressEvents.slice(progressCount);
+    assert.ok(batchProgress.length > 0, 'actual stdio client receives requested progress');
+    assert.ok(batchProgress.every(event => event.tool === 'apply_operations' && event.total === undefined && /elapsed/.test(event.message)));
+    assert.ok(batchProgress.every((event, index) => index === 0 || event.progress > batchProgress[index - 1].progress));
+    const populated = await call('get_session_recovery', { deck_id });
+    assert.equal(added.revision, before.document.revision + 1);
+    assert.equal(populated.document.revision, added.revision);
+    assert.equal(populated.past.length, before.past.length + 1);
+    assertManaged(populated.document);
+    assert.deepEqual(populated.document.sources, before.document.sources);
+    assert.deepEqual(populated.document.bindings, before.document.bindings);
+    await call('undo', { deck_id });
+    const removed = await call('get_session_recovery', { deck_id });
+    assert.equal(removed.document.hash, before.document.hash);
+    assert.deepEqual(removed.document.deck, before.document.deck);
+    assert.deepEqual(removed.document.parts, before.document.parts);
+    assert.deepEqual(removed.document.sources, before.document.sources);
+    assert.equal(removed.past.length, before.past.length);
+    assert.equal(removed.future.length, 1);
+    await call('redo', { deck_id });
+    const restored = await call('get_document', { deck_id });
+    assert.equal(restored.hash, populated.document.hash);
+    assertManaged(restored);
+    const exported = await call('export_pptx', { deck_id, filename: 'managed-original.pptx' });
+    const originalBytes = await readFile(exported.path);
+    const opened = await call('open_pptx', { base64: originalBytes.toString('base64') });
+    const native = await call('get_session_recovery', { deck_id: opened.deck_id });
+    assertManaged(native.document);
+    assert.deepEqual(Buffer.from(native.document.origin.base64, 'base64'), originalBytes);
+    assert.deepEqual(native.document.sources, before.document.sources);
+    assert.deepEqual(native.document.bindings, before.document.bindings);
+    const noop = await call('export_pptx', { deck_id: opened.deck_id, filename: 'managed-noop.pptx' });
+    assert.deepEqual(await readFile(noop.path), originalBytes);
+    const part = native.document.parts.find(part => part.element_id === 'managed-part-0');
+    const graph = native.document.parts.find(part => part.element_id === 'managed-graph-0');
+    const updatedPart = structuredClone(part.spec);
+    updatedPart.data.cells[0][0] = 'Updated';
+    const updatedGraph = structuredClone(graph.spec.data.graph);
+    updatedGraph.nodes[0].label = 'Changed source';
+    const updates = [
+      { op: 'update_part', slide_id: part.slide_id, id: part.element_id, spec: updatedPart },
+      { op: 'update_graph', slide_id: graph.slide_id, id: graph.element_id, spec: updatedGraph },
+    ];
+    await call('apply_operations', { ...guard(opened.deck_id, native.document), operations: updates });
+    const changed = await call('get_session_recovery', { deck_id: opened.deck_id });
+    assert.equal(changed.document.revision, native.document.revision + 1);
+    assert.equal(changed.past.length, native.past.length + 1);
+    assertManaged(changed.document);
+    assert.equal(changed.document.parts.find(entry => entry.element_id === part.element_id).spec.data.cells[0][0], 'Updated');
+    assert.equal(changed.document.parts.find(entry => entry.element_id === graph.element_id).spec.data.graph.nodes[0].label, 'Changed source');
+    assert.deepEqual(changed.document.parts.find(entry => entry.element_id === graph.element_id).spec.layout, graph.spec.layout);
+    assert.deepEqual(changed.document.origin, native.document.origin);
+    assert.deepEqual(changed.document.sources, native.document.sources);
+    assert.deepEqual(changed.document.bindings, native.document.bindings);
+    for (const entry of native.document.parts.filter(entry => ![part.element_id, graph.element_id].includes(entry.element_id))) {
+      assert.deepEqual(changed.document.parts.find(candidate => candidate.element_id === entry.element_id), entry);
+    }
+    await call('apply_operations', { ...guard(opened.deck_id, changed.document), operations: updates });
+    assert.deepEqual(await call('get_session_recovery', { deck_id: opened.deck_id }), changed);
+    const root = changed.document.deck.slides.find(slide => slide.id === part.slide_id).elements.find(element => element.id === part.element_id);
+    const child = elementsOf(root.children).find(element => element.type === 'text' && element.text);
+    assert.ok(child);
+    const failed = await request('apply_operations', { ...guard(opened.deck_id, changed.document), operations: [
+      { op: 'set_text_style', slide_id: part.slide_id, ids: [child.id], style: { color: 'CC0011' } },
+      updates[0],
+    ] });
+    assert.equal(failed.isError, true);
+    assert.match(failed.content[0].text, /stale|modified/i);
+    assert.deepEqual(await call('get_session_recovery', { deck_id: opened.deck_id }), changed);
+    const changedExport = await call('export_pptx', { deck_id: opened.deck_id, filename: 'managed-changed.pptx' });
+    const changedBytes = await readFile(changedExport.path);
+    const changedOpened = await call('open_pptx', { base64: changedBytes.toString('base64') });
+    const persisted = await call('get_document', { deck_id: changedOpened.deck_id });
+    assertManaged(persisted);
+    assert.equal(persisted.parts.find(entry => entry.element_id === part.element_id).spec.data.cells[0][0], 'Updated');
+    assert.equal(persisted.parts.find(entry => entry.element_id === graph.element_id).spec.data.graph.nodes[0].label, 'Changed source');
+    assert.deepEqual(persisted.parts.find(entry => entry.element_id === graph.element_id).spec.layout, graph.spec.layout);
+    assert.deepEqual(persisted.sources, native.document.sources);
+    await call('undo', { deck_id: opened.deck_id });
+    const undone = await call('get_session_recovery', { deck_id: opened.deck_id });
+    assert.equal(undone.document.hash, native.document.hash);
+    for (const field of ['deck', 'parts', 'sources', 'bindings', 'origin']) assert.deepEqual(undone.document[field], native.document[field]);
+    assert.equal(undone.past.length, native.past.length);
+    assert.equal(undone.future.length, 1);
+    const undoneExport = await call('export_pptx', { deck_id: opened.deck_id, filename: 'managed-undone.pptx' });
+    assert.deepEqual(await readFile(undoneExport.path), originalBytes);
+    assert.deepEqual(await readFile(exported.path), originalBytes);
+    assert.deepEqual(Buffer.from(ingested.source.text), sourceBytes);
+  } finally {
+    try { await client.close(); } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test('feedback MCP live typed batches and authored slide import preserve content and atomic history', { timeout: 120000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-feedback-mcp-'));
+  const client = new Client({ name: 'feedback-batch-transport-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
+    return JSON.parse(result.content[0].text);
+  };
+  const guard = (deck_id, document) => ({ deck_id, expected_revision: document.revision, expected_hash: document.hash });
+  try {
+    await client.connect(transport);
+    const tools = (await client.listTools()).tools;
+    for (const name of ['apply_operations', 'add_elements', 'set_frame', 'set_frames', 'set_text_style', 'set_slide_background', 'set_connector', 'set_picture_crop', 'set_hyperlink', 'set_shape_adjustment', 'import_slides', 'create_object']) {
+      const tool = tools.find(tool => tool.name === name);
+      assert.ok(tool, name);
+      assert.equal(tool.annotations.openWorldHint, false, name);
+      assert.equal(tool.annotations.readOnlyHint, name === 'create_object', name);
+      assert.equal(tool.inputSchema.additionalProperties, false, name);
+    }
+    for (const [name, property] of [['apply_operations', 'operations'], ['add_elements', 'elements'], ['import_slides', 'source_slide_ids']]) {
+      const schema = tools.find(tool => tool.name === name).inputSchema;
+      assert.equal(schema.properties[property].minItems, 1);
+      assert.equal(schema.properties[property].maxItems, 128);
+    }
+    const capabilities = await call('authoring_capabilities');
+    assert.equal(capabilities.typed_authoring.batch_limit, 128);
+    assert.equal(capabilities.typed_authoring.scale_fonts, false);
+    assert.equal(capabilities.typed_authoring.one_undo, true);
+    assert.equal(capabilities.slide_import.source, 'authored_document_only');
+    assert.equal(capabilities.slide_import.office_visual_parity, false);
+    assertFeedbackWorkflow(await client.getPrompt({ name: 'author_presentation' }), await client.readResource({ uri: 'aislide://authoring/workflow' }));
+    const source = await call('create_presentation', { title: 'Synthetic batch source' });
+    const target = await call('create_presentation', { title: 'Synthetic merge target' });
+    const sourceInitial = await call('get_session_recovery', { deck_id: source.deck_id });
+    const targetInitial = await call('get_session_recovery', { deck_id: target.deck_id });
+    for (const initial of [sourceInitial, targetInitial]) {
+      assert.equal(initial.document.deck.slides.length, 1);
+      assert.deepEqual(initial.document.deck.slides[0].elements, []);
+      assert.deepEqual(initial.past, []);
+    }
+    const slide_id = sourceInitial.document.deck.slides[0].id;
+    const picture = await call('create_asset', { id: 'pixel', mime_type: 'image/svg+xml', size: 40, alt: 'Synthetic square', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="red"/></svg>').toString('base64') });
+    assert.equal(Buffer.from(picture.base64, 'base64').subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+    const elements = [
+      { type: 'text', id: 'text', x: 40, y: 40, width: 600, height: 140, text: 'One\nTwo', font_size: 28, color: '202525', bold: false, format: { paragraphs: [
+        { alignment: 'right', space_after: { kind: 'points', value: 600 }, runs: [{ text: 'One', style: { italic: true } }] },
+        { bullet: 'bullet', bullet_character: '-', runs: [{ text: 'Two', style: { color: 'AA0000' } }] },
+      ] } },
+      { type: 'shape', id: 'shape', x: 760, y: 40, width: 240, height: 140, preset: 'roundRect', fill: '087F73', stroke: '202525', stroke_width: 3, text: 'Label', font_size: 28, color: 'FFFFFF', bold: true, format: { alignment: 'center', vertical: 'middle' }, visual: { opacity: 0.7, adjustments: [{ name: 'adj', value: 10000 }] } },
+      { type: 'connector', id: 'edge', x: 640, y: 110, width: 120, height: 1, color: '087F73', stroke_width: 2, arrow: true, start: { element_id: 'text', site: 3 }, end: { element_id: 'shape', site: 1 } },
+      { type: 'polygon', id: 'polygon', x: 40, y: 280, width: 200, height: 100, points: [[0, 0], [1, 0], [0.5, 1]], fill: '087F73', stroke: '202525', stroke_width: 2 },
+    ];
+    const frame = { x: 300, y: 280, width: 240, height: 120 };
+    const crop = { left: 0.1, right: 0.2, top: 0.05, bottom: 0.15 };
+    const added = await call('apply_operations', { ...guard(source.deck_id, sourceInitial.document), operations: [
+      { op: 'add_elements', slide_id, elements },
+      { op: 'add_picture', slide_id, id: 'image', base64: picture.base64, mime_type: 'image/png', alt: 'Synthetic square', frame, crop },
+    ] });
+    const populated = await call('get_session_recovery', { deck_id: source.deck_id });
+    assert.equal(added.revision, 1);
+    assert.equal(added.hash, populated.document.hash);
+    assert.equal(added.can_undo, true);
+    assert.equal(populated.past.length, 1);
+    assert.equal(populated.document.deck.slides[0].elements.length, 5);
+    const find = (document, id) => document.deck.slides[0].elements.find(element => element.id === id);
+    for (const expected of elements) {
+      const actual = find(populated.document, expected.id);
+      for (const [key, value] of Object.entries(expected)) {
+        if (key !== 'format' && key !== 'visual') assert.deepEqual(actual[key], value, `${expected.id}.${key}`);
+      }
+    }
+    const image = find(populated.document, 'image');
+    assert.deepEqual(image, { ...image, ...frame, crop, base64: picture.base64, alt: 'Synthetic square' });
+    const paragraphs = find(populated.document, 'text').format.paragraphs;
+    assert.equal(paragraphs[0].alignment, 'right');
+    assert.deepEqual(paragraphs[0].space_after, elements[0].format.paragraphs[0].space_after);
+    assert.equal(paragraphs[0].runs[0].style.italic, true);
+    assert.equal(paragraphs[1].bullet, 'bullet');
+    assert.equal(paragraphs[1].bullet_character, '-');
+    assert.equal(paragraphs[1].runs[0].style.color, 'AA0000');
+    const shape = find(populated.document, 'shape');
+    assert.equal(shape.format.alignment, 'center');
+    assert.equal(shape.format.vertical, 'middle');
+    assert.equal(shape.visual.opacity, 0.7);
+    assert.deepEqual(shape.visual.adjustments, elements[1].visual.adjustments);
+    const textFrame = { x: 80, y: 60, width: 420, height: 120 };
+    const shapeFrame = { x: 760, y: 60, width: 300, height: 160 };
+    await call('apply_operations', { ...guard(source.deck_id, populated.document), operations: [
+      { op: 'set_frame', slide_id, id: 'text', frame: textFrame },
+      { op: 'set_frame', slide_id, id: 'shape', frame: shapeFrame },
+      { op: 'set_text_style', slide_id, ids: ['text'], style: { font_size: 20, bold: true } },
+      { op: 'set_slide_background', slide_id, color: 'F3F5F7' },
+      { op: 'set_picture_crop', slide_id, id: 'image', crop: { left: 0.2 } },
+    ] });
+    const changed = await call('get_session_recovery', { deck_id: source.deck_id });
+    assert.equal(changed.document.revision, 2);
+    assert.equal(changed.past.length, 2);
+    assert.deepEqual(find(changed.document, 'shape'), { ...shape, ...shapeFrame });
+    const expectedText = { ...structuredClone(find(populated.document, 'text')), ...textFrame, font_size: 20, bold: true };
+    for (const paragraph of expectedText.format.paragraphs) for (const run of paragraph.runs) Object.assign(run.style, { font_size: 20, bold: true });
+    assert.deepEqual(find(changed.document, 'text'), expectedText);
+    assert.equal(changed.document.deck.slides[0].background, 'F3F5F7');
+    assert.equal(changed.document.deck.slides[0].inherit_background ?? false, false);
+    assert.deepEqual(find(changed.document, 'image'), { ...image, crop: { left: 0.2, right: 0, top: 0, bottom: 0 } });
+    for (const id of ['edge', 'polygon']) assert.deepEqual(find(changed.document, id), find(populated.document, id));
+    await call('undo', { deck_id: source.deck_id });
+    const undone = await call('get_session_recovery', { deck_id: source.deck_id });
+    assert.equal(undone.document.hash, populated.document.hash);
+    assert.deepEqual(undone.document.deck, populated.document.deck);
+    assert.equal(undone.past.length, 1);
+    assert.equal(undone.future.length, 1);
+    const validOperation = { op: 'set_slide_background', slide_id, color: 'ABCDEF' };
+    const guarded = guard(source.deck_id, undone.document);
+    for (const input of [
+      { ...guarded, operations: [validOperation, { op: 'set_frame', slide_id, id: 'missing', frame: textFrame }] },
+      { ...guarded, operations: [validOperation, { op: 'set_frame', slide_id, id: 'text', frame: { ...textFrame, unknown: true } }] },
+      { ...guarded, expected_revision: 0, operations: [validOperation] },
+      { ...guarded, expected_hash: '0'.repeat(64), operations: [validOperation] },
+    ]) {
+      const result = await client.callTool({ name: 'apply_operations', arguments: input });
+      assert.equal(result.isError, true, JSON.stringify(result.content));
+      assert.deepEqual(await call('get_session_recovery', { deck_id: source.deck_id }), undone);
+    }
+    await call('redo', { deck_id: source.deck_id });
+    const sourceBefore = await call('get_session_recovery', { deck_id: source.deck_id });
+    assert.equal(sourceBefore.document.hash, changed.document.hash);
+    assert.deepEqual(sourceBefore.document.deck, changed.document.deck);
+    assert.equal(sourceBefore.past.length, 2);
+    assert.deepEqual(sourceBefore.future, []);
+    const merged = await call('import_slides', { ...guard(target.deck_id, targetInitial.document), source_deck_id: source.deck_id, source_slide_ids: [slide_id], prefix: 'copy', after: targetInitial.document.deck.slides[0].id });
+    const targetBefore = await call('get_session_recovery', { deck_id: target.deck_id });
+    assert.equal(merged.revision, 1);
+    assert.equal(merged.slides, 2);
+    assert.equal(merged.hash, targetBefore.document.hash);
+    assert.equal(targetBefore.past.length, 1);
+    assert.deepEqual(targetBefore.document.deck.design, targetInitial.document.deck.design);
+    assert.deepEqual(targetBefore.document.deck.slides[0], targetInitial.document.deck.slides[0]);
+    const imported = targetBefore.document.deck.slides[1];
+    assert.notEqual(imported.id, slide_id);
+    assert.deepEqual(imported.elements, sourceBefore.document.deck.slides[0].elements);
+    assert.equal(imported.background, 'F3F5F7');
+    assert.equal(imported.layout_id, targetInitial.document.deck.slides[0].layout_id);
+    assert.deepEqual(await call('get_session_recovery', { deck_id: source.deck_id }), sourceBefore);
+    const exported = await call('export_pptx', { deck_id: target.deck_id, filename: 'merged.pptx' });
+    const bytes = await readFile(exported.path);
+    const native = await call('open_pptx', { base64: bytes.toString('base64') });
+    const nativeBefore = await call('get_session_recovery', { deck_id: native.deck_id });
+    assert.ok(nativeBefore.document.origin);
+    assert.equal(nativeBefore.document.deck.slides[1].elements.find(element => element.id === 'image').base64, picture.base64);
+    assert.equal(nativeBefore.document.deck.slides[1].elements.find(element => element.id === 'text').text, 'One\nTwo');
+    const rejected = await client.callTool({ name: 'import_slides', arguments: { ...guard(target.deck_id, targetBefore.document), source_deck_id: native.deck_id, source_slide_ids: [nativeBefore.document.deck.slides[1].id], prefix: 'native' } });
+    assert.equal(rejected.isError, true);
+    assert.match(rejected.content[0].text, /authored|native/i);
+    assert.deepEqual(await call('get_session_recovery', { deck_id: target.deck_id }), targetBefore);
+    assert.deepEqual(await call('get_session_recovery', { deck_id: native.deck_id }), nativeBefore);
+    const unchanged = await call('export_pptx', { deck_id: native.deck_id, filename: 'native-noop.pptx' });
+    assert.deepEqual(await readFile(unchanged.path), bytes);
+    await call('undo', { deck_id: target.deck_id });
+    const restored = await call('get_session_recovery', { deck_id: target.deck_id });
+    assert.equal(restored.document.hash, targetInitial.document.hash);
+    assert.deepEqual(restored.document.deck, targetInitial.document.deck);
+    assert.deepEqual(restored.past, []);
+    assert.equal(restored.future.length, 1);
+    assert.deepEqual(await call('get_session_recovery', { deck_id: source.deck_id }), sourceBefore);
+  } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('feedback MCP live guided keyword opt-in and titleless graph part layouts survive cross-API updates', { timeout: 120000 }, async () => {
+  const client = new Client({ name: 'feedback-layout-transport-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const tools = (await client.listTools()).tools;
+    for (const name of ['validate_guided_presentation', 'create_guided_presentation']) {
+      assertGuidedFeedbackSchema(tools.find(tool => tool.name === name).inputSchema);
+    }
+    const input = structuredClone(guidedExamples().find(input => input.profile_id === 'technical-explainer'));
+    const template = input.slides[0];
+    input.language = 'en';
+    input.title = 'Synthetic transport briefing';
+    input.audience = 'Test reviewers';
+    input.purpose = 'Exercise guided authoring with synthetic assumptions';
+    input.governing_message = 'Review the evidence before proceeding.';
+    input.evidence = [{ id: 'proposal', kind: 'assumption', reference: 'Synthetic test fixture', statement: 'Illustrative review and action stages, not observed results.' }];
+    template.headline = input.governing_message;
+    template.part = { version: 1, preset: 'list-horizontal/balanced', title: 'Stages', subtitle: 'Synthetic review sequence', data: { kind: 'items', items: [{ label: 'Check', detail: 'Review' }, { label: 'Act', detail: 'Proceed' }] } };
+    template.support = [{ clause: template.headline, body_paths: ['/data/items'], evidence_ids: ['proposal'] }];
+    template.numbers = [];
+    input.slides = Array.from({ length: 32 }, (_, index) => ({ ...structuredClone(template), id: `page-${index}` }));
+    const defaultReview = await call('validate_guided_presentation', { input });
+    assert.equal(defaultReview.ready, true, JSON.stringify(defaultReview));
+    input.slides.push(...Array.from({ length: 7 }, (_, index) => ({ ...structuredClone(template), id: `page-${index + 32}` })));
+    const overDefault = await call('validate_guided_presentation', { input });
+    assert.equal(overDefault.ready, false);
+    assert.match(JSON.stringify(overDefault.issues), /1\.\.32/);
+    input.authoring = { headline_style: 'keyword', slide_limit: 39 };
+    for (const slide of input.slides) { slide.headline = 'Boundary'; slide.support[0].clause = 'Boundary'; }
+    const sentenceInput = { ...input, profile_id: 'consulting-decision', language: 'ja', authoring: { slide_limit: 39 }, slides: [input.slides[0]] };
+    const sentenceDefault = await call('validate_guided_presentation', { input: sentenceInput });
+    assert.equal(sentenceDefault.ready, false);
+    assert.match(JSON.stringify(sentenceDefault.issues), /30-56/);
+    assert.equal((await call('validate_guided_presentation', { input: { ...sentenceInput, authoring: { headline_style: 'keyword' } } })).ready, true);
+    const review = await call('validate_guided_presentation', { input });
+    assert.equal(review.ready, true, JSON.stringify(review));
+    assert.equal(input.issues, undefined);
+    const created = await call('create_guided_presentation', { input });
+    assert.equal(created.slides, 39);
+    assert.equal(created.profile_id, 'technical-explainer');
+    assert.equal(created.model_inference, false);
+    const guided = await call('get_document', { deck_id: created.deck_id });
+    assert.equal(guided.deck.slides.length, 39);
+    assert.equal(new Set(guided.deck.slides.map(slide => slide.id)).size, 39);
+    assert.equal(guided.parts.length, 39);
+    assert.ok(guided.parts.every(part => !part.stale));
+    assert.ok(guided.deck.slides.every(slide => slide.elements.some(element => element.type === 'text' && element.text === 'Boundary')));
+    const unsupported = { ...input, slides: [structuredClone(input.slides[0])] };
+    unsupported.slides[0].support[0].evidence_ids = ['missing'];
+    const evidenceReview = await call('validate_guided_presentation', { input: unsupported });
+    assert.equal(evidenceReview.ready, false);
+    assert.match(JSON.stringify(evidenceReview.issues), /missing evidence/);
+    const numeric = structuredClone(guidedExamples().find(input => input.profile_id === 'status-report'));
+    numeric.profile_id = 'technical-explainer';
+    numeric.authoring = { headline_style: 'keyword' };
+    numeric.slides = [numeric.slides[0]];
+    assert.equal((await call('validate_guided_presentation', { input: numeric })).ready, true);
+    numeric.slides[0].numbers = [];
+    const numericReview = await call('validate_guided_presentation', { input: numeric });
+    assert.equal(numericReview.ready, false);
+    assert.match(JSON.stringify(numericReview.issues), /no source/);
+    await call('close_deck', { deck_id: created.deck_id });
+
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic layout transport' });
+    const graph = { version: 1, title: 'Hidden graph heading', subtitle: 'Hidden subtitle', show_title: false, nodes: [
+      { id: 'client', label: 'Client', detail: 'Validate access\nRecord outcome', detail_font_size: 16, text_align: 'left', heading_bold: false, font_size: 24, x: 40, y: 0, width: 320, height: 200 },
+      { id: 'api', label: 'API', x: 600, y: 120, width: 220, height: 112 },
+    ], edges: [{ id: 'request', source: 'client', target: 'api', source_port: 'right', target_port: 'left', route: 'straight' }], groups: [] };
+    const assertDetails = (group, detailText) => {
+      assert.ok(group.children.every(child => !child.id.endsWith('-title') && !child.id.endsWith('-subtitle')));
+      const heading = group.children.find(child => child.id.endsWith('-nt-client'));
+      const detail = group.children.find(child => child.id.endsWith('-nd-client'));
+      assert.ok(heading);
+      assert.ok(detail);
+      assert.equal(heading.text, 'Client');
+      assert.equal(heading.bold, false);
+      assert.equal(heading.format.alignment, 'left');
+      assert.equal(detail.format.alignment, 'left');
+      assert.equal(detail.text, detailText);
+      assert.ok(detail.y >= heading.y + heading.height);
+      assert.ok(detail.font_size >= 12 && detail.font_size <= heading.font_size);
+    };
+    const inserted = await call('add_graph', { deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'direct', spec: graph });
+    let current = await call('get_document', { deck_id });
+    assert.equal(inserted.revision, 1);
+    assertDetails(current.deck.slides[0].elements[0], graph.nodes[0].detail);
+    assert.equal(current.deck.slides[0].elements[0].children.find(child => child.id.endsWith('-n-client')).y, 0);
+    graph.nodes[0].detail = 'Updated direct detail';
+    await call('update_graph', { deck_id, expected_revision: current.revision, slide_id: 'slide-1', id: 'direct', spec: graph });
+    current = await call('get_document', { deck_id });
+    assertDetails(current.deck.slides[0].elements[0], graph.nodes[0].detail);
+    assert.equal((await call('get_graph', { deck_id, slide_id: 'slide-1', id: 'direct' })).spec.show_title, false);
+    await call('edit_slides', { deck_id, expected_revision: current.revision, operations: [{ op: 'insert', id: 'part-slide', after: 'slide-1', title: 'Explicit body box' }] });
+    current = await call('get_document', { deck_id });
+    const bodyGraph = structuredClone(graph);
+    delete bodyGraph.show_title;
+    bodyGraph.nodes[0].y = 120;
+    const layout = { x: 24, y: 36, width: 1152, height: 424, show_title: false };
+    const part = { version: 1, preset: 'diagram/custom', title: bodyGraph.title, subtitle: bodyGraph.subtitle, data: { kind: 'diagram', graph: bodyGraph }, layout };
+    await call('add_part', { deck_id, expected_revision: current.revision, slide_id: 'part-slide', id: 'bounded', spec: part });
+    const snapshot = await call('get_session_recovery', { deck_id });
+    const assertLayout = document => {
+      const metadata = document.parts.find(entry => entry.element_id === 'bounded');
+      assert.deepEqual(metadata.spec.layout, layout);
+      assert.equal(metadata.stale, false);
+      const group = document.deck.slides.find(slide => slide.id === 'part-slide').elements.find(element => element.id === 'bounded');
+      for (const key of ['x', 'y', 'width', 'height']) assert.equal(group[key], layout[key], key);
+      assert.equal(group.view_width, layout.width);
+      assert.equal(group.view_height, layout.height);
+      assertDetails(group, metadata.spec.data.graph.nodes[0].detail);
+      return group;
+    };
+    assertLayout(snapshot.document);
+    for (const [name, args] of [
+      ['update_graph', { spec: bodyGraph }],
+      ['apply_graph', { operations: [{ op: 'move', ids: ['client'], dx: 0, dy: 0 }] }],
+    ]) {
+      await call(name, { deck_id, expected_revision: snapshot.document.revision, slide_id: 'part-slide', id: 'bounded', ...args });
+      assert.deepEqual(await call('get_session_recovery', { deck_id }), snapshot, `${name} must preserve layout, hash and both histories`);
+    }
+    part.data.graph.nodes[0].detail = 'Updated part detail';
+    await call('update_part', { deck_id, expected_revision: snapshot.document.revision, slide_id: 'part-slide', id: 'bounded', spec: part });
+    current = await call('get_document', { deck_id });
+    assert.equal(current.revision, snapshot.document.revision + 1);
+    assertLayout(current);
+    await call('apply_graph', { deck_id, expected_revision: current.revision, slide_id: 'part-slide', id: 'bounded', operations: [{ op: 'move', ids: ['client'], dx: 16, dy: 0 }] });
+    current = await call('get_document', { deck_id });
+    assert.equal(assertLayout(current).children.find(child => child.id.endsWith('-n-client')).x, 56);
+    const updatedGraph = (await call('get_graph', { deck_id, slide_id: 'part-slide', id: 'bounded' })).spec;
+    updatedGraph.nodes[0].detail = 'Updated through graph API';
+    await call('update_graph', { deck_id, expected_revision: current.revision, slide_id: 'part-slide', id: 'bounded', spec: updatedGraph });
+    const beforeReject = await call('get_session_recovery', { deck_id });
+    assertLayout(beforeReject.document);
+    const rejected = await client.callTool({ name: 'update_part', arguments: { deck_id, expected_revision: beforeReject.document.revision, slide_id: 'part-slide', id: 'bounded', spec: { ...part, layout: { ...layout, width: 20, height: 20 } } } });
+    assert.equal(rejected.isError, true);
+    assert.deepEqual(await call('get_session_recovery', { deck_id }), beforeReject);
+    await call('undo', { deck_id });
+    const restored = await call('get_session_recovery', { deck_id });
+    assert.equal(restored.document.hash, current.hash);
+    assert.deepEqual(restored.document.deck, current.deck);
+    assertLayout(restored.document);
+  } finally { await client.close(); }
+});
+
+test('master import MCP schemas are bounded, strict and expose read-only inspection and preview', async () => {
+  const client = new Client({ name: 'master-import-schema-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const deck_id = '00000000-0000-4000-8000-000000000001';
+  const input = { kind: 'potx', base64: 'c3ludGhldGlj', source_sha256: 'a'.repeat(64), mode: 'masters', ids: ['master-1'], prefix: 'brand', name: 'Synthetic brand' };
+  const guarded = { deck_id, expected_revision: 0, expected_hash: 'b'.repeat(64), input };
+  try {
+    await client.connect(transport);
+    const tools = (await client.listTools()).tools;
+    for (const [name, readOnly, required] of [
+      ['inspect_master_source', true, ['kind', 'base64']],
+      ['preview_master_import', true, ['deck_id', 'expected_revision', 'expected_hash', 'input']],
+      ['import_masters', false, ['deck_id', 'expected_revision', 'expected_hash', 'input', 'expected_candidate_hash']],
+    ]) {
+      const tool = tools.find(tool => tool.name === name);
+      assert.ok(tool, name);
+      assert.equal(tool.annotations.readOnlyHint, readOnly);
+      assert.equal(tool.annotations.openWorldHint, false);
+      assert.equal(tool.inputSchema.additionalProperties, false);
+      assert.deepEqual([...tool.inputSchema.required].sort(), required.sort());
+      if (name !== 'inspect_master_source') {
+        const schema = tool.inputSchema.properties.input;
+        assert.equal(schema.additionalProperties, false);
+        assert.deepEqual([...schema.required].sort(), Object.keys(input).sort());
+        assert.equal(schema.properties.ids.minItems, 1);
+        assert.equal(schema.properties.ids.maxItems, 8);
+        assert.equal(schema.properties.ids.items.maxLength, 80);
+      }
+    }
+    const invalid = [
+      ['inspect_master_source', { kind: 'thmx', base64: input.base64 }],
+      ['inspect_master_source', { kind: 'potx', base64: '' }],
+      ['inspect_master_source', { kind: 'potx', base64: input.base64, path: 'source.potx' }],
+      ['inspect_master_source', { kind: 'potx', base64: input.base64, capacity_profile: 'unlimited' }],
+      ['preview_master_import', { ...guarded, expected_revision: -1 }],
+      ['preview_master_import', { ...guarded, expected_revision: Number.MAX_SAFE_INTEGER + 1 }],
+      ['preview_master_import', { ...guarded, expected_hash: 'not-a-hash' }],
+      ['preview_master_import', { ...guarded, capacity_profile: 'large' }],
+      ['import_masters', { ...guarded, expected_candidate_hash: 'not-a-hash' }],
+      ['import_masters', guarded],
+    ];
+    for (const change of [
+      { kind: 'thmx' }, { mode: 'all' }, { ids: [] }, { ids: Array.from({ length: 9 }, (_, index) => `master-${index}`) },
+      { ids: ['master-1', 'master-1'] }, { ids: [' '] }, { ids: ['x'.repeat(81)] }, { source_sha256: 'g'.repeat(64) },
+      { source_sha256: 'a'.repeat(63) }, { prefix: '' }, { prefix: '../brand' }, { prefix: 'x'.repeat(33) },
+      { name: ' ' }, { name: 'x'.repeat(61) }, { unknown: true }, { base64: '' },
+    ]) {
+      invalid.push(['preview_master_import', { ...guarded, input: { ...input, ...change } }]);
+      invalid.push(['import_masters', { ...guarded, expected_candidate_hash: 'c'.repeat(64), input: { ...input, ...change } }]);
+    }
+    for (const [name, arguments_] of invalid) {
+      const result = await client.callTool({ name, arguments: arguments_ });
+      assert.equal(result.isError, true, name);
+      assert.doesNotMatch(result.content[0].text, /Unknown deck handle|Core execution failed|unknown variant/i);
+    }
+    const overBudget = await client.callTool({ name: 'inspect_master_source', arguments: { kind: 'potx', base64: 'A'.repeat(4 * 1048576), capacity_profile: 'legacy' } });
+    assert.equal(overBudget.isError, true);
+    assert.match(overBudget.content[0].text, /selected capacity profile/i);
+  } finally { await client.close(); }
+});
+
+test('master import MCP POTX inspection, preview, apply and one Undo preserve the target', { timeout: 120000 }, async () => {
+  const { AislideClient } = await import('../packages/client/index.mjs');
+  const { requestCore } = await import('./core-client.mjs');
+  const { createHash } = await import('node:crypto');
+  const sdk = new AislideClient(requestCore);
+  const source = await sdk.createPresentation('master-source-mcp', 'Synthetic source');
+  const sourceBefore = source.recoveryEnvelope;
+  const exported = await source.exportTemplate('potx');
+  const client = new Client({ name: 'master-import-workflow-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    assert.ok(result.content.every(block => block.type === 'text'));
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const catalog = await call('inspect_master_source', { kind: 'potx', base64: exported.base64, capacity_profile: 'standard' });
+    assert.equal(catalog.kind, 'potx');
+    assert.equal(catalog.source_sha256, createHash('sha256').update(Buffer.from(exported.base64, 'base64')).digest('hex'));
+    assert.equal(catalog.office_visual_parity, false);
+    assert.equal(catalog.width, source.document.deck.width);
+    assert.equal(catalog.height, source.document.deck.height);
+    const master = catalog.masters.find(master => master.importable);
+    assert.ok(master, JSON.stringify(catalog));
+    assert.equal(master.reason, null);
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic target', capacity_profile: 'standard' });
+    await call('update_notes', { deck_id, expected_revision: 0, slide_id: 'slide-1', notes: 'Retain target notes' });
+    const before = await call('get_session_recovery', { deck_id });
+    const input = { kind: 'potx', base64: exported.base64, source_sha256: catalog.source_sha256, mode: 'masters', ids: [master.id], prefix: 'brand', name: 'Imported brand' };
+    const args = { deck_id, expected_revision: before.document.revision, expected_hash: before.document.hash, input };
+    const preview = await call('preview_master_import', args);
+    assert.equal(preview.base_revision, before.document.revision);
+    assert.equal(preview.base_hash, before.document.hash);
+    assert.equal(preview.source_sha256, catalog.source_sha256);
+    assert.equal(preview.office_visual_parity, false);
+    assert.match(preview.candidate_hash, /^[a-f0-9]{64}$/);
+    assert.notEqual(preview.candidate_hash, before.document.hash);
+    assert.equal(preview.design.masters.length, before.document.deck.design.masters.length + 1);
+    assert.equal(preview.master_ids.length, 1);
+    assert.equal(preview.layout_ids.length, master.layout_count);
+    assert.equal(preview.preview_slides.length, master.layout_count);
+    assert.deepEqual(preview.preview_slides.map(slide => slide.layout_id), preview.layout_ids);
+    assert.equal('candidate_id' in preview, false);
+    assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
+    const apply = { ...args, expected_candidate_hash: preview.candidate_hash };
+    for (const change of [
+      { expected_revision: before.document.revision - 1 }, { expected_hash: '0'.repeat(64) },
+      { input: { ...input, source_sha256: '0'.repeat(64) } }, { input: { ...input, ids: ['missing-master'] } },
+    ]) {
+      for (const name of ['preview_master_import', 'import_masters']) {
+        const result = await client.callTool({ name, arguments: { ...(name === 'import_masters' ? apply : args), ...change } });
+        assert.equal(result.isError, true, name);
+      }
+    }
+    for (const change of [{ expected_candidate_hash: '0'.repeat(64) }, { input: { ...input, name: 'Changed after preview' } }]) {
+      assert.equal((await client.callTool({ name: 'import_masters', arguments: { ...apply, ...change } })).isError, true);
+    }
+    assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
+    const applied = await call('import_masters', apply);
+    assert.equal(applied.revision, before.document.revision + 1);
+    assert.equal(applied.hash, preview.candidate_hash);
+    const after = await call('get_session_recovery', { deck_id });
+    assert.deepEqual(after.document.deck.design, preview.design);
+    assert.deepEqual({ ...after.document.deck, design: before.document.deck.design }, before.document.deck);
+    for (const field of ['id', 'origin', 'sources', 'bindings', 'parts', 'report']) assert.deepEqual(after.document[field], before.document[field], field);
+    assert.equal(after.past.length, before.past.length + 1);
+    assert.equal((await client.callTool({ name: 'import_masters', arguments: apply })).isError, true);
+    assert.deepEqual(await call('get_session_recovery', { deck_id }), after);
+    await call('undo', { deck_id });
+    const restored = await call('get_session_recovery', { deck_id });
+    assert.equal(restored.document.hash, before.document.hash);
+    assert.deepEqual(restored.document.deck, before.document.deck);
+    assert.equal(restored.past.length, before.past.length);
+    assert.equal(restored.future.length, 1);
+    assert.equal((await client.callTool({ name: 'import_masters', arguments: apply })).isError, true);
+    await call('preview_master_import', { ...args, expected_revision: restored.document.revision });
+    assert.deepEqual(await call('get_session_recovery', { deck_id }), restored);
+    assert.deepEqual(source.recoveryEnvelope, sourceBefore);
+  } finally { await client.close(); }
+});
 
 test('P1 MCP finalization publishes a traceable new bundle without changing the session', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-finalize-mcp-'));
   const client = new Client({ name: 'finalization-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return result;
@@ -73,7 +1205,7 @@ test('P1 MCP finalization publishes a traceable new bundle without changing the 
 
 test('P0 MCP guided options, diagnostics and staged revisions form a guarded visual loop', async () => {
   const client = new Client({ name: 'authoring-loop-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text);
@@ -137,7 +1269,7 @@ test('P0 MCP guided options, diagnostics and staged revisions form a guarded vis
 test('P0 MCP previews return bounded images without changing documents or writing files', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-preview-mcp-'));
   const client = new Client({ name: 'preview-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text);
@@ -185,7 +1317,7 @@ test('P0 MCP previews return bounded images without changing documents or writin
 
 test('P0 MCP revision capacity rejects the seventeenth candidate and releases stale candidates', async () => {
   const client = new Client({ name: 'candidate-capacity-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text);
@@ -213,7 +1345,7 @@ test('P0 MCP revision capacity rejects the seventeenth candidate and releases st
 
 test('phase3 MCP projection and generated SVG are strict read-only helpers', async () => {
   const client = new Client({ name: 'phase3-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text); };
   try {
     await client.connect(transport);
@@ -233,7 +1365,7 @@ test('phase3 MCP projection and generated SVG are strict read-only helpers', asy
 
 test('G25 G27 MCP notes and auxiliary masters are strict atomic operations', async () => {
   const client = new Client({ name: 'native-notes-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text); };
   try {
     await client.connect(transport);
@@ -257,7 +1389,7 @@ test('G25 G27 MCP notes and auxiliary masters are strict atomic operations', asy
 
 test('G23 G25 MCP master fields and themes use strict typed revisioned tools', async () => {
   const client = new Client({ name: 'design-fields-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text); };
   try {
     await client.connect(transport);
@@ -278,7 +1410,7 @@ test('G23 G25 MCP master fields and themes use strict typed revisioned tools', a
 
 test('MCP cell-path helpers are strict read-only candidates and cell batches are atomic and undoable', async () => {
   const client = new Client({ name: 'cell-path-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text);
@@ -319,7 +1451,7 @@ test('MCP cell-path helpers are strict read-only candidates and cell batches are
 test('MCP static export preflights every output and verifies recovery without replacing decks', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-static-mcp-'));
   const client = new Client({ name: 'static-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text);
@@ -361,7 +1493,7 @@ test('MCP static export preflights every output and verifies recovery without re
 
 test('MCP generates, edits and saves with the GUI closed', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-mcp-'));
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'aislide-test', version: '1.0.0' });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });

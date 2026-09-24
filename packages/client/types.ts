@@ -52,6 +52,10 @@ export type DesignField = { master_id: string; layout_id?: string | null; kind: 
 export type DesignCapabilities = { master_theme_override: true; default_theme_preserves_explicit_masters: true; native_theme_copy_on_write: true; field_kinds: KnownFieldKind[]; placeholder_kinds: DesignField['kind'][]; scopes: ('master' | 'layout')[]; reference_date: string; page_number_projection: true; native_fields: true; native_field_cache_refresh: true; unknown_fields: string; notes_master: true; handout_master: true; rich_notes: true; table_fields: false; office_recalculation_verified: false; studio: { master_theme: true; master_layout_fields: true; review_field_scope: true }; limitations: string[] }
 export type SlideLayout = { id: string; name: string; master_id: string; background: string | null; elements: Element[] }
 export type Design = { theme: Theme; masters: Master[]; layouts: SlideLayout[] }
+export type MasterSourceInput = { kind: 'pptx' | 'potx'; base64: string }
+export type MasterSourceInspection = { kind: MasterSourceInput['kind']; source_sha256: string; width: number; height: number; masters: { id: string; name: string; layout_count: number; importable: boolean; reason: string | null }[]; slides: { id: string; name: string; importable: boolean; reason: string | null }[]; warnings: string[]; office_visual_parity: false }
+export type MasterImportInput = MasterSourceInput & { source_sha256: string; mode: 'masters' | 'slides'; ids: string[]; prefix: string; name: string }
+export type MasterImportPreview = { base_revision: number; base_hash: string; source_sha256: string; candidate_hash: string; design: Design; master_ids: string[]; layout_ids: string[]; preview_slides: Slide[]; warnings: string[]; office_visual_parity: false }
 export type DesignRegion = { layout_id: string; name: string; x: number; y: number; width: number; height: number }
 export type DesignPreset = { id: string; name: string; design: Design; rules: { margin: number; gutter: number; heading_size: number; body_size: number; regions: DesignRegion[] } }
 export type ObjectKind = 'text' | 'shape' | 'table' | 'chart' | 'line' | 'arrow'
@@ -152,6 +156,29 @@ export type Checkpoint = { format: 'aislide.project'; version: 1; pptx_sha256: s
 export type ProjectExport = Exported & { checkpoint: Checkpoint; checkpoint_filename: string }
 export type PresentationExport = Exported & { layout: LayoutReport | null }
 export type PatchOperation = { op: 'add' | 'remove' | 'replace' | 'move' | 'copy' | 'test'; path: string; value?: unknown; from?: string }
+export type UndoReceipt = { document_id: string; after_hash: string; inverse: PatchOperation[] }
+
+export type Frame = Omit<Bounds, 'id'>
+export type Crop = { left?: number; top?: number; right?: number; bottom?: number }
+export type Connection = { element_id: string; site: number }
+export type ConnectorRouting = { points: [number, number][]; start_arrow?: boolean; dashed?: boolean }
+export type ConnectorSettings = { color: string; stroke_width: number; arrow: boolean; flip_v?: boolean; start?: Connection | null; end?: Connection | null; routing?: ConnectorRouting | null }
+export type PictureInput = { id: string; base64: string; mime_type: 'image/png' | 'image/jpeg'; alt: string; frame?: Frame | null; crop?: Crop }
+export type AuthoringOperation =
+  | { op: 'add_elements'; slide_id: string; elements: Element[] }
+  | { op: 'set_frame'; slide_id: string; id: string; frame: Frame }
+  | { op: 'set_text_style'; slide_id: string; ids: string[]; style: RunStyle }
+  | { op: 'set_slide_background'; slide_id: string; color: string }
+  | { op: 'set_connector'; slide_id: string; id: string; connector: ConnectorSettings; frame?: Frame | null }
+  | { op: 'set_picture_crop'; slide_id: string; id: string; crop: Crop }
+  | { op: 'set_hyperlink'; slide_id: string; id: string; link: string | null }
+  | { op: 'set_shape_adjustment'; slide_id: string; id: string; adjustment: ShapeAdjustment }
+  | ({ op: 'add_picture'; slide_id: string } & PictureInput)
+  | { op: 'add_part'; slide_id: string; id: string; spec: PartSpec }
+  | { op: 'update_part'; slide_id: string; id: string; spec: PartSpec }
+  | { op: 'add_graph'; slide_id: string; id: string; spec: GraphSpec; layout?: PartLayout | null }
+  | { op: 'update_graph'; slide_id: string; id: string; spec: GraphSpec }
+export type SlideImportInput = { source_slide_ids: string[]; prefix: string; after?: string | null }
 
 export type PartItem = { label: string; detail?: string; value?: number | null }
 export type PartData =
@@ -159,13 +186,14 @@ export type PartData =
   | { kind: 'items'; items: PartItem[]; center?: string }
   | { kind: 'tree'; nodes: { id: string; label: string; parent?: string | null }[] }
   | { kind: 'network'; nodes: PartItem[]; edges: { from: number; to: number; label?: string }[] }
-  | { kind: 'matrix'; rows: string[]; columns: string[]; cells: string[][] }
+  | { kind: 'matrix'; corner_label?: string; rows: string[]; columns: string[]; cells: string[][] }
   | { kind: 'groups'; groups: { label: string; items: string[] }[] }
   | { kind: 'timeline'; periods: string[]; tasks: { label: string; start: number; end: number; progress?: number }[] }
   | { kind: 'waterfall'; steps: { label: string; value: number; total?: boolean }[]; unit?: string }
   | { kind: 'map'; points: { label: string; longitude: number; latitude: number; value?: number | null }[] }
   | { kind: 'diagram'; graph: GraphSpec }
-export type PartSpec = { version: 1; preset: string; title: string; subtitle?: string; data: PartData }
+export type PartLayout = Frame & { show_title?: boolean }
+export type PartSpec = { version: 1; preset: string; title: string; subtitle?: string; data: PartData; layout?: PartLayout | null }
 export type PartPreset = { id: string; category: string; category_name: string; name: string; family: 'Charts' | 'Diagrams'; example: PartSpec }
 export type PartCatalog = { version: 1; presets: PartPreset[]; schema: unknown; style: string; default_bounds: Omit<Bounds, 'id'> }
 export type PartInstance = { slide_id: string; element_id: string; spec: PartSpec; render_sha256: string; native_sha256?: string | null; stale: boolean }
@@ -175,7 +203,7 @@ export type GuidedEvidence = { id: string; kind: 'source' | 'assumption' | 'unkn
 export type ClauseSupport = { clause: string; body_paths: string[]; evidence_ids: string[] }
 export type NumberEvidence = { path: string; value: Scalar; evidence_id: string }
 export type DecisionIssue = { id: string; question: string; requested_decision: string; criterion: string; owner: string; due: string; evidence_ids: string[]; analysis_slide_ids: string[] }
-export type GuidedAuthoring = { context?: 'reading' | 'projection' | null; density?: 'comfortable' | 'compact' | null; spacing?: 'standard' | 'relaxed' | null; body_font_min?: number | null; headline_font_size?: number | null; font_family?: string | null }
+export type GuidedAuthoring = { context?: 'reading' | 'projection' | null; density?: 'comfortable' | 'compact' | null; spacing?: 'standard' | 'relaxed' | null; body_font_min?: number | null; headline_font_size?: number | null; font_family?: string | null; headline_style?: 'sentence' | 'keyword' | null; slide_limit?: number | null }
 export type GuidedSlide = { id: string; section: string; headline: string; sentence_form: 'causal' | 'conditional' | 'contrast' | 'causal-focus' | 'evaluation' | 'proposal' | 'explanation' | 'comparison' | 'outcome'; pattern_id: string; question: string; parent_message: string; transition: string; parallel_basis: string; part?: PartSpec | null; support: ClauseSupport[]; numbers?: NumberEvidence[]; speaker_notes?: string | null }
 export type GuidedInput = { version: 1; profile_id: AuthoringProfile; title: string; audience: string; purpose: string; governing_message: string; language: 'en' | 'ja'; brand_color?: string | null; authoring?: GuidedAuthoring | null; evidence: GuidedEvidence[]; issues?: DecisionIssue[]; slides: GuidedSlide[] }
 export type GuidedReview = { ready: boolean; issues: string[]; review_required: string[]; semantic_truth_verified: false; office_visual_parity: false }
@@ -187,10 +215,11 @@ export type GraphPresentation = 'card' | 'icon'
 export type GraphPort = 'auto' | 'top' | 'left' | 'bottom' | 'right'
 export type GraphRoute = 'straight' | 'elbow'
 export type GraphIcon = { base64: string; mime_type: 'image/png' | 'image/jpeg'; alt?: string }
-export type GraphNode = { id: string; label: string; kind?: GraphNodeKind; presentation?: GraphPresentation; x: number; y: number; width?: number; height?: number; fill?: string; stroke?: string; color?: string; font_size?: number; group?: string | null; icon?: GraphIcon | null }
+export type GraphTextAlign = 'left' | 'center' | 'right'
+export type GraphNode = { id: string; label: string; detail?: string | null; detail_font_size?: number | null; text_align?: GraphTextAlign | null; heading_bold?: boolean; kind?: GraphNodeKind; presentation?: GraphPresentation; x: number; y: number; width?: number; height?: number; fill?: string; stroke?: string; color?: string; font_size?: number; group?: string | null; icon?: GraphIcon | null }
 export type GraphEdge = { id: string; source: string; target: string; source_port?: GraphPort; target_port?: GraphPort; label?: string; route?: GraphRoute; color?: string; arrow?: boolean; start_arrow?: boolean; dashed?: boolean }
 export type GraphGroup = { id: string; label: string; x: number; y: number; width: number; height: number; fill?: string; stroke?: string; parent?: string | null; icon?: GraphIcon | null }
-export type GraphSpec = { version: 1; title: string; subtitle?: string; nodes: GraphNode[]; edges?: GraphEdge[]; groups?: GraphGroup[] }
+export type GraphSpec = { version: 1; title: string; subtitle?: string; show_title?: boolean; nodes: GraphNode[]; edges?: GraphEdge[]; groups?: GraphGroup[] }
 export type GraphAlignment = 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom'
 export type GraphOperation =
   | { op: 'put_node'; node: GraphNode }
@@ -276,4 +305,7 @@ export type SelectionEditResult = { document: AislideDocument; clipboard: Elemen
 export type ReviewCapabilities = { field_kinds: KnownFieldKind[]; field_reference_date: string; native_field_refresh: boolean; comments: string; authenticated_authors: false; modern_powerpoint_threads: boolean; reading_order_changes_z_order: true; complete_personal_data_detection: false; wcag_certified: false; clean_copy: string; limitations: string[] }
 export type VisualAuthoringCapabilities = { preview_pages: number; preview_max_dimension: number; preview_encoded_bytes: number; preview_wire_bytes: number; preflight_findings: number; preflight_objects_per_page: number; revision_edits: number; revision_targets_per_edit: number; revision_edit_bytes: number; preview_schema: unknown; preflight_schema: unknown; revision_edit_schema: unknown; office_visual_parity: false; semantic_truth_verified: false }
 export type DeliveryCapabilities = { visual_pages: number; output_bytes: number; mcp_response_bytes: number; mcp_max_files_including_manifest: number; options_schema: unknown; notes_opt_in: true; source_report_opt_in: true; multi_file_atomic: false }
-export type AuthoringCapabilities = { version: 1; operations: string[]; limits: { request_bytes: number; document_bytes: number; operations: number; canvas_min: number; canvas_max: number; search_matches: number; selection_ids: number; table_rows: number; table_columns: number; image_bytes: number; image_dimension: number }; selection_schema: unknown; search_schema: unknown; replace_schema: unknown; charts: ChartCapability[]; templates: TemplateKind[]; office_visual_parity: false; raw_clipboard_xml: false; limitations: string[]; review: ReviewCapabilities; geometry: GeometryCapabilities; visual_authoring: VisualAuthoringCapabilities; delivery: DeliveryCapabilities }
+export type MasterImportCapabilities = { formats: MasterSourceInput['kind'][]; modes: MasterImportInput['mode'][]; selection_limit: number; masters_limit: number; layouts_limit: number; same_canvas_required: true; append_only: true; automatic_assignment: false; source_fonts_imported: false; unsupported_content: string; office_visual_parity: false }
+export type TypedAuthoringCapabilities = { batch_limit: number; element_roots_per_add: number; managed_parts_limit: number; managed_metadata_persisted: true; operations: AuthoringOperation['op'][]; scale_fonts: false; scale_strokes: false; one_undo: true }
+export type SlideImportCapabilities = { source: 'authored_document_only'; selected_slides: number; same_canvas: true; design_deduplication: true; office_visual_parity: false }
+export type AuthoringCapabilities = { version: 1; operations: string[]; limits: { request_bytes: number; document_bytes: number; operations: number; canvas_min: number; canvas_max: number; search_matches: number; selection_ids: number; table_rows: number; table_columns: number; image_bytes: number; image_dimension: number }; selection_schema: unknown; search_schema: unknown; replace_schema: unknown; charts: ChartCapability[]; templates: TemplateKind[]; office_visual_parity: false; raw_clipboard_xml: false; limitations: string[]; review: ReviewCapabilities; geometry: GeometryCapabilities; visual_authoring: VisualAuthoringCapabilities; delivery: DeliveryCapabilities; master_import: MasterImportCapabilities; typed_authoring: TypedAuthoringCapabilities; slide_import: SlideImportCapabilities }

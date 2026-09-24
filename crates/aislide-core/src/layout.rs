@@ -51,7 +51,7 @@ fn measure_rich(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width
             Some(family) => family.to_owned(),
         }).collect();
         if requested.is_empty() { requested = families.first().cloned().unwrap_or_else(|| theme.fonts.minor.clone()); }
-        let maximum_size = styles.iter().filter_map(|style| style.font_size).fold(size, f64::max);
+        let maximum_size = styles.iter().filter_map(|style| style.font_size).reduce(f64::max).unwrap_or(size);
         let line_height = spacing_pixels(paragraph.line_spacing.unwrap_or(Spacing::Percent(115000)), maximum_size).max(maximum_size);
         let margin = paragraph.margin_left.map(|value| value as f64 / 9525.0).unwrap_or(if paragraph.bullet.unwrap_or(format.bullet) == Bullet::None { 0.0 } else { size });
         let positive_indent = paragraph.indent.unwrap_or(0).max(0) as f64 / 9525.0;
@@ -91,15 +91,26 @@ fn visit(fonts: &mut FontSystem, slide: &str, elements: &[Element], measurements
                 crate::rich_text::validate_element(element)?;
                 *characters += text.chars().count();
                 if *characters > 200_000 { return Err(Error::Limit("layout measurement > 200000 characters".into())); }
+                let (width, height) = if matches!(element, Element::Shape { .. }) { ((width - 12.0).max(1.0), (height - 8.0).max(1.0)) } else { (width, height) };
                 measurements.push(measure(fonts, slide, id, text, width, height, *font_size, *bold, format, theme));
             }
-            Element::Table { rows, font_size, .. } => {
-                let cell_width = width / rows[0].len() as f64 - 12.0;
-                let cell_height = height / rows.len() as f64 - 12.0;
+            Element::Table { rows, font_size, format, .. } => {
+                let columns = crate::table_format::tracks(format.column_widths.as_ref(), rows[0].len(), width)?;
+                let heights = crate::table_format::tracks(format.row_heights.as_ref(), rows.len(), height)?;
                 for (row_index, row) in rows.iter().enumerate() { for (column, text) in row.iter().enumerate() {
+                    let merge = format.merge_at(row_index, column);
+                    if merge.is_some_and(|region| (region.row, region.column) != (row_index, column)) { continue; }
+                    let cell_width = columns[column..column + merge.map_or(1, |region| region.col_span)].iter().sum::<f64>();
+                    let cell_height = heights[row_index..row_index + merge.map_or(1, |region| region.row_span)].iter().sum::<f64>();
+                    let style = format.cell_style(row_index, column);
+                    let padding = style.padding.clone().unwrap_or(crate::table_format::CellPadding { left: 6.0, right: 6.0, top: 6.0, bottom: 6.0 });
+                    let text_width = cell_width - padding.left - padding.right;
+                    let text_height = cell_height - padding.top - padding.bottom;
                     *characters += text.chars().count();
                     if *characters > 200_000 { return Err(Error::Limit("layout measurement > 200000 characters".into())); }
-                    measurements.push(measure(fonts, slide, &format!("{id}[{},{}]", row_index + 1, column + 1), text, cell_width, cell_height, *font_size, row_index == 0, &TextFormat::default(), theme));
+                    let mut measurement = measure(fonts, slide, &format!("{id}[{},{}]", row_index + 1, column + 1), text, text_width, text_height, *font_size, row_index == 0, &style.text(text), theme);
+                    if !text.is_empty() && (text_width <= 0.0 || text_height <= 0.0) { measurement.overflow = true; }
+                    measurements.push(measurement);
                 } }
             }
             Element::Group { children, .. } => visit(fonts, slide, children, measurements, characters, theme)?,

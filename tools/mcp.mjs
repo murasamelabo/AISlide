@@ -94,6 +94,10 @@ const svgSchema = z.string().min(1).max(349528).regex(/^(?:[A-Za-z0-9+/]{4})*(?:
 const boundsSchema = { id: z.string().min(1).max(80), x: z.number().min(0).max(4096), y: z.number().min(0).max(4096), width: z.number().positive().max(4096), height: z.number().positive().max(4096) };
 const textFields = { text: z.string().max(4000), font_size: z.number().min(8).max(120), color: colorSchema, bold: z.boolean(), format: textFormatSchema.optional() };
 const connectionSchema = z.object({ element_id: z.string().min(1).max(80), site: z.number().int().min(0).max(4294967295) }).strict();
+const cropSchema = z.object({ left: alpha.optional(), right: alpha.optional(), top: alpha.optional(), bottom: alpha.optional() }).strict();
+const connectorRoutingSchema = z.object({ points: z.array(pointSchema).min(2).max(4), start_arrow: z.boolean().optional(), dashed: z.boolean().optional() }).strict();
+const frameSchema = z.object(boundsSchema).omit({ id: true }).strict();
+const connectorSettingsSchema = z.object({ color: colorSchema, stroke_width: z.number().min(0).max(20), arrow: z.boolean(), flip_v: z.boolean().optional(), start: optional(connectionSchema), end: optional(connectionSchema), routing: optional(connectorRoutingSchema) }).strict();
 const elementSchema = z.lazy(() => z.discriminatedUnion('type', [
 	z.object({ type: z.literal('text'), ...boundsSchema, ...textFields, visual: optional(currentVisualSchema) }).strict(),
 	z.object({ type: z.literal('rect'), ...boundsSchema, fill: colorSchema, visual: optional(currentVisualSchema) }).strict(),
@@ -101,8 +105,8 @@ const elementSchema = z.lazy(() => z.discriminatedUnion('type', [
 	z.object({ type: z.literal('shape'), ...boundsSchema, ...textFields, preset: z.string().min(1).max(80), fill: z.union([colorSchema, z.literal('none')]), stroke: colorSchema, stroke_width: z.number().min(0).max(20), rotation: z.number().min(-360).max(360).optional(), visual: optional(currentVisualSchema) }).strict(),
 	z.object({ type: z.literal('table'), ...boundsSchema, rows: z.array(z.array(z.string().max(200)).min(1).max(8)).min(1).max(12), font_size: z.number().min(8).max(120), format: tableFormatSchema.optional() }).strict(),
 	z.object({ type: z.literal('chart'), ...boundsSchema, ...chartSchema.shape }).strict(),
-	z.object({ type: z.literal('picture'), ...boundsSchema, base64: z.string().max(1398104), mime_type: z.enum(['image/png', 'image/jpeg']), alt: z.string().max(500), crop: z.object({ left: alpha.optional(), right: alpha.optional(), top: alpha.optional(), bottom: alpha.optional() }).strict().optional(), visual: optional(currentVisualSchema), svg: optional(svgSchema) }).strict(),
-	z.object({ type: z.literal('connector'), ...boundsSchema, color: colorSchema, stroke_width: z.number().min(0).max(20), arrow: z.boolean(), flip_v: z.boolean().optional(), start: optional(connectionSchema), end: optional(connectionSchema), routing: optional(z.object({ points: z.array(pointSchema).min(2).max(4), start_arrow: z.boolean().optional(), dashed: z.boolean().optional() }).strict()), visual: optional(currentVisualSchema) }).strict(),
+	z.object({ type: z.literal('picture'), ...boundsSchema, base64: z.string().max(1398104), mime_type: z.enum(['image/png', 'image/jpeg']), alt: z.string().max(500), crop: cropSchema.optional(), visual: optional(currentVisualSchema), svg: optional(svgSchema) }).strict(),
+	z.object({ type: z.literal('connector'), ...boundsSchema, ...connectorSettingsSchema.shape, visual: optional(currentVisualSchema) }).strict(),
 	z.object({ type: z.literal('group'), ...boundsSchema, view_width: z.number().positive().max(4096), view_height: z.number().positive().max(4096), children: z.array(elementSchema).min(1).max(256), visual: optional(currentVisualSchema) }).strict(),
 ]));
 const designElements = z.array(elementSchema).max(256);
@@ -211,16 +215,35 @@ const rgbSchema = z.tuple([z.number().int().min(0).max(255), z.number().int().mi
 const imageParamsSchema = z.object({ brightness: z.number().min(-1).max(1).optional(), contrast: z.number().min(0).max(4).optional(), saturation: z.number().min(0).max(4).optional(), grayscale: z.boolean().optional(), background_key: optional(z.object({ color: rgbSchema, tolerance: z.number().min(0).max(255) }).strict()), resize_longest_side: optional(z.number().int().min(1).max(4096)), format: z.discriminatedUnion('kind', [z.object({ kind: z.literal('png') }).strict(), z.object({ kind: z.literal('jpeg'), quality: z.number().int().min(1).max(100), matte: optional(rgbSchema) }).strict()]).optional() }).strict();
 const preparedImageSchema = z.object({ base64: z.string().max(1398104), mime_type: z.enum(['image/png', 'image/jpeg']), width: z.number().int().min(1).max(4096), height: z.number().int().min(1).max(4096) }).strict();
 const mutationInput = { deck_id: handle, expected_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER) };
+const authoringIds = z.array(slideId).min(1).max(128).refine(ids => new Set(ids).size === ids.length, 'IDs must be distinct');
+const pictureInput = { id: slideId, base64: z.string().max(1398104), mime_type: z.enum(['image/png', 'image/jpeg']), alt: z.string().max(500), frame: optional(frameSchema), crop: cropSchema.optional() };
+const authoringVariants = [
+	z.object({ op: z.literal('add_elements'), slide_id: slideId, elements: z.array(elementSchema).min(1).max(128) }).strict(),
+	z.object({ op: z.literal('set_frame'), slide_id: slideId, id: slideId, frame: frameSchema }).strict(),
+	z.object({ op: z.literal('set_text_style'), slide_id: slideId, ids: authoringIds, style: runStyleSchema.refine(style => Object.values(style).some(value => value != null), 'At least one style property is required') }).strict(),
+	z.object({ op: z.literal('set_slide_background'), slide_id: slideId, color: colorSchema }).strict(),
+	z.object({ op: z.literal('set_connector'), slide_id: slideId, id: slideId, connector: connectorSettingsSchema, frame: optional(frameSchema) }).strict(),
+	z.object({ op: z.literal('set_picture_crop'), slide_id: slideId, id: slideId, crop: cropSchema }).strict(),
+	z.object({ op: z.literal('set_hyperlink'), slide_id: slideId, id: slideId, link: z.string().max(2048).nullable() }).strict(),
+	z.object({ op: z.literal('set_shape_adjustment'), slide_id: slideId, id: slideId, adjustment: visualSchema.shape.adjustments.unwrap().element }).strict(),
+	z.object({ op: z.literal('add_picture'), slide_id: slideId, ...pictureInput }).strict(),
+	z.object({ op: z.literal('add_part'), slide_id: slideId, id: z.string().min(1).max(40), spec: z.lazy(() => partSpec) }).strict(),
+	z.object({ op: z.literal('update_part'), slide_id: slideId, id: z.string().min(1).max(40), spec: z.lazy(() => partSpec) }).strict(),
+	z.object({ op: z.literal('add_graph'), slide_id: slideId, id: z.string().min(1).max(40), spec: z.lazy(() => graphSpec), layout: optional(z.lazy(() => partLayout)) }).strict(),
+	z.object({ op: z.literal('update_graph'), slide_id: slideId, id: z.string().min(1).max(40), spec: z.lazy(() => graphSpec) }).strict(),
+];
+const authoringOperations = z.array(z.discriminatedUnion('op', authoringVariants)).min(1).max(128);
+const objectInput = { id: slideId, kind: z.enum(['text', 'shape', 'table', 'chart', 'line', 'arrow']), preset: z.string().max(80).optional(), rows: z.number().int().min(1).max(12).optional(), columns: z.number().int().min(1).max(8).optional() };
 const templateKind = z.enum(['potx', 'thmx']);
 const templateFilename = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}\.(?:potx|thmx)$/).refine((name) => !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])\./i.test(name), 'Reserved Windows filename');
 
 const graphId = z.string().regex(/^[A-Za-z0-9_-]{1,24}$/);
 const graphPort = z.enum(['auto', 'top', 'left', 'bottom', 'right']);
 const graphIcon = z.object({ base64: z.string().min(1).max(1398104), mime_type: z.enum(['image/png', 'image/jpeg']), alt: z.string().max(500).optional() }).strict();
-const graphNode = z.object({ id: graphId, label: z.string().max(160), kind: z.enum(['rectangle', 'rounded_rectangle', 'ellipse', 'diamond', 'cylinder', 'cloud']).optional(), presentation: z.enum(['card', 'icon']).optional(), x: z.number().min(0).max(1152), y: z.number().min(88).max(512), width: z.number().min(64).max(1152).optional(), height: z.number().min(40).max(424).optional(), fill: colorSchema.optional(), stroke: colorSchema.optional(), color: colorSchema.optional(), font_size: z.number().min(12).max(40).optional(), group: graphId.nullable().optional(), icon: graphIcon.nullable().optional() }).strict();
+const graphNode = z.object({ id: graphId, label: z.string().max(160), detail: optional(z.string().max(480).refine(value => value.trim().length > 0 && Array.from(value).length <= 240, 'Detail requires 1-240 Unicode scalars and must not be blank')), detail_font_size: optional(z.number().min(12).max(40)), text_align: optional(z.enum(['left', 'center', 'right'])), heading_bold: z.boolean().optional(), kind: z.enum(['rectangle', 'rounded_rectangle', 'ellipse', 'diamond', 'cylinder', 'cloud']).optional(), presentation: z.enum(['card', 'icon']).optional(), x: z.number().min(0).max(1152), y: z.number().min(0).max(512), width: z.number().min(64).max(1152).optional(), height: z.number().min(40).max(512).optional(), fill: colorSchema.optional(), stroke: colorSchema.optional(), color: colorSchema.optional(), font_size: z.number().min(12).max(40).optional(), group: graphId.nullable().optional(), icon: graphIcon.nullable().optional() }).strict();
 const graphEdge = z.object({ id: graphId, source: graphId, target: graphId, source_port: graphPort.optional(), target_port: graphPort.optional(), label: z.string().max(64).optional(), route: z.enum(['straight', 'elbow']).optional(), color: colorSchema.optional(), arrow: z.boolean().optional(), start_arrow: z.boolean().optional(), dashed: z.boolean().optional() }).strict();
-const graphGroup = z.object({ id: graphId, label: z.string().max(64), x: z.number().min(0).max(1152), y: z.number().min(88).max(512), width: z.number().min(64).max(1152), height: z.number().min(40).max(424), fill: colorSchema.optional(), stroke: colorSchema.optional(), parent: graphId.nullable().optional(), icon: graphIcon.nullable().optional() }).strict();
-const graphSpec = z.object({ version: z.literal(1), title: z.string().max(80), subtitle: z.string().max(120).optional(), nodes: z.array(graphNode).min(1).max(48), edges: z.array(graphEdge).max(64).optional(), groups: z.array(graphGroup).max(16).optional() }).strict();
+const graphGroup = z.object({ id: graphId, label: z.string().max(64), x: z.number().min(0).max(1152), y: z.number().min(0).max(512), width: z.number().min(64).max(1152), height: z.number().min(40).max(512), fill: colorSchema.optional(), stroke: colorSchema.optional(), parent: graphId.nullable().optional(), icon: graphIcon.nullable().optional() }).strict();
+const graphSpec = z.object({ version: z.literal(1), title: z.string().max(80), subtitle: z.string().max(120).optional(), show_title: z.boolean().optional(), nodes: z.array(graphNode).min(1).max(48), edges: z.array(graphEdge).max(64).optional(), groups: z.array(graphGroup).max(16).optional() }).strict();
 const graphSelection = z.array(graphId).min(1).max(120);
 const graphOperations = z.array(z.discriminatedUnion('op', [
 	z.object({ op: z.literal('put_node'), node: graphNode }).strict(),
@@ -240,15 +263,22 @@ const partData = z.discriminatedUnion('kind', [
 	z.object({ kind: z.literal('items'), items: z.array(partItem).min(2).max(12), center: partLabel.optional() }).strict(),
 	z.object({ kind: z.literal('tree'), nodes: z.array(z.object({ id: z.string().min(1).max(32), label: z.string().max(40), parent: z.string().max(32).nullable().optional() }).strict()).min(2).max(12) }).strict(),
 	z.object({ kind: z.literal('network'), nodes: z.array(partItem).min(2).max(6), edges: z.array(z.object({ from: z.number().int().min(0).max(5), to: z.number().int().min(0).max(5), label: z.string().max(24).optional() }).strict()).min(1).max(12) }).strict(),
-	z.object({ kind: z.literal('matrix'), rows: z.array(partLabel).min(2).max(4), columns: z.array(partLabel).min(2).max(4), cells: z.array(z.array(partLabel).min(2).max(4)).min(2).max(4) }).strict(),
+	z.object({ kind: z.literal('matrix'), corner_label: z.string().max(96).refine(value => Array.from(value).length <= 48, 'Corner label exceeds 48 Unicode scalars').meta({ maxLength: 48 }).optional().describe('At most 48 Unicode scalars. Omitted defaults to empty; core omits empty labels from serialization.'), rows: z.array(partLabel).min(2).max(4), columns: z.array(partLabel).min(2).max(4), cells: z.array(z.array(partLabel).min(2).max(4)).min(2).max(4) }).strict(),
 	z.object({ kind: z.literal('groups'), groups: z.array(z.object({ label: z.string().max(32), items: z.array(z.string().max(40)).min(1).max(5) }).strict()).min(2).max(6) }).strict(),
 	z.object({ kind: z.literal('timeline'), periods: z.array(z.string().max(16)).min(2).max(12), tasks: z.array(z.object({ label: z.string().max(32), start: z.number().int().min(0).max(11), end: z.number().int().min(1).max(12), progress: z.number().min(0).max(1).optional() }).strict()).min(1).max(8) }).strict(),
 	z.object({ kind: z.literal('waterfall'), steps: z.array(z.object({ label: z.string().max(32), value: partValue, total: z.boolean().optional() }).strict()).min(2).max(10), unit: z.string().max(24).optional() }).strict(),
 	z.object({ kind: z.literal('map'), points: z.array(z.object({ label: z.string().max(32), longitude: z.number().min(-180).max(180), latitude: z.number().min(-85).max(85), value: partValue.nullable().optional() }).strict()).min(1).max(8) }).strict(),
 	z.object({ kind: z.literal('diagram'), graph: graphSpec }).strict(),
 ]);
-const partSpec = z.object({ version: z.literal(1), preset: z.string().min(1).max(100), title: z.string().max(80), subtitle: z.string().max(120).optional(), data: partData }).strict();
+const partLayout = frameSchema.extend({ show_title: z.boolean().optional() }).strict();
+const partSpec = z.object({ version: z.literal(1), preset: z.string().min(1).max(100), title: z.string().max(80), subtitle: z.string().max(120).optional(), data: partData, layout: optional(partLayout) }).strict();
 const contentHash = z.string().regex(/^[a-f0-9]{64}$/);
+const masterSourceSchema = z.object({ kind: z.enum(['pptx', 'potx']), base64: archiveBase64.min(1) }).strict();
+const masterImportSchema = masterSourceSchema.extend({
+	source_sha256: contentHash, mode: z.enum(['masters', 'slides']),
+	ids: z.array(z.string().min(1).max(80).refine(value => value.trim().length > 0, 'Source IDs must not be blank')).min(1).max(8).refine(ids => new Set(ids).size === ids.length, 'Source IDs must be distinct'),
+	prefix: z.string().regex(/^[A-Za-z0-9_-]{1,32}$/), name: z.string().min(1).max(60).refine(value => value.trim().length > 0, 'Master import name is required'),
+}).strict();
 const revisionIds = z.array(slideId).min(1).max(32);
 const revisionEdits = z.array(z.discriminatedUnion('op', [
 	z.object({ op: z.literal('translate'), ids: revisionIds, dx: z.number().min(-4096).max(4096), dy: z.number().min(-4096).max(4096) }).strict(),
@@ -258,7 +288,7 @@ const revisionEdits = z.array(z.discriminatedUnion('op', [
 	z.object({ op: z.literal('update_part'), id: slideId, spec: partSpec }).strict(),
 	z.object({ op: z.literal('update_graph'), id: slideId, spec: graphSpec }).strict(),
 ])).min(1).max(16).refine(edits => Buffer.byteLength(JSON.stringify(edits)) <= 128 * 1024, 'Revision edits exceed 128 KiB');
-const guidedAuthoring = z.object({ context: optional(z.enum(['reading', 'projection'])), density: optional(z.enum(['comfortable', 'compact'])), spacing: optional(z.enum(['standard', 'relaxed'])), body_font_min: optional(z.number().min(12).max(40)), headline_font_size: optional(z.number().min(28).max(64)), font_family: optional(z.string().trim().min(1).max(100)) }).strict();
+const guidedAuthoring = z.object({ context: optional(z.enum(['reading', 'projection'])), density: optional(z.enum(['comfortable', 'compact'])), spacing: optional(z.enum(['standard', 'relaxed'])), body_font_min: optional(z.number().min(12).max(40)), headline_font_size: optional(z.number().min(28).max(64)), font_family: optional(z.string().trim().min(1).max(100)), headline_style: optional(z.enum(['sentence', 'keyword'])), slide_limit: optional(z.number().int().min(32).max(128)) }).strict();
 const authoringProfile = z.enum(['consulting-decision', 'technical-explainer', 'event-talk', 'status-report']);
 const evidenceId = z.string().min(1).max(40);
 const guidedInput = z.object({
@@ -266,7 +296,7 @@ const guidedInput = z.object({
 	authoring: optional(guidedAuthoring),
 	evidence: z.array(z.object({ id: evidenceId, kind: z.enum(['source', 'assumption', 'unknown']), reference: z.string().min(1).max(600), statement: z.string().min(1).max(1200) }).strict()).max(64),
 	issues: z.array(z.object({ id: z.string().min(1).max(32), question: z.string().min(1).max(100), requested_decision: z.string().min(1).max(120), criterion: z.string().min(1).max(120), owner: z.string().min(1).max(48), due: z.string().min(1).max(48), evidence_ids: z.array(evidenceId).min(1).max(8), analysis_slide_ids: z.array(slideId).min(1).max(12) }).strict()).max(6).optional(),
-	slides: z.array(z.object({ id: slideId, section: z.string().min(1).max(80), headline: z.string().min(1).max(240), sentence_form: z.enum(['causal', 'conditional', 'contrast', 'causal-focus', 'evaluation', 'proposal', 'explanation', 'comparison', 'outcome']), pattern_id: z.string().min(1).max(80), question: z.string().min(1).max(240), parent_message: z.string().min(1).max(80), transition: z.string().min(1).max(80), parallel_basis: z.string().min(1).max(80), part: partSpec.nullable().optional(), speaker_notes: optional(z.string().max(8000).refine(value => Array.from(value).length <= 4000, 'Speaker notes exceed 4000 Unicode scalars')), support: z.array(z.object({ clause: z.string().min(1).max(240), body_paths: z.array(z.string().min(1).max(512)).min(1).max(16), evidence_ids: z.array(evidenceId).min(1).max(16) }).strict()).max(8), numbers: z.array(z.object({ path: z.string().min(1).max(512), value: z.union([partValue, z.string().max(120), z.boolean(), z.null()]), evidence_id: evidenceId }).strict()).max(256).optional() }).strict()).min(1).max(32),
+	slides: z.array(z.object({ id: slideId, section: z.string().min(1).max(80), headline: z.string().min(1).max(240), sentence_form: z.enum(['causal', 'conditional', 'contrast', 'causal-focus', 'evaluation', 'proposal', 'explanation', 'comparison', 'outcome']), pattern_id: z.string().min(1).max(80), question: z.string().min(1).max(240), parent_message: z.string().min(1).max(80), transition: z.string().min(1).max(80), parallel_basis: z.string().min(1).max(80), part: partSpec.nullable().optional(), speaker_notes: optional(z.string().max(8000).refine(value => Array.from(value).length <= 4000, 'Speaker notes exceed 4000 Unicode scalars')), support: z.array(z.object({ clause: z.string().min(1).max(240), body_paths: z.array(z.string().min(1).max(512)).min(1).max(16), evidence_ids: z.array(evidenceId).min(1).max(16) }).strict()).max(8), numbers: z.array(z.object({ path: z.string().min(1).max(512), value: z.union([partValue, z.string().max(120), z.boolean(), z.null()]), evidence_id: evidenceId }).strict()).max(256).optional() }).strict()).min(1).max(128),
 }).strict();
 
 function getDeck(id) {
@@ -296,8 +326,35 @@ function toolResponse(result) {
 	return { content: [{ type: 'text', text }, ...(result?.[imageResult] ? result.images : [])], ...(Buffer.byteLength(text) <= 65536 ? { structuredContent: metadata } : {}) };
 }
 
+function managedProgress(name, input, extra) {
+	const managed = ['add_part', 'update_part', 'add_graph', 'update_graph', 'apply_graph'].includes(name)
+		|| name === 'apply_operations' && input.operations.some(operation => ['add_part', 'update_part', 'add_graph', 'update_graph'].includes(operation.op));
+	const token = extra._meta?.progressToken;
+	if (!managed || !(typeof token === 'string' || Number.isSafeInteger(token)) || typeof extra.sendNotification !== 'function') return () => {};
+	const started = performance.now();
+	let stopped = false;
+	let inFlight = false;
+	let progress = -1;
+	const report = () => {
+		if (stopped || extra.signal.aborted || inFlight) return;
+		const elapsed = (performance.now() - started) / 1000;
+		progress = Math.max(progress + 0.001, elapsed);
+		inFlight = true;
+		void Promise.resolve().then(() => {
+			if (stopped || extra.signal.aborted) return;
+			return extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress, message: `Managed authoring: ${Math.floor(elapsed)} seconds elapsed; not a completion percentage.` } });
+		}).catch(() => {}).finally(() => { inFlight = false; });
+	};
+	const timer = setInterval(report, 5000);
+	timer.unref?.();
+	const stop = () => { stopped = true; clearInterval(timer); extra.signal.removeEventListener('abort', stop); };
+	extra.signal.addEventListener('abort', stop, { once: true });
+	report();
+	return stop;
+}
+
 function register(name, description, inputSchema, readOnly, action) {
-	const selectsProfile = ['create_presentation', 'compile_report', 'open_pptx', 'import_pptx', 'open_project', 'import_template', 'create_guided_presentation', 'verify_recovery', 'recover_presentation'].includes(name);
+	const selectsProfile = ['create_presentation', 'compile_report', 'open_pptx', 'import_pptx', 'open_project', 'import_template', 'inspect_master_source', 'create_guided_presentation', 'verify_recovery', 'recover_presentation'].includes(name);
 	server.registerTool(name, {
 		description,
 		inputSchema: z.object({ ...inputSchema, ...(selectsProfile ? { capacity_profile: capacityProfileSchema.optional() } : {}) }).strict(),
@@ -305,12 +362,14 @@ function register(name, description, inputSchema, readOnly, action) {
 	}, async (input, extra) => {
 		if (!readOnly && activeMutation) return { isError: true, content: [{ type: 'text', text: 'Another mutation is in progress' }] };
 		if (!readOnly) activeMutation = true;
+		let stopProgress;
 		try {
 			const { capacity_profile, ...parameters } = input;
 			const profile = capacity_profile ?? (input.deck_id ? getDeck(input.deck_id).capacityProfile : 'large');
 			const budget = CAPACITY_PROFILES[profile].request_bytes;
 			if (Buffer.byteLength(JSON.stringify(input), 'utf8') > budget) throw new Error('JSON input exceeds selected capacity profile');
 			if (extra.signal.aborted) throw new Error('Operation cancelled');
+			stopProgress = managedProgress(name, input, extra);
 			const result = await action(parameters, extra.signal, { signal: extra.signal, capacityProfile: profile });
 			if (readOnly && extra.signal.aborted) throw new Error('Operation cancelled');
 			const response = toolResponse(result);
@@ -324,7 +383,7 @@ function register(name, description, inputSchema, readOnly, action) {
 					retry: 'Inspect published paths and manifest hashes; do not overwrite or blindly retry the same name. Use a new name for another complete delivery.', multi_file_atomic: false }), isError: true };
 			}
 			return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : 'Operation failed' }] };
-		} finally { if (!readOnly) activeMutation = false; }
+		} finally { stopProgress?.(); if (!readOnly) activeMutation = false; }
 	});
 }
 
@@ -456,6 +515,15 @@ register('import_template', 'Create a NEW document from explicit POTX or THMX ba
 	const id = randomUUID(); const state = await client.importTemplate(id, input, options);
 	if (signal.aborted) throw new Error('Operation cancelled');
 	decks.set(id, state); return { deck_id: id, revision: state.revision, slides: state.document.deck.slides.length, kind: input.kind };
+});
+register('inspect_master_source', 'Inspect supplied PPTX/POTX bytes for source SHA-256, page size and selectable master/slide IDs with importability reasons. No files, source handles, network access or document mutation; not Office visual parity.', masterSourceSchema.shape, true, async (input, _signal, options) => client.inspectMasterSource(input, options));
+register('preview_master_import', 'Preview 1-8 distinct inspected source masters or sample slides as editable design content under exact source and base revision/hash guards. Returns candidate hash, Design and preview_slides as JSON only; no cached candidate, files, document or Undo changes. Not Office visual parity.', { ...mutationInput, expected_hash: contentHash, input: masterImportSchema }, true, async ({ deck_id, expected_revision, expected_hash, input }, signal) => {
+	return { deck_id, ...await getDeck(deck_id).previewMasterImport(input, { signal, expectedRevision: expected_revision, expectedHash: expected_hash }) };
+});
+register('import_masters', 'Import selected PPTX/POTX master or sample-slide design content after recomputing and verifying the source SHA-256, base revision/hash and expected candidate hash. Preserves existing slides and origin, records one Undo, and rejects unsafe native content. No files, fetches or candidate storage; not Office visual parity.', { ...mutationInput, expected_hash: contentHash, input: masterImportSchema, expected_candidate_hash: contentHash }, false, async ({ deck_id, expected_revision, expected_hash, input, expected_candidate_hash }, signal) => {
+	const state = getDeck(deck_id);
+	await state.importMasters(input, expected_candidate_hash, { signal, expectedRevision: expected_revision, expectedHash: expected_hash });
+	return { deck_id, revision: state.revision, hash: state.document.hash, office_visual_parity: false };
 });
 register('export_template', 'Save a new POTX or THMX only inside the operator-approved output directory. Filename extension must exactly match kind. Never overwrites a file or converts protected/signed/macro content.', { deck_id: handle, kind: templateKind, filename: templateFilename }, false, async ({ deck_id, kind, filename }, signal) => {
 	if (!outputDirectory) throw new Error('Saving requires --output-dir at server startup');
@@ -589,7 +657,7 @@ register('graph_catalog', 'List architecture diagram shapes, ports, routing styl
 register('architecture_icons', 'Return the fixed 1498-entry Azure/Entra, AWS and GCP metadata catalog with vendor notices, archive/source provenance and PNG pins. configured checks local vendor consent only, not full pack integrity or redistribution rights. Metadata has no artwork; this read-only API never downloads, installs or follows source URLs.', {}, true, async (_input, signal) => client.architectureIcons({ signal }));
 register('architecture_icon_assets', 'Read explicitly selected local catalog PNGs after consent, size, SHA-256 and raster verification. Returns icons with id, original base64, image/png mime_type, full service name alt and actual width/height. Requires 1..60 distinct catalog IDs, at most 4 MiB raw PNG bytes per atomic batch; use fewer IDs if needed. No paths, URLs, downloads or artwork transformations. Strip id/width/height before supplying GraphIcon.', { ids: z.array(z.string().min(1).max(256)).min(1).max(60).refine(ids => new Set(ids).size === ids.length, 'Duplicate architecture icon IDs are not allowed') }, true, async ({ ids }, signal) => client.architectureIconAssets(ids, { signal }));
 register('create_graph_icon', 'Prepare a bounded node icon from SVG, PNG or JPEG. SVG becomes transparent PNG; large rasters are fitted to a 256px longest side. Returns image data for GraphNode.icon, with no document or filesystem mutation. External resources and active SVG are rejected.', { base64: assetInput.base64, mime_type: assetInput.mime_type, alt: z.string().max(500).optional() }, true, async (input, signal) => client.createGraphIcon(input, { signal }));
-register('create_graph', 'Render a typed node/edge/group graph into native editable PowerPoint objects without inserting it. Coordinates use the 1152x512 graph canvas below its 88px title band. No HTML, executable content or draw.io XML is accepted.', { id: z.string().min(1).max(40), spec: graphSpec, theme: themeSchema.optional() }, true, async (input, signal) => client.createGraph(input, { signal }));
+register('create_graph', 'Render a typed graph without inserting it. Prefer apply_operations with add_graph and explicit layout for regenerable metadata. create_graph plus add_elements is an explicit unmanaged choice, never a timeout fallback. Canvas: 1152x512; y starts at 88 unless show_title=false. Core checks bounds and detail font size. No HTML, executable content or draw.io XML.', { id: z.string().min(1).max(40), spec: graphSpec, theme: themeSchema.optional() }, true, async (input, signal) => client.createGraph(input, { signal }));
 register('transform_graph', 'Apply bounded graph operations to a candidate specification. Nodes, edges, group movement, alignment and grid layout are computed and validated in Rust. No document mutation.', { spec: graphSpec, operations: graphOperations }, true, async ({ spec, operations }, signal) => client.transformGraph(spec, operations, { signal }));
 register('get_graph', 'Read one managed graph specification and stale status without returning unrelated document source data.', { deck_id: handle, slide_id: z.string().min(1).max(80), id: z.string().min(1).max(40) }, true, async ({ deck_id, slide_id, id }) => {
 	const state = getDeck(deck_id); const part = state.document.parts?.find((entry) => entry.slide_id === slide_id && entry.element_id === id && entry.spec.data.kind === 'diagram');
@@ -610,14 +678,14 @@ register('part_catalog', 'List 108 original metadata-driven presets across 36 ch
 register('best_practice_profiles', 'List four evidence-led authoring profiles: consulting decisions, technical explanations, event talks and reports. English guides are retrieved separately; no file or model access.', {}, true, async (_input, signal) => client.bestPracticeProfiles({ signal }));
 register('best_practice_guide', 'Retrieve the English five-stage workflow, profile-specific guidance and strict creation schema. The consulting catalog retains 48 patterns with honest native-template, composition-required or guidance-only status. Read this before planning; guidance does not verify truth.', { profile_id: authoringProfile }, true, async ({ profile_id }, signal) => client.bestPracticeGuide(profile_id, { signal }));
 register('validate_guided_presentation', 'Dry-run a structured outline, clause-to-body evidence, numeric source declarations and native layout. ready means compilable, not semantically proven or Office-qualified. Returns unmet checks and human-review requirements; no deck handle or file is created.', { input: guidedInput }, true, async ({ input }, signal) => client.validateGuidedPresentation(input, { signal }));
-register('create_guided_presentation', 'Create a NEW evidence-led presentation from supplied claims and native parts after the same strict validation. Consulting multi-page decks require 3-6 issues, C02 summary and C03 close. Unknown numbers must remain xx in qualitative content. Does not invent content, call a model, overwrite a deck or save a file; use export_pptx separately. Review semantics and actual rendering.', { input: guidedInput }, false, async ({ input }, signal, options) => {
+register('create_guided_presentation', 'Create a NEW evidence-led presentation after strict validation. Defaults: sentence headlines, 32 slides. input.authoring.headline_style="keyword" permits keyword headings; slide_limit explicitly raises the limit within 32..128. Evidence and numeric checks still apply. Only consulting-decision multi-page decks require 3-6 issues, C02 summary and C03 close. Unknown numbers remain xx in qualitative content. No model call or file save; review actual rendering and export separately.', { input: guidedInput }, false, async ({ input }, signal, options) => {
 	if (decks.size >= 8) throw new Error('At most eight decks per session; close a deck first');
 	const id = randomUUID(); const result = await client.createGuidedPresentation(id, input, options);
 	if (signal.aborted) throw new Error('Operation cancelled');
 	decks.set(id, result.session);
 	return { deck_id: id, revision: result.session.revision, slides: result.session.document.deck.slides.length, profile_id: result.profile_id, validation: result.validation, model_inference: false };
 });
-register('create_part', 'Preview a metadata-driven part as native editable elements without inserting it. Validates bounds, numeric meaning and references in Rust. This is deterministic design, not AI generation.', { id: z.string().min(1).max(40), spec: partSpec, theme: themeSchema.optional() }, true, async (input, signal) => client.createPart(input, { signal }));
+register('create_part', 'Preview a part without inserting it. Prefer apply_operations with add_part and PartSpec.layout for regenerable metadata. create_part plus add_elements is an explicit unmanaged choice, never a timeout fallback. Core validates bounds, numeric meaning and references. Deterministic design, not AI generation.', { id: z.string().min(1).max(40), spec: partSpec, theme: themeSchema.optional() }, true, async (input, signal) => client.createPart(input, { signal }));
 for (const name of ['add_part', 'update_part']) {
 	register(name, name === 'add_part' ? 'Insert a native metadata-driven part in one undoable revision. Presets and metadata schema come from part_catalog. Placement does not rearrange existing content.' : 'Update a part from metadata while retaining its placement, in one undoable revision. Rejects stale metadata after native edits; never restores a cached scene over external changes.', { deck_id: handle, expected_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), slide_id: z.string().min(1).max(80), id: z.string().min(1).max(40), spec: partSpec }, false, async ({ deck_id, expected_revision, slide_id, ...input }, signal) => {
 		const state = getDeck(deck_id);
@@ -646,7 +714,44 @@ register('apply_theme', 'Apply twelve native theme color slots and heading/body/
 register('assign_layout', 'Apply or reset a native slide layout while preserving existing matching text. Placeholder geometry and format follow later design edits until explicitly detached.', { deck_id: handle, expected_revision: z.number().int().min(0), slide_id: shortText, layout_id: z.string().min(1).max(80), preserve_freeform: z.boolean().optional() }, false, async ({ deck_id, expected_revision, slide_id, layout_id, preserve_freeform }, signal) => {
 	const state = getDeck(deck_id); await state.assignLayout(slide_id, layout_id, { signal, expectedRevision: expected_revision, preserveFreeform: preserve_freeform }); return { deck_id, revision: state.revision };
 });
-register('add_object', 'Insert a core-created text box, preset shape, table, chart, line or arrow. Charts contain labeled synthetic examples, not factual data. All objects remain native and editable in PowerPoint.', { deck_id: handle, expected_revision: z.number().int().min(0), slide_id: shortText, id: z.string().min(1).max(80), kind: z.enum(['text', 'shape', 'table', 'chart', 'line', 'arrow']), preset: z.string().max(80).optional(), rows: z.number().int().min(1).max(12).optional(), columns: z.number().int().min(1).max(8).optional() }, false, async ({ deck_id, expected_revision, slide_id, ...input }, signal) => {
+register('create_object', 'Create a typed default object without inserting it. Charts contain synthetic examples. Supply final content and geometry through add_elements or apply_operations; core validates complete elements there.', objectInput, true, async (input, signal) => client.createObject(input, { signal }));
+register('apply_operations', 'Apply 1-128 typed operations atomically with one Undo and revision/hash checks. Prefer add_part/add_graph with explicit layouts for regenerable metadata; add_elements is for unmanaged final elements. update_graph preserves existing PartLayout. Child edits followed by managed updates reject stale render hashes. Core retains locks, hidden-group, source and native guards, 128 total metadata entries and other capacity limits. Use smaller bounded chunks for progress/cancellation; never automatically fall back after timeout. set_text_style overlays; set_connector replaces settings. No raw Patch paths.', { ...mutationInput, expected_hash: contentHash, operations: authoringOperations }, false, async ({ deck_id, expected_revision, expected_hash, operations }, signal) => {
+	const state = getDeck(deck_id);
+	await state.applyOperations(operations, { signal, expectedRevision: expected_revision, expectedHash: expected_hash });
+	return { deck_id, revision: state.revision, hash: state.document.hash, can_undo: state.canUndo };
+});
+const authoringDescriptions = {
+	add_elements: 'Append 1-128 complete typed native elements in one Undo. Includes rich text, geometry, visual styles, tables, charts and groups. Core validates all content; no external fetches.',
+	set_frame: 'Set one element frame, geometry only. Groups normalize child geometry and absolute table tracks scale; fonts and strokes remain unchanged. One Undo.',
+	set_text_style: 'Overlay supplied RunStyle fields on 1-128 distinct text/shape targets and their defaults. Retains unspecified paragraph/run attributes. Unlike apply_format, this is not format painting. One Undo.',
+	set_slide_background: 'Set one slide background color and detach background inheritance in one Undo.',
+	set_connector: 'Replace all connector settings, optionally its frame, in one Undo. Omitted start/end/routing clear existing values; omitted flip_v becomes false. Visual properties remain unchanged.',
+	set_picture_crop: 'Replace the crop of an existing picture in one Undo. Omitted crop edges become zero; core validates the visible region.',
+	set_hyperlink: 'Set or clear a text/shape hyperlink in one Undo. Core validates allowed link targets without fetching them.',
+	set_shape_adjustment: 'Set the existing adj guide of a supported roundRect, chevron or triangle in one Undo. Core rejects unsupported presets and values.',
+	add_picture: 'Decode and append embedded PNG/JPEG bytes with optional final frame/crop in one core transaction and Undo. No linked images or execution. Optional revision retains legacy calls; supply it for stale-edit protection.',
+};
+for (const variant of authoringVariants) {
+	const name = variant.shape.op.value;
+	if (['add_part', 'update_part', 'add_graph', 'update_graph'].includes(name)) continue;
+	register(name, authoringDescriptions[name], { ...mutationInput, ...(name === 'add_picture' ? { expected_revision: mutationInput.expected_revision.optional() } : {}), expected_hash: contentHash.optional(), ...variant.omit({ op: true }).shape }, false, async ({ deck_id, expected_revision, expected_hash, ...input }, signal) => {
+		const state = getDeck(deck_id);
+		await state.applyOperations([{ ...input, op: name }], { signal, expectedRevision: expected_revision, expectedHash: expected_hash });
+		return { deck_id, revision: state.revision, hash: state.document.hash, ...(input.id === undefined ? {} : { element_id: input.id }) };
+	});
+}
+register('set_frames', 'Set 1-128 frames on one slide in one Undo. Geometry only; fonts and strokes remain unchanged. Core validates the whole batch.', { ...mutationInput, expected_hash: contentHash.optional(), slide_id: slideId, frames: z.array(z.object({ id: slideId, frame: frameSchema }).strict()).min(1).max(128) }, false, async ({ deck_id, expected_revision, expected_hash, slide_id, frames }, signal) => {
+	const state = getDeck(deck_id);
+	await state.setFrames(slide_id, frames, { signal, expectedRevision: expected_revision, expectedHash: expected_hash });
+	return { deck_id, revision: state.revision, hash: state.document.hash };
+});
+register('import_slides', 'Import 1-128 selected slides from an existing authored source deck handle into a same-canvas target, in one Undo. Core deduplicates design and preserves supported metadata, fonts and evidence bindings. Native sources and unsupported native target edits fail closed. Source notes/evidence may contain sensitive data. No paths or arbitrary source JSON.', { ...mutationInput, expected_hash: contentHash, source_deck_id: handle, source_slide_ids: authoringIds, prefix: z.string().regex(/^[A-Za-z0-9_-]{1,24}$/), after: optional(slideId) }, false, async ({ deck_id, expected_revision, expected_hash, source_deck_id, ...input }, signal) => {
+	const state = getDeck(deck_id);
+	const source = getDeck(source_deck_id).document;
+	await state.importSlides(source, input, { signal, expectedRevision: expected_revision, expectedHash: expected_hash });
+	return { deck_id, revision: state.revision, hash: state.document.hash, slides: state.document.deck.slides.length, can_undo: state.canUndo };
+});
+register('add_object', 'Insert a core-created default text box, shape, table, chart, line or arrow. Prefer add_elements for complete final content and geometry in one call. Charts contain synthetic examples, not factual data.', { deck_id: handle, expected_revision: z.number().int().min(0), slide_id: shortText, ...objectInput }, false, async ({ deck_id, expected_revision, slide_id, ...input }, signal) => {
 	const state = getDeck(deck_id); await state.addObject(slide_id, input, { signal, expectedRevision: expected_revision }); return { deck_id, revision: state.revision, element_id: input.id };
 });
 register('provider_status', 'Read operator-configured model availability and destination without API keys. This does not contact the provider or validate credentials.', {}, true, async (_input, signal) => requestCore({ op: 'provider_status' }, { signal }));
@@ -665,7 +770,7 @@ register('generate_report', 'Ask the operator-configured OpenAI-compatible model
 	decks.set(id, await client.createDocument({ id, deck: result.compiled.deck, report: result.report }, { signal }));
 	return { deck_id: id, slides: result.compiled.deck.slides.length, revision: 0, issues: result.compiled.issues, provenance: result.provenance };
 });
-register('compile_report', 'Compile structured content into native text, rectangles, tables, charts and process groups. Returns a session document handle. Deterministic layout, not a model call.', { report: reportSchema }, false, async ({ report }, signal, options) => {
+register('compile_report', 'Compile structured content into native text, rectangles, tables, charts and process groups using fixed structured layouts. A shortcut, not the best path for exact recreation: use complete add_elements/apply_operations for freeform final geometry. Returns a session document handle. Deterministic layout, not a model call.', { report: reportSchema }, false, async ({ report }, signal, options) => {
 	if (decks.size >= 8) throw new Error('At most eight decks per session; close a deck first');
 	const result = await client.request({ op: 'compile', report }, options);
 	const id = randomUUID();
@@ -755,7 +860,6 @@ async function appendElement(deck_id, slide_id, element, signal) {
 	return { deck_id, revision: state.revision, element_id: element.id };
 }
 register('add_diagram', 'Create and append a native group of labeled shapes and connected arrows through the shared core.', { deck_id: handle, slide_id: shortText, id: z.string().min(1).max(50), steps: z.array(z.string().max(80)).min(2).max(6) }, false, async ({ deck_id, slide_id, id, steps }, signal) => appendElement(deck_id, slide_id, await requestCore({ op: 'create_diagram', id, steps }, { signal }), signal));
-register('add_picture', 'Decode and append a PNG/JPEG image, at most 1 MiB and 4096px. Images are embedded, never linked or executed.', { deck_id: handle, slide_id: shortText, id: z.string().min(1).max(80), base64: z.string().max(1_398_104), mime_type: z.enum(['image/png', 'image/jpeg']), alt: z.string().max(500) }, false, async ({ deck_id, slide_id, ...input }, signal) => appendElement(deck_id, slide_id, await requestCore({ op: 'create_picture', ...input }, { signal }), signal));
 register('export_project', 'Legacy compatibility only: save a new PPTX and hash-bound .aislide.json checkpoint. Prefer export_pptx for single-file operation. Never overwrites files; pair publication is not crash-atomic.', { deck_id: handle, filename: filenameSchema }, false, async ({ deck_id, filename }, signal) => {
 	if (!outputDirectory) throw new Error('Saving requires --output-dir at server startup');
 	const result = await getDeck(deck_id).exportProject({ signal });
@@ -771,18 +875,24 @@ server.registerResource('report-example', 'aislide://report/example', { mimeType
 
 const authoringWorkflow = [
 	'Create an editable presentation using the AISlide MCP tools in this connection.',
-	'Read authoring_capabilities and best_practice_guide for the chosen profile. Establish audience, purpose, evidence and assumptions; do not invent facts or fetch imported relationships.',
+	'Read authoring_capabilities, including typed_authoring, and choose the authoring path for the task. Establish audience, purpose, evidence and assumptions; do not invent facts or fetch imported relationships.',
+	'For freeform, exact recreation or high-volume authoring, use create_presentation and apply_operations with complete add_elements at their final frames. Each atomic batch accepts 1..128 typed operations; successful changed batches create one Undo entry, while no-ops create none. Supply expected_revision and expected_hash from get_document. set_frame/set_frames change geometry only. set_text_style is a partial style update; apply_format copies a complete compatible style. Do not force a preview_slide_revision candidate for every frame change. Finish with preview_presentation and preflight_presentation.',
+	'When parts or graphs need later regeneration, prefer apply_operations with add_part/add_graph and explicit layouts: the batch retains both native elements and managed metadata in one transaction. Mixed batches supersede separate per-part calls without removing the existing individual tools. Use create_part/create_graph plus add_elements ONLY as an explicit unmanaged choice; never automatically fall back to ordinary groups after a timeout or rejection. Editing a managed child then update_part/update_graph in the same batch rejects the stale render hash atomically.',
+	'Keep batches bounded: 1..128 operations, at most 128 metadata entries in the document, plus all selected capacity limits. Reduce chunk size for progress and cancellation responsiveness; these do not make limits unlimited. Each committed chunk has its own Undo. After timeout or cancellation, inspect get_document/get_session_recovery before retrying; do not blindly repeat a mutation.',
+	'For evidence-led guided decks, read best_practice_guide for the chosen profile. Guided defaults remain sentence headlines and a 32-slide limit. Set input.authoring.headline_style="keyword" to opt into keyword-headline validation. For a 39-slide deck, use input.authoring.slide_limit=39 or a higher ceiling (explicit range 32..128). Evidence support and numeric declarations still apply. Consulting issues are required only for the consulting-decision profile.',
 	'Use optional input.authoring for reading/projection context, density, spacing, body_font_min, headline_font_size and font_family; existing brand_color controls the palette. Add speaker_notes to each input slide when supplied.',
-	'Run validate_guided_presentation, resolve unmet checks, then create_guided_presentation. ready means compilable, not factual truth or Office parity.',
+	'For the guided path, run validate_guided_presentation, resolve unmet checks, then create_guided_presentation. ready means compilable, not factual truth or Office parity. compile_report is a fixed structured-layout shortcut, not the best path for exact recreation.',
+	'For positioned native parts, use PartSpec.layout with show_title=false and an explicit body box (x, y, width, height). For graphs, GraphSpec.show_title=false removes the fixed title band; node.detail, text_align and heading_bold separate heading and detail presentation. Native part fitting enforces a 12px text floor and can reject a box that is too small. Keep layout when updating parts or graphs across APIs. Only batch add_graph accepts a top-level layout (PartLayout or null); batch update_graph has no layout field and preserves the existing PartLayout. Matrix and contrast data accept corner_label, at most 48 Unicode scalars, default empty; core omits empty labels from serialization.',
+	'For cross-document reuse, import_slides takes an authored source_deck_id handle and selected source_slide_ids, reusing matching masters. Source and target must use the same canvas. It does not support arbitrary native cross-package slide import; opening native bytes does not turn them into an authored source or permit origin rewriting.',
 	'Use preview_presentation for actual PNG pages or a contact_sheet; choose at most eight unique zero-based page_indices per call. Inspect the images and renderer warnings. include_images=false returns metadata only.',
 	'Run preflight_presentation for the same pages and a suitable min_font_size. Findings include geometry and readability heuristics, not guaranteed defects. Run check_accessibility separately when needed.',
-	'For an authorized correction, use preview_slide_revision with deck_id, expected_revision, expected_hash, slide_id and typed edits. Inspect before/after images, affected_ids, stale_part_ids and source_bindings_stale. No changes have been applied yet.',
+	'When a correction needs before/after review before mutation, use preview_slide_revision with deck_id, expected_revision, expected_hash, slide_id and typed edits. Inspect before/after images, affected_ids, stale_part_ids and source_bindings_stale. No changes have been applied yet.',
 	'Apply only the agreed candidate using apply_slide_revision with the candidate_id and exact base revision/hash. Candidates expire after ten minutes, deck closure or any revision change; at most sixteen are retained. Undo reverses one applied batch. Native preservation may reject unsupported edits.',
 	'Review again, then finalize_presentation with deck_id, exact expected_revision/expected_hash and a new plain name under the operator-approved output directory. It always exports the complete PPTX and manifest. Optional PDF/previews/preflight cover selected pages only (at most eight); notes and source_report require explicit opt-in because they may contain sensitive plaintext. The PPTX itself retains notes and may include source data. Individual export_pptx/export_static remain available.',
 	'Finalization stages all files and publishes the manifest last without overwriting existing files. Return actual paths, sizes, SHA-256 hashes and check scopes. Partial failures retain published files; do not blindly retry the same name. Complete means output generation, not a visual or factual approval; Office parity remains unverified.',
 	'No automatic persistence, restart recovery, source freshness verification or background model generation is provided by this workflow.',
 ].join('\n\n');
-server.registerResource('authoring-workflow', 'aislide://authoring/workflow', { mimeType: 'text/plain', description: 'Bounded visual review and scoped correction workflow' }, async () => ({ contents: [{ uri: 'aislide://authoring/workflow', mimeType: 'text/plain', text: authoringWorkflow }] }));
-server.registerPrompt('author_presentation', { description: 'Create, preview, diagnose, safely revise and export an evidence-led editable presentation with AISlide.' }, async () => ({ messages: [{ role: 'user', content: { type: 'text', text: authoringWorkflow } }] }));
+server.registerResource('authoring-workflow', 'aislide://authoring/workflow', { mimeType: 'text/plain', description: 'Choose typed batches, guided decks, positioned parts or authored-slide reuse, then visually review and export.' }, async () => ({ contents: [{ uri: 'aislide://authoring/workflow', mimeType: 'text/plain', text: authoringWorkflow }] }));
+server.registerPrompt('author_presentation', { description: 'Choose an authoring path, create, preview, diagnose, revise and export an editable presentation with AISlide.' }, async () => ({ messages: [{ role: 'user', content: { type: 'text', text: authoringWorkflow } }] }));
 
 await server.connect(new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: MAX_REQUEST_BYTES }));

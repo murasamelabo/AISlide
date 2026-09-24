@@ -44,7 +44,7 @@ pub fn catalog() -> Value {
     let presets: Vec<_> = CATEGORIES.iter().enumerate().flat_map(|(index,(category,name,names))| {
         ["balanced","focus","labeled"].into_iter().enumerate().map(move |(variant,suffix)| {
             let id = format!("{category}/{suffix}");
-            let example = PartSpec { version:1,preset:id.clone(),title:(*name).into(),subtitle:"Synthetic example".into(),data:example(category,variant) };
+            let example = PartSpec { version:1,preset:id.clone(),title:(*name).into(),subtitle:"Synthetic example".into(),data:example(category,variant),layout:None };
             json!({"id":id,"category":category,"category_name":name,"name":names[variant],"family":if index<10 {"Charts"} else {"Diagrams"},"example":example})
         })
     }).collect();

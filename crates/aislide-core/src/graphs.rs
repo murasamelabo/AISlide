@@ -18,9 +18,24 @@ pub struct GraphSpec {
     pub version: u32,
     pub title: String,
     #[serde(default)] pub subtitle: String,
+    #[serde(default = "enabled", skip_serializing_if = "is_true")] pub show_title: bool,
     pub nodes: Vec<GraphNode>,
     #[serde(default)] pub edges: Vec<GraphEdge>,
     #[serde(default)] pub groups: Vec<GraphGroup>,
+}
+
+impl GraphSpec {
+    fn content_top(&self) -> f64 { if self.show_title { CONTENT_TOP } else { 0.0 } }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphTextAlign { Left, Center, Right }
+
+impl GraphTextAlign {
+    fn alignment(self) -> TextAlign {
+        match self { Self::Left => TextAlign::Left, Self::Center => TextAlign::Center, Self::Right => TextAlign::Right }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -72,6 +87,8 @@ fn accent() -> String { "@accent1".into() }
 fn muted() -> String { "@dk2".into() }
 fn surface() -> String { "@lt2".into() }
 fn arrow() -> bool { true }
+fn enabled() -> bool { true }
+fn is_true(value: &bool) -> bool { *value }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -91,6 +108,12 @@ pub fn create_icon(base64: String, mime_type: &str, alt: &str) -> Result<GraphIc
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
     pub id: String, pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 240))] pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 12, max = 40))] pub detail_font_size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub text_align: Option<GraphTextAlign>,
+    #[serde(default = "enabled", skip_serializing_if = "is_true")] pub heading_bold: bool,
     #[serde(default)] pub kind: NodeKind,
     #[serde(default, skip_serializing_if = "GraphPresentation::is_card")] pub presentation: GraphPresentation,
     pub x: f64, pub y: f64,
@@ -136,9 +159,9 @@ fn identity(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn bounds(x: f64, y: f64, width: f64, height: f64) -> Result<()> {
-    if [x, y, width, height].iter().any(|value| !value.is_finite()) || x < 0.0 || y < CONTENT_TOP || width < 64.0 || height < 40.0 || x + width > WIDTH || y + height > HEIGHT {
-        return Err(Error::Invalid("graph bounds must fit 1152x512, below the 88px title band, with minimum size 64x40".into()));
+fn bounds(x: f64, y: f64, width: f64, height: f64, content_top: f64) -> Result<()> {
+    if [x, y, width, height].iter().any(|value| !value.is_finite()) || x < 0.0 || y < content_top || width < 64.0 || height < 40.0 || x + width > WIDTH || y + height > HEIGHT {
+        return Err(Error::Invalid(format!("graph bounds must fit 1152x512 at y >= {content_top}, with minimum size 64x40")));
     }
     Ok(())
 }
@@ -167,8 +190,14 @@ fn contains(region: &GraphGroup, rect: [f64; 4]) -> bool {
 }
 
 fn icon_height(node: &GraphNode) -> f64 {
-    (node.height * 0.55).min(node.height - 16.0 - node.font_size * 2.5).min(96.0)
+    let text_height = node.detail.as_ref().map_or(node.font_size * 2.5, |detail| {
+        node.font_size * 1.25 * node.label.lines().count().max(1) as f64
+            + 8.0 + detail_size(node) * 1.25 * detail.lines().count().max(1) as f64
+    });
+    (node.height * 0.55).min(node.height - 16.0 - text_height).min(96.0)
 }
+
+fn detail_size(node: &GraphNode) -> f64 { node.detail_font_size.unwrap_or((node.font_size * 0.8).max(12.0)) }
 
 pub fn validate(spec: &GraphSpec) -> Result<()> {
     if spec.version != 1 { return Err(Error::Unsupported("graph version".into())); }
@@ -181,7 +210,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
     for region in &spec.groups {
         identity(&region.id)?; valid_text(&region.label, 64)?;
         if !ids.insert(&region.id) { return Err(Error::Invalid("duplicate graph ID".into())); }
-        bounds(region.x, region.y, region.width, region.height)?;
+        bounds(region.x, region.y, region.width, region.height, spec.content_top())?;
         valid_color(&region.fill)?; valid_color(&region.stroke)?;
     }
     ordered_group_indices(spec)?;
@@ -198,9 +227,18 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
     for node in &spec.nodes {
         identity(&node.id)?; valid_text(&node.label, 160)?;
         if !ids.insert(&node.id) { return Err(Error::Invalid("duplicate graph ID".into())); }
-        bounds(node.x, node.y, node.width, node.height)?;
+        bounds(node.x, node.y, node.width, node.height, spec.content_top())?;
         valid_color(&node.fill)?; valid_color(&node.stroke)?; valid_color(&node.color)?;
         if !node.font_size.is_finite() || !(12.0..=40.0).contains(&node.font_size) { return Err(Error::Invalid("graph font size must be 12-40".into())); }
+        if let Some(detail) = &node.detail {
+            valid_text(detail, 240)?;
+            if detail.trim().is_empty() { return Err(Error::Invalid("graph detail must be nonempty when supplied".into())); }
+        }
+        if let Some(size) = node.detail_font_size {
+            if node.detail.is_none() || !size.is_finite() || !(12.0..=40.0).contains(&size) || size > node.font_size {
+                return Err(Error::Invalid("graph detail_font_size requires detail and must be finite, 12-40 and no larger than font_size".into()));
+            }
+        }
         if node.presentation == GraphPresentation::Icon && (node.icon.is_none() || icon_height(node) <= 0.0) { return Err(Error::Invalid("icon presentation requires an icon and room for an image, gap and two-line label".into())); }
         if let Some(icon) = &node.icon {
             valid_text(&icon.alt, 500)?;
@@ -222,6 +260,26 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
 fn text(id: String, rect: [f64; 4], label: &str, size: f64, color: &str, alignment: TextAlign, bold: bool) -> Element {
     let [x, y, width, height] = rect;
     Element::Text { visual: None, id, x, y, width, height, text: label.into(), font_size: size, color: color.into(), bold, format: TextFormat { alignment, vertical: VerticalAlign::Middle, font_family: Some("@minor".into()), ..Default::default() } }
+}
+
+fn node_text(children: &mut Vec<Element>, prefix: &str, node: &GraphNode, content: [f64; 4]) -> Result<()> {
+    let alignment = node.text_align.unwrap_or(if node.detail.is_some() { GraphTextAlign::Left } else { GraphTextAlign::Center });
+    let heading_id = format!("{prefix}-nt-{}", node.id);
+    let Some(detail) = &node.detail else {
+        children.push(text(heading_id, content, &node.label, node.font_size, &node.color, alignment.alignment(), node.heading_bold));
+        return Ok(());
+    };
+    let [left, top, width, height] = content;
+    let heading_height = (node.font_size * 1.25 * node.label.lines().count().max(1) as f64).min((height - 8.0) / 2.0);
+    let detail_height = height - heading_height - 8.0;
+    if heading_height < 15.0 || detail_height < 15.0 { return Err(Error::Invalid("graph detail requires room for a heading, 8px gap and body at 12px".into())); }
+    let mut heading = text(heading_id, [left, top, width, heading_height], &node.label, node.font_size, &node.color, alignment.alignment(), node.heading_bold);
+    let mut body = text(format!("{prefix}-nd-{}", node.id), [left, top + heading_height + 8.0, width, detail_height], detail, detail_size(node), &node.color, alignment.alignment(), false);
+    for element in [&mut heading, &mut body] {
+        if let Element::Text { format, .. } = element { format.vertical = VerticalAlign::Top; }
+    }
+    children.push(heading); children.push(body);
+    Ok(())
 }
 
 fn shape(id: String, rect: [f64; 4], preset: &str, fill: &str, stroke: &str) -> Element {
@@ -277,7 +335,7 @@ fn relationship_label_bounds(spec: &GraphSpec, elements: &[Element], points: &[[
     let mut obstacles = Vec::new();
     for node in &spec.nodes {
         if node.presentation == GraphPresentation::Icon {
-            let suffixes = [format!("-ni-{}", node.id), format!("-nt-{}", node.id)];
+            let suffixes = [format!("-ni-{}", node.id), format!("-nt-{}", node.id), format!("-nd-{}", node.id)];
             for element in elements {
                 let (id, x, y, width, height) = element.bounds();
                 if suffixes.iter().any(|suffix| id.ends_with(suffix)) { obstacles.push([x, y, width, height]); }
@@ -299,7 +357,7 @@ fn relationship_label_bounds(spec: &GraphSpec, elements: &[Element], points: &[[
         let length = |segment: &[[f64; 2]]| (segment[1][0] - segment[0][0]).hypot(segment[1][1] - segment[0][1]);
         length(right).total_cmp(&length(left))
     });
-    let mut best = [points[0][0].clamp(0.0, WIDTH - width), points[0][1].clamp(CONTENT_TOP, HEIGHT - height), width, height];
+    let mut best = [points[0][0].clamp(0.0, WIDTH - width), points[0][1].clamp(spec.content_top(), HEIGHT - height), width, height];
     let mut best_score = f64::INFINITY;
     for segment in segments {
         let horizontal = segment[1][0] - segment[0][0]; let vertical = segment[1][1] - segment[0][1];
@@ -311,7 +369,7 @@ fn relationship_label_bounds(spec: &GraphSpec, elements: &[Element], points: &[[
             for side in [1.0, -1.0] {
                 let candidate = [
                     ((segment[0][0] + segment[1][0]) / 2.0 + normal[0] * (clearance + extra) * side - width / 2.0).clamp(0.0, WIDTH - width),
-                    ((segment[0][1] + segment[1][1]) / 2.0 + normal[1] * (clearance + extra) * side - height / 2.0).clamp(CONTENT_TOP, HEIGHT - height), width, height];
+                    ((segment[0][1] + segment[1][1]) / 2.0 + normal[1] * (clearance + extra) * side - height / 2.0).clamp(spec.content_top(), HEIGHT - height), width, height];
                 let area = rectangle(candidate, 3.0);
                 let route_crossings = routes.iter().filter(|line| line.intersects(&area)).count();
                 let overlaps = obstacles.iter().filter(|bounds| rectangle(**bounds, 0.0).intersects(&area)).count();
@@ -323,12 +381,33 @@ fn relationship_label_bounds(spec: &GraphSpec, elements: &[Element], points: &[[
     best
 }
 
+fn render_prefix(id: &str, spec: &GraphSpec) -> Result<String> {
+    Ok(format!("{id}-{}", &format!("{:x}", Sha256::digest(crate::canonical::bytes(&(RENDER_LAYOUT_VERSION, spec))?))[..10]))
+}
+
+pub(crate) fn cap_detail_fonts(id: &str, spec: &GraphSpec, children: &mut [Element]) -> Result<()> {
+    let prefix = render_prefix(id, spec)?;
+    for node in spec.nodes.iter().filter(|node| node.detail.is_some()) {
+        let heading_id = format!("{prefix}-nt-{}", node.id);
+        let heading_size = children.iter().find_map(|element| match element {
+            Element::Text { id, font_size, .. } if id == &heading_id => Some(*font_size), _ => None,
+        }).ok_or_else(|| Error::Invalid("graph detail heading is missing".into()))?;
+        let detail_id = format!("{prefix}-nd-{}", node.id);
+        for element in children.iter_mut() {
+            if let Element::Text { id, font_size, .. } = element {
+                if id == &detail_id { *font_size = font_size.min(heading_size); }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
     valid_text(id, 40)?;
     if id.is_empty() { return Err(Error::Invalid("graph root ID is required".into())); }
     validate(spec)?; crate::design::validate_theme(theme)?;
-    let prefix = format!("{id}-{}", &format!("{:x}", Sha256::digest(crate::canonical::bytes(&(RENDER_LAYOUT_VERSION, spec))?))[..10]);
-    let mut children = vec![text(format!("{prefix}-title"), [16.0, 0.0, 1120.0, 40.0], &spec.title, 28.0, "@dk1", TextAlign::Left, true), text(format!("{prefix}-subtitle"), [16.0, 44.0, 1120.0, 26.0], &spec.subtitle, 16.0, "@dk2", TextAlign::Left, false)];
+    let prefix = render_prefix(id, spec)?;
+    let mut children = if spec.show_title { vec![text(format!("{prefix}-title"), [16.0, 0.0, 1120.0, 40.0], &spec.title, 28.0, "@dk1", TextAlign::Left, true), text(format!("{prefix}-subtitle"), [16.0, 44.0, 1120.0, 26.0], &spec.subtitle, 16.0, "@dk2", TextAlign::Left, false)] } else { Vec::new() };
     for index in ordered_group_indices(spec)? {
         let region = &spec.groups[index];
         children.push(shape(format!("{prefix}-g-{}", region.id), [region.x, region.y, region.width, region.height], "rect", &region.fill, &region.stroke));
@@ -360,7 +439,7 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
             let width = (node.width - 8.0).min(96.0);
             let icon = node.icon.as_ref().ok_or_else(|| Error::Invalid("icon presentation requires an icon".into()))?;
             children.push(icon_picture(&format!("{prefix}-ni-{}", node.id), icon, [node.x + (node.width - width) / 2.0, node.y + 4.0, width, height])?);
-            children.push(text(format!("{prefix}-nt-{}", node.id), [node.x + 4.0, node.y + 12.0 + height, node.width - 8.0, node.height - 16.0 - height], &node.label, node.font_size, &node.color, TextAlign::Center, true));
+            node_text(&mut children, &prefix, node, [node.x + 4.0, node.y + 12.0 + height, node.width - 8.0, node.height - 16.0 - height])?;
             continue;
         }
         children.push(shape(format!("{prefix}-n-{}", node.id), [node.x, node.y, node.width, node.height], node.kind.preset(), &node.fill, &node.stroke));
@@ -379,7 +458,7 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
             let offset = size + 8.0_f64.min(content[2] / 8.0);
             content[0] += offset; content[2] -= offset;
         }
-        children.push(text(format!("{prefix}-nt-{}", node.id), content, &node.label, node.font_size, &node.color, TextAlign::Center, true));
+        node_text(&mut children, &prefix, node, content)?;
     }
     let mut label_bounds = Vec::new();
     for edge in &spec.edges {
@@ -392,6 +471,7 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
         label_bounds.push(bounds);
     }
     crate::layout::fit_part_text(&mut children, theme)?;
+    cap_detail_fonts(id, spec, &mut children)?;
     let result = Element::Group { visual: None, id: id.into(), x: 64.0, y: 144.0, width: WIDTH, height: HEIGHT, view_width: WIDTH, view_height: HEIGHT, children };
     validate_elements(std::slice::from_ref(&result), (1280.0, 720.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
     Ok(result)
@@ -403,14 +483,15 @@ pub fn catalog() -> Value {
         json!({"id":"approval","name":"Approval flow","spec":{"version":1,"title":"Approval flow","subtitle":"Editable example","nodes":[{"id":"input","label":"Request","x":40,"y":220},{"id":"review","label":"Review","kind":"diamond","x":390,"y":190,"width":200,"height":140},{"id":"approve","label":"Approved","kind":"rounded_rectangle","x":830,"y":120},{"id":"revise","label":"Revise","x":830,"y":340}],"edges":[{"id":"submit","source":"input","target":"review"},{"id":"yes","source":"review","target":"approve","label":"Yes"},{"id":"no","source":"review","target":"revise","label":"No"}],"groups":[]}}),
         json!({"id":"boundary","name":"Network boundary","spec":{"version":1,"title":"Network boundary","subtitle":"Editable example","nodes":[{"id":"client","label":"Client","x":40,"y":210},{"id":"app","label":"Application","x":430,"y":210,"group":"private"},{"id":"store","label":"Storage","kind":"cylinder","x":800,"y":210,"group":"private"}],"edges":[{"id":"access","source":"client","target":"app","label":"Authorized"},{"id":"data","source":"app","target":"store"}],"groups":[{"id":"private","label":"Private network","x":370,"y":120,"width":680,"height":300}]}}),
     ];
-    json!({"version":1,"shapes":["rectangle","rounded_rectangle","ellipse","diamond","cylinder","cloud"],"ports":["auto","top","left","bottom","right"],"routes":["straight","elbow"],"limits":{"nodes":48,"edges":64,"groups":MAX_GROUPS,"group_depth":MAX_GROUP_DEPTH,"rendered_elements":256},"canvas":{"width":WIDTH,"height":HEIGHT,"content_top":CONTENT_TOP},"schema":schemars::schema_for!(GraphSpec),"operation_schema":schemars::schema_for!(GraphOperation),"examples":examples})
+    json!({"version":1,"shapes":["rectangle","rounded_rectangle","ellipse","diamond","cylinder","cloud"],"ports":["auto","top","left","bottom","right"],"routes":["straight","elbow"],"limits":{"nodes":48,"edges":64,"groups":MAX_GROUPS,"group_depth":MAX_GROUP_DEPTH,"rendered_elements":256},"canvas":{"width":WIDTH,"height":HEIGHT,"content_top":CONTENT_TOP,"content_top_without_title":0.0},"node_text":{"detail_max_length":240,"detail_font_size_min":12,"detail_font_size_max":40,"detail_font_size_default":"max(12, font_size * 0.8)","detail_font_size_ceiling":"font_size","text_align":["left","center","right"],"default_alignment":"left with detail, center without detail","heading_bold_default":true},"schema":schemars::schema_for!(GraphSpec),"operation_schema":schemars::schema_for!(GraphOperation),"examples":examples})
 }
 
 pub fn change(document: &crate::document::Document, expected_revision: u64, slide_id: &str, id: &str, spec: &GraphSpec, update: bool) -> Result<crate::document::TransactionResult> {
-    if update && !document.parts.iter().any(|part| part.slide_id == slide_id && part.element_id == id && part.spec.preset == "diagram/custom") {
-        return Err(Error::Invalid("managed graph metadata not found".into()));
-    }
-    let part = crate::parts::PartSpec { version: 1, preset: "diagram/custom".into(), title: spec.title.clone(), subtitle: spec.subtitle.clone(), data: crate::parts::PartData::Diagram { graph: spec.clone() } };
+    let layout = if update {
+        document.parts.iter().find(|part| part.slide_id == slide_id && part.element_id == id && part.spec.preset == "diagram/custom")
+            .ok_or_else(|| Error::Invalid("managed graph metadata not found".into()))?.spec.layout.clone()
+    } else { None };
+    let part = crate::parts::PartSpec { version: 1, preset: "diagram/custom".into(), title: spec.title.clone(), subtitle: spec.subtitle.clone(), data: crate::parts::PartData::Diagram { graph: spec.clone() }, layout };
     crate::parts::state::change(document, expected_revision, slide_id, id, &part, update)
 }
 
@@ -495,7 +576,10 @@ pub fn transform(spec: &GraphSpec, operations: &[GraphOperation]) -> Result<Grap
                     }
                     Ok(())
                 };
-                if next.groups.is_empty() { place(&mut next.nodes.iter_mut().collect(), [0.0, CONTENT_TOP, WIDTH, HEIGHT - CONTENT_TOP])?; }
+                if next.groups.is_empty() {
+                    let top = next.content_top();
+                    place(&mut next.nodes.iter_mut().collect(), [0.0, top, WIDTH, HEIGHT - top])?;
+                }
                 else {
                     if next.nodes.iter().any(|node| node.group.is_none()) { return Err(Error::Invalid("grid with groups requires all nodes to belong to a group".into())); }
                     for group in &next.groups { place(&mut next.nodes.iter_mut().filter(|node| node.group.as_deref() == Some(&group.id)).collect(), [group.x + 8.0, group.y + 40.0, group.width - 16.0, group.height - 48.0])?; }

@@ -10,8 +10,15 @@ use std::io::Cursor;
 #[serde(deny_unknown_fields)]
 pub struct RasterInfo { pub width: u32, pub height: u32, pub mime_type: String, pub sha256: String, pub byte_length: usize }
 
+const RASTER_INFO_CACHE_CAPACITY: usize = 512;
+
 thread_local! {
     static RASTER_INFO_CACHE: RefCell<VecDeque<RasterInfo>> = const { RefCell::new(VecDeque::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static RASTER_DECODE_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub fn create_asset(id: &str, base64: String, mime_type: &str, alt: &str, size: f64) -> Result<crate::model::Element> {
@@ -199,11 +206,18 @@ pub fn inspect_raster(base64: &str, mime_type: &str) -> Result<RasterInfo> {
     let actual = image::guess_format(&bytes).map_err(|_| Error::Invalid("unrecognized raster image".into()))?;
     if actual != expected { return Err(Error::Invalid("image content does not match its media type".into())); }
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
-    if let Some(info) = RASTER_INFO_CACHE.with(|cache| cache.borrow().iter().find(|info| info.sha256 == sha256 && info.mime_type == mime_type).cloned()) { return Ok(info); }
+    if let Some(info) = RASTER_INFO_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let index = cache.iter().position(|info| info.sha256 == sha256 && info.mime_type == mime_type
+            && info.byte_length == bytes.len() && (1..=4096).contains(&info.width) && (1..=4096).contains(&info.height))?;
+        let info = cache.remove(index)?;
+        cache.push_back(info.clone());
+        Some(info)
+    }) { return Ok(info); }
     let info = decode_raster(&bytes, actual, mime_type, sha256)?;
     RASTER_INFO_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if cache.len() >= 64 { cache.pop_front(); }
+        if cache.len() >= RASTER_INFO_CACHE_CAPACITY { cache.pop_front(); }
         cache.push_back(info.clone());
     });
     Ok(info)
@@ -215,6 +229,8 @@ fn decode_raster(bytes: &[u8], format: ImageFormat, mime_type: &str, sha256: Str
 }
 
 fn decode_image(bytes: &[u8], format: ImageFormat) -> Result<image::DynamicImage> {
+    #[cfg(test)]
+    RASTER_DECODE_ATTEMPTS.with(|count| count.set(count.get() + 1));
     let mut limits = Limits::default();
     limits.max_image_width = Some(4096);
     limits.max_image_height = Some(4096);
@@ -231,32 +247,141 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn reset_raster_cache() {
+        RASTER_INFO_CACHE.with(|cache| cache.borrow_mut().clear());
+        RASTER_DECODE_ATTEMPTS.with(|count| count.set(0));
+    }
+
+    fn raster_decode_attempts() -> usize {
+        RASTER_DECODE_ATTEMPTS.with(|count| count.get())
+    }
+
+    fn cache_test_png(width: u32, seed: u32) -> String {
+        let color = seed.to_le_bytes();
+        let image = image::RgbImage::from_pixel(width, 2, image::Rgb([color[0], color[1], color[2]]));
+        let mut output = Cursor::new(Vec::new());
+        image.write_to(&mut output, ImageFormat::Png).unwrap();
+        STANDARD.encode(output.into_inner())
+    }
+
+    #[test]
+    fn raster_metadata_cache_reuses_191_unique_images_on_second_pass() {
+        reset_raster_cache();
+        let images: Vec<_> = (0..191).map(|seed| cache_test_png(2, seed)).collect();
+        let first: Vec<_> = images.iter().map(|encoded| inspect_raster(encoded, "image/png").unwrap()).collect();
+        let unique: std::collections::BTreeSet<_> = first.iter().map(|info| &info.sha256).collect();
+        assert_eq!(unique.len(), 191);
+        let cold_decodes = raster_decode_attempts();
+        assert_eq!(cold_decodes, 191);
+        for (encoded, expected) in images.iter().zip(&first) {
+            let cached = inspect_raster(encoded, "image/png").unwrap();
+            assert_eq!(cached.sha256, expected.sha256);
+            assert_eq!(cached.mime_type, expected.mime_type);
+            assert_eq!(cached.byte_length, expected.byte_length);
+            assert_eq!((cached.width, cached.height), (2, 2));
+        }
+        let second_pass_decodes = raster_decode_attempts() - cold_decodes;
+        eprintln!("raster cache: unique_images=191 cold_decodes={cold_decodes} second_pass_decodes={second_pass_decodes}");
+        assert_eq!(second_pass_decodes, 0);
+        assert_eq!(RASTER_INFO_CACHE.with(|cache| cache.borrow().len()), 191);
+        reset_raster_cache();
+    }
+
+    #[test]
+    fn raster_metadata_cache_is_bounded_and_refreshes_lru_hits() {
+        reset_raster_cache();
+        for seed in 0..512 { inspect_raster(&cache_test_png(2, seed), "image/png").unwrap(); }
+        assert_eq!(raster_decode_attempts(), 512);
+        assert_eq!(RASTER_INFO_CACHE.with(|cache| cache.borrow().len()), 512);
+        let oldest = cache_test_png(2, 0);
+        let refreshed = inspect_raster(&oldest, "image/png").unwrap();
+        assert_eq!(raster_decode_attempts(), 512);
+        let evicted_sha256 = format!("{:x}", Sha256::digest(STANDARD.decode(cache_test_png(2, 1)).unwrap()));
+        inspect_raster(&cache_test_png(2, 512), "image/png").unwrap();
+        assert_eq!(raster_decode_attempts(), 513);
+        RASTER_INFO_CACHE.with(|cache| {
+            let cache = cache.borrow();
+            assert_eq!(cache.len(), 512);
+            let retained_bytes = cache.capacity() * std::mem::size_of::<RasterInfo>()
+                + cache.iter().map(|info| info.mime_type.capacity() + info.sha256.capacity()).sum::<usize>();
+            assert!(retained_bytes <= 200 * 1024);
+            assert!(cache.iter().any(|info| info.sha256 == refreshed.sha256));
+            assert!(!cache.iter().any(|info| info.sha256 == evicted_sha256));
+        });
+        inspect_raster(&oldest, "image/png").unwrap();
+        assert_eq!(raster_decode_attempts(), 513);
+        inspect_raster(&cache_test_png(2, 1), "image/png").unwrap();
+        assert_eq!(raster_decode_attempts(), 514);
+        for seed in 513..1025 {
+            inspect_raster(&cache_test_png(2, seed), "image/png").unwrap();
+            assert_eq!(RASTER_INFO_CACHE.with(|cache| cache.borrow().len()), 512);
+        }
+        assert_eq!(raster_decode_attempts(), 1026);
+        reset_raster_cache();
+    }
+
     #[test]
     fn raster_metadata_cache_preserves_content_mime_and_size_checks() {
-        RASTER_INFO_CACHE.with(|cache| cache.borrow_mut().clear());
-        let png = |width: u32, color: u8| {
-            let image = image::RgbImage::from_pixel(width, 2, image::Rgb([color, 32, 160]));
-            let mut output = Cursor::new(Vec::new());
-            image.write_to(&mut output, ImageFormat::Png).unwrap();
-            STANDARD.encode(output.into_inner())
-        };
-        let encoded = png(4, 1);
+        reset_raster_cache();
+        let encoded = cache_test_png(4, 1);
         let first = inspect_raster(&encoded, "image/png").unwrap();
         assert_eq!((first.width, first.height), (4, 2));
         assert_eq!(inspect_raster(&encoded, "image/png").unwrap().sha256, first.sha256);
+        assert_eq!(raster_decode_attempts(), 1);
         assert_eq!(RASTER_INFO_CACHE.with(|cache| cache.borrow().len()), 1);
         assert!(inspect_raster(&encoded, "image/jpeg").is_err());
         assert!(inspect_raster(&encoded, "image/svg+xml").is_err());
-        let truncated = STANDARD.decode(&encoded).unwrap();
-        assert!(inspect_raster(&STANDARD.encode(&truncated[..20]), "image/png").is_err());
+        assert!(inspect_raster("!!!!", "image/png").is_err());
+        assert!(inspect_raster(&STANDARD.encode(b"not an image"), "image/png").is_err());
         assert!(inspect_raster(&"A".repeat(1_398_105), "image/png").is_err());
-        assert!(inspect_raster(&png(4097, 2), "image/png").is_err());
+        let mut oversized = STANDARD.decode(&encoded).unwrap();
+        oversized.resize(1024 * 1024 + 1, 0);
+        let oversized = STANDARD.encode(oversized);
+        assert_eq!(oversized.len(), 1_398_104);
+        assert!(inspect_raster(&oversized, "image/png").is_err());
+        assert_eq!(raster_decode_attempts(), 1);
+        let bytes = STANDARD.decode(&encoded).unwrap();
+        let truncated = STANDARD.encode(&bytes[..20]);
+        let too_wide = cache_test_png(4097, 2);
+        for rejected in [&truncated, &too_wide] {
+            for _ in 0..2 {
+                let before = raster_decode_attempts();
+                assert!(inspect_raster(rejected, "image/png").is_err());
+                assert_eq!(raster_decode_attempts(), before + 1);
+                assert_eq!(RASTER_INFO_CACHE.with(|cache| cache.borrow().len()), 1);
+            }
+        }
         assert_eq!(RASTER_INFO_CACHE.with(|cache| cache.borrow().len()), 1);
-        let changed = inspect_raster(&png(8, 1), "image/png").unwrap();
+        let before = raster_decode_attempts();
+        assert_eq!(inspect_raster(&encoded, "image/png").unwrap().sha256, first.sha256);
+        assert_eq!(raster_decode_attempts(), before);
+        let changed = inspect_raster(&cache_test_png(8, 1), "image/png").unwrap();
         assert_eq!((changed.width, changed.height), (8, 2));
         assert_ne!(changed.sha256, first.sha256);
-        for color in 0..70 { inspect_raster(&png(4, color), "image/png").unwrap(); }
-        assert_eq!(RASTER_INFO_CACHE.with(|cache| cache.borrow().len()), 64);
+        assert_eq!(raster_decode_attempts(), before + 1);
+        assert_eq!(RASTER_INFO_CACHE.with(|cache| cache.borrow().len()), 2);
+        reset_raster_cache();
+    }
+
+    #[test]
+    fn raster_metadata_cache_reuses_jpeg_and_reset_forces_redecode() {
+        reset_raster_cache();
+        let image = image::RgbImage::from_pixel(4, 2, image::Rgb([16u8, 32, 160]));
+        let mut output = Cursor::new(Vec::new());
+        image.write_to(&mut output, ImageFormat::Jpeg).unwrap();
+        let encoded = STANDARD.encode(output.into_inner());
+        let first = inspect_raster(&encoded, "image/jpeg").unwrap();
+        assert_eq!((first.width, first.height), (4, 2));
+        assert_eq!(first.mime_type, "image/jpeg");
+        assert_eq!(inspect_raster(&encoded, "image/jpeg").unwrap().sha256, first.sha256);
+        assert!(inspect_raster(&encoded, "image/png").is_err());
+        assert_eq!(raster_decode_attempts(), 1);
+        reset_raster_cache();
+        assert_eq!(RASTER_INFO_CACHE.with(|cache| cache.borrow().len()), 0);
+        assert_eq!(raster_decode_attempts(), 0);
+        assert_eq!(inspect_raster(&encoded, "image/jpeg").unwrap().sha256, first.sha256);
+        assert_eq!(raster_decode_attempts(), 1);
+        reset_raster_cache();
     }
 
     #[test]

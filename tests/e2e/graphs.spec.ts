@@ -5,6 +5,139 @@ import { readFile } from 'node:fs/promises';
 import { icons as lucideIcons } from 'lucide-react';
 import type { ArchitectureIconCatalog, ArchitectureIconAssets } from '../../packages/client/types';
 
+test('graph feedback options preserve native details, titleless geometry and PPTX editing', async ({ page }) => {
+  test.setTimeout(90_000);
+  await openSample(page);
+  await page.getByRole('button', { name: 'New presentation', exact: true }).click();
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+  async function changeGraph(action: () => Promise<unknown>) {
+    await expect(dialog.locator('.graph-actions button')).toBeEnabled();
+    const requested = page.waitForRequest(request => request.url().endsWith('/api/core')
+      && request.method() === 'POST' && request.postDataJSON().op === 'create_graph'
+      && request.postDataJSON().id === 'graph-preview' && request.postDataJSON().spec.title === 'Feedback options');
+    const completed = page.waitForResponse(async response => response.request() === await requested);
+    await action();
+    const response = await completed;
+    expect(response.ok()).toBe(true);
+    expect(await response.finished()).toBeNull();
+    await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+  }
+  async function graphJson() {
+    await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+    return JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue());
+  }
+  const initial = {
+    version: 1, title: 'Feedback options', subtitle: 'Retained subtitle',
+    nodes: [
+      { id: 'source', label: 'Source', x: 24, y: 120, width: 320, height: 200 },
+      { id: 'target', label: 'Target', x: 720, y: 120, width: 320, height: 200 },
+    ],
+    edges: [{ id: 'request', source: 'source', target: 'target', label: 'Request', route: 'elbow' }],
+  };
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  await dialog.getByLabel('Graph JSON', { exact: true }).fill(JSON.stringify(initial));
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await dialog.getByRole('button', { name: 'Select node source', exact: true }).click();
+  await expect(dialog.getByLabel('Show graph title', { exact: true })).toBeChecked();
+  await expect(dialog.getByRole('button', { name: 'Node align center', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(dialog.getByRole('button', { name: 'Node heading bold', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await dialog.getByLabel('Node label', { exact: true }).fill('Gateway');
+  await changeGraph(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  const unchangedOptions = await graphJson();
+  expect(unchangedOptions.show_title).toBeUndefined();
+  for (const key of ['detail', 'detail_font_size', 'text_align', 'heading_bold']) expect(unchangedOptions.nodes[0][key]).toBeUndefined();
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  const detailInput = dialog.getByLabel('Node detail', { exact: true });
+  await detailInput.fill('a'.repeat(241));
+  expect(await detailInput.evaluate((element: HTMLTextAreaElement) => element.checkValidity())).toBe(false);
+  await dialog.getByRole('button', { name: 'Apply node', exact: true }).click();
+  await expect(dialog.locator('.graph-node-detail')).toHaveCount(0);
+  await detailInput.fill(String.fromCodePoint(0x1f680).repeat(240));
+  expect(await detailInput.evaluate((element: HTMLTextAreaElement) => element.checkValidity())).toBe(true);
+  await dialog.getByLabel('Node detail', { exact: true }).fill('First line\nSecond line');
+  await expect(dialog.getByRole('button', { name: 'Node align left', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await dialog.getByLabel('Node font size', { exact: true }).fill('24');
+  await dialog.getByLabel('Node detail font size', { exact: true }).fill('25');
+  expect(await dialog.getByLabel('Node detail font size', { exact: true }).evaluate((element: HTMLInputElement) => element.checkValidity())).toBe(false);
+  await dialog.getByLabel('Node detail font size', { exact: true }).fill('16');
+  await dialog.getByRole('button', { name: 'Node align left', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Node heading bold', exact: true }).click();
+  await changeGraph(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  const source = dialog.locator('.react-flow__node[data-id="source"]');
+  await expect(source.locator('.graph-node-detail')).toContainText('First line');
+  await expect(source.locator('.graph-node-detail')).toContainText('Second line');
+  await expect(source.locator('.graph-fitted-label').first()).toContainText('Gateway');
+  await expect(source.locator('.graph-fitted-label').first().locator('.slide-text')).toHaveCSS('font-weight', '400');
+  await expect(source.locator('.graph-fitted-label').first().locator('.slide-text')).toHaveCSS('font-size', '24px');
+  await expect(source.locator('.graph-node-detail .slide-text')).toHaveCSS('font-size', '16px');
+  await expect(source.locator('.graph-node-detail .slide-text')).toHaveCSS('text-align', 'left');
+  await changeGraph(() => dialog.getByLabel('Show graph title', { exact: true }).uncheck());
+  await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+  await expect(dialog.getByLabel('Show graph title', { exact: true })).toBeChecked();
+  await expect(dialog.getByLabel('Graph y', { exact: true })).toHaveAttribute('min', '88');
+  await changeGraph(() => dialog.getByRole('button', { name: 'Redo diagram edit', exact: true }).click());
+  await expect(dialog.getByLabel('Show graph title', { exact: true })).not.toBeChecked();
+  await expect(dialog.getByLabel('Graph y', { exact: true })).toHaveAttribute('min', '0');
+  await expect(dialog.getByLabel('Graph title', { exact: true })).toHaveValue('Feedback options');
+  await expect(dialog.getByLabel('Graph subtitle', { exact: true })).toHaveValue('Retained subtitle');
+  await dialog.getByLabel('Graph y', { exact: true }).fill('0');
+  await dialog.getByLabel('Graph height', { exact: true }).fill('512');
+  await changeGraph(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  await expect(source).toHaveCSS('height', '512px');
+  await expect(source).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 24, 0)');
+  const refusedTitle = page.waitForResponse(response => response.url().endsWith('/api/core')
+    && response.request().method() === 'POST' && response.request().postDataJSON().op === 'create_graph'
+    && response.request().postDataJSON().spec.show_title === true);
+  await dialog.getByLabel('Show graph title', { exact: true }).check();
+  expect((await refusedTitle).ok()).toBe(false);
+  await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+  await expect(dialog.getByLabel('Show graph title', { exact: true })).not.toBeChecked();
+  await expect(dialog.getByRole('alert')).toBeVisible();
+  await expect(dialog.locator('.graph-edge-label')).toContainText('Request');
+  await dialog.locator('.react-flow__controls-fitview').click();
+  expect(await source.locator('.react-flow__resize-control.handle.bottom.right').evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    const target = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    return target === element || element.contains(target);
+  })).toBe(true);
+  const authored = await graphJson();
+  expect(authored).toMatchObject({ show_title: false, nodes: [{ id: 'source', y: 0, height: 512, detail: 'First line\nSecond line', detail_font_size: 16, text_align: 'left', heading_bold: false }, { id: 'target' }] });
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Preview', exact: true }).click());
+  await expect(dialog.locator('.graph-native-preview')).toContainText('First line');
+  await expect(dialog.locator('.graph-native-preview')).not.toContainText('Feedback options');
+  await expect(dialog.locator('.graph-native-preview')).not.toContainText('Retained subtitle');
+  await test.info().attach('graph-feedback-titleless', { body: await page.screenshot(), contentType: 'image/png' });
+  await dialog.getByRole('button', { name: 'Insert graph', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  const file = await download;
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: file.suggestedFilename(), mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await readFile((await file.path())!) });
+  await page.getByRole('button', { name: /^Select graph-/ }).click();
+  await page.getByRole('button', { name: 'Edit graph', exact: true }).click();
+  await expect(source.locator('.graph-node-detail')).toContainText('Second line');
+  expect(await graphJson()).toEqual(authored);
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await dialog.getByRole('button', { name: 'Select node source', exact: true }).click();
+  await dialog.getByLabel('Graph x', { exact: true }).fill('32');
+  await changeGraph(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  expect((await graphJson()).nodes[0]).toEqual({ ...authored.nodes[0], x: 32 });
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await dialog.getByLabel('Node detail', { exact: true }).fill('   ');
+  await changeGraph(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  const cleared = await graphJson();
+  expect(cleared.nodes[0].detail).toBeUndefined();
+  expect(cleared.nodes[0].detail_font_size).toBeUndefined();
+  expect(cleared.nodes[0].text_align).toBe('left');
+  expect(cleared.nodes[0].heading_bold).toBe(false);
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+  await expect(dialog.getByLabel('Node detail', { exact: true })).toHaveValue('First line\nSecond line');
+});
+
 test('relationship labels have no background and remain clear of connector paths', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'New presentation', exact: true })).toBeEnabled();
@@ -597,6 +730,29 @@ for (const width of [1440, 390]) {
     await page.evaluate(() => document.fonts.ready);
     await dialog.screenshot({ path: `.artifacts/graph-editor-${width}.png` });
     await dialog.getByRole('button', { name: 'Select node api', exact: true }).click();
+    await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+    await dialog.getByLabel('Node detail', { exact: true }).fill('Routes validated requests.');
+    await dialog.getByLabel('Graph height', { exact: true }).fill('160');
+    await dialog.getByLabel('Node font size', { exact: true }).fill('20');
+    await dialog.getByLabel('Node detail font size', { exact: true }).fill('14');
+    await dialog.getByRole('button', { name: 'Node align right', exact: true }).focus();
+    await dialog.getByRole('button', { name: 'Node align right', exact: true }).press('Space');
+    const updated = waitForCoreOperation(page, 'create_graph');
+    await dialog.getByRole('button', { name: 'Apply node', exact: true }).click();
+    await updated;
+    await expect(dialog.locator('.react-flow__node[data-id="api"] .graph-node-detail')).toContainText('Routes validated requests.');
+    await expect(dialog.getByRole('button', { name: 'Node align right', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+    const titleChanged = waitForCoreOperation(page, 'create_graph');
+    await dialog.getByLabel('Show graph title', { exact: true }).uncheck();
+    await titleChanged;
+    await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+    await page.evaluate(() => document.fonts.ready);
+    expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+    expect(await dialog.locator('.graph-topbar, .graph-properties-form, .graph-text-options').evaluateAll(elements => elements.filter(element => element.scrollWidth > element.clientWidth + 1).map(element => element.className))).toEqual([]);
+    const feedbackResults = await new AxeBuilder({ page }).include('.graph-editor').analyze();
+    expect(feedbackResults.violations.filter((issue) => ['serious', 'critical'].includes(issue.impact ?? ''))).toEqual([]);
+    await dialog.screenshot({ path: `.artifacts/graph-feedback-${width}.png` });
     await dialog.getByRole('button', { name: 'Choose node icon', exact: true }).click();
     const picker = dialog.getByRole('region', { name: 'Node icon', exact: true });
     await expect(picker.getByLabel('Search icons', { exact: true })).toBeFocused();

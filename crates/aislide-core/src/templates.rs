@@ -53,6 +53,16 @@ pub fn load_potx(id: String, bytes: Vec<u8>) -> Result<Document> {
     Ok(serde_json::from_value(result["document"].clone())?)
 }
 
+pub(crate) fn master_source(bytes: Vec<u8>, potx: bool) -> Result<Package> {
+    let package = Package::open(bytes)?;
+    safe(&package)?;
+    let main = main_part(&package)?;
+    if content_type(&package, &main)? != if potx { POTX } else { PPTX } {
+        return Err(Error::Unsupported("master source must match the selected non-macro PPTX or POTX format".into()));
+    }
+    if potx { Package::open(convert(package, POTX, PPTX)?) } else { Ok(package) }
+}
+
 pub fn export_potx(document: &Document) -> Result<Vec<u8>> {
     let result = document::export_presentation(document)?;
     let bytes = STANDARD.decode(result["base64"].as_str().ok_or_else(|| Error::Invalid("presentation export bytes missing".into()))?).map_err(|_| Error::Invalid("presentation export encoding".into()))?;

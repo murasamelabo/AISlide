@@ -269,9 +269,10 @@ fn groups(drawing: &mut Drawing, category: &str, variant: usize, data: &PartData
 }
 
 fn matrix(drawing: &mut Drawing, variant: usize, data: &PartData) -> Result<()> {
-    let PartData::Matrix { rows,columns,cells }=data else {return Err(Error::Invalid("matrix data required".into()));};
-    if variant==2 {let mut table=vec![std::iter::once(String::new()).chain(columns.iter().cloned()).collect::<Vec<_>>()];for (label,cells) in rows.iter().zip(cells) {table.push(std::iter::once(label.clone()).chain(cells.iter().cloned()).collect());} drawing.elements.push(Element::Table { id:drawing.id(),x:32.0,y:110.0,width:1088.0,height:350.0,rows:table,font_size:20.0,format:Default::default() });return Ok(());}
+    let PartData::Matrix { rows,columns,cells,corner_label }=data else {return Err(Error::Invalid("matrix data required".into()));};
+    if variant==2 {let mut table=vec![std::iter::once(corner_label.clone()).chain(columns.iter().cloned()).collect::<Vec<_>>()];for (label,cells) in rows.iter().zip(cells) {table.push(std::iter::once(label.clone()).chain(cells.iter().cloned()).collect());} drawing.elements.push(Element::Table { id:drawing.id(),x:32.0,y:110.0,width:1088.0,height:350.0,rows:table,font_size:20.0,format:Default::default() });return Ok(());}
     let width=880.0/columns.len() as f64; let height=320.0/rows.len() as f64;
+    if !corner_label.is_empty() {drawing.text(corner_label,[24.0,90.0,180.0,48.0],22.0,"@dk1",true,TextAlign::Left);}
     for (index,column) in columns.iter().enumerate() {drawing.text(column,[228.0+index as f64*width,90.0,width-16.0,48.0],22.0,&accent(index),true,TextAlign::Center);}
     for (row_index,row) in rows.iter().enumerate() {let top=150.0+row_index as f64*height; drawing.text(row,[24.0,top+40.0,180.0,height-52.0],20.0,"@dk1",true,TextAlign::Left);for (column_index,cell) in cells[row_index].iter().enumerate() {let left=224.0+column_index as f64*width; drawing.rect([left,top,width-12.0,height-12.0],if variant==1 && column_index==columns.len()-1 {"@accent1"} else {"@lt2"}); drawing.text(cell,[left+22.0,top+30.0,width-56.0,height-58.0],22.0,if variant==1 && column_index==columns.len()-1 {"@lt1"} else {"@dk1"},false,TextAlign::Center);}}
     Ok(())
