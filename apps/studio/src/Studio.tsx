@@ -670,7 +670,7 @@ export default function Studio() {
   }, [dirty])
   const closeRequested = useEffectEvent((event: CloseRequestedEvent) => {
     if (busy || activeOperation.current || modal || nameDialog || pendingReplacement) { event.preventDefault(); return }
-    if (dirty) { event.preventDefault(); setPendingReplacement(() => async () => getCurrentWindow().destroy()) }
+    if (dirty) { event.preventDefault(); setError(''); setPendingReplacement(() => async () => getCurrentWindow().destroy()) }
   })
   useEffect(() => {
     if (!isTauri()) return

@@ -78,6 +78,113 @@ async function launchOwnedNative(context, recovery, endpoint) {
   return { app, page, browser, profile, stop };
 }
 
+async function requestOwnedClose(application) {
+  await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
+    $ErrorActionPreference = 'Stop'
+    Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class AISlideOwnedClose { [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool PostMessage(IntPtr handle, uint message, IntPtr word, IntPtr data); }'
+    $owned = Get-Process -Id ${application.pid} -ErrorAction Stop
+    if ($owned.Path -ne '${application.spawnfile.replaceAll("'", "''")}' -or $owned.MainWindowHandle -eq 0) { throw 'Owned test window identity changed' }
+    if (-not [AISlideOwnedClose]::PostMessage($owned.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) { throw 'Owned close request failed' }
+  `], { windowsHide: true });
+}
+
+test('native unsaved close cancels safely then discards only on explicit confirmation', { timeout: 90000, skip: process.platform !== 'win32' }, async context => {
+  const recovery = await ownedRecovery(context);
+  const fixture = await startProviderFixture(await requestCore({ op: 'sample' }));
+  context.after(() => fixture.close());
+  const owned = await launchOwnedNative(context, recovery, fixture.endpoint);
+  const { app, page } = owned;
+  await page.getByRole('button', { name: 'New presentation', exact: true }).click();
+  await expect(page.locator('.dirty-indicator')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+  await requestOwnedClose(app);
+  const unsaved = page.getByRole('dialog', { name: 'Unsaved changes', exact: true });
+  await expect(unsaved).toBeVisible();
+  await unsaved.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(unsaved).toHaveCount(0);
+  assert.equal(app.exitCode, null);
+  await expect(page.locator('.dirty-indicator')).toBeVisible();
+  await requestOwnedClose(app);
+  await expect(unsaved).toBeVisible();
+  await unsaved.getByRole('button', { name: 'Discard changes', exact: true }).click().catch(error => {
+    if (!page.isClosed()) throw error;
+  });
+  try { await expect.poll(() => app.exitCode, { timeout: 10000, message: 'Explicit discard must close the owned native process normally' }).toBe(0); }
+  catch (error) {
+    if (!page.isClosed()) context.diagnostic(`Close error: ${await unsaved.getByRole('alert').textContent().catch(() => 'No alert')}`);
+    throw error;
+  }
+});
+
+test('native unsaved close saves a new file before normal process exit', { timeout: 90000, skip: process.platform !== 'win32' }, async context => {
+  const recovery = await ownedRecovery(context);
+  const fixture = await startProviderFixture(await requestCore({ op: 'sample' }));
+  context.after(() => fixture.close());
+  const { app, page } = await launchOwnedNative(context, recovery, fixture.endpoint);
+  await page.getByRole('button', { name: 'New presentation', exact: true }).click();
+  await expect(page.locator('.dirty-indicator')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+  await requestOwnedClose(app);
+  const unsaved = page.getByRole('dialog', { name: 'Unsaved changes', exact: true });
+  await expect(unsaved).toBeVisible();
+  await unsaved.getByRole('button', { name: 'Save and continue', exact: true }).click();
+  await nativeSaveDialog(app.pid, 'cancel');
+  await expect(unsaved.getByRole('button', { name: 'Save and continue', exact: true })).toBeEnabled();
+  assert.equal(app.exitCode, null, 'Cancelling Save must retain the native document');
+  const destination = join(recovery.directory, 'Synthetic-close-save.pptx');
+  await unsaved.getByRole('button', { name: 'Save and continue', exact: true }).click();
+  await nativeSaveDialog(app.pid, 'save', destination);
+  await expect.poll(() => app.exitCode, { timeout: 15000, message: 'Successful Save and continue must close the owned process' }).toBe(0);
+  const { readFile } = await import('node:fs/promises');
+  assert.equal((await readFile(destination)).subarray(0, 2).toString(), 'PK');
+});
+
+test('native close confirmation does not inherit an earlier failed operation error', { timeout: 90000, skip: process.platform !== 'win32' }, async context => {
+  const recovery = await ownedRecovery(context);
+  const fixture = await startProviderFixture(await requestCore({ op: 'sample' }));
+  context.after(() => fixture.close());
+  const { app, page } = await launchOwnedNative(context, recovery, fixture.endpoint);
+  await page.getByRole('button', { name: 'New presentation', exact: true }).click();
+  await expect(page.locator('.dirty-indicator')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+  const saveEndpoint = await page.evaluate(() => window.__TAURI_INTERNALS__.convertFileSrc('save_presentation', 'ipc'));
+  let injected = false;
+  await page.route(saveEndpoint, async route => {
+    if (route.request().method() !== 'POST' || injected) return route.continue();
+    injected = true;
+    await route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'Tauri-Response': 'error', 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'Tauri-Response' },
+      body: JSON.stringify('runtime error: failed to send message to the webview'),
+    });
+  });
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('failed to send message to the webview');
+  assert.equal(injected, true, 'The failed native save response must reach the UI');
+  await expect(page.getByRole('button', { name: 'Save PPTX', exact: true })).toBeEnabled();
+  await requestOwnedClose(app);
+  const unsaved = page.getByRole('dialog', { name: 'Unsaved changes', exact: true });
+  await expect(unsaved).toBeVisible();
+  await expect(unsaved.getByRole('alert')).toHaveCount(0).catch(async error => {
+    console.log('NATIVE_CLOSE_FAILURE', JSON.stringify({
+      scripts: await page.locator('script[src]').evaluateAll(scripts => scripts.map(script => script.src)),
+      alerts: await unsaved.getByRole('alert').allTextContents(),
+    }));
+    throw error;
+  });
+  injected = false;
+  await unsaved.getByRole('button', { name: 'Save and continue', exact: true }).click();
+  await expect(unsaved.getByRole('alert')).toContainText('failed to send message to the webview');
+  assert.equal(injected, true, 'A new failed save inside the close dialog must remain visible');
+  await expect(unsaved.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled();
+  assert.equal(app.exitCode, null, 'A failed save must not close the native document');
+  await requestOwnedClose(app);
+  await expect(unsaved.getByRole('alert')).toContainText('failed to send message to the webview');
+  await unsaved.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.locator('.dirty-indicator')).toBeVisible();
+  assert.equal(app.exitCode, null);
+});
+
 async function nativeSaveDialog(processId, action, destination = '') {
   const execute = async action => {
   const { stdout } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
