@@ -176,7 +176,7 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
         let graph_id = format!("part-{}", &identity[..24]);
         let mut result = crate::graphs::create(&graph_id, &rendered_graph, theme)?;
         if let Element::Group { id: root_id, .. } = &mut result { *root_id = id.into(); }
-        adopt_layout(&mut result, layout, 0.0, content_height, theme)?;
+        adopt_layout(&mut result, layout, 0.0, content_height, theme, &crate::graphs::small_annotation_ids(&graph_id, &rendered_graph)?)?;
         if let Element::Group { children, .. } = &mut result { crate::graphs::cap_detail_fonts(&graph_id, &rendered_graph, children)?; }
         return Ok(result);
     }
@@ -195,7 +195,7 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
             if let Element::Group { children, .. } = &mut result { drop(children.drain(..2)); }
         }
         let content_top = if layout.show_title { 0.0 } else if category == "venn" && variant == 1 { 80.0 } else { 88.0 };
-        adopt_layout(&mut result, layout, content_top, 512.0 - content_top, theme)?;
+        adopt_layout(&mut result, layout, content_top, 512.0 - content_top, theme, &BTreeSet::new())?;
     }
     Ok(result)
 }
@@ -229,15 +229,15 @@ fn transform_layout_element(element: &mut Element, horizontal: f64, vertical: f6
     Ok(())
 }
 
-fn minimum_layout_text(text: &str, size: f64, format: &TextFormat) -> Result<()> {
-    if !text.is_empty() && (size < 12.0 || format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs)
-        .any(|run| !run.text.is_empty() && run.style.font_size.unwrap_or(size) < 12.0)) {
-        return Err(Error::Invalid("bounded part text requires at least 12px".into()));
+fn minimum_layout_text(text: &str, size: f64, format: &TextFormat, minimum: f64) -> Result<()> {
+    if !text.is_empty() && (size < minimum || format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs)
+        .any(|run| !run.text.is_empty() && run.style.font_size.unwrap_or(size) < minimum)) {
+        return Err(Error::Invalid(format!("bounded part text requires at least {minimum}px")));
     }
     Ok(())
 }
 
-fn adopt_layout(element: &mut Element, layout: &PartLayout, content_top: f64, content_height: f64, theme: &crate::design::Theme) -> Result<()> {
+fn adopt_layout(element: &mut Element, layout: &PartLayout, content_top: f64, content_height: f64, theme: &crate::design::Theme, small_annotations: &BTreeSet<String>) -> Result<()> {
     layout.validate()?;
     let Element::Group { x, y, width, height, view_width, view_height, children, .. } = element else {
         return Err(Error::Invalid("part layout requires a group".into()));
@@ -245,13 +245,13 @@ fn adopt_layout(element: &mut Element, layout: &PartLayout, content_top: f64, co
     for child in children.iter_mut() { transform_layout_element(child, layout.width / *view_width, layout.height / content_height, content_top)?; }
     *x = layout.x; *y = layout.y; *width = layout.width; *height = layout.height;
     *view_width = layout.width; *view_height = layout.height;
-    crate::layout::fit_part_text(children, theme)?;
+    crate::layout::fit_part_text_with_small_annotations(children, theme, small_annotations)?;
     for child in crate::model::element_list(children) {
         match child {
-            Element::Text { text, font_size, format, .. } | Element::Shape { text, font_size, format, .. } => minimum_layout_text(text, *font_size, format)?,
+            Element::Text { id, text, font_size, format, .. } | Element::Shape { id, text, font_size, format, .. } => minimum_layout_text(text, *font_size, format, if small_annotations.contains(id) { 8.0 } else { 12.0 })?,
             Element::Table { rows, font_size, format, .. } => {
                 for (row_index, row) in rows.iter().enumerate() {
-                    for (column_index, text) in row.iter().enumerate() { minimum_layout_text(text, *font_size, &format.cell_style(row_index, column_index).text(text))?; }
+                    for (column_index, text) in row.iter().enumerate() { minimum_layout_text(text, *font_size, &format.cell_style(row_index, column_index).text(text), 12.0)?; }
                 }
             }
             _ => {}
@@ -369,7 +369,7 @@ mod tests {
         let mut element: Element = serde_json::from_value(json!({"type":"group","id":"root","x":64,"y":144,"width":1152,"height":512,"view_width":1152,"view_height":512,"children":[nested]})).unwrap();
         let original = serde_json::to_value(&element).unwrap();
         let layout = PartLayout { x: 20.0, y: 30.0, width: 576.0, height: 512.0, show_title: true };
-        adopt_layout(&mut element, &layout, 0.0, 512.0, &crate::design::Theme::default()).unwrap();
+        adopt_layout(&mut element, &layout, 0.0, 512.0, &crate::design::Theme::default(), &BTreeSet::new()).unwrap();
         let result = serde_json::to_value(element).unwrap();
         let nested = &result["children"][0];
         assert_eq!(nested["x"], 50.0);
@@ -409,7 +409,7 @@ mod tests {
         ] {
             let mut element: Element = serde_json::from_value(json!({"type":"group","id":"root","x":64,"y":144,"width":1152,"height":512,"view_width":1152,"view_height":512,"children":[child]})).unwrap();
             let layout = PartLayout { x: 0.0, y: 0.0, width: 1152.0, height: 424.0, show_title: false };
-            assert!(adopt_layout(&mut element, &layout, 88.0, 424.0, &crate::design::Theme::default()).is_err(), "{child}");
+            assert!(adopt_layout(&mut element, &layout, 88.0, 424.0, &crate::design::Theme::default(), &BTreeSet::new()).is_err(), "{child}");
         }
     }
 }

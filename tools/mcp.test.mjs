@@ -1282,6 +1282,41 @@ test('P1 MCP finalization publishes a traceable new bundle without changing the 
   } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test('MCP bounded graph annotations honor small fonts and report actionable group bounds', async () => {
+  const client = new Client({ name: 'bounded-graph-feedback-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic small graph annotations' });
+    const current = await call('get_document', { deck_id });
+    const slide_id = current.deck.slides[0].id;
+    const spec = { version: 1, title: 'Small annotations', show_title: false, nodes: [
+      { id: 'source', label: 'Source', x: 48, y: 40, width: 200, height: 96, group: 'boundary' },
+      { id: 'target', label: 'Target', x: 560, y: 240, width: 220, height: 112, group: 'boundary' },
+    ], edges: [{ id: 'flow', source: 'source', target: 'target', label: 'HTTPS', label_font_size: 11, badge: { number: 2, position: 0.75, font_size: 11 } }],
+    groups: [{ id: 'boundary', label: 'Boundary', x: 0, y: 10, width: 1000, height: 450, padding: 12, header_height: 30, header_font_size: 11 }] };
+    const operation = { op: 'add_graph', slide_id, id: 'architecture', spec, layout: { x: 64, y: 144, width: 1152, height: 512, show_title: false } };
+    await call('apply_operations', { deck_id, expected_revision: current.revision, expected_hash: current.hash, operations: [operation] });
+    const inserted = await call('get_document', { deck_id });
+    const children = inserted.deck.slides[0].elements[0].children;
+    for (const suffix of ['-et-flow', '-eb-flow', '-gt-boundary']) assert.equal(children.find(child => child.id.endsWith(suffix)).font_size, 11);
+    const invalid = structuredClone(operation);
+    invalid.id = 'invalid'; invalid.spec.nodes[0].x = 8;
+    const rejected = await client.callTool({ name: 'apply_operations', arguments: { deck_id, expected_revision: inserted.revision, expected_hash: inserted.hash, operations: [invalid] } });
+    assert.equal(rejected.isError, true);
+    const error = JSON.stringify(rejected.content);
+    for (const detail of ['source', 'boundary', 'x >= 12', 'y >= 40', 'actual x=8, y=40']) assert.ok(error.includes(detail), error);
+    assert.deepEqual(await call('get_document', { deck_id }), inserted);
+    await call('undo', { deck_id });
+    assert.equal((await call('get_document', { deck_id })).hash, current.hash);
+  } finally { await client.close(); }
+});
+
 test('MCP layout preflight reports rounded-container warnings and informational badges without mutation', async () => {
   const client = new Client({ name: 'layout-preflight-test', version: '1.0.0' });
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });

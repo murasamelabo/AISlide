@@ -76,8 +76,9 @@ Use `PartSpec.layout:{x,y,width,height,show_title?}` for a bounded part region.
 The frame must fit within 4096 scene pixels, including its right/bottom
 edges, and within the destination slide on insertion. `show_title:false`
 removes the part title/subtitle band; omission defaults true. Explicit-region
-fitting normalizes geometry and absolute table tracks, enforces a 12px text
-floor and can reject overflow or missing glyphs. Enlarge the region or reduce
+fitting normalizes geometry and absolute table tracks, normally enforces a
+12px text floor and can reject overflow or missing glyphs. Explicitly small
+graph annotations have the exception described below. Enlarge the region or reduce
 content when it cannot fit. Some chart axis labels occupy the removed 88px
 band and make title removal reject. Chart-internal typography has not been
 newly qualified by these checks. Omitted layout retains previous placement.
@@ -93,7 +94,12 @@ Omitting the new fields preserves the earlier title/label presentation.
 
 Graph edges also accept `stroke_width` (0.5-12, default 2), `label_color`
 (default `@dk1`) and `label_font_size` (8-40, default 16). These sizes are in
-graph pixels, before any explicit part-region fitting and its 12px floor.
+graph pixels, before any explicit part-region fitting. Explicit font sizes
+below 12 on edge labels, numbered badges and group headers opt those specific
+annotations into an 8px fitting floor, including bounded `add_graph` layouts.
+Omitted sizes or sizes of 12 and above retain the 12px fitting floor; node
+headings/details and ordinary parts always retain it. Fitting still rejects
+clipping or unavailable glyphs rather than shrinking below the applicable floor.
 Use `label_placement:{position,side?,offset?}` for an explicit label: `position`
 is 0-1 of the complete route length from the semantic source to target;
 `side` is `above` (default) or `below`, and `offset` is the 0-128px gap from
@@ -131,6 +137,10 @@ Groups accept `padding` (0-64px, default 8) on left/right/bottom,
 `header_font_size` (8-32px, default 18). Headers must fit the band, with
 `header_font_size * 1.25 <= header_height - 12`. Containment, grid layout,
 Studio placement and resize constraints use these values consistently.
+The minimum node y is `group.y + header_height`, not that value plus padding;
+the minimum x is `group.x + padding`. Containment errors include node/group
+IDs, these minimum coordinates, the allowed right/bottom boundaries and the
+actual frame, so horizontal padding violations are also distinguishable.
 All options are retained through SDK/MCP managed edits and Studio's Canvas,
 Preview and JSON views. Optional styles/placements accept null to remove
 them; `waypoints` is an array, not null. Native polyline/custom-site tests

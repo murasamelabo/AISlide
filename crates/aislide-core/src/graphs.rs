@@ -245,6 +245,17 @@ fn contains(region: &GraphGroup, rect: [f64; 4]) -> bool {
     x >= region.x + region.padding() && y >= region.y + region.header_height() && x + width <= region.x + region.width - region.padding() && y + height <= region.y + region.height - region.padding()
 }
 
+fn containment_error(kind: &str, id: &str, region: &GraphGroup, rect: [f64; 4]) -> Error {
+    let [x, y, width, height] = rect;
+    let owner = if kind == "node" { "group" } else { "parent" };
+    Error::Invalid(format!(
+        "graph {kind} must fit inside its {owner} below the group label: '{id}' in group '{}'; required x >= {}, y >= {}, right <= {}, bottom <= {}; actual x={x}, y={y}, width={width}, height={height}; padding={}, header_height={}",
+        region.id, region.x + region.padding(), region.y + region.header_height(),
+        region.x + region.width - region.padding(), region.y + region.height - region.padding(),
+        region.padding(), region.header_height()
+    ))
+}
+
 fn icon_height(node: &GraphNode) -> f64 {
     let text_height = node.detail.as_ref().map_or(node.font_size * 2.5, |detail| {
         node.font_size * 1.25 * node.label.lines().count().max(1) as f64
@@ -281,7 +292,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
     for region in &spec.groups {
         if let Some(parent) = &region.parent {
             let ancestor = spec.groups.iter().find(|group| &group.id == parent).ok_or_else(|| Error::Invalid("unknown graph parent group".into()))?;
-            if !contains(ancestor, [region.x, region.y, region.width, region.height]) { return Err(Error::Invalid("graph group must fit inside its parent below the group label".into())); }
+            if !contains(ancestor, [region.x, region.y, region.width, region.height]) { return Err(containment_error("group", &region.id, ancestor, [region.x, region.y, region.width, region.height])); }
         }
         if let Some(icon) = &region.icon {
             valid_text(&icon.alt, 500)?;
@@ -310,7 +321,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
         }
         if let Some(parent) = &node.group {
             let region = spec.groups.iter().find(|region| &region.id == parent).ok_or_else(|| Error::Invalid("unknown graph group".into()))?;
-            if !contains(region, [node.x, node.y, node.width, node.height]) { return Err(Error::Invalid("graph node must fit inside its group below the group label".into())); }
+            if !contains(region, [node.x, node.y, node.width, node.height]) { return Err(containment_error("node", &node.id, region, [node.x, node.y, node.width, node.height])); }
         }
     }
     for edge in &spec.edges {
@@ -546,6 +557,19 @@ fn render_prefix(id: &str, spec: &GraphSpec) -> Result<String> {
     Ok(format!("{id}-{}", &format!("{:x}", Sha256::digest(crate::canonical::bytes(&(RENDER_LAYOUT_VERSION, spec))?))[..10]))
 }
 
+pub(crate) fn small_annotation_ids(id: &str, spec: &GraphSpec) -> Result<BTreeSet<String>> {
+    let prefix = render_prefix(id, spec)?;
+    let mut ids = BTreeSet::new();
+    for edge in &spec.edges {
+        if edge.label_font_size.is_some_and(|size| size < 12.0) { ids.insert(format!("{prefix}-et-{}", edge.id)); }
+        if edge.badge.as_ref().is_some_and(|badge| badge.font_size < 12.0) { ids.insert(format!("{prefix}-eb-{}", edge.id)); }
+    }
+    for group in &spec.groups {
+        if group.header_font_size.is_some_and(|size| size < 12.0) { ids.insert(format!("{prefix}-gt-{}", group.id)); }
+    }
+    Ok(ids)
+}
+
 pub(crate) fn cap_detail_fonts(id: &str, spec: &GraphSpec, children: &mut [Element]) -> Result<()> {
     let prefix = render_prefix(id, spec)?;
     for node in spec.nodes.iter().filter(|node| node.detail.is_some()) {
@@ -677,7 +701,7 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
         children.push(text(format!("{prefix}-et-{}", edge.id), bounds, &edge.label, size, edge.label_color.as_deref().unwrap_or("@dk1"), TextAlign::Center, false));
         label_bounds.push(bounds);
     }
-    crate::layout::fit_part_text(&mut children, theme)?;
+    crate::layout::fit_part_text_with_small_annotations(&mut children, theme, &small_annotation_ids(id, spec)?)?;
     cap_detail_fonts(id, spec, &mut children)?;
     let result = Element::Group { visual: None, id: id.into(), x: 64.0, y: 144.0, width: WIDTH, height: HEIGHT, view_width: WIDTH, view_height: HEIGHT, children };
     validate_elements(std::slice::from_ref(&result), (1280.0, 720.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;

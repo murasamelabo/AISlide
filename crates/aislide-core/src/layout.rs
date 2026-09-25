@@ -155,26 +155,31 @@ pub(crate) fn fit_metric_size(text: &str, width: f64, height: f64) -> Result<f64
 }
 
 pub(crate) fn fit_part_text(elements: &mut [Element], theme: &Theme) -> Result<()> {
+    fit_part_text_with_small_annotations(elements, theme, &BTreeSet::new())
+}
+
+pub(crate) fn fit_part_text_with_small_annotations(elements: &mut [Element], theme: &Theme, small_annotations: &BTreeSet<String>) -> Result<()> {
     let mut fonts=FONTS.get_or_init(||Mutex::new(FontSystem::new())).lock().map_err(|_|Error::Invalid("font measurement state unavailable".into()))?;
     if fonts.db().faces().next().is_none() {return Err(Error::Unsupported("installed fonts are required for part fitting".into()));}
-    fn fit(fonts:&mut FontSystem,elements:&mut [Element],theme:&Theme)->Result<()> {
+    fn fit(fonts:&mut FontSystem,elements:&mut [Element],theme:&Theme,small_annotations:&BTreeSet<String>)->Result<()> {
         for element in elements {
             match element {
                 Element::Text {id,text,width,height,font_size,bold,format,..} | Element::Shape {id,text,width,height,font_size,bold,format,..} => {
                     let mut size=*font_size;
+                    let minimum=if small_annotations.contains(id) {8.0} else {12.0};
                     loop {
                         let result=measure(fonts,"part",id,text,*width,*height,size,*bold,format,theme);
                         if result.missing_glyphs>0 {return Err(Error::Invalid(format!("part text {id} contains unavailable glyphs")));}
                         if !result.overflow {*font_size=size;break;}
                         size-=1.0;
-                        if size<12.0 {return Err(Error::Invalid(format!("part text {id} does not fit at 12px; shorten the label or reduce item count")));}
+                        if size<minimum {return Err(Error::Invalid(format!("part text {id} does not fit at {minimum}px; shorten the label or reduce item count")));}
                     }
                 }
-                Element::Group {children,..} => fit(fonts,children,theme)?,
+                Element::Group {children,..} => fit(fonts,children,theme,small_annotations)?,
                 _ => {}
             }
         }
         Ok(())
     }
-    fit(&mut fonts,elements,theme)
+    fit(&mut fonts,elements,theme,small_annotations)
 }

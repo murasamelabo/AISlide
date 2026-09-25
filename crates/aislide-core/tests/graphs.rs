@@ -70,6 +70,44 @@ fn graph_explicit_label_and_badge_positions_follow_the_route() {
 }
 
 #[test]
+fn graph_bounded_annotations_honor_declared_font_minimum_and_reopen() {
+    for size in [8, 11] {
+        let mut spec = graph();
+        spec["edges"][0]["label_font_size"] = json!(size);
+        spec["edges"][0]["badge"] = json!({"number":2,"position":0.75,"size":24,"font_size":size});
+        spec["groups"] = json!([{"id":"boundary","label":"Boundary","x":0,"y":88,"width":1000,"height":400,"padding":8,"header_height":32,"header_font_size":size}]);
+        for node in spec["nodes"].as_array_mut().unwrap() { node["group"] = json!("boundary"); }
+        let document = execute_request(json!({"op":"create_presentation","id":"bounded-annotations","title":"Annotation size"})).unwrap();
+        let inserted = execute_request(json!({"op":"apply_operations","document":document,"expected_revision":0,"expected_hash":document["hash"],"operations":[{
+            "op":"add_graph","slide_id":"slide-1","id":"architecture","spec":spec,"layout":{"x":64,"y":144,"width":1152,"height":512,"show_title":true}
+        }]})).unwrap();
+        let children = inserted["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap();
+        for suffix in ["-et-request", "-eb-request", "-gt-boundary"] {
+            let annotation = children.iter().find(|child| child["id"].as_str().unwrap().ends_with(suffix)).unwrap();
+            assert_eq!(annotation["font_size"].as_f64(), Some(f64::from(size)), "{suffix}");
+        }
+        let mut bounded = json!({"version":1,"preset":"diagram/custom","title":spec["title"],"subtitle":spec["subtitle"],"data":{"kind":"diagram","graph":spec},"layout":{"x":64,"y":144,"width":576,"height":512,"show_title":true}});
+        bounded["data"]["graph"]["edges"][0]["badge"] = Value::Null;
+        let compact = execute_request(json!({"op":"create_part","id":"compact-annotations","spec":bounded})).unwrap();
+        let compact_children = compact["children"].as_array().unwrap();
+        let compact_label = compact_children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-et-request")).unwrap();
+        let compact_size = compact_label["font_size"].as_f64().unwrap();
+        assert!((8.0..=f64::from(size)).contains(&compact_size));
+        if size == 11 { assert!(compact_size < 11.0, "fixture must exercise fitting below 12px"); }
+        for node in compact_children.iter().filter(|child| child["id"].as_str().unwrap().contains("-nt-")) { assert!(node["font_size"].as_f64().unwrap() >= 12.0); }
+        bounded["data"]["graph"]["nodes"][0]["label"] = json!("M".repeat(60));
+        let error = execute_request(json!({"op":"create_part","id":"body-floor","spec":bounded})).unwrap_err().to_string();
+        assert!(error.contains("12px"), "{error}");
+        let saved = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+        let reopened = execute_request(json!({"op":"open_presentation","id":"bounded-annotations-open","base64":saved["base64"]})).unwrap();
+        assert_eq!(reopened["document"]["parts"][0]["stale"], false);
+        assert_eq!(reopened["document"]["parts"][0]["spec"], inserted["document"]["parts"][0]["spec"]);
+        let undone = execute_request(json!({"op":"undo_transaction","document":inserted["document"],"expected_revision":1,"receipt":inserted["receipt"]})).unwrap();
+        assert_eq!(undone["document"]["hash"], document["hash"]);
+    }
+}
+
+#[test]
 fn graph_group_spacing_controls_containment_header_and_layout() {
     let mut spec = graph();
     spec["groups"] = json!([{"id":"boundary","label":"Boundary","x":24,"y":120,"width":1000,"height":368,"padding":16,"header_height":24,"header_font_size":8}]);
@@ -100,6 +138,25 @@ fn review_legacy_small_groups_accept_omitted_spacing_controls() {
         let exported = execute_request(json!({"op":"export","deck":deck(original)})).unwrap();
         execute_request(json!({"op":"open_presentation","id":"legacy-small-open","base64":exported["base64"]})).unwrap();
     }
+}
+
+#[test]
+fn graph_containment_errors_report_actual_and_required_bounds() {
+    let mut spec = graph(); spec["show_title"] = json!(false);
+    spec["groups"] = json!([{"id":"boundary","label":"Boundary","x":0,"y":10,"width":1000,"height":450,"padding":12,"header_height":30,"header_font_size":13}]);
+    spec["nodes"][0]["group"] = json!("boundary"); spec["nodes"][0]["y"] = json!(40);
+    execute_request(json!({"op":"create_graph","id":"contained","spec":spec})).unwrap();
+    for (horizontal, vertical) in [(8,40), (48,39), (900,40), (48,390)] {
+        let mut invalid = spec.clone(); invalid["nodes"][0]["x"] = json!(horizontal); invalid["nodes"][0]["y"] = json!(vertical);
+        let message = execute_request(json!({"op":"create_graph","id":"outside-group","spec":invalid})).unwrap_err().to_string();
+        for expected in ["graph node", "client", "boundary", "x >= 12", "y >= 40", "right <= 988", "bottom <= 448", "padding=12", "header_height=30"] {
+            assert!(message.contains(expected), "missing {expected}: {message}");
+        }
+        assert!(message.contains(&format!("actual x={horizontal}, y={vertical}, width=200, height=96")), "{message}");
+    }
+    spec["groups"].as_array_mut().unwrap().push(json!({"id":"inner","label":"Inner","x":12,"y":39,"width":200,"height":100,"parent":"boundary"}));
+    let message = execute_request(json!({"op":"create_graph","id":"outside-parent","spec":spec})).unwrap_err().to_string();
+    for expected in ["graph group", "inner", "boundary", "y >= 40", "actual x=12, y=39"] { assert!(message.contains(expected), "missing {expected}: {message}"); }
 }
 
 fn deck(element: Value) -> Value {
