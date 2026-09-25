@@ -91,6 +91,51 @@ detail and center without. `heading_bold` defaults true. Heading and detail
 render as separate editable native text with an 8px gap, subject to fitting.
 Omitting the new fields preserves the earlier title/label presentation.
 
+Graph edges also accept `stroke_width` (0.5-12, default 2), `label_color`
+(default `@dk1`) and `label_font_size` (8-40, default 16). These sizes are in
+graph pixels, before any explicit part-region fitting and its 12px floor.
+Use `label_placement:{position,side?,offset?}` for an explicit label: `position`
+is 0-1 of the complete route length from the semantic source to target;
+`side` is `above` (default) or `below`, and `offset` is the 0-128px gap from
+the label frame to the segment (default 8). Above is the upward-facing
+segment normal, or rightward for a vertical segment. At a bend, the incoming
+segment determines the normal. Omit placement for automatic avoidance.
+Explicit annotations outside the graph content area reject rather than move
+elsewhere. Overlap with another object remains the author's responsibility;
+inspect previews and preflight before export.
+
+Use `badge:{number,position?,size?,font_size?,fill?,color?}` for a native
+editable numbered circle. Numbers are 1-99; position defaults to 0.5 along
+the route, size to 24px (16-64), font size to 12px (8-32), fill to `@lt1` and
+text to `@dk1`. Its outline uses the edge color. The circle must fit its text
+and the graph content area. A badge does not require a relationship label.
+
+`route:"manual"` requires 1-16 `waypoints:[[x,y],...]` between the endpoints,
+in the 1152x512 graph coordinate space. Diagonal and backtracking segments
+are supported; points must be finite, inside the content area, and cannot
+collapse consecutive segments. Other route kinds cannot include waypoints.
+`source_offset` / `target_offset` are signed fractions of node-side length
+in -0.5..0.5: zero is the center, increasing rightward on top/bottom and
+downward on left/right. Curved edges project these positions onto the shape
+boundary. Nonzero offsets currently support rectangles, rounded rectangles,
+ellipses and diamonds, not cylinders or clouds. Unsupported offsets reject.
+Native connection IDs still reference the true source/target node; routing
+never moves nodes or substitutes another endpoint to fit a line. A `move`
+of both endpoints translates their waypoints; moving only one endpoint keeps
+intermediate points fixed. Selecting the edge in `move` translates its
+waypoints without moving nodes. A no-op `apply_graph` retains the current
+native objects and history; `update_graph` remains an explicit regeneration.
+
+Groups accept `padding` (0-64px, default 8) on left/right/bottom,
+`header_height` (20-128px, default 40) as the reserved top band, and
+`header_font_size` (8-32px, default 18). Headers must fit the band, with
+`header_font_size * 1.25 <= header_height - 12`. Containment, grid layout,
+Studio placement and resize constraints use these values consistently.
+All options are retained through SDK/MCP managed edits and Studio's Canvas,
+Preview and JSON views. Optional styles/placements accept null to remove
+them; `waypoints` is an array, not null. Native polyline/custom-site tests
+verify structural round trips, not PowerPoint visual parity.
+
 For mixed managed batches, use `add_part` / `update_part` with
 `{slide_id,id,spec:PartSpec}` and `add_graph` with
 `{slide_id,id,spec:GraphSpec,layout?:PartLayout|null}`. Batch `update_graph`

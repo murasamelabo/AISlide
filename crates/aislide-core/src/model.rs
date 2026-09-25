@@ -111,6 +111,7 @@ pub struct Connection { pub element_id: String, pub site: u32 }
 #[serde(deny_unknown_fields)]
 pub struct ConnectorRouting {
     pub points: Vec<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub custom: bool,
     #[serde(default)] pub start_arrow: bool,
     #[serde(default)] pub dashed: bool,
 }
@@ -126,6 +127,7 @@ pub(crate) struct ConnectorPreset {
 
 impl ConnectorRouting {
     pub(crate) fn native_preset(&self) -> Option<ConnectorPreset> {
+        if self.custom { return None; }
         let start = self.points.first()?;
         let end = self.points.last()?;
         let flip_h = start[0] > end[0];
@@ -314,13 +316,22 @@ pub(crate) fn validate_elements(elements: &[Element], canvas: (f64, f64), depth:
                     valid_color(color)?;
                     if !stroke_width.is_finite() || !(0.5..=20.0).contains(stroke_width) { return Err(Error::Invalid("connector stroke must be 0.5-20 pixels".into())); }
                     if let Some(route) = routing {
-                        if *flip_v || !(2..=4).contains(&route.points.len()) || route.points.iter().flatten().any(|value| !value.is_finite() || !(0.0..=1.0).contains(value)) { return Err(Error::Invalid("routed connector requires 2-4 normalized points without flip_v".into())); }
+                        let maximum = if route.custom { 18 } else { 4 };
+                        if *flip_v || !(2..=maximum).contains(&route.points.len()) || route.points.iter().flatten().any(|value| !value.is_finite() || !(0.0..=1.0).contains(value)) { return Err(Error::Invalid(format!("routed connector requires 2-{maximum} normalized points without flip_v"))); }
                         if route.points.windows(2).all(|points| points[0] == points[1]) { return Err(Error::Invalid("connector path must have length".into())); }
-                        if route.native_preset().is_none() { return Err(Error::Unsupported("connector route must fit a standard straight or one/two-bend DrawingML preset".into())); }
+                        if route.custom {
+                            let extent = [(width * 9525.0).round(), (height * 9525.0).round()];
+                            if route.points.windows(2).any(|points| (0..2).all(|axis| extent[axis] == 0.0 || (points[0][axis] * 1e6).round() == (points[1][axis] * 1e6).round())) { return Err(Error::Invalid("custom connector segments must remain nonzero at native coordinate precision".into())); }
+                        } else if route.native_preset().is_none() { return Err(Error::Unsupported("connector route must fit a standard straight or one/two-bend DrawingML preset".into())); }
                     }
                     for connection in [start, end].into_iter().flatten() {
                         let target = elements.iter().find(|candidate| candidate.bounds().0 == connection.element_id);
-                        let sites = match target { Some(Element::Shape { preset, .. }) if preset == "ellipse" => 8, Some(Element::Shape { preset, .. }) if preset == "can" => 5, _ => 4 };
+                        let sites = match target {
+                            Some(Element::Shape { visual: Some(style), .. }) if !style.connection_sites.is_empty() => style.connection_sites.len() as u32,
+                            Some(Element::Shape { preset, .. }) if preset == "ellipse" => 8,
+                            Some(Element::Shape { preset, .. }) if preset == "can" => 5,
+                            _ => 4,
+                        };
                         if connection.site >= sites || connection.element_id == id || !target.is_some_and(|candidate| matches!(candidate, Element::Rect { .. } | Element::Shape { .. } | Element::Text { .. } | Element::Picture { .. })) {
                             return Err(Error::Invalid("connector target must be a supported sibling with an existing connection site".into()));
                         }

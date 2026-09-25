@@ -67,6 +67,300 @@ fn assert_undo(document: &Value, changed: &Value, source: &[u8]) {
 }
 
 #[test]
+fn custom_polyline_retains_native_route_references_and_styles() {
+    let points = json!([[0.1,0.2],[0.3,0.8],[0.5,0.4],[0.6,0.9],[0.8,0.1],[0.9,0.7]]);
+    let connector = json!({"type":"connector","id":"route","x":400,"y":180,"width":400,"height":240,"color":"123456","stroke_width":2,"arrow":true,"start":{"element_id":"shape","site":3},"end":{"element_id":"target","site":1},"routing":{"custom":true,"points":points,"start_arrow":true,"dashed":true}});
+    let mut target = shape(); target["id"] = json!("target"); target["x"] = json!(850);
+    let mut scene = deck(shape());
+    scene["slides"][0]["elements"].as_array_mut().unwrap().extend([target, connector]);
+    let source = export(scene);
+    let package = Package::open(source.clone()).unwrap();
+    let parsed = roxmltree::Document::parse(package.text("ppt/slides/slide1.xml").unwrap()).unwrap();
+    let route = parsed.descendants().find(|node| node.tag_name().name() == "cxnSp").unwrap();
+    let native_id = |name| parsed.descendants().find(|node| node.tag_name().name() == "cNvPr" && node.attribute("name") == Some(name)).unwrap().attribute("id").unwrap();
+    for (tag, name, site) in [("stCxn", "shape", "3"), ("endCxn", "target", "1")] {
+        let connection = route.descendants().find(|node| node.tag_name().name() == tag).unwrap();
+        assert_eq!(connection.attribute("id"), Some(native_id(name)));
+        assert_eq!(connection.attribute("idx"), Some(site));
+    }
+    assert!(route.descendants().any(|node| node.tag_name().name() == "custGeom"));
+    assert!(!route.descendants().any(|node| node.tag_name().name() == "prstGeom"));
+    assert_eq!(route.descendants().filter(|node| node.tag_name().name() == "lnTo").count(), 5);
+    for (tag, attribute, value) in [("headEnd", "type", "triangle"), ("tailEnd", "type", "triangle"), ("prstDash", "val", "dash")] {
+        assert!(route.descendants().any(|node| node.tag_name().name() == tag && node.attribute(attribute) == Some(value)));
+    }
+    let document = open(&source);
+    let reopened = &document["deck"]["slides"][0]["elements"][2];
+    assert_eq!(reopened["routing"], json!({"custom":true,"points":points,"start_arrow":true,"dashed":true}));
+    assert_eq!(reopened["start"], json!({"element_id":"shape","site":3}));
+    assert_eq!(reopened["end"], json!({"element_id":"target","site":1}));
+    assert_eq!(saved(&document), source);
+}
+
+#[test]
+fn custom_connection_sites_retain_semantic_shapes_and_native_indices() {
+    let sites = json!([{"x":0.5,"y":0.0,"angle":270.0},{"x":0.0,"y":0.5,"angle":180.0},{"x":0.5,"y":1.0,"angle":90.0},{"x":1.0,"y":0.5,"angle":0.0},{"x":0.75,"y":0.25,"angle":360.0}]);
+    for preset in ["rect", "roundRect", "ellipse", "diamond"] {
+        let mut node = shape(); node["preset"] = json!(preset);
+        node["visual"] = json!({"connection_sites":sites});
+        let mut target = node.clone(); target["id"] = json!("target"); target["x"] = json!(850);
+        let connector = json!({"type":"connector","id":"route","x":400,"y":180,"width":400,"height":240,"color":"123456","stroke_width":2,"arrow":true,"start":{"element_id":"shape","site":4},"end":{"element_id":"target","site":4},"routing":{"custom":true,"points":[[0.25,0.25],[0.5,0.75],[1.0,1.0]],"start_arrow":true,"dashed":true}});
+        let mut scene = deck(node);
+        scene["slides"][0]["elements"].as_array_mut().unwrap().extend([connector, target]);
+        let source = export(scene);
+        let package = Package::open(source.clone()).unwrap();
+        let parsed = roxmltree::Document::parse(package.text("ppt/slides/slide1.xml").unwrap()).unwrap();
+        let native_shape = parsed.descendants().find(|node| node.tag_name().name() == "sp").unwrap();
+        let geometry = native_shape.descendants().find(|node| node.tag_name().name() == "custGeom").unwrap();
+        assert_eq!(geometry.descendants().filter(|node| node.tag_name().name() == "cxn").count(), 5, "{preset}");
+        let native_id = native_shape.descendants().find(|node| node.tag_name().name() == "cNvPr").unwrap().attribute("id").unwrap();
+        let connection = parsed.descendants().find(|node| node.tag_name().name() == "stCxn").unwrap();
+        assert_eq!(connection.attribute("id"), Some(native_id));
+        assert_eq!(connection.attribute("idx"), Some("4"));
+        let target_id = parsed.descendants().find(|node| node.tag_name().name() == "cNvPr" && node.attribute("name") == Some("target")).unwrap().attribute("id").unwrap();
+        let end = parsed.descendants().find(|node| node.tag_name().name() == "endCxn").unwrap();
+        assert_eq!(end.attribute("id"), Some(target_id));
+        assert_eq!(end.attribute("idx"), Some("4"));
+        let document = open(&source);
+        let reopened = &document["deck"]["slides"][0]["elements"][0];
+        assert_eq!(reopened["type"], "shape", "{preset}");
+        assert_eq!(reopened["preset"], preset);
+        assert_eq!(reopened["visual"]["connection_sites"], sites);
+        assert_eq!(document["deck"]["slides"][0]["elements"].as_array().unwrap().len(), 3);
+        assert_eq!(document["deck"]["slides"][0]["elements"][2]["visual"]["connection_sites"], sites);
+        assert_eq!(document["deck"]["slides"][0]["elements"][1]["end"], json!({"element_id":"target","site":4}));
+        assert_eq!(saved(&document), source);
+        let changed = transact(&document, json!([
+            {"op":"replace","path":"/deck/slides/0/elements/1/start/site","value":1},
+            {"op":"remove","path":"/deck/slides/0/elements/0/visual"}
+        ])).unwrap();
+        let cleared = open(&saved(&changed["document"]));
+        assert_eq!(cleared["deck"]["slides"][0]["elements"][0]["preset"], preset);
+        assert!(cleared["deck"]["slides"][0]["elements"][0]["visual"].is_null());
+        assert_undo(&document, &changed, &source);
+    }
+    for preset in ["can", "cloud"] {
+        let mut node = shape(); node["preset"] = json!(preset); node["visual"] = json!({"connection_sites":sites});
+        let error = execute_request(json!({"op":"export","deck":deck(node)})).unwrap_err().to_string();
+        assert!(error.contains("faithful custom connection-site geometry"), "{error}");
+    }
+}
+
+#[test]
+fn custom_polyline_native_edit_is_guarded_and_undoable() {
+    let route = json!({"type":"connector","id":"route","x":400,"y":180,"width":400,"height":240,"color":"123456","stroke_width":2,"arrow":true,"start":{"element_id":"shape","site":3},"routing":{"custom":true,"points":[[0.1,0.2],[0.5,0.8],[0.9,0.7]],"start_arrow":true,"dashed":true}});
+    let mut scene = deck(shape()); scene["slides"][0]["elements"].as_array_mut().unwrap().push(route);
+    let source = export(scene); let document = open(&source);
+    let points = json!([[0.0,0.2],[0.3,0.8],[0.8,0.7],[1.0,0.5]]);
+    let operations = json!([
+        {"op":"replace","path":"/deck/slides/0/elements/1/routing/points","value":points},
+        {"op":"replace","path":"/deck/slides/0/elements/1/routing/dashed","value":false},
+        {"op":"replace","path":"/deck/slides/0/elements/1/routing/start_arrow","value":false},
+        {"op":"replace","path":"/deck/slides/0/elements/1/x","value":420}
+    ]);
+    let changed = transact(&document, operations.clone()).unwrap();
+    let reopened = open(&saved(&changed["document"]));
+    let route = &reopened["deck"]["slides"][0]["elements"][1];
+    assert_eq!(route["routing"], json!({"custom":true,"points":points,"start_arrow":false,"dashed":false}));
+    assert_eq!(route["start"], json!({"element_id":"shape","site":3}));
+    assert_eq!(route["arrow"], true);
+    assert_eq!(route["x"], 420.0);
+    assert_undo(&document, &changed, &source);
+    let mut package = Package::open(source).unwrap();
+    let path = "ppt/slides/slide1.xml";
+    let xml = package.text(path).unwrap().replace("fill=\"none\"", "fill=\"none\" extrusionOk=\"0\"");
+    package.replace_part(path, xml.into_bytes()).unwrap();
+    let source = package.save().unwrap(); let document = open(&source);
+    assert!(transact(&document, operations).is_err());
+    assert_eq!(saved(&document), source);
+}
+
+#[test]
+fn custom_polyline_limits_and_legacy_defaults_are_preserved() {
+    let base = json!({"type":"connector","id":"route","x":100,"y":100,"width":400,"height":240,"color":"123456","stroke_width":2,"arrow":true,"routing":{"points":[[0.0,0.0],[1.0,1.0]],"start_arrow":false,"dashed":false}});
+    let legacy = export(deck(base.clone()));
+    let mut explicit_default = base.clone(); explicit_default["routing"]["custom"] = json!(false);
+    assert_eq!(export(deck(explicit_default.clone())), legacy);
+    let legacy_model: aislide_core::model::Deck = serde_json::from_value(deck(base.clone())).unwrap();
+    let explicit_model: aislide_core::model::Deck = serde_json::from_value(deck(explicit_default)).unwrap();
+    assert_eq!(serde_json::to_value(legacy_model).unwrap(), serde_json::to_value(explicit_model).unwrap());
+    let mut custom = base.clone(); custom["routing"]["custom"] = json!(true);
+    for points in [json!([[0.0,0.0],[1.0,1.0]]), json!([[0.0,0.0],[0.5,0.8],[1.0,1.0]]), json!((0..18).map(|index| [index as f64 / 17.0, (index % 2) as f64]).collect::<Vec<_>>())] {
+        custom["routing"]["points"] = points;
+        let bytes = export(deck(custom.clone()));
+        assert_eq!(open(&bytes)["deck"]["slides"][0]["elements"][0]["routing"]["custom"], true);
+        assert!(Package::open(bytes).unwrap().text("ppt/slides/slide1.xml").unwrap().contains("a:custGeom"));
+    }
+    for points in [json!([]),json!([[0,0]]),json!([[0,0],[0,0],[1,1]]),json!([[0,0],[0.00000001,0.00000001],[1,1]]),json!([[0,0],[1.1,1]]),json!([[0,0],[-0.1,1]]),json!((0..19).map(|index| [index as f64 / 18.0, (index % 2) as f64]).collect::<Vec<_>>())] {
+        custom["routing"]["points"] = points;
+        assert!(execute_request(json!({"op":"export","deck":deck(custom.clone())})).is_err());
+    }
+    for points in [json!([[0.1,0.2],[0.9,0.7]]),json!([[0,0],[0.5,0.8],[1,1]]),json!([[0,0],[0.2,0],[0.2,0.5],[0.8,0.5],[1,1]])] {
+        let mut legacy = base.clone(); legacy["routing"]["points"] = points;
+        assert!(execute_request(json!({"op":"export","deck":deck(legacy)})).is_err());
+    }
+}
+
+#[test]
+fn custom_connection_site_validation_and_default_serialization() {
+    let source = export(deck(shape()));
+    let mut empty = shape(); empty["visual"] = json!({"connection_sites":[]});
+    let mut default = shape(); default["visual"] = json!({});
+    assert_eq!(export(deck(empty.clone())), export(deck(default)));
+    assert_eq!(serde_json::to_value(serde_json::from_value::<aislide_core::visual::VisualStyle>(json!({"connection_sites":[]})).unwrap()).unwrap(), json!({}));
+    for sites in [json!([{"x":-0.1,"y":0,"angle":0}]),json!([{"x":0,"y":1.1,"angle":0}]),json!([{"x":0,"y":0,"angle":360.1}]),json!([{"x":0,"y":0,"angle":-1}]),json!([{"x":0,"y":0}]),json!(vec![json!({"x":0,"y":0,"angle":0});129])] {
+        let mut node = shape(); node["visual"] = json!({"connection_sites":sites});
+        assert!(execute_request(json!({"op":"export","deck":deck(node)})).is_err());
+    }
+    let sites = json!([{"x":0.2,"y":0.5,"angle":180.0}]);
+    let mut node = shape(); node["visual"] = json!({"connection_sites":sites});
+    let mut scene = deck(node.clone());
+    scene["slides"][0]["elements"].as_array_mut().unwrap().push(json!({"type":"connector","id":"route","x":400,"y":180,"width":400,"height":240,"color":"123456","stroke_width":2,"arrow":false,"start":{"element_id":"shape","site":1}}));
+    assert!(execute_request(json!({"op":"export","deck":scene})).is_err());
+    for kind in ["rect", "text", "connector", "polygon", "group", "picture"] {
+        let mut invalid = node.clone(); invalid["type"] = json!(kind);
+        assert!(execute_request(json!({"op":"export","deck":deck(invalid)})).is_err());
+    }
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for site in [aislide_core::visual::ConnectionSite {x:value,y:0.5,angle:0.0},aislide_core::visual::ConnectionSite {x:0.5,y:value,angle:0.0},aislide_core::visual::ConnectionSite {x:0.5,y:0.5,angle:value}] {
+            assert!(aislide_core::vector::connection_geometry_xml("rect", &[], &[site]).is_err());
+        }
+    }
+    assert_eq!(saved(&open(&source)), source);
+}
+
+#[test]
+fn custom_connection_sites_resize_edit_and_reject_tampered_geometry() {
+    let sites = json!([{"x":0.25,"y":0.75,"angle":45.0},{"x":1.0,"y":0.5,"angle":0.0}]);
+    let source = export(deck(shape())); let document = open(&source);
+    let style = json!({"connection_sites":sites,"adjustments":[{"name":"adj","value":12000}],"flip_h":true});
+    let added = transact(&document, json!([{"op":"add","path":"/deck/slides/0/elements/0/visual","value":style}])).unwrap();
+    let source = saved(&added["document"]); let document = open(&source);
+    assert_eq!(document["deck"]["slides"][0]["elements"][0]["visual"], style);
+    let package = Package::open(source.clone()).unwrap();
+    let xml = package.text("ppt/slides/slide1.xml").unwrap();
+    let parsed = roxmltree::Document::parse(xml).unwrap();
+    let geometry = parsed.descendants().find(|node| node.tag_name().name() == "custGeom").unwrap();
+    let connections: Vec<_> = geometry.descendants().filter(|node| node.tag_name().name() == "cxn").collect();
+    assert_eq!(connections[0].attribute("ang"), Some("2700000"));
+    let position = connections[0].children().find(|node| node.tag_name().name() == "pos").unwrap();
+    assert_eq!(position.attribute("x"), Some("site0x"));
+    assert_eq!(position.attribute("y"), Some("site0y"));
+    for (name, formula) in [("site0x", "*/ w 250000 1000000"),("site0y", "*/ h 750000 1000000"),("radius", "*/ ss adj 100000")] {
+        assert!(geometry.descendants().any(|node| node.tag_name().name() == "gd" && node.attribute("name") == Some(name) && node.attribute("fmla") == Some(formula)));
+    }
+    assert_eq!(geometry.descendants().filter(|node| node.tag_name().name() == "arcTo").count(), 4);
+    let changed = transact(&document, json!([
+        {"op":"replace","path":"/deck/slides/0/elements/0/visual/connection_sites/0/x","value":0.5},
+        {"op":"replace","path":"/deck/slides/0/elements/0/visual/adjustments/0/value","value":24000},
+        {"op":"replace","path":"/deck/slides/0/elements/0/width","value":500}
+    ])).unwrap();
+    let reopened = open(&saved(&changed["document"]));
+    assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["width"], 500.0);
+    assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["visual"]["connection_sites"][0]["x"], 0.5);
+    assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["visual"]["adjustments"][0]["value"], 24000);
+    assert_undo(&document, &changed, &source);
+    let mut package = Package::open(source).unwrap();
+    let path = "ppt/slides/slide1.xml";
+    let xml = package.text(path).unwrap().replace("swAng=\"5400000\"", "swAng=\"2700000\"");
+    package.replace_part(path, xml.into_bytes()).unwrap();
+    let source = package.save().unwrap(); let document = open(&source);
+    assert!(document["deck"]["slides"][0]["elements"].as_array().unwrap().is_empty());
+    assert_eq!(saved(&document), source);
+    let mut node = shape(); node["visual"] = json!({"connection_sites":sites});
+    assert!(transact(&document, json!([{"op":"add","path":"/deck/slides/0/elements/-","value":node}])).is_err());
+}
+
+#[test]
+fn custom_polyline_zero_axis_native_bounds_do_not_introduce_diagonals() {
+    for (axis, attribute, points) in [(0, "cx", json!([[0.2,0.1],[0.7,0.5],[0.4,0.9]])),(1, "cy", json!([[0.1,0.2],[0.5,0.7],[0.9,0.4]]))] {
+        let route = json!({"type":"connector","id":"route","x":100,"y":100,"width":400,"height":240,"color":"123456","stroke_width":2,"arrow":true,"routing":{"custom":true,"points":points,"start_arrow":true,"dashed":true}});
+        let mut package = Package::open(export(deck(route))).unwrap();
+        let path = "ppt/slides/slide1.xml";
+        let mut xml = package.text(path).unwrap().to_owned();
+        let parsed = roxmltree::Document::parse(&xml).unwrap();
+        let extent = parsed.descendants().find(|node| node.tag_name().name() == "cxnSp").unwrap().descendants().find(|node| node.tag_name().name() == "ext").unwrap();
+        let range = extent.attributes().find(|candidate| candidate.name() == attribute).unwrap().range_value();
+        xml.replace_range(range, "0");
+        package.replace_part(path, xml.into_bytes()).unwrap();
+        let source = package.save().unwrap(); let document = open(&source);
+        let route = &document["deck"]["slides"][0]["elements"][0];
+        assert!(route["routing"]["points"].as_array().unwrap().iter().all(|point| point[axis] == 0.0));
+        assert_eq!(saved(&document), source);
+        let changed = transact(&document, json!([{"op":"replace","path":"/deck/slides/0/elements/0/x","value":120}])).unwrap();
+        let reopened = open(&saved(&changed["document"]));
+        assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["routing"], route["routing"]);
+        let fresh = open(&export(reopened["deck"].clone()));
+        assert_eq!(fresh["deck"]["slides"][0]["elements"][0]["routing"], route["routing"]);
+    }
+}
+
+#[test]
+fn review_flipped_custom_connector_frame_edits_preserve_route() {
+    for flips in ["flipV=\"1\"", "flipH=\"1\"", "flipH=\"1\" flipV=\"1\""] {
+        let route = json!({"type":"connector","id":"route","x":100,"y":100,"width":400,"height":240,"color":"123456","stroke_width":2,"arrow":true,"routing":{"custom":true,"points":[[0.2,0.1],[0.4,0.8],[1.0,0.3]],"start_arrow":true,"dashed":true}});
+        let mut package = Package::open(export(deck(route))).unwrap();
+        let path = "ppt/slides/slide1.xml";
+        let mut xml = package.text(path).unwrap().to_owned();
+        let parsed = roxmltree::Document::parse(&xml).unwrap();
+        let transform = parsed.descendants().find(|node| node.tag_name().name() == "cxnSp").unwrap().descendants().find(|node| node.tag_name().name() == "xfrm").unwrap();
+        xml.insert_str(transform.range().start + "<a:xfrm".len(), &format!(" {flips}"));
+        package.replace_part(path, xml.into_bytes()).unwrap();
+        let source = package.save().unwrap(); let document = open(&source);
+        let changed = transact(&document, json!([{"op":"replace","path":"/deck/slides/0/elements/0/x","value":120}])).unwrap();
+        let reopened = open(&saved(&changed["document"]));
+        assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["routing"], document["deck"]["slides"][0]["elements"][0]["routing"], "{flips}");
+        assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["x"], 120.0);
+        assert_undo(&document, &changed, &source);
+    }
+}
+
+#[test]
+fn custom_polyline_rejects_malformed_points_and_unrepresented_line_edits() {
+    let route = json!({"type":"connector","id":"route","x":100,"y":100,"width":400,"height":240,"color":"123456","stroke_width":2,"arrow":true,"routing":{"custom":true,"points":[[0.1,0.2],[0.5,0.8],[0.9,0.7]],"start_arrow":true,"dashed":true}});
+    let source = export(deck(route.clone()));
+    let mut package = Package::open(source.clone()).unwrap();
+    let path = "ppt/slides/slide1.xml";
+    let xml = package.text(path).unwrap().replace("</a:moveTo>", "<a:pt x=\"1\" y=\"1\"/></a:moveTo>");
+    package.replace_part(path, xml.into_bytes()).unwrap();
+    let malformed = package.save().unwrap(); let document = open(&malformed);
+    assert!(document["deck"]["slides"][0]["elements"].as_array().unwrap().is_empty());
+    assert_eq!(saved(&document), malformed);
+    let mut package = Package::open(source).unwrap();
+    let xml = package.text(path).unwrap().replace("<a:ln w=", "<a:ln cap=\"rnd\" w=");
+    package.replace_part(path, xml.into_bytes()).unwrap();
+    let source = package.save().unwrap(); let document = open(&source);
+    for (field, value) in [("color",json!("654321")),("stroke_width",json!(3)),("arrow",json!(false))] {
+        assert!(transact(&document, json!([{"op":"replace","path":format!("/deck/slides/0/elements/0/{field}"),"value":value}])).is_err());
+    }
+    assert_eq!(saved(&document), source);
+    let mut collapsed = route;
+    collapsed["width"] = json!(0.00001);
+    collapsed["routing"]["points"] = json!([[0.0,0.5],[1.0,0.5]]);
+    assert!(execute_request(json!({"op":"export","deck":deck(collapsed)})).is_err());
+}
+
+#[test]
+fn custom_connection_geometry_render_keeps_curves_and_degenerate_round_rect() {
+    for (preset, adjustment) in [("rect",None),("diamond",None),("ellipse",None),("roundRect",None),("roundRect",Some(0)),("roundRect",Some(50000))] {
+        let mut node = shape(); node["preset"] = json!(preset);
+        node["visual"] = json!({"connection_sites":[{"x":0.75,"y":0.25,"angle":45.0}]});
+        if let Some(value) = adjustment { node["visual"]["adjustments"] = json!([{"name":"adj","value":value}]); }
+        let scene: aislide_core::model::Deck = serde_json::from_value(deck(node.clone())).unwrap();
+        let rendered = aislide_core::export_static::export_static(&scene, &Default::default()).unwrap();
+        let image = image::load_from_memory(&rendered.artifacts[0].bytes).unwrap().to_rgba8();
+        assert_eq!(image.get_pixel(250,190).0, [0x12,0x34,0x56,255]);
+        let bytes = export(deck(node));
+        let reopened = open(&bytes);
+        assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["preset"], preset);
+        if preset == "roundRect" && adjustment == Some(0) {
+            let package = Package::open(bytes).unwrap();
+            assert!(!package.text("ppt/slides/slide1.xml").unwrap().contains("a:arcTo"));
+        }
+    }
+}
+
+#[test]
 fn native_visual_edits_reopen_remove_and_undo_each_family() {
     let source = export(deck(shape()));
     let document = open(&source);

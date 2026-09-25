@@ -42,7 +42,7 @@ export const Content = memo(function ElementContent({ element: source, theme, pa
   if (element.type === 'rect') return <svg width="100%" height="100%" aria-hidden="true">{definitions}<rect width="100%" height="100%" fill={fill(element.fill)} fillOpacity={visual?.opacity ?? undefined} /></svg>
   if (element.type === 'table') return <TableSurface element={element} theme={theme} />
   return <>
-    {element.type === 'shape' && <ShapeSurface preset={element.preset} fill={fill(element.fill)} stroke={cssColor(element.stroke, theme)} strokeWidth={element.stroke_width} fillOpacity={visual?.opacity ?? undefined} adjustments={visual?.adjustments} width={element.width} height={element.height}>{definitions}</ShapeSurface>}
+    {element.type === 'shape' && <ShapeSurface preset={element.preset} fill={fill(element.fill)} stroke={cssColor(element.stroke, theme)} strokeWidth={element.stroke_width} fillOpacity={visual?.opacity ?? undefined} adjustments={visual?.adjustments} width={element.width} height={element.height} nativeGeometry={Boolean(visual?.connection_sites?.length)}>{definitions}</ShapeSurface>}
     <div className="slide-text" style={{ ...textStyle(element, theme), textDecoration: 'none', justifyContent: element.format?.vertical === 'middle' ? 'center' : element.format?.vertical === 'bottom' ? 'flex-end' : 'flex-start' }}><RichTextSurface text={element.text} format={element.format} size={element.font_size} theme={theme} warp={visual?.text_warp} /></div>
   </>
   })()

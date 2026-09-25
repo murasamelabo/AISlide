@@ -67,6 +67,44 @@ async function feedbackMcpFixture(run) {
   } finally { hooks.deregister(); delete globalThis[key]; }
 }
 
+test('graph authoring MCP preserves manual routes and waypoints', async () => {
+  await feedbackMcpFixture(async ({ call, calls, registrations }) => {
+    const spec = { version: 1, title: 'Synthetic route', show_title: false, nodes: [
+      { id: 'source', label: 'Source', x: 40, y: 120 },
+      { id: 'target', label: 'Target', x: 700, y: 120 },
+    ], edges: [{ id: 'edge', source: 'source', target: 'target', route: 'manual', waypoints: [[400, 300]], stroke_width: 4, label: 'Request', label_color: '@accent2', label_font_size: 20, source_offset: -0.25, target_offset: 0.25, label_placement: { position: 0.3, side: 'below', offset: 12 }, badge: { number: 7, position: 0.7, size: 28, font_size: 14, fill: '@lt1', color: '@dk1' } }], groups: [{ id: 'group', label: 'Group', x: 0, y: 0, width: 1152, height: 512, padding: 16, header_height: 64, header_font_size: 24 }] };
+    await call('create_graph', { id: 'graph', spec });
+    assert.deepEqual(calls.at(-1).request.spec, spec);
+    const edge = spec.edges[0], group = spec.groups[0];
+    await call('transform_graph', { spec, operations: [{ op: 'put_edge', edge }, { op: 'put_group', group }] });
+    assert.deepEqual(calls.at(-1).request.operations, [{ op: 'put_edge', edge }, { op: 'put_group', group }]);
+    const schema = registrations.get('create_graph').config.inputSchema;
+    const json = z.toJSONSchema(schema);
+    assert.deepEqual(json.properties.spec.properties.edges.items.properties.route.enum, ['straight', 'elbow', 'manual']);
+    assert.equal(json.properties.spec.properties.edges.items.properties.waypoints.maxItems, 16);
+    for (const patch of [{ stroke_width: 0.49 }, { stroke_width: 12.1 }, { label_font_size: 41 }, { label_color: 'red' }, { source_offset: -0.51 }, { target_offset: 0.51 }, { waypoints: null }, { waypoints: Array(17).fill([1, 100]) }, { waypoints: [[1153, 100]] }, { waypoints: [[100, -1]] }, { label_placement: { position: 1.1 } }, { label_placement: { position: 0.5, offset: 129 } }, { label_placement: { position: 0.5, side: 'left' } }, { badge: { number: 0 } }, { badge: { number: 100 } }, { badge: { number: 1.5 } }, { badge: { number: 1, size: 65 } }, { badge: { number: 1, font_size: 33 } }, { badge: { number: 1, unknown: true } }]) {
+      assert.equal(schema.safeParse({ id: 'graph', spec: { ...spec, edges: [{ ...edge, ...patch }] } }).success, false, JSON.stringify(patch));
+    }
+    for (const patch of [{ padding: 65 }, { header_height: 19 }, { header_font_size: 33 }, { unknown: true }]) {
+      assert.equal(schema.safeParse({ id: 'graph', spec: { ...spec, groups: [{ ...group, ...patch }] } }).success, false, JSON.stringify(patch));
+    }
+    assert.ok(schema.safeParse({ id: 'graph', spec: { ...spec, edges: [{ ...edge, stroke_width: null, label_color: null, label_font_size: null, source_offset: null, target_offset: null, label_placement: null, badge: null }], groups: [{ ...group, padding: null, header_height: null, header_font_size: null }] } }).success);
+    const nativeSchema = registrations.get('add_elements').config.inputSchema;
+    const input = { deck_id: randomUUID(), expected_revision: 0, slide_id: 'slide-1', elements: [{ type: 'connector', id: 'edge', x: 0, y: 0, width: 100, height: 100, color: '@dk1', stroke_width: 4, arrow: true, routing: { custom: true, points: Array.from({ length: 18 }, (_, index) => [index / 17, index % 2]) }, visual: { connection_sites: [{ x: 0.25, y: 1, angle: 90 }] } }] };
+    assert.deepEqual(nativeSchema.parse(input), input);
+    for (const patch of [{ custom: false }, { custom: undefined }, { custom: null }, { points: Array(19).fill([0, 0]) }]) {
+      const invalid = structuredClone(input);
+      Object.assign(invalid.elements[0].routing, patch);
+      assert.equal(nativeSchema.safeParse(invalid).success, false);
+    }
+    for (const sites of [null, Array(129).fill({ x: 0, y: 0, angle: 0 }), [{ x: -0.1, y: 0, angle: 0 }], [{ x: 0, y: 0, angle: 361 }], [{ x: 0, y: 0, angle: 0, unknown: true }]]) {
+      const invalid = structuredClone(input);
+      invalid.elements[0].visual.connection_sites = sites;
+      assert.equal(nativeSchema.safeParse(invalid).success, false);
+    }
+  });
+});
+
 function assertFeedbackWorkflow(prompt, resource) {
   const text = prompt.messages[0].content.text;
   assert.equal(resource.contents[0].text, text);

@@ -45,7 +45,12 @@ pub struct VisualStyle {
     #[serde(skip_serializing_if = "Vec::is_empty")] pub adjustments: Vec<ShapeAdjustment>,
     #[serde(skip_serializing_if = "Option::is_none")] pub picture_mask: Option<PictureMask>,
     #[serde(skip_serializing_if = "Option::is_none")] pub path: Option<crate::vector::VectorPath>,
+    #[serde(skip_serializing_if = "Vec::is_empty")] pub connection_sites: Vec<ConnectionSite>,
 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionSite { pub x: f64, pub y: f64, pub angle: f64 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -142,6 +147,10 @@ pub fn validate(element: &Element) -> Result<()> {
         if style.adjustments.len() != 1 || style.adjustments[0].name != "adj" || !(0..=maximum).contains(&style.adjustments[0].value) { return Err(Error::Invalid("preset adjustment must be one bounded adj value".into())); }
     }
     if style.picture_mask.is_some() && !matches!(element, Element::Picture { .. }) { return Err(Error::Invalid("picture mask requires a picture".into())); }
+    if !style.connection_sites.is_empty() {
+        let Element::Shape { preset, .. } = element else { return Err(Error::Invalid("custom connection sites require a supported semantic Shape".into())); };
+        crate::vector::connection_geometry_xml(preset, &style.adjustments, &style.connection_sites)?;
+    }
     if let Some(path) = &style.path {
         path.validate()?;
         if !path.requires_override() { return Err(Error::Invalid("single-contour straight polygons use points without visual.path".into())); }
@@ -219,11 +228,15 @@ pub(crate) fn decorate(xml: String, elements: &[&Element], ids: &BTreeMap<&str, 
         if style.opacity.is_some() || style.gradient.is_some() { if let Element::Rect { fill, .. } | Element::Shape { fill, .. } | Element::Polygon { fill, .. } = element { replace(&xml, parent, &["solidFill", "noFill", "gradFill"], &fill_xml(style, fill), ORDER, &mut edits)?; } }
         let effects = effects_xml(style); if !effects.is_empty() { replace(&xml, parent, &["effectLst"], &effects, ORDER, &mut edits)?; }
         if let Some(path) = &style.path { replace(&xml, parent, &["custGeom"], &crate::vector::path_xml(path), ORDER, &mut edits)?; }
+        if !style.connection_sites.is_empty() {
+            let Element::Shape { preset, .. } = element else { return Err(Error::Invalid("connection-site shape missing".into())); };
+            replace(&xml, parent, &["prstGeom", "custGeom"], &crate::vector::connection_geometry_xml(preset, &style.adjustments, &style.connection_sites)?, ORDER, &mut edits)?;
+        }
         if let Some(warp) = style.text_warp {
             let body = child(node, P, "txBody").and_then(|node| child(node, A, "bodyPr")).ok_or_else(|| Error::Invalid("warp body missing".into()))?;
             insert(&xml, body, &format!("<a:prstTxWarp prst=\"{}\"><a:avLst/></a:prstTxWarp>", warp.preset()), &["prstTxWarp", "noAutofit", "normAutofit", "spAutoFit", "scene3d", "sp3d", "flatTx", "extLst"], "prstTxWarp", &mut edits)?;
         }
-        if !style.adjustments.is_empty() {
+        if !style.adjustments.is_empty() && style.connection_sites.is_empty() {
             let geometry = child(parent, A, "prstGeom").ok_or_else(|| Error::Invalid("adjustment geometry missing".into()))?;
             let guides: String = style.adjustments.iter().map(|adjustment| format!("<a:gd name=\"{}\" fmla=\"val {}\"/>", adjustment.name, adjustment.value)).collect();
             replace(&xml, geometry, &["avLst"], &format!("<a:avLst>{guides}</a:avLst>"), &["avLst"], &mut edits)?;
@@ -288,7 +301,11 @@ pub(crate) fn read(node: Node<'_, '_>) -> Result<Option<VisualStyle>> {
         style.text_warp = TextWarp::ALL.into_iter().find(|preset| Some(preset.preset()) == warp.attribute("prst"));
     }
     if node.has_tag_name((P, "sp")) {
-        if let Some(geometry) = child(parent,A,"custGeom").filter(|node| crate::vector::native_requires_override(*node)) { style.path = Some(crate::vector::read_path(geometry)?); }
+        if let Some(geometry) = child(parent,A,"custGeom") {
+            if let Some((_, adjustments, sites)) = crate::vector::read_connection_geometry(geometry)? {
+                style.adjustments = adjustments; style.connection_sites = sites;
+            } else if crate::vector::native_requires_override(geometry) { style.path = Some(crate::vector::read_path(geometry)?); }
+        }
     }
     if node.has_tag_name((P, "pic")) {
         if child(parent,A,"custGeom").is_some() { return Err(Error::Unsupported("custom picture mask retained as raw XML".into())); }
@@ -307,7 +324,7 @@ pub(crate) fn read(node: Node<'_, '_>) -> Result<Option<VisualStyle>> {
     Ok((style != VisualStyle::default()).then_some(style))
 }
 
-fn signature(node: Node<'_, '_>, references: bool) -> serde_json::Value {
+pub(crate) fn signature(node: Node<'_, '_>, references: bool) -> serde_json::Value {
     let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| {
         let value = if references && attribute.namespace() == Some(crate::native::R) && attribute.name() == "embed" { "resource" } else { attribute.value() };
         (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), value)
@@ -376,13 +393,19 @@ pub(crate) fn patch(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'
     }
     let geometry_changed = match (old, new) {
         (Element::Polygon { points, .. }, Element::Polygon { points: next, .. }) => points != next || before.path != after.path,
-        (Element::Shape { preset, .. }, Element::Shape { preset: next, .. }) => preset != next || before.adjustments != after.adjustments,
+        (Element::Shape { preset, .. }, Element::Shape { preset: next, .. }) => preset != next || before.adjustments != after.adjustments || before.connection_sites != after.connection_sites,
+        (Element::Connector { routing: Some(before), .. }, Element::Connector { routing: Some(after), .. }) if before.custom && after.custom => before.points != after.points,
         (Element::Picture { .. }, Element::Picture { .. }) => before.picture_mask != after.picture_mask,
         _ => false,
     };
     if geometry_changed { replace_generated(xml, parent, generated, next_parent, expected, &["prstGeom", "custGeom"], ORDER, edits)?; }
     let outline_changed = matches!((old,new), (Element::Shape { stroke, stroke_width, .. }, Element::Shape { stroke: next, stroke_width: next_width, .. }) | (Element::Polygon { stroke, stroke_width, .. }, Element::Polygon { stroke: next, stroke_width: next_width, .. }) if stroke != next || stroke_width != next_width);
     if outline_changed { replace_generated(xml, parent, generated, next_parent, expected, &["ln"], ORDER, edits)?; }
+    if let (Element::Connector { routing: Some(before), color, stroke_width, arrow, .. }, Element::Connector { routing: Some(after), color: next_color, stroke_width: next_width, arrow: next_arrow, .. }) = (old, new) {
+        if before.custom && after.custom && (before.points != after.points || before.start_arrow != after.start_arrow || before.dashed != after.dashed || color != next_color || stroke_width != next_width || arrow != next_arrow) {
+            replace_generated(xml, parent, generated, next_parent, expected, &["ln"], ORDER, edits)?;
+        }
+    }
     if matches!(new, Element::Picture { .. }) && (picture_changed(old,new) || before.opacity != after.opacity) {
         let fill = child(node, P, "blipFill").ok_or_else(|| Error::Unsupported("native picture fill missing".into()))?;
         let previous_fill = child(previous, P, "blipFill").ok_or_else(|| Error::Invalid("previous picture fill missing".into()))?;

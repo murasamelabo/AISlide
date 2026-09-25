@@ -36,6 +36,8 @@
 .graph-node-icon { position: absolute; pointer-events: none; }
 .graph-boundary .graph-node-label { inset: 8px 12px auto; height: 28px; text-align: left; justify-content: flex-start; }
 .graph-node-content .react-flow__handle { width: 16px; height: 16px; background: #0056ff; border: 2px solid #fff; }
+.graph-node-content .graph-native-port { width: 0; height: 0; min-width: 0; min-height: 0; border: 0; background: transparent; pointer-events: none; }
+.graph-native-port::after { content: ''; position: absolute; width: 8px; height: 8px; border: 1px solid #fff; border-radius: 50%; background: #1a1a1a; transform: translate(-50%, -50%); }
 .graph-node-content .react-flow__resize-control.handle { width: 12px; height: 12px; background: #0056ff; border: 1px solid #fff; }
 .graph-canvas .react-flow__controls-button { width: 44px; height: 44px; border: 1px solid #949494; }
 .graph-canvas .react-flow__attribution { font-size: 14px; }
@@ -44,6 +46,9 @@
 .graph-properties-form textarea { min-width: 0; max-width: 100%; resize: vertical; }
 .graph-text-options { display: flex; flex-wrap: wrap; gap: 4px; }
 .graph-geometry { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.graph-waypoints { display: grid; gap: 8px; min-width: 0; }
+.graph-waypoint { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 44px; gap: 4px; align-items: end; }
+.graph-waypoint input { min-width: 0; width: 100%; }
 .graph-connection-fields { display: grid; grid-template-columns: minmax(0, 1fr) 90px; gap: 8px; }
 .graph-new-edge { display: grid; gap: 12px; border-top: 1px solid var(--border); padding-top: 16px; margin-top: 24px; }
 .graph-empty { padding: 24px 0; color: var(--muted); font-size: 16px; }

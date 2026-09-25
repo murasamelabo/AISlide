@@ -100,6 +100,69 @@ pub(crate) fn path_xml(path: &VectorPath) -> String {
     format!("<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l=\"0\" t=\"0\" r=\"r\" b=\"b\"/><a:pathLst><a:path w=\"1000000\" h=\"1000000\">{commands}</a:path></a:pathLst></a:custGeom>")
 }
 
+pub fn connection_geometry_xml(preset: &str, adjustments: &[crate::visual::ShapeAdjustment], sites: &[crate::visual::ConnectionSite]) -> Result<String> {
+    if !matches!(preset, "rect" | "roundRect" | "ellipse" | "diamond") {
+        return Err(Error::Unsupported(format!("faithful custom connection-site geometry is not implemented for {preset}")));
+    }
+    if sites.is_empty() || sites.len() > 128 { return Err(Error::Invalid("custom connection sites require 1-128 entries".into())); }
+    if !adjustments.is_empty() && (preset != "roundRect" || adjustments.len() != 1 || adjustments[0].name != "adj" || !(0..=50000).contains(&adjustments[0].value)) {
+        return Err(Error::Invalid("custom connection geometry supports only roundRect's bounded adj".into()));
+    }
+    let marker = format!("<a:gd name=\"aislideConnectionSitesV1_{preset}\" fmla=\"val 0\"/>");
+    let adjustment = adjustments.first().map(|adjustment| format!("<a:gd name=\"adj\" fmla=\"val {}\"/>", adjustment.value)).unwrap_or_default();
+    let mut guides = String::new();
+    let mut connections = String::new();
+    for (index, site) in sites.iter().enumerate() {
+        if !site.x.is_finite() || !site.y.is_finite() || !site.angle.is_finite() || !(0.0..=1.0).contains(&site.x) || !(0.0..=1.0).contains(&site.y) || !(0.0..=360.0).contains(&site.angle) {
+            return Err(Error::Invalid("connection sites require finite normalized positions and angles in 0..=360 degrees".into()));
+        }
+        for (axis, dimension, value) in [("x", "w", site.x), ("y", "h", site.y)] {
+            guides.push_str(&format!("<a:gd name=\"site{index}{axis}\" fmla=\"*/ {dimension} {} 1000000\"/>", (value * 1e6).round()));
+        }
+        connections.push_str(&format!("<a:cxn ang=\"{}\"><a:pos x=\"site{index}x\" y=\"site{index}y\"/></a:cxn>", (site.angle * 60000.0).round()));
+    }
+    let commands = match preset {
+        "rect" | "roundRect" if preset == "rect" || adjustments.first().is_some_and(|adjustment| adjustment.value == 0) => "<a:moveTo><a:pt x=\"l\" y=\"t\"/></a:moveTo><a:lnTo><a:pt x=\"r\" y=\"t\"/></a:lnTo><a:lnTo><a:pt x=\"r\" y=\"b\"/></a:lnTo><a:lnTo><a:pt x=\"l\" y=\"b\"/></a:lnTo><a:close/>",
+        "diamond" => "<a:moveTo><a:pt x=\"hc\" y=\"t\"/></a:moveTo><a:lnTo><a:pt x=\"r\" y=\"vc\"/></a:lnTo><a:lnTo><a:pt x=\"hc\" y=\"b\"/></a:lnTo><a:lnTo><a:pt x=\"l\" y=\"vc\"/></a:lnTo><a:close/>",
+        "ellipse" => "<a:moveTo><a:pt x=\"l\" y=\"vc\"/></a:moveTo><a:arcTo wR=\"wd2\" hR=\"hd2\" stAng=\"10800000\" swAng=\"10800000\"/><a:arcTo wR=\"wd2\" hR=\"hd2\" stAng=\"0\" swAng=\"10800000\"/><a:close/>",
+        "roundRect" => {
+            let radius = if adjustments.is_empty() { "16667" } else { "adj" };
+            guides.push_str(&format!("<a:gd name=\"radius\" fmla=\"*/ ss {radius} 100000\"/><a:gd name=\"rightInset\" fmla=\"+- r 0 radius\"/><a:gd name=\"bottomInset\" fmla=\"+- b 0 radius\"/>"));
+            "<a:moveTo><a:pt x=\"radius\" y=\"t\"/></a:moveTo><a:lnTo><a:pt x=\"rightInset\" y=\"t\"/></a:lnTo><a:arcTo wR=\"radius\" hR=\"radius\" stAng=\"16200000\" swAng=\"5400000\"/><a:lnTo><a:pt x=\"r\" y=\"bottomInset\"/></a:lnTo><a:arcTo wR=\"radius\" hR=\"radius\" stAng=\"0\" swAng=\"5400000\"/><a:lnTo><a:pt x=\"radius\" y=\"b\"/></a:lnTo><a:arcTo wR=\"radius\" hR=\"radius\" stAng=\"5400000\" swAng=\"5400000\"/><a:lnTo><a:pt x=\"l\" y=\"radius\"/></a:lnTo><a:arcTo wR=\"radius\" hR=\"radius\" stAng=\"10800000\" swAng=\"5400000\"/><a:close/>"
+        }
+        _ => unreachable!(),
+    };
+    Ok(format!("<a:custGeom><a:avLst>{marker}{adjustment}</a:avLst><a:gdLst>{guides}</a:gdLst><a:ahLst/><a:cxnLst>{connections}</a:cxnLst><a:rect l=\"l\" t=\"t\" r=\"r\" b=\"b\"/><a:pathLst><a:path>{commands}</a:path></a:pathLst></a:custGeom>"))
+}
+
+pub(crate) fn read_connection_geometry(geometry: Node<'_, '_>) -> Result<Option<(String, Vec<crate::visual::ShapeAdjustment>, Vec<crate::visual::ConnectionSite>)>> {
+    let Some(marker) = child(geometry, A, "avLst").and_then(|list| list.children().find(|node| node.has_tag_name((A, "gd")) && node.attribute("name").is_some_and(|name| name.starts_with("aislideConnectionSitesV1_")))) else { return Ok(None); };
+    let preset = marker.attribute("name").unwrap_or_default().trim_start_matches("aislideConnectionSitesV1_");
+    let invalid = || Error::Unsupported("unrepresented native custom connection-site geometry".into());
+    let mut adjustments = Vec::new();
+    if let Some(guide) = child(geometry, A, "avLst").and_then(|list| list.children().find(|node| node.has_tag_name((A, "gd")) && node.attribute("name") == Some("adj"))) {
+        let value = guide.attribute("fmla").and_then(|value| value.strip_prefix("val ")).and_then(|value| value.parse().ok()).ok_or_else(invalid)?;
+        adjustments.push(crate::visual::ShapeAdjustment { name: "adj".into(), value });
+    }
+    let mut sites = Vec::new();
+    let list = child(geometry, A, "cxnLst").ok_or_else(invalid)?;
+    for (index, connection) in list.children().filter(|node| node.is_element()).enumerate() {
+        if index >= 128 { return Err(Error::Limit("native connection sites exceed 128 entries".into())); }
+        let coordinate = |axis, dimension| -> Result<f64> {
+            let name = format!("site{index}{axis}");
+            let guide = child(geometry, A, "gdLst").and_then(|list| list.children().find(|node| node.has_tag_name((A, "gd")) && node.attribute("name") == Some(name.as_str()))).ok_or_else(invalid)?;
+            guide.attribute("fmla").and_then(|value| value.strip_prefix(&format!("*/ {dimension} "))).and_then(|value| value.strip_suffix(" 1000000")).and_then(|value| value.parse::<u32>().ok()).map(|value| f64::from(value) / 1e6).ok_or_else(invalid)
+        };
+        let angle = connection.attribute("ang").and_then(|value| value.parse::<u32>().ok()).ok_or_else(invalid)?;
+        sites.push(crate::visual::ConnectionSite { x: coordinate("x", "w")?, y: coordinate("y", "h")?, angle: f64::from(angle) / 60000.0 });
+    }
+    let expected = format!("<root xmlns:a=\"{A}\">{}</root>", connection_geometry_xml(preset, &adjustments, &sites)?);
+    let parsed = crate::pptx::parse(&expected)?;
+    let expected = child(parsed.root_element(), A, "custGeom").ok_or_else(invalid)?;
+    if crate::visual::signature(geometry, false) != crate::visual::signature(expected, false) { return Err(invalid()); }
+    Ok(Some((preset.into(), adjustments, sites)))
+}
+
 pub(crate) fn read_path(geometry: Node<'_, '_>) -> Result<VectorPath> {
     let paths: Vec<_> = child(geometry, A, "pathLst").into_iter().flat_map(|node| node.children()).filter(|node| node.is_element()).collect();
     if paths.len() != 1 || !paths[0].has_tag_name((A,"path")) { return Err(Error::Unsupported("multiple native paths".into())); }

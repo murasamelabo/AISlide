@@ -280,6 +280,7 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
         let flip_h = matches!(xfrm.and_then(|node| node.attribute("flipH")), Some("1" | "true"));
         let flip_v = matches!(xfrm.and_then(|node| node.attribute("flipV")), Some("1" | "true"));
         let connection = |name| node.descendants().find(|node| node.has_tag_name((A, name))).and_then(|node| Some(Connection { element_id: ids.get(node.attribute("id")?)?.clone(), site: number(node, "idx", 0.0) as u32 }));
+        let custom = child(properties, A, "custGeom").is_some();
         let mut points = if let Some(geometry) = child(properties, A, "custGeom") {
             let paths: Vec<_> = child(geometry, A, "pathLst").into_iter().flat_map(|node| node.children()).filter(|node| node.has_tag_name((A, "path"))).collect();
             if paths.len() != 1 { return Err(Error::Unsupported("complex connector path".into())); }
@@ -287,7 +288,9 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
             if !path_width.is_finite() || !path_height.is_finite() || path_width <= 0.0 || path_height <= 0.0 { return Err(Error::Unsupported("connector coordinate space".into())); }
             let mut points = Vec::new();
             for (index, command) in path.children().filter(|node| node.is_element()).enumerate() {
+                if index >= 18 { return Err(Error::Limit("custom connector exceeds 18 points".into())); }
                 if !command.has_tag_name((A, if index == 0 { "moveTo" } else { "lnTo" })) { return Err(Error::Unsupported("curved connector path".into())); }
+                if command.children().filter(|node| node.is_element()).count() != 1 { return Err(Error::Unsupported("custom connector command requires exactly one point".into())); }
                 let point = child(command, A, "pt").ok_or_else(|| Error::Unsupported("connector point".into()))?;
                 let coordinate = |name| point.attribute(name).and_then(|value| value.parse::<f64>().ok()).ok_or_else(|| Error::Unsupported("formula connector path".into()));
                 points.push([coordinate("x")? / path_width, coordinate("y")? / path_height]);
@@ -319,10 +322,17 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
             }
         };
         if let Some(points) = &mut points {
-            points.dedup();
+            if !custom { points.dedup(); }
             for point in points { if flip_h { point[0] = ((1.0 - point[0]) * 1e6).round() / 1e6; } if flip_v { point[1] = ((1.0 - point[1]) * 1e6).round() / 1e6; } }
         }
-        let routing = points.map(|points| crate::model::ConnectorRouting { points, start_arrow: line.and_then(|node| child(node, A, "headEnd")).is_some_and(|node| node.attribute("type") == Some("triangle")), dashed: line.and_then(|node| child(node, A, "prstDash")).is_some_and(|node| node.attribute("val") == Some("dash")) });
+        if custom {
+            if let Some(extent) = xfrm.and_then(|node| child(node, A, "ext")) {
+                for (axis, name) in [(0, "cx"), (1, "cy")] {
+                    if number(extent, name, 0.0) == 0.0 { if let Some(points) = &mut points { for point in points { point[axis] = 0.0; } } }
+                }
+            }
+        }
+        let routing = points.map(|points| crate::model::ConnectorRouting { points, custom, start_arrow: line.and_then(|node| child(node, A, "headEnd")).is_some_and(|node| node.attribute("type") == Some("triangle")), dashed: line.and_then(|node| child(node, A, "prstDash")).is_some_and(|node| node.attribute("val") == Some("dash")) });
         return Ok(Element::Connector { visual: None, id, x, y, width, height, color: line.map_or_else(|| "@dk2".into(), |node| color(node, "@dk2")), stroke_width: line.map_or(1.0, |node| number(node, "w", 9525.0) / 9525.0), arrow: line.and_then(|node| child(node, A, "tailEnd")).is_some_and(|node| node.attribute("type").is_some_and(|value| value != "none")), flip_v: routing.is_none() && flip_v, start: connection("stCxn"), end: connection("endCxn"), routing });
     }
     if node.has_tag_name((P, "graphicFrame")) {
@@ -335,10 +345,11 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
     }
     let properties = child(node, P, "spPr");
     let body = child(node, P, "txBody");
-    let preset = properties.and_then(|node| child(node, A, "prstGeom")).and_then(|node| node.attribute("prst")).unwrap_or("rect");
+    let connection_geometry = properties.and_then(|node| child(node, A, "custGeom")).map(crate::vector::read_connection_geometry).transpose()?.flatten();
+    let preset = connection_geometry.as_ref().map(|(preset, _, _)| preset.as_str()).or_else(|| properties.and_then(|node| child(node, A, "prstGeom")).and_then(|node| node.attribute("prst"))).unwrap_or("rect");
     let filled = properties.is_some_and(|node| child(node, A, "solidFill").is_some() || child(node, A, "gradFill").is_some());
     let line = properties.and_then(|node| child(node, A, "ln"));
-    if let Some(geometry) = properties.and_then(|node| child(node, A, "custGeom")) {
+    if let Some(geometry) = properties.and_then(|node| child(node, A, "custGeom")).filter(|_| connection_geometry.is_none()) {
         if crate::vector::native_requires_override(geometry) {
             if body.is_some() { return Err(Error::Unsupported("custom path text body".into())); }
             let path = crate::vector::read_path(geometry)?;
@@ -374,12 +385,12 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
                 return Ok(inherited);
             }
         }
-        if tx_box || format.placeholder.is_some() || (!filled && preset == "rect") {
+        if tx_box || format.placeholder.is_some() || (!filled && preset == "rect" && connection_geometry.is_none()) {
             return Ok(Element::Text { visual: None, id, x, y, width, height, text, font_size, color: shade, bold, format });
         }
         return Ok(Element::Shape { visual: None, id, x, y, width, height, preset: preset.into(), fill: properties.map(shape_fill).unwrap_or_else(|| "@lt1".into()), stroke: line.map_or_else(|| "@dk1".into(), |node| color(node, "@dk1")), stroke_width: line.filter(|node| child(*node, A, "noFill").is_none()).map_or(0.0, |node| number(node, "w", 9525.0) / 9525.0), rotation: xfrm.map_or(0.0, |node| number(node, "rot", 0.0) / 60000.0), text, font_size, color: shade, bold, format });
     }
-    if preset != "rect" { return Ok(Element::Shape { visual: None, id, x, y, width, height, preset: preset.into(), fill: properties.map(shape_fill).unwrap_or_else(|| "@lt1".into()), stroke: line.map_or_else(|| "@dk1".into(), |node| color(node, "@dk1")), stroke_width: line.map_or(0.0, |node| number(node, "w", 0.0) / 9525.0), rotation: xfrm.map_or(0.0, |node| number(node, "rot", 0.0) / 60000.0), text: String::new(), font_size: 24.0, color: "@dk1".into(), bold: false, format: TextFormat::default() }); }
+    if preset != "rect" || connection_geometry.is_some() { return Ok(Element::Shape { visual: None, id, x, y, width, height, preset: preset.into(), fill: properties.map(shape_fill).unwrap_or_else(|| "@lt1".into()), stroke: line.map_or_else(|| "@dk1".into(), |node| color(node, "@dk1")), stroke_width: line.map_or(0.0, |node| number(node, "w", 0.0) / 9525.0), rotation: xfrm.map_or(0.0, |node| number(node, "rot", 0.0) / 60000.0), text: String::new(), font_size: 24.0, color: "@dk1".into(), bold: false, format: TextFormat::default() }); }
     Ok(Element::Rect { visual: None, id, x, y, width, height, fill: properties.map(shape_fill).unwrap_or_else(|| "@lt1".into()) })
 }
 

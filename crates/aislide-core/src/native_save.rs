@@ -409,10 +409,13 @@ fn geometry(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '_>, 
         if let (Some(offset), Some(extent)) = (offset, extent) {
             let (_, old_x, old_y, _, _) = old.bounds();
             let original = |name| offset.attribute(name).and_then(|value| value.parse::<f64>().ok()).filter(|value| value.is_finite()).ok_or_else(|| Error::Unsupported("native origin coordinate".into()));
-            for (node, name, value) in [(offset, "x", original("x")? + (x-old_x) * scale.0), (offset, "y", original("y")? + (y-old_y) * scale.1), (extent, "cx", width * scale.0), (extent, "cy", height * scale.1)] { set_attribute(xml, node, name, &value.round().to_string(), edits)?; }
+            let native_dimension = |axis, name, value| {
+                if matches!(new, Element::Connector { routing: Some(route), .. } if route.custom && route.points.iter().all(|point| point[axis] == 0.0)) && extent.attribute(name).and_then(|value| value.parse::<f64>().ok()) == Some(0.0) { 0.0 } else { value }
+            };
+            for (node, name, value) in [(offset, "x", original("x")? + (x-old_x) * scale.0), (offset, "y", original("y")? + (y-old_y) * scale.1), (extent, "cx", native_dimension(0, "cx", width * scale.0)), (extent, "cy", native_dimension(1, "cy", height * scale.1))] { set_attribute(xml, node, name, &value.round().to_string(), edits)?; }
         } else { return Err(Error::Unsupported("partial inherited transforms are preserved; detach using a supported layout".into())); }
         if let Element::Shape { rotation, .. } = new { set_attribute(xml, xfrm, "rot", &((*rotation * 60000.0).round()).to_string(), edits)?; }
-        if let Element::Connector { flip_v, .. } = new { set_attribute(xml, xfrm, "flipV", if *flip_v { "1" } else { "0" }, edits)?; }
+        if let Element::Connector { flip_v, routing: None, .. } = new { set_attribute(xml, xfrm, "flipV", if *flip_v { "1" } else { "0" }, edits)?; }
     } else {
         let parent = parent.ok_or_else(|| Error::Unsupported("shape properties missing".into()))?;
         let generated_parent = child(next, P, "spPr").ok_or_else(|| Error::Invalid("generated shape properties".into()))?;
@@ -563,9 +566,11 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
             if !equal(crop, next_crop)? { let fill = child(node, P, "blipFill").unwrap(); merge_child(xml, fill, &generated, child(next, P, "blipFill").unwrap(), A, "srcRect", &["blip", "srcRect", "tile", "stretch"], edits)?; }
         }
         (Element::Connector { color, stroke_width, arrow, start, end, flip_v, routing, .. }, Element::Connector { color: next_color, stroke_width: next_width, arrow: next_arrow, start: next_start, end: next_end, flip_v: next_flip, routing: next_routing, .. }) => {
-            if !equal(routing, next_routing)? { return Err(Error::Unsupported("native connector path replacement requires graph metadata editing".into())); }
+            let routing_changed = !equal(routing, next_routing)?;
+            let custom_edit = routing.as_ref().is_some_and(|route| route.custom) && next_routing.as_ref().is_some_and(|route| route.custom);
+            if routing_changed && !custom_edit { return Err(Error::Unsupported("native connector path replacement requires graph metadata editing".into())); }
             let parent = child(node, P, "spPr").unwrap(); let next_parent = child(next, P, "spPr").unwrap();
-            if color != next_color || stroke_width != next_width || arrow != next_arrow { merge_child(xml, parent, &generated, next_parent, A, "ln", &["xfrm", "prstGeom", "ln", "extLst"], edits)?; }
+            if !custom_edit && (color != next_color || stroke_width != next_width || arrow != next_arrow) { merge_child(xml, parent, &generated, next_parent, A, "ln", &["xfrm", "prstGeom", "ln", "extLst"], edits)?; }
             if flip_v != next_flip && old_bounds == new_bounds { geometry(xml, node, &generated, next, old, new, scale, edits)?; }
             if !equal(&(start, end), &(next_start, next_end))? { let parent = child(node, P, "nvCxnSpPr").and_then(|node| child(node, P, "cNvCxnSpPr")).unwrap(); let next_parent = child(next, P, "nvCxnSpPr").and_then(|node| child(node, P, "cNvCxnSpPr")).unwrap(); for tag in ["stCxn", "endCxn"] { merge_child(xml, parent, &generated, next_parent, A, tag, &["cxnSpLocks", "stCxn", "endCxn", "extLst"], edits)?; } }
         }

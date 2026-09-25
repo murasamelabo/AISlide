@@ -153,14 +153,14 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
   const filename = fileURLToPath(new URL('../packages/client/feedback-types.mts', import.meta.url)).replaceAll('\\', '/');
   const preamble = `
     import type { DocumentSession, AislideDocument, AuthoringOptions, AuthoringOperation, Frame, Crop,
-      Connection, ConnectorRouting, ConnectorSettings, PictureInput, SlideImportInput, GraphSpec, PartSpec, GuidedAuthoring, PreflightFinding } from './index.mjs';
+      Connection, ConnectorRouting, ConnectorSettings, VisualStyle, GraphEdge, GraphGroup, PictureInput, SlideImportInput, GraphSpec, PartSpec, GuidedAuthoring, PreflightFinding } from './index.mjs';
     declare const session: DocumentSession;
     declare const source: AislideDocument;
     const options: AuthoringOptions = { expectedRevision: 0, expectedHash: 'hash', signal: new AbortController().signal };
     const frame: Frame = { x: 0, y: 0, width: 300, height: 150 };
     const crop: Crop = { top: 0.1 };
     const connection: Connection = { element_id: 'text', site: 0 };
-    const routing: ConnectorRouting = { points: [[0, 0], [1, 1]] };
+    const routing: ConnectorRouting = { points: [[0, 0], [1, 1]], custom: true };
     const connector: ConnectorSettings = { color: '@dk1', stroke_width: 1, arrow: true, start: connection, end: null, routing };
     const picture: PictureInput = { id: 'image', base64: 'synthetic', mime_type: 'image/png', alt: 'Synthetic', frame, crop };
     const imported: SlideImportInput = { source_slide_ids: ['slide-1'], prefix: 'copy', after: null };
@@ -190,6 +190,12 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
       session.addPicture('slide-1', picture, options), session.importSlides(source, imported, options),
     ];
     const graph: GraphSpec = { version: 1, title: 'Synthetic', show_title: false, nodes: [{ id: 'node', label: 'Heading', detail: 'Detail', detail_font_size: 12, text_align: 'right', heading_bold: false, x: 0, y: 0, height: 512 }] };
+    const edge: GraphEdge = { id: 'edge', source: 'node', target: 'other', route: 'manual', waypoints: [[400, 200]], stroke_width: 4, label_color: '@accent2', label_font_size: 20, source_offset: -0.25, target_offset: 0.25, label_placement: { position: 0.3, side: 'below', offset: 12 }, badge: { number: 7, position: 0.7, size: 28, font_size: 14, fill: '@lt1', color: '@dk1' } };
+    const group: GraphGroup = { id: 'group', label: 'Group', ...frame, padding: 16, header_height: 64, header_font_size: 24 };
+    const visual: VisualStyle = { connection_sites: [{ x: 1, y: 0.25, angle: 0 }] };
+    graph.edges = [edge, { ...edge, stroke_width: null, label_color: null, label_font_size: null, source_offset: null, target_offset: null, label_placement: null, badge: null }];
+    graph.groups = [group, { ...group, padding: null, header_height: null, header_font_size: null }];
+    results.push(session.addElements('slide-1', [{ type: 'connector', id: 'edge', ...frame, ...connector, visual }]));
     const part: PartSpec = { version: 1, preset: 'synthetic', title: 'Synthetic', data: { kind: 'diagram', graph }, layout: { ...frame, show_title: false } };
     const matrix: PartSpec = { ...part, data: { kind: 'matrix', corner_label: 'Criterion', rows: ['A', 'B'], columns: ['C', 'D'], cells: [['a', 'b'], ['c', 'd']] } };
     const managed: AuthoringOperation[] = [
@@ -209,6 +215,12 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
   `);
   assert.deepEqual(diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')), []);
   for (const invalid of [
+    "const invalid: GraphEdge = { id: 'edge', source: 'a', target: 'b', waypoints: null };",
+    "const invalid: GraphEdge = { id: 'edge', source: 'a', target: 'b', label_placement: { position: 0.5, side: 'left' } };",
+    "const invalid: GraphEdge = { id: 'edge', source: 'a', target: 'b', badge: { number: '7' } };",
+    "const invalid: GraphGroup = { id: 'group', label: '', ...frame, padding: '8' };",
+    "const invalid: VisualStyle = { connection_sites: null };",
+    "const invalid: ConnectorRouting = { points: [[0, 0], [1, 1]], custom: null };",
     "const invalid: PreflightFinding['severity'] = 'approved';",
     "session.applyOperations([{ op: 'replace', path: '/deck', value: {} }]);",
     "session.setTextStyle('slide-1', { ids: ['text'], style: { font_size: 'large' } });",
@@ -896,6 +908,61 @@ test('graph SDK creates, edits and reopens native graph metadata with undo', asy
   assert.equal(reopened.session.document.deck.slides[0].elements[0].children.filter((element) => element.type === 'picture').length, 0);
   await reopened.session.undo();
   assert.deepEqual(reopened.session.document.parts[0].spec.data.graph.nodes[1].icon, spec.nodes[1].icon);
+});
+
+test('graph authoring SDK retains routes annotations sites and group layout through native editing', async () => {
+  const client = new AislideClient(requestCore);
+  const spec = { version: 1, title: 'Synthetic graph authoring', nodes: [
+    { id: 'source', label: 'Source', x: 80, y: 176, width: 160, height: 120, group: 'region' },
+    { id: 'target', label: 'Target', kind: 'ellipse', x: 848, y: 176, width: 160, height: 120, group: 'region' },
+  ], edges: [
+    { id: 'manual', source: 'source', target: 'target', source_port: 'right', target_port: 'left', route: 'manual', waypoints: [[500, 320], [380, 180], [660, 340]], stroke_width: 4, label: 'Request', label_color: 'AA2244', label_font_size: 20, source_offset: -0.25, target_offset: 0.25, label_placement: { position: 0.35, side: 'above', offset: 12 }, badge: { number: 7, position: 0.65, size: 28, font_size: 14, fill: 'FFFFFF', color: '112233' } },
+    { id: 'center', source: 'source', target: 'target', source_port: 'right', target_port: 'left', badge: { number: 2 } },
+  ], groups: [{ id: 'region', label: 'Region', x: 24, y: 96, width: 1104, height: 400, padding: 24, header_height: 64, header_font_size: 24 }] };
+  const rendered = await client.createGraph({ id: 'graph', spec });
+  const connector = rendered.children.find(element => element.id.endsWith('-e-manual'));
+  assert.equal(connector.stroke_width, 4);
+  assert.equal(connector.routing.custom, true);
+  assert.equal(connector.routing.points.length, 5);
+  const source = rendered.children.find(element => element.id.endsWith('-n-source'));
+  assert.equal(source.visual.connection_sites.length, 2);
+  for (const edgeId of ['manual', 'center']) {
+    const edge = rendered.children.find(element => element.id.endsWith(`-e-${edgeId}`));
+    assert.equal(edge.start.element_id, source.id);
+    assert.ok(source.visual.connection_sites[edge.start.site]);
+  }
+  const label = rendered.children.find(element => element.id.endsWith('-et-manual'));
+  assert.equal(label.color, 'AA2244'); assert.equal(label.font_size, 20);
+  assert.equal(rendered.children.find(element => element.id.endsWith('-eb-center')).text, '2');
+  const header = rendered.children.find(element => element.id.endsWith('-gt-region'));
+  assert.equal(header.x, 52); assert.equal(header.height, 52); assert.equal(header.font_size, 24);
+  for (const ids of [['source'], ['source', 'target'], ['manual'], ['region']]) {
+    const moved = await client.transformGraph(spec, [{ op: 'move', ids, dx: 8, dy: 8 }]);
+    assert.deepEqual(moved.edges[0].waypoints, ids.length === 1 && ids[0] === 'source' ? spec.edges[0].waypoints : spec.edges[0].waypoints.map(([horizontal, vertical]) => [horizontal + 8, vertical + 8]));
+  }
+  for (const kind of ['cloud', 'cylinder']) await assert.rejects(() => client.createGraph({ id: 'graph', spec: { ...spec, nodes: [{ ...spec.nodes[0], kind }, spec.nodes[1]] } }), /offset/i);
+  for (const patch of [{ waypoints: [] }, { route: 'elbow' }, { waypoints: [[400, 200], [400, 200]] }, { label: '' }, { label_placement: { position: 0, offset: 128 } }, { badge: { number: 99, size: 16, font_size: 32 } }]) {
+    await assert.rejects(() => client.createGraph({ id: 'graph', spec: { ...spec, edges: [{ ...spec.edges[0], ...patch }] } }));
+  }
+  const session = await client.createDocument({ id: 'graph-authoring-sdk', deck: { version: 1, title: 'Synthetic graph', width: 1280, height: 720, slides: [{ id: 'slide', title: 'Graph', background: '@lt1', notes: '', elements: [] }] } });
+  await session.addGraph('slide', { id: 'graph', spec });
+  const original = session.document;
+  await session.applyGraph('slide', { id: 'graph', operations: [{ op: 'put_edge', edge: { ...spec.edges[0], stroke_width: 6 } }, { op: 'put_group', group: { ...spec.groups[0], padding: 32 } }] });
+  assert.equal(session.document.parts[0].spec.data.graph.edges[0].stroke_width, 6);
+  await session.undo(); assert.equal(session.document.hash, original.hash);
+  await session.redo();
+  const authored = session.document.parts[0].spec.data.graph;
+  const exported = await session.exportPresentation();
+  const reopened = await client.openPresentation('graph-authoring-reopened', exported.base64);
+  assert.equal(reopened.session.document.parts[0].stale, false);
+  assert.deepEqual(reopened.session.document.parts[0].spec.data.graph, authored);
+  const children = reopened.session.document.deck.slides[0].elements[0].children;
+  assert.equal(children.find(element => element.id.endsWith('-e-manual')).routing.custom, true);
+  assert.equal(children.find(element => element.id.endsWith('-n-source')).visual.connection_sites.length, 2);
+  await reopened.session.applyGraph('slide', { id: 'graph', operations: [{ op: 'move', ids: ['manual'], dx: 8, dy: 0 }] });
+  assert.deepEqual(reopened.session.document.parts[0].spec.data.graph.edges[0].waypoints, authored.edges[0].waypoints.map(([horizontal, vertical]) => [horizontal + 8, vertical]));
+  await reopened.session.undo();
+  assert.deepEqual(reopened.session.document.parts[0].spec.data.graph, authored);
 });
 
 test('metadata parts share catalog, revisioned updates, undo and single PPTX persistence', async () => {

@@ -10,7 +10,7 @@ function polygon(sides: number, inner?: number): string {
   }).join(' ') + ' Z'
 }
 
-export function ShapeSurface({ preset, fill, stroke, strokeWidth = 2, fillOpacity, adjustments, children, width = 100, height = 100 }: { preset: string; fill: string; stroke: string; strokeWidth?: number; fillOpacity?: number; adjustments?: ShapeAdjustment[]; children?: ReactNode; width?: number; height?: number }) {
+export function ShapeSurface({ preset, fill, stroke, strokeWidth = 2, fillOpacity, adjustments, children, width = 100, height = 100, nativeGeometry = false }: { preset: string; fill: string; stroke: string; strokeWidth?: number; fillOpacity?: number; adjustments?: ShapeAdjustment[]; children?: ReactNode; width?: number; height?: number; nativeGeometry?: boolean }) {
   const rectangle = 'M0 0H100V100H0Z'
   const ellipse = 'M0 50A50 50 0 1 0 100 50A50 50 0 1 0 0 50Z'
   const paths: Record<string, string> = {
@@ -46,6 +46,11 @@ export function ShapeSurface({ preset, fill, stroke, strokeWidth = 2, fillOpacit
     }
     if (preset === 'triangle') paths.triangle = `M${Math.max(0, Math.min(100, adjustment / 1000))} 0L100 100H0Z`
     if (preset === 'chevron') { const inset = Math.max(0, Math.min(100, adjustment / 100000 * Math.min(width, height) / width * 100)); paths.chevron = `M0 0H${100 - inset}L100 50 ${100 - inset} 100H0L${inset} 50Z` }
+  }
+  if (nativeGeometry && preset === 'roundRect') {
+    const radius = Math.max(0, Math.min(50000, adjustment ?? 16667)) / 100000 * Math.min(width, height)
+    const horizontal = radius / width * 100, vertical = radius / height * 100
+    paths.roundRect = radius === 0 ? rectangle : `M${horizontal} 0H${100 - horizontal}A${horizontal} ${vertical} 0 0 1 100 ${vertical}V${100 - vertical}A${horizontal} ${vertical} 0 0 1 ${100 - horizontal} 100H${horizontal}A${horizontal} ${vertical} 0 0 1 0 ${100 - vertical}V${vertical}A${horizontal} ${vertical} 0 0 1 ${horizontal} 0Z`
   }
   const path = star ? polygon(Number(star[1]), Number(star[1]) === 5 ? 0.382 : 0.5) : paths[preset] ?? rectangle
   return <svg className="preset-shape" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">

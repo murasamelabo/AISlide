@@ -74,11 +74,12 @@ export type PictureMask = 'ellipse' | 'round_rect' | 'diamond' | 'hexagon'
 export type ShapeAdjustment = { name: 'adj'; value: number }
 export type PathCommand = { op: 'move' | 'line'; point: [number, number] } | { op: 'quadratic'; control: [number, number]; point: [number, number] } | { op: 'cubic'; control1: [number, number]; control2: [number, number]; point: [number, number] } | { op: 'close' }
 export type VectorPath = { commands: PathCommand[] }
+export type ConnectionSite = { x: number; y: number; angle: number }
 export type BooleanOperation = 'union' | 'intersect' | 'subtract' | 'xor' | 'fragment'
 export type CombineShapesInput = { ids: string[]; operation: BooleanOperation; result_id: string }
 export type GeometryCapabilities = { operations: BooleanOperation[]; max_shapes: number; max_vertices: number; max_path_commands: number; max_edge_pairs: number; max_fragments: number; native_coordinate_units: number; fill_rule: 'nonzero_opposite_winding'; clipping_fill_rule: 'even_odd'; curve_flattening: true; flatten_tolerance_px: number; flatten_max_depth: number; curve_output: 'polygon'; empty_result: 'reject_without_changes'; touching_contours: 'reject'; style_reference: 'first_supplied_id'; backend: 'geo/i_overlay'; office_visual_parity: false }
 /** Degrees and scene pixels; alpha/offsets 0..1. Shape.rotation and connector routing own their legacy transforms. Opacity is shape fill or picture pixels only. Polygon.points must equal the path's complete control-point list. */
-export type VisualStyle = { rotation?: number | null; flip_h?: boolean; flip_v?: boolean; hidden?: boolean; locked?: boolean; opacity?: number | null; gradient?: Gradient | null; shadow?: Shadow | null; glow?: Glow | null; soft_edge?: number | null; reflection?: Reflection | null; text_warp?: TextWarp | null; adjustments?: ShapeAdjustment[]; picture_mask?: PictureMask | null; path?: VectorPath | null }
+export type VisualStyle = { rotation?: number | null; flip_h?: boolean; flip_v?: boolean; hidden?: boolean; locked?: boolean; opacity?: number | null; gradient?: Gradient | null; shadow?: Shadow | null; glow?: Glow | null; soft_edge?: number | null; reflection?: Reflection | null; text_warp?: TextWarp | null; adjustments?: ShapeAdjustment[]; picture_mask?: PictureMask | null; path?: VectorPath | null; connection_sites?: ConnectionSite[] }
 export type Element = Bounds & (
   | { type: 'text'; text: string; font_size: number; color: string; bold: boolean; format?: TextFormat; visual?: VisualStyle | null }
   | { type: 'rect'; fill: string; visual?: VisualStyle | null }
@@ -87,7 +88,7 @@ export type Element = Bounds & (
   | { type: 'table'; rows: string[][]; font_size: number; format?: TableFormat }
   | ({ type: 'chart' } & ChartData)
   | { type: 'picture'; base64: string; mime_type: 'image/png' | 'image/jpeg'; alt: string; crop: { left: number; top: number; right: number; bottom: number }; visual?: VisualStyle | null; svg?: string | null }
-  | { type: 'connector'; color: string; stroke_width: number; arrow: boolean; flip_v?: boolean; start?: { element_id: string; site: number } | null; end?: { element_id: string; site: number } | null; routing?: { points: [number, number][]; start_arrow: boolean; dashed: boolean } | null; visual?: VisualStyle | null }
+  | { type: 'connector'; color: string; stroke_width: number; arrow: boolean; flip_v?: boolean; start?: Connection | null; end?: Connection | null; routing?: ConnectorRouting | null; visual?: VisualStyle | null }
   | { type: 'group'; view_width: number; view_height: number; children: Element[]; visual?: VisualStyle | null }
 )
 export type Comment = { id: string; author: string; initials: string; timestamp: string; text: string; x?: number; y?: number; parent_id?: string | null; resolved?: boolean; native_author_id?: number | null; native_index?: number | null }
@@ -161,7 +162,7 @@ export type UndoReceipt = { document_id: string; after_hash: string; inverse: Pa
 export type Frame = Omit<Bounds, 'id'>
 export type Crop = { left?: number; top?: number; right?: number; bottom?: number }
 export type Connection = { element_id: string; site: number }
-export type ConnectorRouting = { points: [number, number][]; start_arrow?: boolean; dashed?: boolean }
+export type ConnectorRouting = { points: [number, number][]; start_arrow?: boolean; dashed?: boolean; custom?: boolean }
 export type ConnectorSettings = { color: string; stroke_width: number; arrow: boolean; flip_v?: boolean; start?: Connection | null; end?: Connection | null; routing?: ConnectorRouting | null }
 export type PictureInput = { id: string; base64: string; mime_type: 'image/png' | 'image/jpeg'; alt: string; frame?: Frame | null; crop?: Crop }
 export type AuthoringOperation =
@@ -213,12 +214,14 @@ export type BestPracticeProfiles = { version: 1; profiles: { id: AuthoringProfil
 export type GraphNodeKind = 'rectangle' | 'rounded_rectangle' | 'ellipse' | 'diamond' | 'cylinder' | 'cloud'
 export type GraphPresentation = 'card' | 'icon'
 export type GraphPort = 'auto' | 'top' | 'left' | 'bottom' | 'right'
-export type GraphRoute = 'straight' | 'elbow'
+export type GraphRoute = 'straight' | 'elbow' | 'manual'
 export type GraphIcon = { base64: string; mime_type: 'image/png' | 'image/jpeg'; alt?: string }
 export type GraphTextAlign = 'left' | 'center' | 'right'
 export type GraphNode = { id: string; label: string; detail?: string | null; detail_font_size?: number | null; text_align?: GraphTextAlign | null; heading_bold?: boolean; kind?: GraphNodeKind; presentation?: GraphPresentation; x: number; y: number; width?: number; height?: number; fill?: string; stroke?: string; color?: string; font_size?: number; group?: string | null; icon?: GraphIcon | null }
-export type GraphEdge = { id: string; source: string; target: string; source_port?: GraphPort; target_port?: GraphPort; label?: string; route?: GraphRoute; color?: string; arrow?: boolean; start_arrow?: boolean; dashed?: boolean }
-export type GraphGroup = { id: string; label: string; x: number; y: number; width: number; height: number; fill?: string; stroke?: string; parent?: string | null; icon?: GraphIcon | null }
+export type GraphLabelPlacement = { position: number; side?: 'above' | 'below'; offset?: number }
+export type GraphBadge = { number: number; position?: number; size?: number; font_size?: number; fill?: string; color?: string }
+export type GraphEdge = { id: string; source: string; target: string; source_port?: GraphPort; target_port?: GraphPort; label?: string; route?: GraphRoute; color?: string; arrow?: boolean; start_arrow?: boolean; dashed?: boolean; stroke_width?: number | null; label_color?: string | null; label_font_size?: number | null; source_offset?: number | null; target_offset?: number | null; waypoints?: [number, number][]; label_placement?: GraphLabelPlacement | null; badge?: GraphBadge | null }
+export type GraphGroup = { id: string; label: string; x: number; y: number; width: number; height: number; fill?: string; stroke?: string; parent?: string | null; icon?: GraphIcon | null; padding?: number | null; header_height?: number | null; header_font_size?: number | null }
 export type GraphSpec = { version: 1; title: string; subtitle?: string; show_title?: boolean; nodes: GraphNode[]; edges?: GraphEdge[]; groups?: GraphGroup[] }
 export type GraphAlignment = 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom'
 export type GraphOperation =

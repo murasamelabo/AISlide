@@ -1476,6 +1476,11 @@ fn vector_path(path: &crate::vector::VectorPath, width: f64, height: f64) -> Str
 }
 
 fn shape_path(preset: &str, width: f64, height: f64, visual: &VisualStyle) -> Result<String> {
+    if !visual.connection_sites.is_empty() && preset == "roundRect" {
+        let radius = f64::from(visual.adjustments.first().map_or(16667, |adjustment| adjustment.value)) / 100000.0 * width.min(height);
+        let right = width - radius; let bottom = height - radius;
+        return Ok(format!("M{radius} 0H{right}A{radius} {radius} 0 0 1 {width} {radius}V{bottom}A{radius} {radius} 0 0 1 {right} {height}H{radius}A{radius} {radius} 0 0 1 0 {bottom}V{radius}A{radius} {radius} 0 0 1 {radius} 0Z"));
+    }
     let normalized=match preset {
         "rect"|"flowChartProcess"|"flowChartPredefinedProcess"|"flowChartInternalStorage"=>"M0 0H100V100H0Z",
         "roundRect"=>"M17 0H83Q100 0 100 17V83Q100 100 83 100H17Q0 100 0 83V17Q0 0 17 0Z",

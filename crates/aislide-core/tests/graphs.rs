@@ -9,8 +9,176 @@ fn graph() -> Value {
     ],"edges":[{"id":"request","source":"client","target":"api","label":"HTTPS","source_port":"right","target_port":"left","route":"straight"}],"groups":[]})
 }
 
+#[test]
+fn graph_edge_styles_are_optional_bounded_and_rendered() {
+    let original = graph();
+    let legacy = execute_request(json!({"op":"create_graph","id":"edge-style","spec":original})).unwrap();
+    let mut explicit = original.clone();
+    for field in ["stroke_width", "label_color", "label_font_size"] { explicit["edges"][0][field] = Value::Null; }
+    assert_eq!(execute_request(json!({"op":"create_graph","id":"edge-style","spec":explicit})).unwrap(), legacy);
+    let typed: aislide_core::graphs::GraphSpec = serde_json::from_value(explicit).unwrap();
+    let serialized = serde_json::to_value(typed).unwrap();
+    for field in ["stroke_width", "label_color", "label_font_size"] { assert!(serialized["edges"][0].get(field).is_none()); }
+    let mut styled = original.clone();
+    styled["edges"][0]["stroke_width"] = json!(4.5);
+    styled["edges"][0]["label_color"] = json!("C02040");
+    styled["edges"][0]["label_font_size"] = json!(10);
+    let rendered = execute_request(json!({"op":"create_graph","id":"edge-style","spec":styled})).unwrap();
+    let children = rendered["children"].as_array().unwrap();
+    let edge = children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-e-request")).unwrap();
+    let label = children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-et-request")).unwrap();
+    assert_eq!(edge["stroke_width"], 4.5);
+    assert_eq!(label["color"], "C02040");
+    assert_eq!(label["font_size"], 10.0);
+    for (field, value) in [("stroke_width", json!(0.25)), ("stroke_width", json!(13)), ("label_font_size", json!(7)), ("label_font_size", json!(41)), ("label_color", json!("bad-color"))] {
+        let mut invalid = original.clone(); invalid["edges"][0][field] = value;
+        assert!(execute_request(json!({"op":"create_graph","id":"invalid-style","spec":invalid})).is_err(), "{field}");
+    }
+}
+
+#[test]
+fn graph_explicit_label_and_badge_positions_follow_the_route() {
+    let mut spec = graph();
+    spec["nodes"][1]["y"] = json!(160); spec["nodes"][1]["height"] = json!(96);
+    spec["edges"][0]["label_font_size"] = json!(10);
+    spec["edges"][0]["label_placement"] = json!({"position":0.25,"side":"above","offset":6});
+    spec["edges"][0]["badge"] = json!({"number":8,"position":0.75,"size":24,"font_size":12,"fill":"FFFFFF","color":"C02040"});
+    for side in ["above", "below"] {
+        spec["edges"][0]["label_placement"]["side"] = json!(side);
+        let rendered = execute_request(json!({"op":"create_graph","id":"positioned","spec":spec})).unwrap();
+        let children = rendered["children"].as_array().unwrap();
+        let label = children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-et-request")).unwrap();
+        assert_eq!(label["x"].as_f64().unwrap() + label["width"].as_f64().unwrap() / 2.0, 326.0);
+        let facing_edge = if side == "above" { label["y"].as_f64().unwrap() + label["height"].as_f64().unwrap() } else { label["y"].as_f64().unwrap() };
+        assert_eq!(facing_edge, if side == "above" { 202.0 } else { 214.0 });
+        let badge = children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-eb-request")).unwrap();
+        assert_eq!(badge["type"], "shape"); assert_eq!(badge["preset"], "ellipse"); assert_eq!(badge["text"], "8");
+        assert_eq!(badge["x"], 470.0); assert_eq!(badge["y"], 196.0); assert_eq!(badge["color"], "C02040");
+        for (index, node) in spec["nodes"].as_array().unwrap().iter().enumerate() {
+            let suffix = format!("-n-{}", node["id"].as_str().unwrap());
+            let rendered_node = children.iter().find(|child| child["id"].as_str().unwrap().ends_with(&suffix)).unwrap();
+            for field in ["x", "y", "width", "height"] { assert_eq!(rendered_node[field].as_f64(), spec["nodes"][index][field].as_f64()); }
+        }
+    }
+    for (field, value) in [("label_placement", json!({"position":1.1,"side":"above"})), ("label_placement", json!({"position":0.5,"side":"above","offset":-1})), ("badge", json!({"number":0})), ("badge", json!({"number":100})), ("badge", json!({"number":1,"size":8}))] {
+        let mut invalid = spec.clone(); invalid["edges"][0][field] = value;
+        assert!(execute_request(json!({"op":"create_graph","id":"invalid-position","spec":invalid})).is_err());
+    }
+    spec["edges"][0]["label_placement"] = json!({"position":0.5,"side":"above","offset":128});
+    spec["nodes"][0]["y"] = json!(88); spec["nodes"][1]["y"] = json!(88);
+    assert!(execute_request(json!({"op":"create_graph","id":"outside-position","spec":spec})).is_err());
+}
+
+#[test]
+fn graph_group_spacing_controls_containment_header_and_layout() {
+    let mut spec = graph();
+    spec["groups"] = json!([{"id":"boundary","label":"Boundary","x":24,"y":120,"width":1000,"height":368,"padding":16,"header_height":24,"header_font_size":8}]);
+    spec["nodes"][0]["y"] = json!(144);
+    for node in spec["nodes"].as_array_mut().unwrap() { node["group"] = json!("boundary"); }
+    let rendered = execute_request(json!({"op":"create_graph","id":"spacing","spec":spec})).unwrap();
+    let header = rendered["children"].as_array().unwrap().iter().find(|child| child["id"].as_str().unwrap().ends_with("-gt-boundary")).unwrap();
+    assert_eq!(header["x"], 44.0); assert_eq!(header["y"], 128.0); assert_eq!(header["height"], 12.0); assert_eq!(header["font_size"], 8.0);
+    let layout = execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"layout","columns":2}]})).unwrap();
+    assert_eq!(layout["nodes"][0]["x"], 182.0);
+    assert_eq!(layout["nodes"][0]["y"], 260.0);
+    let mut outside = spec.clone(); outside["nodes"][0]["y"] = json!(143);
+    assert!(execute_request(json!({"op":"create_graph","id":"spacing-invalid","spec":outside})).is_err());
+    for (field, value) in [("padding", -1), ("padding", 65), ("header_height", 10), ("header_font_size", 7), ("header_font_size", 40)] {
+        let mut invalid = spec.clone(); invalid["groups"][0][field] = json!(value);
+        assert!(execute_request(json!({"op":"create_graph","id":"spacing-invalid","spec":invalid})).is_err(), "{field}");
+    }
+}
+
+#[test]
+fn review_legacy_small_groups_accept_omitted_spacing_controls() {
+    for height in [40, 48] {
+        let mut spec = graph();
+        spec["groups"] = json!([{"id":"empty","label":"Legacy","x":900,"y":88,"width":200,"height":height}]);
+        let original = execute_request(json!({"op":"create_graph","id":"legacy-small","spec":spec})).unwrap();
+        for field in ["padding", "header_height", "header_font_size"] { spec["groups"][0][field] = Value::Null; }
+        assert_eq!(execute_request(json!({"op":"create_graph","id":"legacy-small","spec":spec})).unwrap(), original);
+        let exported = execute_request(json!({"op":"export","deck":deck(original)})).unwrap();
+        execute_request(json!({"op":"open_presentation","id":"legacy-small-open","base64":exported["base64"]})).unwrap();
+    }
+}
+
 fn deck(element: Value) -> Value {
     json!({"version":1,"title":"Graph fixture","width":1280,"height":720,"slides":[{"id":"slide","title":"Graph","background":"FFFFFF","notes":"Synthetic fixture","elements":[element]}]})
+}
+
+#[test]
+fn graph_manual_routes_offsets_preserve_nodes_native_metadata_and_undo() {
+    let mut spec = graph();
+    spec["edges"][0]["route"] = json!("manual");
+    spec["edges"][0]["waypoints"] = json!([[360,176],[440,248],[360,352],[480,400]]);
+    spec["edges"][0]["source_offset"] = json!(-0.25);
+    spec["edges"][0]["target_offset"] = json!(0.25);
+    spec["edges"][0]["start_arrow"] = json!(true); spec["edges"][0]["dashed"] = json!(true);
+    spec["edges"].as_array_mut().unwrap().push(graph()["edges"][0].clone());
+    spec["edges"][1]["id"] = json!("parallel");
+    let document = execute_request(json!({"op":"create_presentation","id":"manual-graph","title":"Manual graph"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_graph","document":document,"expected_revision":0,"slide_id":"slide-1","id":"architecture","spec":spec})).unwrap();
+    let original = &inserted["document"]["deck"]["slides"][0]["elements"][0];
+    let children = original["children"].as_array().unwrap();
+    let source = children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-n-client")).unwrap();
+    assert_eq!(source["x"], 48.0); assert_eq!(source["y"], 160.0);
+    assert_eq!(source["visual"]["connection_sites"], json!([{"x":1.0,"y":0.25,"angle":0.0},{"x":1.0,"y":0.5,"angle":0.0}]));
+    let edge = children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-e-request")).unwrap();
+    assert_eq!(edge["routing"]["custom"], true); assert_eq!(edge["routing"]["points"].as_array().unwrap().len(), 6);
+    assert_eq!(edge["start"]["element_id"], source["id"]); assert_eq!(edge["start"]["site"], 0);
+    let parallel = children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-e-parallel")).unwrap();
+    assert_eq!(parallel["start"]["element_id"], source["id"]); assert_eq!(parallel["start"]["site"], 1);
+    assert_eq!(parallel["routing"].get("custom"), None);
+    let typed: aislide_core::graphs::GraphSpec = serde_json::from_value(spec.clone()).unwrap();
+    assert_eq!(aislide_core::graphs::edge_points(&typed.nodes[0], &typed.nodes[1], &typed.edges[0]), vec![[248.0,184.0],[360.0,176.0],[440.0,248.0],[360.0,352.0],[480.0,400.0],[560.0,340.0]]);
+    let saved = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+    let package = Package::open(STANDARD.decode(saved["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let xml = package.text("ppt/slides/slide1.xml").unwrap();
+    assert!(xml.contains("<a:cxn ")); assert!(xml.contains("<a:custGeom>")); assert!(xml.contains("<a:lnTo>"));
+    let opened = execute_request(json!({"op":"open_presentation","id":"manual-open","base64":saved["base64"]})).unwrap();
+    let before = &opened["document"];
+    assert_eq!(before["parts"][0]["stale"], false);
+    assert_eq!(before["parts"][0]["spec"], inserted["document"]["parts"][0]["spec"]);
+    let restored = before["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap();
+    assert_eq!(restored.len(), children.len());
+    for child in children {
+        let native = restored.iter().find(|native| native["id"] == child["id"]).unwrap();
+        for field in ["type", "preset", "visual", "routing", "start", "end", "arrow", "flip_v"] { assert_eq!(native[field], child[field], "{field}"); }
+        for field in ["x", "y", "width", "height"] {
+            assert!((native[field].as_f64().unwrap() - child[field].as_f64().unwrap()).abs() <= 1.0 / 9525.0, "{field}");
+        }
+    }
+    let updated = execute_request(json!({"op":"apply_graph","document":before,"expected_revision":0,"slide_id":"slide-1","id":"architecture","operations":[{"op":"move","ids":["client","api"],"dx":16,"dy":8}]})).unwrap();
+    assert_eq!(updated["document"]["parts"][0]["spec"]["data"]["graph"]["edges"][0]["waypoints"], json!([[376.0,184.0],[456.0,256.0],[376.0,360.0],[496.0,408.0]]));
+    let updated_saved = execute_request(json!({"op":"export_presentation","document":updated["document"]})).unwrap();
+    let reopened = execute_request(json!({"op":"open_presentation","id":"manual-updated","base64":updated_saved["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["parts"][0]["stale"], false);
+    let unchanged = execute_request(json!({"op":"apply_graph","document":before,"expected_revision":0,"slide_id":"slide-1","id":"architecture","operations":[{"op":"move","ids":["client"],"dx":0,"dy":0}]})).unwrap();
+    assert_eq!(unchanged["document"]["hash"], before["hash"]); assert!(unchanged["receipt"].is_null());
+    let undone = execute_request(json!({"op":"undo_transaction","document":updated["document"],"expected_revision":1,"receipt":updated["receipt"]})).unwrap();
+    assert_eq!(undone["document"]["hash"], before["hash"]);
+    assert_eq!(execute_request(json!({"op":"export_presentation","document":undone["document"]})).unwrap()["base64"], saved["base64"]);
+    let moved = execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"move","ids":["client"],"dx":16,"dy":0}]})).unwrap();
+    assert_eq!(moved["edges"][0]["waypoints"], json!([[360.0,176.0],[440.0,248.0],[360.0,352.0],[480.0,400.0]]));
+}
+
+#[test]
+fn graph_manual_routes_and_offsets_reject_ambiguous_or_unsupported_input() {
+    for edge in [
+        json!({"route":"manual"}), json!({"waypoints":[[320,200]]}),
+        json!({"route":"manual","waypoints":[[320,200],[320,200]]}),
+        json!({"route":"manual","waypoints":[[320,80]]}),
+        json!({"route":"manual","waypoints":[[1200,200]]}),
+        json!({"route":"manual","waypoints":vec![[320,200];17]}),
+        json!({"source_offset":0.51}), json!({"target_offset":-0.51}),
+    ] {
+        let mut spec = graph(); spec["edges"][0].as_object_mut().unwrap().extend(edge.as_object().unwrap().clone());
+        assert!(execute_request(json!({"op":"create_graph","id":"invalid-manual","spec":spec})).is_err(), "{edge}");
+    }
+    for kind in ["cylinder", "cloud"] {
+        let mut spec = graph(); spec["nodes"][0]["kind"] = json!(kind); spec["edges"][0]["source_offset"] = json!(0.2);
+        assert!(execute_request(json!({"op":"create_graph","id":"unsupported-offset","spec":spec})).unwrap_err().to_string().contains("offset"));
+    }
 }
 
 fn node_icon(color: &str) -> Value {
@@ -565,7 +733,7 @@ fn cloud_graph_moves_descendants_once_and_removes_boundaries_without_resources()
 #[test]
 fn cloud_graph_limits_include_sixteen_groups_and_rendered_children() {
     let catalog = execute_request(json!({"op":"graph_catalog"})).unwrap();
-    assert_eq!(catalog["limits"], json!({"nodes":48,"edges":64,"groups":16,"group_depth":4,"rendered_elements":256}));
+    assert_eq!(catalog["limits"], json!({"nodes":48,"edges":64,"groups":16,"group_depth":4,"rendered_elements":256,"waypoints_per_edge":16}));
     let mut spec = graph();
     spec["groups"] = json!((0..16).map(|index| json!({"id":format!("boundary-{index}"),"label":"Boundary","x":16,"y":104,"width":300,"height":240})).collect::<Vec<_>>());
     execute_request(json!({"op":"create_graph","id":"sixteen","spec":spec})).unwrap();

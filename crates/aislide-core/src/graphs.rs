@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use geo::Intersects;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const WIDTH: f64 = 1152.0;
 pub const HEIGHT: f64 = 512.0;
@@ -60,7 +60,7 @@ pub enum Port { #[default] Auto, Top, Left, Bottom, Right }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum Route { #[default] Straight, Elbow }
+pub enum Route { #[default] Straight, Elbow, Manual }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -89,6 +89,37 @@ fn surface() -> String { "@lt2".into() }
 fn arrow() -> bool { true }
 fn enabled() -> bool { true }
 fn is_true(value: &bool) -> bool { *value }
+fn midpoint() -> f64 { 0.5 }
+fn label_gap() -> f64 { 8.0 }
+fn badge_size() -> f64 { 24.0 }
+fn badge_font_size() -> f64 { 12.0 }
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphLabelSide { #[default] Above, Below }
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GraphLabelPlacement {
+    #[schemars(range(min = 0, max = 1))] pub position: f64,
+    #[serde(default)] pub side: GraphLabelSide,
+    #[serde(default = "label_gap")]
+    #[schemars(range(min = 0, max = 128))] pub offset: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GraphBadge {
+    #[schemars(range(min = 1, max = 99))] pub number: u16,
+    #[serde(default = "midpoint")]
+    #[schemars(range(min = 0, max = 1))] pub position: f64,
+    #[serde(default = "badge_size")]
+    #[schemars(range(min = 16, max = 64))] pub size: f64,
+    #[serde(default = "badge_font_size")]
+    #[schemars(range(min = 8, max = 32))] pub font_size: f64,
+    #[serde(default = "paper")] pub fill: String,
+    #[serde(default = "ink")] pub color: String,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -133,9 +164,22 @@ pub struct GraphEdge {
     pub id: String, pub source: String, pub target: String,
     #[serde(default)] pub source_port: Port,
     #[serde(default)] pub target_port: Port,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = -0.5, max = 0.5))] pub source_offset: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = -0.5, max = 0.5))] pub target_offset: Option<f64>,
     #[serde(default)] pub label: String,
     #[serde(default)] pub route: Route,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 16))] pub waypoints: Vec<[f64; 2]>,
     #[serde(default = "muted")] pub color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.5, max = 12))] pub stroke_width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub label_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 8, max = 40))] pub label_font_size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub label_placement: Option<GraphLabelPlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub badge: Option<GraphBadge>,
     #[serde(default = "arrow")] pub arrow: bool,
     #[serde(default)] pub start_arrow: bool,
     #[serde(default)] pub dashed: bool,
@@ -148,8 +192,20 @@ pub struct GraphGroup {
     pub x: f64, pub y: f64, pub width: f64, pub height: f64,
     #[serde(default = "surface")] pub fill: String,
     #[serde(default = "muted")] pub stroke: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 64))] pub padding: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 20, max = 128))] pub header_height: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 8, max = 32))] pub header_font_size: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub parent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<GraphIcon>,
+}
+
+impl GraphGroup {
+    fn padding(&self) -> f64 { self.padding.unwrap_or(8.0) }
+    fn header_height(&self) -> f64 { self.header_height.unwrap_or(40.0) }
+    fn header_font_size(&self) -> f64 { self.header_font_size.unwrap_or(18.0) }
 }
 
 fn identity(id: &str) -> Result<()> {
@@ -186,7 +242,7 @@ fn ordered_group_indices(spec: &GraphSpec) -> Result<Vec<usize>> {
 
 fn contains(region: &GraphGroup, rect: [f64; 4]) -> bool {
     let [x, y, width, height] = rect;
-    x >= region.x + 8.0 && y >= region.y + 40.0 && x + width <= region.x + region.width - 8.0 && y + height <= region.y + region.height - 8.0
+    x >= region.x + region.padding() && y >= region.y + region.header_height() && x + width <= region.x + region.width - region.padding() && y + height <= region.y + region.height - region.padding()
 }
 
 fn icon_height(node: &GraphNode) -> f64 {
@@ -212,6 +268,14 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
         if !ids.insert(&region.id) { return Err(Error::Invalid("duplicate graph ID".into())); }
         bounds(region.x, region.y, region.width, region.height, spec.content_top())?;
         valid_color(&region.fill)?; valid_color(&region.stroke)?;
+        if !region.padding().is_finite() || !(0.0..=64.0).contains(&region.padding())
+            || !region.header_height().is_finite() || !(20.0..=128.0).contains(&region.header_height())
+            || !region.header_font_size().is_finite() || !(8.0..=32.0).contains(&region.header_font_size())
+            || region.padding() * 2.0 + 8.0 >= region.width
+            || (region.padding.is_some() || region.header_height.is_some()) && region.header_height() + region.padding() >= region.height
+            || region.header_font_size() * 1.25 > region.header_height() - 12.0 {
+            return Err(Error::Invalid("graph group padding/header must be finite, in range, and leave room for its label and content".into()));
+        }
     }
     ordered_group_indices(spec)?;
     for region in &spec.groups {
@@ -251,8 +315,50 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
     }
     for edge in &spec.edges {
         identity(&edge.id)?; valid_text(&edge.label, 64)?; valid_color(&edge.color)?;
+        if let Some(color) = &edge.label_color { valid_color(color)?; }
+        if edge.stroke_width.is_some_and(|value| !value.is_finite() || !(0.5..=12.0).contains(&value)) {
+            return Err(Error::Invalid("graph edge stroke_width must be finite and 0.5-12".into()));
+        }
+        if edge.label_font_size.is_some_and(|value| !value.is_finite() || !(8.0..=40.0).contains(&value)) {
+            return Err(Error::Invalid("graph edge label_font_size must be finite and 8-40".into()));
+        }
+        if let Some(placement) = &edge.label_placement {
+            if edge.label.is_empty() || !placement.position.is_finite() || !(0.0..=1.0).contains(&placement.position)
+                || !placement.offset.is_finite() || !(0.0..=128.0).contains(&placement.offset) {
+                return Err(Error::Invalid("graph label_placement requires a label, position 0-1 and offset 0-128".into()));
+            }
+        }
+        if let Some(badge) = &edge.badge {
+            valid_color(&badge.fill)?; valid_color(&badge.color)?;
+            if !(1..=99).contains(&badge.number) || !badge.position.is_finite() || !(0.0..=1.0).contains(&badge.position)
+                || !badge.size.is_finite() || !(16.0..=64.0).contains(&badge.size)
+                || !badge.font_size.is_finite() || !(8.0..=32.0).contains(&badge.font_size)
+                || badge.font_size * 1.25 + 4.0 > badge.size
+                || badge.number.to_string().len() as f64 * badge.font_size * 0.65 + 8.0 > badge.size {
+                return Err(Error::Invalid("graph badge requires number 1-99, position 0-1, size 16-64 and fitting font 8-32".into()));
+            }
+        }
         if !ids.insert(&edge.id) { return Err(Error::Invalid("duplicate graph ID".into())); }
         if edge.source == edge.target || !spec.nodes.iter().any(|node| node.id == edge.source) || !spec.nodes.iter().any(|node| node.id == edge.target) { return Err(Error::Invalid("graph edges require distinct existing node endpoints".into())); }
+        for (node_id, offset) in [(&edge.source, edge.source_offset), (&edge.target, edge.target_offset)] {
+            if let Some(offset) = offset {
+                if !offset.is_finite() || !(-0.5..=0.5).contains(&offset) { return Err(Error::Invalid("graph port offset must be finite and -0.5 to 0.5 of the side length".into())); }
+                if offset != 0.0 && spec.nodes.iter().any(|node| &node.id == node_id && matches!(node.kind, NodeKind::Cylinder | NodeKind::Cloud)) {
+                    return Err(Error::Unsupported("graph port offsets require rectangle, rounded_rectangle, ellipse or diamond nodes".into()));
+                }
+            }
+        }
+        if edge.waypoints.len() > 16 || (edge.route == Route::Manual) == edge.waypoints.is_empty()
+            || edge.waypoints.iter().any(|point| !point[0].is_finite() || !point[1].is_finite() || !(0.0..=WIDTH).contains(&point[0]) || !(spec.content_top()..=HEIGHT).contains(&point[1])) {
+            return Err(Error::Invalid("graph manual route requires 1-16 finite waypoints inside the content area; other routes cannot have waypoints".into()));
+        }
+        if edge.route == Route::Manual {
+            let source = spec.nodes.iter().find(|node| node.id == edge.source).ok_or_else(|| Error::Invalid("unknown source node".into()))?;
+            let target = spec.nodes.iter().find(|node| node.id == edge.target).ok_or_else(|| Error::Invalid("unknown target node".into()))?;
+            if edge_points(source, target, edge).windows(2).any(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]) < 1e-6) {
+                return Err(Error::Invalid("graph manual route cannot have collapsed consecutive segments".into()));
+            }
+        }
     }
     Ok(())
 }
@@ -315,10 +421,37 @@ pub fn endpoint(node: &GraphNode, port: Port, other: &GraphNode) -> (f64, f64, u
     (node.x + positions[index][0] * node.width, node.y + positions[index][1] * node.height, sites[index])
 }
 
+fn offset_endpoint(node: &GraphNode, port: Port, other: &GraphNode, offset: Option<f64>) -> (f64, f64, u32) {
+    let original = endpoint(node, port, other);
+    let offset = offset.unwrap_or(0.0);
+    if offset == 0.0 { return original; }
+    let port = resolved_port(node, port, other);
+    let along_horizontal = matches!(port, Port::Top | Port::Bottom);
+    let inset = match node.kind {
+        NodeKind::Ellipse => (1.0 - (1.0 - 4.0 * offset * offset).max(0.0).sqrt()) / 2.0,
+        NodeKind::Diamond => offset.abs(),
+        NodeKind::RoundedRectangle => {
+            let radius = node.width.min(node.height) * 16667.0 / 100000.0;
+            let length = if along_horizontal { node.width } else { node.height };
+            let perpendicular = if along_horizontal { node.height } else { node.width };
+            let coordinate = (0.5 + offset) * length;
+            let corner_distance = (radius - coordinate).max(coordinate - length + radius).max(0.0);
+            (radius - (radius * radius - corner_distance * corner_distance).max(0.0).sqrt()) / perpendicular
+        }
+        _ => 0.0,
+    };
+    let point = match port {
+        Port::Top => [0.5 + offset, inset], Port::Bottom => [0.5 + offset, 1.0 - inset],
+        Port::Left => [inset, 0.5 + offset], Port::Right | Port::Auto => [1.0 - inset, 0.5 + offset],
+    };
+    (node.x + (point[0] * 1e6).round() / 1e6 * node.width, node.y + (point[1] * 1e6).round() / 1e6 * node.height, original.2)
+}
+
 pub fn edge_points(source: &GraphNode, target: &GraphNode, edge: &GraphEdge) -> Vec<[f64; 2]> {
-    let start = endpoint(source, edge.source_port, target);
-    let end = endpoint(target, edge.target_port, source);
+    let start = offset_endpoint(source, edge.source_port, target, edge.source_offset);
+    let end = offset_endpoint(target, edge.target_port, source, edge.target_offset);
     let mut points = vec![[start.0, start.1]];
+    if edge.route == Route::Manual { points.extend(edge.waypoints.iter().copied()); }
     if edge.route == Route::Elbow && start.0 != end.0 && start.1 != end.1 {
         let start_horizontal = matches!(resolved_port(source, edge.source_port, target), Port::Left | Port::Right);
         let end_horizontal = matches!(resolved_port(target, edge.target_port, source), Port::Left | Port::Right);
@@ -329,6 +462,34 @@ pub fn edge_points(source: &GraphNode, target: &GraphNode, edge: &GraphEdge) -> 
     }
     points.push([end.0, end.1]);
     points
+}
+
+fn route_anchor(points: &[[f64; 2]], position: f64) -> Result<([f64; 2], [f64; 2])> {
+    let length = |segment: &[[f64; 2]]| (segment[1][0] - segment[0][0]).hypot(segment[1][1] - segment[0][1]);
+    let total: f64 = points.windows(2).map(length).sum();
+    if !total.is_finite() || total <= 0.0 { return Err(Error::Invalid("graph edge annotations require a nonempty path".into())); }
+    let mut distance = total * position;
+    for segment in points.windows(2) {
+        let segment_length = length(segment);
+        if segment_length <= 0.0 { continue; }
+        if distance <= segment_length + 1e-9 {
+            let ratio = (distance / segment_length).min(1.0);
+            let horizontal = segment[1][0] - segment[0][0]; let vertical = segment[1][1] - segment[0][1];
+            let mut normal = [-vertical / segment_length, horizontal / segment_length];
+            if normal[1] > 0.0 || normal[1].abs() < 1e-9 && normal[0] < 0.0 { normal = [-normal[0], -normal[1]]; }
+            return Ok(([segment[0][0] + horizontal * ratio, segment[0][1] + vertical * ratio], normal));
+        }
+        distance -= segment_length;
+    }
+    Err(Error::Invalid("graph annotation position does not lie on the route".into()))
+}
+
+fn annotation_bounds(spec: &GraphSpec, center: [f64; 2], width: f64, height: f64) -> Result<[f64; 4]> {
+    let rect = [center[0] - width / 2.0, center[1] - height / 2.0, width, height];
+    if rect[0] < 0.0 || rect[1] < spec.content_top() || rect[0] + width > WIDTH || rect[1] + height > HEIGHT {
+        return Err(Error::Invalid("explicit graph edge annotation must fit inside the graph content area".into()));
+    }
+    Ok(rect)
 }
 
 fn relationship_label_bounds(spec: &GraphSpec, elements: &[Element], points: &[[f64; 2]], width: f64, height: f64, placed: &[[f64; 4]]) -> [f64; 4] {
@@ -342,7 +503,7 @@ fn relationship_label_bounds(spec: &GraphSpec, elements: &[Element], points: &[[
             }
         } else { obstacles.push([node.x, node.y, node.width, node.height]); }
     }
-    obstacles.extend(spec.groups.iter().map(|group| [group.x, group.y, group.width, 40.0]));
+    obstacles.extend(spec.groups.iter().map(|group| [group.x, group.y, group.width, group.header_height()]));
     obstacles.extend(placed.iter().copied());
     let rectangle = |bounds: [f64; 4], padding: f64| geo::Rect::new(
         (bounds[0] - padding, bounds[1] - padding), (bounds[0] + bounds[2] + padding, bounds[1] + bounds[3] + padding));
@@ -407,28 +568,46 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
     if id.is_empty() { return Err(Error::Invalid("graph root ID is required".into())); }
     validate(spec)?; crate::design::validate_theme(theme)?;
     let prefix = render_prefix(id, spec)?;
+    let mut sites_by_node = BTreeMap::new();
+    let mut site_indices = BTreeMap::new();
+    for node in &spec.nodes {
+        if !spec.edges.iter().any(|edge| edge.source == node.id && edge.source_offset.is_some_and(|offset| offset != 0.0)
+            || edge.target == node.id && edge.target_offset.is_some_and(|offset| offset != 0.0)) { continue; }
+        let mut sites = Vec::new();
+        for edge in &spec.edges {
+            let (other_id, port, offset) = if edge.source == node.id { (&edge.target, edge.source_port, edge.source_offset) }
+                else if edge.target == node.id { (&edge.source, edge.target_port, edge.target_offset) } else { continue; };
+            let other = spec.nodes.iter().find(|other| &other.id == other_id).ok_or_else(|| Error::Invalid("unknown connected node".into()))?;
+            let point = offset_endpoint(node, port, other, offset);
+            let angle = match resolved_port(node, port, other) { Port::Top => 270.0, Port::Left => 180.0, Port::Bottom => 90.0, _ => 0.0 };
+            site_indices.insert((node.id.as_str(), edge.id.as_str()), sites.len() as u32);
+            sites.push(crate::visual::ConnectionSite { x: ((point.0 - node.x) / node.width * 1e6).round() / 1e6, y: ((point.1 - node.y) / node.height * 1e6).round() / 1e6, angle });
+        }
+        sites_by_node.insert(node.id.as_str(), sites);
+    }
     let mut children = if spec.show_title { vec![text(format!("{prefix}-title"), [16.0, 0.0, 1120.0, 40.0], &spec.title, 28.0, "@dk1", TextAlign::Left, true), text(format!("{prefix}-subtitle"), [16.0, 44.0, 1120.0, 26.0], &spec.subtitle, 16.0, "@dk2", TextAlign::Left, false)] } else { Vec::new() };
     for index in ordered_group_indices(spec)? {
         let region = &spec.groups[index];
         children.push(shape(format!("{prefix}-g-{}", region.id), [region.x, region.y, region.width, region.height], "rect", &region.fill, &region.stroke));
+        let inset = region.padding() + 4.0;
         let offset = if let Some(icon) = &region.icon {
-            let size = ((region.width - 24.0) / 3.0).min(32.0);
-            children.push(icon_picture(&format!("{prefix}-gi-{}", region.id), icon, [region.x + 12.0, region.y + 4.0, size, 32.0])?);
+            let size = ((region.width - inset * 2.0) / 3.0).min(32.0).min(region.header_height() - 8.0);
+            children.push(icon_picture(&format!("{prefix}-gi-{}", region.id), icon, [region.x + inset, region.y + 4.0, size, region.header_height() - 8.0])?);
             size + 8.0
         } else { 0.0 };
-        children.push(text(format!("{prefix}-gt-{}", region.id), [region.x + 12.0 + offset, region.y + 8.0, region.width - 24.0 - offset, 28.0], &region.label, 18.0, "@dk1", TextAlign::Left, true));
+        children.push(text(format!("{prefix}-gt-{}", region.id), [region.x + inset + offset, region.y + 8.0, region.width - inset * 2.0 - offset, region.header_height() - 12.0], &region.label, region.header_font_size(), "@dk1", TextAlign::Left, true));
     }
     for edge in &spec.edges {
         let source = spec.nodes.iter().find(|node| node.id == edge.source).ok_or_else(|| Error::Invalid("unknown source node".into()))?;
         let target = spec.nodes.iter().find(|node| node.id == edge.target).ok_or_else(|| Error::Invalid("unknown target node".into()))?;
-        let start = endpoint(source, edge.source_port, target);
-        let end = endpoint(target, edge.target_port, source);
+        let start = offset_endpoint(source, edge.source_port, target, edge.source_offset);
+        let end = offset_endpoint(target, edge.target_port, source, edge.target_offset);
         let points = edge_points(source, target, edge);
         let left = points.iter().map(|point| point[0]).fold(f64::INFINITY, f64::min); let top = points.iter().map(|point| point[1]).fold(f64::INFINITY, f64::min);
         let width = (points.iter().map(|point| point[0]).fold(f64::NEG_INFINITY, f64::max) - left).max(0.01); let height = (points.iter().map(|point| point[1]).fold(f64::NEG_INFINITY, f64::max) - top).max(0.01);
         let points = points.into_iter().map(|point| [((point[0] - left) / width * 1e6).round() / 1e6, ((point[1] - top) / height * 1e6).round() / 1e6]).collect();
-        children.push(Element::Connector { visual: None, id: format!("{prefix}-e-{}", edge.id), x: left, y: top, width, height, color: edge.color.clone(), stroke_width: 2.0, arrow: edge.arrow, flip_v: false,
-            start: Some(Connection { element_id: format!("{prefix}-n-{}", source.id), site: start.2 }), end: Some(Connection { element_id: format!("{prefix}-n-{}", target.id), site: end.2 }), routing: Some(crate::model::ConnectorRouting { points, start_arrow: edge.start_arrow, dashed: edge.dashed }) });
+        children.push(Element::Connector { visual: None, id: format!("{prefix}-e-{}", edge.id), x: left, y: top, width, height, color: edge.color.clone(), stroke_width: edge.stroke_width.unwrap_or(2.0), arrow: edge.arrow, flip_v: false,
+            start: Some(Connection { element_id: format!("{prefix}-n-{}", source.id), site: site_indices.get(&(source.id.as_str(), edge.id.as_str())).copied().unwrap_or(start.2) }), end: Some(Connection { element_id: format!("{prefix}-n-{}", target.id), site: site_indices.get(&(target.id.as_str(), edge.id.as_str())).copied().unwrap_or(end.2) }), routing: Some(crate::model::ConnectorRouting { points, custom: edge.route == Route::Manual, start_arrow: edge.start_arrow, dashed: edge.dashed }) });
     }
     for node in &spec.nodes {
         if node.presentation == GraphPresentation::Icon {
@@ -460,14 +639,42 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
         }
         node_text(&mut children, &prefix, node, content)?;
     }
+    for (node_id, connection_sites) in sites_by_node {
+        let node_id = format!("{prefix}-n-{node_id}");
+        for child in &mut children {
+            if let Element::Shape { id, visual, .. } = child {
+                if id == &node_id { *visual = Some(crate::visual::VisualStyle { connection_sites: connection_sites.clone(), ..Default::default() }); }
+            }
+        }
+    }
     let mut label_bounds = Vec::new();
+    for edge in &spec.edges {
+        let Some(badge) = &edge.badge else { continue; };
+        let source = spec.nodes.iter().find(|node| node.id == edge.source).ok_or_else(|| Error::Invalid("unknown source node".into()))?;
+        let target = spec.nodes.iter().find(|node| node.id == edge.target).ok_or_else(|| Error::Invalid("unknown target node".into()))?;
+        let (center, _) = route_anchor(&edge_points(source, target, edge), badge.position)?;
+        let bounds = annotation_bounds(spec, center, badge.size, badge.size)?;
+        let mut element = shape(format!("{prefix}-eb-{}", edge.id), bounds, "ellipse", &badge.fill, &edge.color);
+        if let Element::Shape { text, font_size, color, bold, format, .. } = &mut element {
+            *text = badge.number.to_string(); *font_size = badge.font_size; *color = badge.color.clone(); *bold = true;
+            *format = TextFormat { alignment: TextAlign::Center, vertical: VerticalAlign::Middle, font_family: Some("@minor".into()), ..Default::default() };
+        }
+        children.push(element); label_bounds.push(bounds);
+    }
     for edge in &spec.edges {
         if edge.label.is_empty() { continue; }
         let source = spec.nodes.iter().find(|node| node.id == edge.source).ok_or_else(|| Error::Invalid("unknown source node".into()))?;
         let target = spec.nodes.iter().find(|node| node.id == edge.target).ok_or_else(|| Error::Invalid("unknown target node".into()))?;
-        let width = (edge.label.chars().map(|character| if character.is_ascii() { 9.0 } else { 16.0 }).sum::<f64>() + 8.0).clamp(48.0, 280.0);
-        let bounds = relationship_label_bounds(spec, &children, &edge_points(source, target, edge), width, 28.0, &label_bounds);
-        children.push(text(format!("{prefix}-et-{}", edge.id), bounds, &edge.label, 16.0, "@dk1", TextAlign::Center, false));
+        let size = edge.label_font_size.unwrap_or(16.0);
+        let width = (edge.label.chars().map(|character| if character.is_ascii() { 9.0 } else { 16.0 }).sum::<f64>() * size / 16.0 + 8.0).clamp(48.0, 280.0);
+        let points = edge_points(source, target, edge);
+        let bounds = if let Some(placement) = &edge.label_placement {
+            let (center, normal) = route_anchor(&points, placement.position)?;
+            let direction = match placement.side { GraphLabelSide::Above => 1.0, GraphLabelSide::Below => -1.0 };
+            let distance = (normal[0].abs() * width + normal[1].abs() * size * 1.75) / 2.0 + placement.offset;
+            annotation_bounds(spec, [center[0] + normal[0] * distance * direction, center[1] + normal[1] * distance * direction], width, size * 1.75)?
+        } else { relationship_label_bounds(spec, &children, &points, width, size * 1.75, &label_bounds) };
+        children.push(text(format!("{prefix}-et-{}", edge.id), bounds, &edge.label, size, edge.label_color.as_deref().unwrap_or("@dk1"), TextAlign::Center, false));
         label_bounds.push(bounds);
     }
     crate::layout::fit_part_text(&mut children, theme)?;
@@ -483,7 +690,7 @@ pub fn catalog() -> Value {
         json!({"id":"approval","name":"Approval flow","spec":{"version":1,"title":"Approval flow","subtitle":"Editable example","nodes":[{"id":"input","label":"Request","x":40,"y":220},{"id":"review","label":"Review","kind":"diamond","x":390,"y":190,"width":200,"height":140},{"id":"approve","label":"Approved","kind":"rounded_rectangle","x":830,"y":120},{"id":"revise","label":"Revise","x":830,"y":340}],"edges":[{"id":"submit","source":"input","target":"review"},{"id":"yes","source":"review","target":"approve","label":"Yes"},{"id":"no","source":"review","target":"revise","label":"No"}],"groups":[]}}),
         json!({"id":"boundary","name":"Network boundary","spec":{"version":1,"title":"Network boundary","subtitle":"Editable example","nodes":[{"id":"client","label":"Client","x":40,"y":210},{"id":"app","label":"Application","x":430,"y":210,"group":"private"},{"id":"store","label":"Storage","kind":"cylinder","x":800,"y":210,"group":"private"}],"edges":[{"id":"access","source":"client","target":"app","label":"Authorized"},{"id":"data","source":"app","target":"store"}],"groups":[{"id":"private","label":"Private network","x":370,"y":120,"width":680,"height":300}]}}),
     ];
-    json!({"version":1,"shapes":["rectangle","rounded_rectangle","ellipse","diamond","cylinder","cloud"],"ports":["auto","top","left","bottom","right"],"routes":["straight","elbow"],"limits":{"nodes":48,"edges":64,"groups":MAX_GROUPS,"group_depth":MAX_GROUP_DEPTH,"rendered_elements":256},"canvas":{"width":WIDTH,"height":HEIGHT,"content_top":CONTENT_TOP,"content_top_without_title":0.0},"node_text":{"detail_max_length":240,"detail_font_size_min":12,"detail_font_size_max":40,"detail_font_size_default":"max(12, font_size * 0.8)","detail_font_size_ceiling":"font_size","text_align":["left","center","right"],"default_alignment":"left with detail, center without detail","heading_bold_default":true},"schema":schemars::schema_for!(GraphSpec),"operation_schema":schemars::schema_for!(GraphOperation),"examples":examples})
+    json!({"version":1,"shapes":["rectangle","rounded_rectangle","ellipse","diamond","cylinder","cloud"],"ports":["auto","top","left","bottom","right"],"routes":["straight","elbow","manual"],"limits":{"nodes":48,"edges":64,"groups":MAX_GROUPS,"group_depth":MAX_GROUP_DEPTH,"rendered_elements":256,"waypoints_per_edge":16},"canvas":{"width":WIDTH,"height":HEIGHT,"content_top":CONTENT_TOP,"content_top_without_title":0.0},"node_text":{"detail_max_length":240,"detail_font_size_min":12,"detail_font_size_max":40,"detail_font_size_default":"max(12, font_size * 0.8)","detail_font_size_ceiling":"font_size","text_align":["left","center","right"],"default_alignment":"left with detail, center without detail","heading_bold_default":true},"edge_layout":{"position":"fraction of path length from semantic source to target","label_side":"above/below the segment; right/left for vertical segments","offset":"source_offset/target_offset are -0.5..0.5 of side length from center, increasing right/down","offset_shapes":["rectangle","rounded_rectangle","ellipse","diamond"],"manual":"1-16 graph-coordinate waypoints, including diagonal segments; nodes are not moved","move":"waypoints move with both endpoints, or when the edge itself is selected; otherwise intermediate points stay fixed"},"schema":schemars::schema_for!(GraphSpec),"operation_schema":schemars::schema_for!(GraphOperation),"examples":examples})
 }
 
 pub fn change(document: &crate::document::Document, expected_revision: u64, slide_id: &str, id: &str, spec: &GraphSpec, update: bool) -> Result<crate::document::TransactionResult> {
@@ -507,10 +714,16 @@ fn move_entities(spec: &mut GraphSpec, selection: &BTreeSet<&str>, dx: f64, dy: 
     for group in &spec.groups {
         if group_ancestors(spec, Some(&group.id))?.iter().any(|index| selection.contains(spec.groups[*index].id.as_str())) { moved_groups.insert(group.id.clone()); }
     }
+    let mut moved_nodes = BTreeSet::new();
     for node in &mut spec.nodes {
-        if selection.contains(node.id.as_str()) || node.group.as_ref().is_some_and(|id| moved_groups.contains(id)) { node.x += dx; node.y += dy; }
+        if selection.contains(node.id.as_str()) || node.group.as_ref().is_some_and(|id| moved_groups.contains(id)) { node.x += dx; node.y += dy; moved_nodes.insert(node.id.clone()); }
     }
     for group in &mut spec.groups { if moved_groups.contains(&group.id) { group.x += dx; group.y += dy; } }
+    for edge in &mut spec.edges {
+        if selection.contains(edge.id.as_str()) || moved_nodes.contains(&edge.source) && moved_nodes.contains(&edge.target) {
+            for point in &mut edge.waypoints { point[0] += dx; point[1] += dy; }
+        }
+    }
     Ok(())
 }
 
@@ -582,7 +795,7 @@ pub fn transform(spec: &GraphSpec, operations: &[GraphOperation]) -> Result<Grap
                 }
                 else {
                     if next.nodes.iter().any(|node| node.group.is_none()) { return Err(Error::Invalid("grid with groups requires all nodes to belong to a group".into())); }
-                    for group in &next.groups { place(&mut next.nodes.iter_mut().filter(|node| node.group.as_deref() == Some(&group.id)).collect(), [group.x + 8.0, group.y + 40.0, group.width - 16.0, group.height - 48.0])?; }
+                    for group in &next.groups { place(&mut next.nodes.iter_mut().filter(|node| node.group.as_deref() == Some(&group.id)).collect(), [group.x + group.padding(), group.y + group.header_height(), group.width - group.padding() * 2.0, group.height - group.header_height() - group.padding()])?; }
                 }
             }
         }
@@ -596,5 +809,14 @@ pub fn apply(document: &crate::document::Document, expected_revision: u64, slide
     crate::document::verify(document)?;
     let part = document.parts.iter().find(|part| part.slide_id == slide_id && part.element_id == id && part.spec.preset == "diagram/custom").ok_or_else(|| Error::Invalid("managed graph metadata not found".into()))?;
     let crate::parts::PartData::Diagram { graph } = &part.spec.data else { return Err(Error::Invalid("graph data missing".into())); };
-    change(document, expected_revision, slide_id, id, &transform(graph, operations)?, true)
+    let next = transform(graph, operations)?;
+    if crate::canonical::bytes(graph)? == crate::canonical::bytes(&next)? {
+        if part.stale { return Err(Error::Conflict("part metadata is stale; retain manual edits or insert a new part".into())); }
+        let current = document.deck.slides.iter().find(|slide| slide.id == slide_id).and_then(|slide| slide.elements.iter().find(|element| element.bounds().0 == id)).ok_or_else(|| Error::Conflict("part element missing".into()))?;
+        if crate::model::element_list(std::slice::from_ref(current)).iter().any(|element| element.visual().is_some_and(|visual| visual.locked || visual.hidden)) {
+            return Err(Error::Unsupported("unlock and show the managed part before updating".into()));
+        }
+        return crate::document::transact(document, crate::document::Transaction { expected_revision, expected_hash: document.hash.clone(), operations: serde_json::from_value(json!([{"op":"replace","path":"/deck","value":document.deck}]))? });
+    }
+    change(document, expected_revision, slide_id, id, &next, true)
 }
