@@ -16,6 +16,10 @@ impl Frame {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PictureFit { Contain, Cover, #[default] Stretch }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectorSettings {
@@ -39,11 +43,14 @@ pub enum Operation {
     SetFrame { slide_id: String, id: String, frame: Frame },
     SetTextStyle { slide_id: String, ids: Vec<String>, style: RunStyle },
     SetSlideBackground { slide_id: String, color: String },
+    UpdateNotes { slide_id: String, notes: String },
+    SetTableHeaders { slide_id: String, element_id: String, policy: crate::review::TableHeaders },
+    SetAccessibility { slide_id: String, element_id: String, #[serde(deserialize_with = "Option::deserialize")] metadata: Option<crate::review::ElementAccessibility> },
     SetConnector { slide_id: String, id: String, connector: ConnectorSettings, #[serde(default)] frame: Option<Frame> },
     SetPictureCrop { slide_id: String, id: String, crop: Crop },
     SetHyperlink { slide_id: String, id: String, #[serde(deserialize_with = "Option::deserialize")] link: Option<String> },
     SetShapeAdjustment { slide_id: String, id: String, adjustment: crate::visual::ShapeAdjustment },
-    AddPicture { slide_id: String, id: String, base64: String, mime_type: String, alt: String, #[serde(default)] frame: Option<Frame>, #[serde(default)] crop: Crop },
+    AddPicture { slide_id: String, id: String, base64: String, mime_type: String, alt: String, #[serde(default)] frame: Option<Frame>, #[serde(default)] crop: Crop, #[serde(default)] fit: PictureFit },
 }
 
 fn target<'a>(elements: &'a mut [Element], id: &str) -> Result<&'a mut Element> {
@@ -92,6 +99,43 @@ fn frame(element: &mut Element, destination: &Frame) -> Result<()> {
     Ok(())
 }
 
+fn position_picture(element: &mut Element, destination: Option<&Frame>, crop: &Crop, fit: PictureFit) -> Result<()> {
+    crop.validate()?;
+    let (_, x, y, width, height) = element.bounds();
+    let mut destination = destination.cloned().unwrap_or(Frame { x, y, width, height });
+    destination.validate()?;
+    let visible_width = width * (1.0 - crop.left - crop.right);
+    let visible_height = height * (1.0 - crop.top - crop.bottom);
+    let mut fitted_crop = crop.clone();
+    match fit {
+        PictureFit::Stretch => {}
+        PictureFit::Contain => {
+            let scale = (destination.width / visible_width).min(destination.height / visible_height);
+            let fitted_width = visible_width * scale;
+            let fitted_height = visible_height * scale;
+            destination.x += (destination.width - fitted_width) / 2.0;
+            destination.y += (destination.height - fitted_height) / 2.0;
+            destination.width = fitted_width;
+            destination.height = fitted_height;
+        }
+        PictureFit::Cover => {
+            let source_ratio = visible_width / visible_height;
+            let frame_ratio = destination.width / destination.height;
+            if source_ratio > frame_ratio {
+                let inset = (1.0 - crop.left - crop.right) * (1.0 - frame_ratio / source_ratio) / 2.0;
+                fitted_crop.left += inset; fitted_crop.right += inset;
+            } else {
+                let inset = (1.0 - crop.top - crop.bottom) * (1.0 - source_ratio / frame_ratio) / 2.0;
+                fitted_crop.top += inset; fitted_crop.bottom += inset;
+            }
+        }
+    }
+    fitted_crop.validate()?;
+    frame(element, &destination)?;
+    if let Element::Picture { crop: current, .. } = element { *current = fitted_crop; }
+    Ok(())
+}
+
 fn text_style(element: &mut Element, style: &RunStyle) -> Result<()> {
     style.validate()?;
     let (text, font_size, color, bold, format) = match element {
@@ -117,6 +161,7 @@ fn apply(deck: &mut Deck, parts: &mut Vec<crate::parts::state::PartInstance>, op
     let slide_id = match operation {
         Operation::AddElements { slide_id, .. } | Operation::SetFrame { slide_id, .. } | Operation::SetTextStyle { slide_id, .. }
         | Operation::AddPart { slide_id, .. } | Operation::UpdatePart { slide_id, .. } | Operation::AddGraph { slide_id, .. } | Operation::UpdateGraph { slide_id, .. }
+        | Operation::UpdateNotes { slide_id, .. } | Operation::SetTableHeaders { slide_id, .. } | Operation::SetAccessibility { slide_id, .. }
         | Operation::SetSlideBackground { slide_id, .. } | Operation::SetConnector { slide_id, .. } | Operation::SetPictureCrop { slide_id, .. }
         | Operation::SetHyperlink { slide_id, .. } | Operation::SetShapeAdjustment { slide_id, .. } | Operation::AddPicture { slide_id, .. } => slide_id,
     };
@@ -150,6 +195,12 @@ fn apply(deck: &mut Deck, parts: &mut Vec<crate::parts::state::PartInstance>, op
             crate::model::valid_color(color)?;
             slide.background = color.clone(); slide.inherit_background = false;
         }
+        Operation::UpdateNotes { notes, .. } => {
+            crate::model::valid_text(notes, 8000)?;
+            slide.notes = notes.clone();
+        }
+        Operation::SetTableHeaders { element_id, policy, .. } => crate::review::set_table_headers_on_slide(slide, element_id, *policy)?,
+        Operation::SetAccessibility { element_id, metadata, .. } => crate::review::set_accessibility_on_slide(slide, element_id, metadata.clone())?,
         Operation::SetConnector { id, connector, frame: destination, .. } => {
             let element = target(&mut slide.elements, id)?;
             let Element::Connector { color, stroke_width, arrow, flip_v, start, end, routing, .. } = element else { return Err(Error::Unsupported("set_connector requires a connector".into())); };
@@ -177,10 +228,9 @@ fn apply(deck: &mut Deck, parts: &mut Vec<crate::parts::state::PartInstance>, op
             visual.adjustments.retain(|entry| entry.name != adjustment.name);
             visual.adjustments.push(adjustment.clone());
         }
-        Operation::AddPicture { id, base64, mime_type, alt, frame: destination, crop, .. } => {
+        Operation::AddPicture { id, base64, mime_type, alt, frame: destination, crop, fit, .. } => {
             let mut element = crate::media::create_picture(id, base64.clone(), mime_type, alt)?;
-            if let Some(destination) = destination { frame(&mut element, destination)?; }
-            if let Element::Picture { crop: current, .. } = &mut element { *current = crop.clone(); }
+            position_picture(&mut element, destination.as_ref(), crop, *fit)?;
             slide.elements.push(element);
         }
     }

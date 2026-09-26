@@ -7,6 +7,56 @@ fn document() -> Value {
 }
 
 #[test]
+fn retest_fallback_warnings_merge_per_element_without_losing_requested_families() {
+    let mut deck = document()["deck"].clone();
+    deck["design"] = Value::Null;
+    deck["slides"][0]["layout_id"] = Value::Null;
+    deck["slides"][0]["elements"] = json!([{"type":"text","id":"fallback-label","x":40,"y":80,"width":1000,"height":100,"text":"AlphaBeta","font_size":24,"color":"000000","bold":false,"format":{"paragraphs":[{"runs":[{"text":"Alpha","style":{"font_family":"AISlide-Missing-Family-A"}},{"text":"Beta","style":{"font_family":"AISlide-Missing-Family-B"}}]}]}}]);
+    let document = execute_request(json!({"op":"new_document","id":"fallback-aggregate","deck":deck})).unwrap();
+    let preview = execute_request(json!({"op":"preview_presentation","document":document,"options":{"page_indices":[0],"max_dimension":320}})).unwrap();
+    let warnings: Vec<_> = preview["warnings"].as_array().unwrap().iter().filter(|warning| warning["code"] == "FONT_FALLBACK" && warning["element_id"] == "fallback-label").collect();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let message = warnings[0]["message"].as_str().unwrap();
+    assert!(message.contains("AISlide-Missing-Family-A") && message.contains("AISlide-Missing-Family-B"));
+}
+
+#[test]
+fn retest_delivery_ignores_unused_layout_fonts_but_explicit_measurement_retains_them() {
+    let mut deck = document()["deck"].clone();
+    for master in deck["design"]["masters"].as_array_mut().unwrap() { master["elements"] = json!([]); }
+    let mut unused = deck["design"]["layouts"][0].clone();
+    unused["id"] = json!("unused-font-layout");
+    unused["elements"] = json!([{"type":"text","id":"unused-text","x":40,"y":80,"width":1000,"height":100,"text":"Synthetic unused layout","font_size":24,"color":"000000","bold":false,"format":{"font_family":"AISlide-Missing-Layout-Font"}}]);
+    deck["slides"][0]["layout_id"] = deck["design"]["layouts"][0]["id"].clone();
+    deck["design"]["layouts"][0]["elements"] = json!([]);
+    deck["design"]["layouts"].as_array_mut().unwrap().push(unused);
+    let measured = execute_request(json!({"op":"measure_layout","deck":deck})).unwrap();
+    assert!(measured["issues"].as_array().unwrap().iter().any(|issue| issue["code"] == "FONT_FALLBACK"));
+    for active in [false, true] {
+        if active { deck["slides"][0]["layout_id"] = json!("unused-font-layout"); }
+        let document = execute_request(json!({"op":"new_document","id":"layout-warning-scope","deck":deck})).unwrap();
+        let delivery = execute_request(json!({"op":"prepare_delivery","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"options":{"preview":"none","preflight":false}})).unwrap();
+        assert_eq!(delivery["manifest"]["checks"]["layout_issues"].as_array().unwrap().iter().any(|issue| issue["code"] == "FONT_FALLBACK"), active);
+    }
+}
+
+#[test]
+fn retest_image_aspect_warning_distinguishes_stretch_from_contain_and_cover() {
+    let image = image::RgbImage::from_pixel(200, 100, image::Rgb([30, 150, 110]));
+    let mut output = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut output, image::ImageFormat::Png).unwrap();
+    let base64 = STANDARD.encode(output.into_inner());
+    for fit in ["stretch", "contain", "cover"] {
+        let document = document();
+        let document = execute_request(json!({"op":"apply_operations","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"operations":[{"op":"add_picture","slide_id":"slide-1","id":"aspect-image","base64":base64,"mime_type":"image/png","alt":"Synthetic aspect","frame":{"x":40,"y":80,"width":300,"height":200},"fit":fit}]})).unwrap()["document"].clone();
+        let preview = execute_request(json!({"op":"preview_presentation","document":document,"options":{"page_indices":[0],"max_dimension":320}})).unwrap();
+        assert_eq!(preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "IMAGE_ASPECT_DISTORTED" && warning["element_id"] == "aspect-image"), fit == "stretch");
+        let delivery = execute_request(json!({"op":"prepare_delivery","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"options":{"page_indices":[0],"max_dimension":320,"preflight":false}})).unwrap();
+        assert_eq!(delivery["manifest"]["render_warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "IMAGE_ASPECT_DISTORTED"), fit == "stretch");
+    }
+}
+
+#[test]
 fn delivery_preparation_is_read_only_and_hashes_requested_artifacts() {
     use sha2::{Digest, Sha256};
     let capabilities=execute_request(json!({"op":"authoring_capabilities"})).unwrap();

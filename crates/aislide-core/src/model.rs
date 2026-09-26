@@ -103,6 +103,15 @@ impl TextFormat { pub fn is_default(&self) -> bool { self == &Self::default() } 
 #[serde(default, deny_unknown_fields)]
 pub struct Crop { pub left: f64, pub top: f64, pub right: f64, pub bottom: f64 }
 
+impl Crop {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if [self.left, self.right, self.top, self.bottom].iter().any(|value| !value.is_finite() || !(0.0..1.0).contains(value)) || self.left + self.right >= 1.0 || self.top + self.bottom >= 1.0 {
+            return Err(Error::Invalid("image crop must retain positive area".into()));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Connection { pub element_id: String, pub site: u32 }
@@ -307,9 +316,7 @@ pub(crate) fn validate_elements(elements: &[Element], canvas: (f64, f64), depth:
                         crate::vector::prepare_svg(svg)?;
                     }
                     if *image_bytes > crate::limits::STANDARD.image_encoded_bytes { return Err(Error::Limit("scene image payload > 3 MiB encoded".into())); }
-                    if [crop.left, crop.right, crop.top, crop.bottom].iter().any(|value| !value.is_finite() || !(0.0..1.0).contains(value)) || crop.left + crop.right >= 1.0 || crop.top + crop.bottom >= 1.0 {
-                        return Err(Error::Invalid("image crop must retain positive area".into()));
-                    }
+                    crop.validate()?;
                     crate::media::inspect_raster(base64, mime_type)?;
                 }
                 Element::Connector { color, stroke_width, start, end, routing, flip_v, .. } => {

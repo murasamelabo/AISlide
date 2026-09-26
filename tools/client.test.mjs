@@ -312,6 +312,7 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
     import type { AislideClient, DocumentSession, AislideDocument, Element, GraphCreation, GraphDiagnostics, GraphDiagnosticsSnapshot, GraphNode, AuthoringOptions, AuthoringOperation, Frame, Crop,
       Connection, ConnectorRouting, ConnectorSettings, VisualStyle, GraphEdge, GraphGroup, PictureInput, SlideImportInput, GraphSpec, PartSpec, PartPreset, GuidedAuthoring, PreflightFinding, PreviewOptions, PreviewImage, PresentationPreview } from './index.mjs';
     declare const session: DocumentSession;
+    import type { DeliveryChecks } from './index.mjs';
     declare const client: AislideClient;
     declare const source: AislideDocument;
     const options: AuthoringOptions = { expectedRevision: 0, expectedHash: 'hash', signal: new AbortController().signal };
@@ -320,7 +321,7 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
     const connection: Connection = { element_id: 'text', site: 0 };
     const routing: ConnectorRouting = { points: [[0, 0], [1, 1]], custom: true };
     const connector: ConnectorSettings = { color: '@dk1', stroke_width: 1, arrow: true, start: connection, end: null, routing };
-    const picture: PictureInput = { id: 'image', base64: 'synthetic', mime_type: 'image/png', alt: 'Synthetic', frame, crop };
+    const picture: PictureInput = { id: 'image', base64: 'synthetic', mime_type: 'image/png', alt: 'Synthetic', frame, crop, fit: 'contain' };
     const imported: SlideImportInput = { source_slide_ids: ['slide-1'], prefix: 'copy', after: null };
     const operations: AuthoringOperation[] = [{ op: 'set_frame', slide_id: 'slide-1', id: 'text', frame }];
   `;
@@ -335,6 +336,8 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
     return ts.getPreEmitDiagnostics(ts.createProgram([filename], compilerOptions, host));
   };
   const diagnostics = check(`
+    const layoutScopes: DeliveryChecks['layout_scope'][] = ['visible_slide_elements_and_used_design', 'not_measured_for_native_origin'];
+    void layoutScopes;
     const results: Promise<AislideDocument>[] = [
       session.applyOperations(operations, options),
       session.addElements('slide-1', [{ type: 'text', id: 'text', ...frame, text: 'Synthetic', font_size: 24, color: '@dk1', bold: false }], options),
@@ -367,6 +370,10 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
     const part: PartSpec = { version: 1, preset: 'synthetic', title: 'Synthetic', data: { kind: 'diagram', graph }, layout: { ...frame, show_title: false } };
     const matrix: PartSpec = { ...part, data: { kind: 'matrix', corner_label: 'Criterion', rows: ['A', 'B'], columns: ['C', 'D'], cells: [['a', 'b'], ['c', 'd']] } };
     const managed: AuthoringOperation[] = [
+      { op: 'update_notes', slide_id: 'slide-1', notes: 'Synthetic notes' },
+      { op: 'set_table_headers', slide_id: 'slide-1', element_id: 'table', policy: 'first_row' },
+      { op: 'set_accessibility', slide_id: 'slide-1', element_id: 'picture', metadata: { description: 'Synthetic image', decorative: false } },
+      { op: 'set_accessibility', slide_id: 'slide-1', element_id: 'picture', metadata: null },
       { op: 'add_part', slide_id: 'slide-1', id: 'part', spec: matrix },
       { op: 'update_part', slide_id: 'slide-1', id: 'part', spec: part },
       { op: 'add_graph', slide_id: 'slide-1', id: 'graph', spec: graph, layout: { ...frame, show_title: false } },
@@ -391,6 +398,11 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
   `);
   assert.deepEqual(diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')), []);
   for (const invalid of [
+    "const invalid: DeliveryChecks['layout_scope'] = 'all_layouts';",
+    "session.applyOperations([{ op: 'update_notes', slide_id: 'slide-1', notes: null }]);",
+    "session.applyOperations([{ op: 'set_table_headers', slide_id: 'slide-1', element_id: 'table', policy: 'all' }]);",
+    "session.applyOperations([{ op: 'set_accessibility', slide_id: 'slide-1', element_id: 'picture' }]);",
+    "session.applyOperations([{ op: 'set_accessibility', slide_id: 'slide-1', element_id: 'picture', metadata: { unknown: true } }]);",
     "const invalid: GraphNode['label_fit'] = 'truncate';",
     "const invalid: GraphNode['label_fit'] = null;",
     "const invalid: GraphGroup['header_color'] = 123;",
@@ -415,6 +427,7 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
     "session.setTextStyle('slide-1', { ids: ['text'], style: { font_size: 'large' } });",
     "const invalid: GuidedAuthoring = { headline_style: 'freeform' };",
     "session.addPicture('slide-1', { ...picture, mime_type: 'image/svg+xml' });",
+    "session.addPicture('slide-1', { ...picture, fit: 'fill' });",
     "session.applyOperations([{ op: 'add_part', slide_id: 'slide-1', id: 'part', spec: {} }]);",
     "session.applyOperations([{ op: 'add_graph', slide_id: 'slide-1', id: 'graph', spec: { version: 1, title: '', nodes: [] }, layout: { ...frame, unknown: true } }]);",
     "session.applyOperations([{ op: 'update_graph', slide_id: 'slide-1', id: 'graph', spec: { version: 1, title: '', nodes: [] }, layout: frame }]);",

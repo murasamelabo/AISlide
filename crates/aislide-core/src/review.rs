@@ -209,9 +209,7 @@ pub(crate) fn save_end(package: &mut crate::package::Package, original: &crate::
     Ok(())
 }
 
-pub fn set_accessibility(deck: &crate::model::Deck, slide_id: &str, element_id: &str, mut metadata: Option<ElementAccessibility>) -> Result<crate::model::Deck> {
-    let mut next = deck.clone();
-    let slide = next.slides.iter_mut().find(|slide| slide.id == slide_id).ok_or_else(|| Error::Invalid("slide missing".into()))?;
+pub(crate) fn set_accessibility_on_slide(slide: &mut crate::model::Slide, element_id: &str, mut metadata: Option<ElementAccessibility>) -> Result<()> {
     fn picture_description(elements: &mut [crate::model::Element], id: &str, metadata: &mut Option<ElementAccessibility>) {
         for element in elements {
             match element {
@@ -224,13 +222,25 @@ pub fn set_accessibility(deck: &crate::model::Deck, slide_id: &str, element_id: 
     picture_description(&mut slide.elements, element_id, &mut metadata);
     let entries = &mut slide.review.get_or_insert_with(Default::default).accessibility;
     if let Some(metadata) = metadata { entries.insert(element_id.into(), metadata); } else { entries.remove(element_id); }
+    validate_slide(slide)
+}
+
+pub fn set_accessibility(deck: &crate::model::Deck, slide_id: &str, element_id: &str, metadata: Option<ElementAccessibility>) -> Result<crate::model::Deck> {
+    let mut next = deck.clone();
+    let slide = next.slides.iter_mut().find(|slide| slide.id == slide_id).ok_or_else(|| Error::Invalid("slide missing".into()))?;
+    set_accessibility_on_slide(slide, element_id, metadata)?;
     crate::model::validate_deck(&next)?; Ok(next)
+}
+
+pub(crate) fn set_table_headers_on_slide(slide: &mut crate::model::Slide, element_id: &str, policy: TableHeaders) -> Result<()> {
+    slide.review.get_or_insert_with(Default::default).table_headers.insert(element_id.into(), policy);
+    validate_slide(slide)
 }
 
 pub fn set_table_headers(deck: &crate::model::Deck, slide_id: &str, element_id: &str, policy: TableHeaders) -> Result<crate::model::Deck> {
     let mut next = deck.clone();
     let slide = next.slides.iter_mut().find(|slide| slide.id == slide_id).ok_or_else(|| Error::Invalid("slide missing".into()))?;
-    slide.review.get_or_insert_with(Default::default).table_headers.insert(element_id.into(), policy);
+    set_table_headers_on_slide(slide, element_id, policy)?;
     crate::model::validate_deck(&next)?;
     Ok(next)
 }

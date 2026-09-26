@@ -11,7 +11,7 @@ export type RevisionEdit = { op: 'translate'; ids: string[]; dx: number; dy: num
 export type RevisionPreview = { slide_id: string; base_revision: number; base_hash: string; candidate_hash: string; affected_ids: string[]; stale_part_ids: string[]; source_bindings_stale: boolean; native_preservation_checked: boolean; office_visual_parity: false; before: PresentationPreview; after: PresentationPreview }
 export type DeliveryOptions = { page_indices?: number[] | null; pdf?: boolean; preview?: 'none' | 'pages' | 'contact_sheet'; notes?: boolean; source_report?: boolean; preflight?: boolean; max_dimension?: number; min_font_size?: number; max_output_bytes?: number }
 export type DeliveryFile = { kind: 'pptx' | 'pdf' | 'preview' | 'notes' | 'source_report'; suffix: string; mime_type: string; page_indices: number[]; byte_length: number; sha256: string; base64: string; width?: number; height?: number }
-export type DeliveryChecks = { document_verified: true; pptx_exported: true; native_preservation_checked: boolean; source_bindings_current: true; layout_measured: boolean; layout_issues: { code: string; severity: string; message: string }[]; preflight_page_indices: number[]; static_render_page_indices: number[]; office_visual_parity: false; source_authenticity_verified: false; source_freshness_verified: false; semantic_truth_verified: false; accessibility_checked: false }
+export type DeliveryChecks = { document_verified: true; pptx_exported: true; native_preservation_checked: boolean; source_bindings_current: true; layout_measured: boolean; layout_scope?: 'visible_slide_elements_and_used_design' | 'not_measured_for_native_origin'; layout_issues: { code: string; severity: string; message: string }[]; preflight_page_indices: number[]; static_render_page_indices: number[]; office_visual_parity: false; source_authenticity_verified: false; source_freshness_verified: false; semantic_truth_verified: false; accessibility_checked: false }
 export type DeliveryManifest = { format: 'aislide.delivery'; version: 1; producer: { name: string; version: string; engine: 'aislide-core'; contract_version: 1 }; document: { id: string; revision: number; hash: string; title: string; slide_count: number }; options: Required<DeliveryOptions>; files: (Omit<DeliveryFile, 'base64' | 'width' | 'height'> & { width: number | null; height: number | null })[]; preview_pages: PresentationPreview['pages']; multi_file_atomic: false; checks: DeliveryChecks; preflight: PreflightReport | null; render_warnings: StaticExport['warnings']; privacy: { pptx_includes_notes: true; pptx_may_include_sources_and_bindings: true; separate_notes_requested: boolean; separate_source_report_requested: boolean }; limitations: string[] }
 export type PreparedDelivery = { revision: number; hash: string; files: DeliveryFile[]; manifest: DeliveryManifest }
 export type StaticExportFile = { filename: string; base64: string; byte_length: number; mime_type: 'image/png' | 'image/jpeg' | 'application/pdf'; page_indices: number[]; width: number; height: number }
@@ -164,12 +164,16 @@ export type Crop = { left?: number; top?: number; right?: number; bottom?: numbe
 export type Connection = { element_id: string; site: number }
 export type ConnectorRouting = { points: [number, number][]; start_arrow?: boolean; dashed?: boolean; custom?: boolean }
 export type ConnectorSettings = { color: string; stroke_width: number; arrow: boolean; flip_v?: boolean; start?: Connection | null; end?: Connection | null; routing?: ConnectorRouting | null }
-export type PictureInput = { id: string; base64: string; mime_type: 'image/png' | 'image/jpeg'; alt: string; frame?: Frame | null; crop?: Crop }
+export type PictureFit = 'contain' | 'cover' | 'stretch'
+export type PictureInput = { id: string; base64: string; mime_type: 'image/png' | 'image/jpeg'; alt: string; frame?: Frame | null; crop?: Crop; fit?: PictureFit }
 export type AuthoringOperation =
   | { op: 'add_elements'; slide_id: string; elements: Element[] }
   | { op: 'set_frame'; slide_id: string; id: string; frame: Frame }
   | { op: 'set_text_style'; slide_id: string; ids: string[]; style: RunStyle }
   | { op: 'set_slide_background'; slide_id: string; color: string }
+  | { op: 'update_notes'; slide_id: string; notes: string }
+  | { op: 'set_table_headers'; slide_id: string; element_id: string; policy: TableHeaders }
+  | { op: 'set_accessibility'; slide_id: string; element_id: string; metadata: ElementAccessibility | null }
   | { op: 'set_connector'; slide_id: string; id: string; connector: ConnectorSettings; frame?: Frame | null }
   | { op: 'set_picture_crop'; slide_id: string; id: string; crop: Crop }
   | { op: 'set_hyperlink'; slide_id: string; id: string; link: string | null }

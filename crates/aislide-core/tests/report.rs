@@ -67,6 +67,24 @@ fn invalid_reports_are_rejected_before_layout() {
 }
 
 #[test]
+fn process_report_text_limits_identify_the_field_and_unicode_scalar_count() {
+    for scalar in ["x", "\u{754c}", "\u{1f680}"] {
+        let mut report = sample_report();
+        report.sections.truncate(2);
+        report.sections[1].layout = aislide_core::report::Layout::Process;
+        report.sections[1].body = vec![scalar.repeat(80), "Next".into()];
+        assert!(compile_report(&report).is_ok(), "80 Unicode scalars must remain valid");
+        report.sections[1].body[0] = scalar.repeat(81);
+        let error = compile_report(&report).unwrap_err().to_string();
+        assert!(error.contains("report.sections[1].body[0]"), "{error}");
+        assert!(error.contains("81") && error.contains("80"), "{error}");
+        assert!(!error.contains(&scalar.repeat(81)), "Do not echo supplied content");
+        report.sections[1].layout = aislide_core::report::Layout::Columns;
+        assert!(compile_report(&report).is_ok(), "The 80-character limit is process-specific");
+    }
+}
+
+#[test]
 fn invalid_scene_does_not_export() {
     let mut deck = compile_report(&sample_report()).unwrap().deck;
     deck.slides[0].background = "\"/><bad/>".into();

@@ -667,6 +667,12 @@ impl Scene<'_> {
                         "static crop magnification exceeds 10000".into(),
                     ));
                 }
+                let info = crate::media::inspect_raster(base64, mime_type)?;
+                let image_ratio = f64::from(info.width) * visible_width / (f64::from(info.height) * visible_height);
+                let distortion = (width / height) / image_ratio;
+                if distortion.max(1.0 / distortion) > 1.05 {
+                    self.warning(id, "IMAGE_ASPECT_DISTORTED", format!("Image frame ratio {:.3} differs from cropped source ratio {image_ratio:.3} by more than 5%; use contain/cover fitting or confirm intentional stretching", width / height));
+                }
                 self.writer.start_element("image");
                 self.writer
                     .write_attribute("x", &(-crop.left * width / visible_width));
@@ -903,6 +909,7 @@ impl Scene<'_> {
         let mut top = 0.0;
         let mut used = BTreeSet::new();
         let mut requested = BTreeSet::new();
+        let mut fallbacks = std::collections::BTreeMap::<String, BTreeSet<String>>::new();
         let mut overflow = false;
         for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
             if !paragraph.tabs.is_empty()
@@ -1064,16 +1071,11 @@ impl Scene<'_> {
                         {
                             None
                         } else {
-                            Some(format!(
-                                "Requested {requested}; glyphs use {}",
-                                face.families
-                                    .first()
-                                    .map_or("unknown", |(name, _)| name.as_str())
-                            ))
+                            Some((requested.clone(), face.families.first().map_or("unknown", |(name, _)| name.as_str()).to_owned()))
                         }
                     });
-                    if let Some(message) = fallback {
-                        self.warning(id, "FONT_FALLBACK", message);
+                    if let Some((requested, actual)) = fallback {
+                        fallbacks.entry(requested).or_default().insert(actual);
                     }
                     let whitespace = paragraph_text
                         .get(glyph.start..glyph.end)
@@ -1102,15 +1104,12 @@ impl Scene<'_> {
         }
         for family in requested {
             if !used.iter().any(|name| name.eq_ignore_ascii_case(&family)) {
-                self.warning(
-                    id,
-                    "FONT_FALLBACK",
-                    format!(
-                        "Requested {family}; used {}",
-                        used.iter().cloned().collect::<Vec<_>>().join(", ")
-                    ),
-                );
+                fallbacks.entry(family).or_default().extend(used.iter().cloned());
             }
+        }
+        if !fallbacks.is_empty() {
+            let message = fallbacks.into_iter().map(|(family, actual)| format!("Requested {family}; used {}", actual.into_iter().collect::<Vec<_>>().join(", "))).collect::<Vec<_>>().join("; ");
+            self.warning(id, "FONT_FALLBACK", message);
         }
         let offset = match format.vertical {
             VerticalAlign::Top => 0.0,

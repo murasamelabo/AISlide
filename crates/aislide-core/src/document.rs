@@ -278,7 +278,7 @@ pub fn export(document: &Document) -> Result<Value> {
 fn export_internal(document: &Document, checkpoint: bool) -> Result<Value> {
     verify(document)?;
     if document.bindings.iter().any(|binding| binding.stale) { return Err(Error::Conflict("source bindings are stale; undo data edits or explicitly remove/rebind affected citations before export".into())); }
-    let layout = if document.origin.is_none() { Some(crate::layout::measure_layout(&document.deck)?) } else { None };
+    let layout = if document.origin.is_none() { Some(crate::layout::measure_visible_layout(&document.deck)?) } else { None };
     if let Some(issue) = layout.as_ref().and_then(|report| report.issues.iter().find(|issue| issue.severity == "error")) {
         return Err(Error::Invalid(format!("project export blocked by {}: {}", issue.code, issue.message)));
     }

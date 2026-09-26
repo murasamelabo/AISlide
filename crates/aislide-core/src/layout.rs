@@ -104,8 +104,9 @@ fn measure_rich(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width
         overflow: !text.is_empty() && (measured_width as f64 > width + 1.0 || measured_height as f64 > height + 1.0), missing_glyphs: missing, requested_family: requested, fonts: used.into_iter().collect() }
 }
 
-fn visit(fonts: &mut FontSystem, slide: &str, elements: &[Element], measurements: &mut Vec<Measurement>, characters: &mut usize, theme: &Theme) -> Result<()> {
+fn visit(fonts: &mut FontSystem, slide: &str, elements: &[Element], measurements: &mut Vec<Measurement>, characters: &mut usize, theme: &Theme, visible_only: bool) -> Result<()> {
     for element in elements {
+    if visible_only && element.visual().is_some_and(|visual| visual.hidden) { continue; }
         let (id, _, _, width, height) = element.bounds();
         match element {
             Element::Text { text, font_size, bold, format, .. } | Element::Shape { text, font_size, bold, format, .. } => {
@@ -134,7 +135,7 @@ fn visit(fonts: &mut FontSystem, slide: &str, elements: &[Element], measurements
                     measurements.push(measurement);
                 } }
             }
-            Element::Group { children, .. } => visit(fonts, slide, children, measurements, characters, theme)?,
+            Element::Group { children, .. } => visit(fonts, slide, children, measurements, characters, theme, visible_only)?,
             _ => {}
         }
     }
@@ -142,6 +143,14 @@ fn visit(fonts: &mut FontSystem, slide: &str, elements: &[Element], measurements
 }
 
 pub fn measure_layout(deck: &Deck) -> Result<LayoutReport> {
+    measure_layout_scope(deck, false)
+}
+
+pub(crate) fn measure_visible_layout(deck: &Deck) -> Result<LayoutReport> {
+    measure_layout_scope(deck, true)
+}
+
+fn measure_layout_scope(deck: &Deck, visible_only: bool) -> Result<LayoutReport> {
     validate_deck(deck)?;
     let mut fonts = FONTS.get_or_init(|| Mutex::new(FontSystem::new())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
     let mut document_fonts = crate::fonts::document_system(&fonts, deck)?;
@@ -149,10 +158,30 @@ pub fn measure_layout(deck: &Deck) -> Result<LayoutReport> {
     if fonts.db().faces().next().is_none() { return Err(Error::Unsupported("no installed fonts available for measurement".into())); }
     let mut measurements = Vec::new(); let mut characters = 0;
     let fallback = Theme::default();
-    for slide in &deck.slides { visit(fonts, &slide.id, &slide.elements, &mut measurements, &mut characters, crate::design::slide_theme(slide, deck.design.as_ref()).unwrap_or(&fallback))?; }
+    for slide in &deck.slides { visit(fonts, &slide.id, &slide.elements, &mut measurements, &mut characters, crate::design::slide_theme(slide, deck.design.as_ref()).unwrap_or(&fallback), visible_only)?; }
     if let Some(design) = &deck.design {
-        for master in &design.masters { visit(fonts, &format!("master:{}", master.id), &master.elements, &mut measurements, &mut characters, crate::design::master_theme(design, &master.id))?; }
-        for layout in &design.layouts { visit(fonts, &format!("layout:{}", layout.id), &layout.elements, &mut measurements, &mut characters, crate::design::master_theme(design, &layout.master_id))?; }
+        let mut active_layouts = BTreeSet::new();
+        let mut active_masters = BTreeSet::new();
+        for slide in &deck.slides {
+            if let Some(layout) = slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)).or_else(|| design.layouts.first()) {
+                active_layouts.insert(&layout.id);
+                if !slide.hide_master_graphics { active_masters.insert(&layout.master_id); }
+            }
+        }
+        for master in &design.masters {
+            if visible_only && !active_masters.contains(&master.id) { continue; }
+            for element in &master.elements {
+                if visible_only && matches!(element, Element::Text { format, .. } if format.placeholder.is_some()) { continue; }
+                visit(fonts, &format!("master:{}", master.id), std::slice::from_ref(element), &mut measurements, &mut characters, crate::design::master_theme(design, &master.id), visible_only)?;
+            }
+        }
+        for layout in &design.layouts {
+            if visible_only && !active_layouts.contains(&layout.id) { continue; }
+            for element in &layout.elements {
+                if visible_only && matches!(element, Element::Text { format, .. } if format.placeholder.is_some()) { continue; }
+                visit(fonts, &format!("layout:{}", layout.id), std::slice::from_ref(element), &mut measurements, &mut characters, crate::design::master_theme(design, &layout.master_id), visible_only)?;
+            }
+        }
     }
     let mut issues = vec![Issue { code: "OFFICE_PARITY_UNVERIFIED".into(), severity: "warning".into(), message: "Measurements use installed fonts and cosmic-text, not Office's text engine. Charts and images require separate visual review.".into() }];
     let mut used = BTreeSet::new();

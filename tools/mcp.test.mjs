@@ -8,7 +8,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { guidedExamples } from './guided-demo.mjs';
 import { registerHooks } from 'node:module';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
@@ -46,6 +46,10 @@ async function feedbackMcpFixture(run, args = ['--tool-profile', 'full']) {
     requestCore: async (request, options) => {
       calls.push({ request: structuredClone(request), signal: options?.signal });
       if (fixture.onRequest) return fixture.onRequest(request, options);
+      if (request.op === 'inspect_raster') {
+        const bytes = Buffer.from(request.base64, 'base64');
+        return { width: 1, height: 1, mime_type: request.mime_type, sha256: createHash('sha256').update(bytes).digest('hex'), byte_length: bytes.length };
+      }
       if (request.op === 'create_presentation') return { version: 1, id: request.id, revision: 0, hash: 'a'.repeat(64), sources: [], bindings: [], parts: [], deck: { version: 1, title: request.title, width: 1280, height: 720, slides: [{ id: 'slide-1', title: request.title, background: 'FFFFFF', elements: [], notes: '' }] } };
       if (request.op === 'apply_operations' || request.op === 'import_slides') {
         assert.equal(request.expected_hash, request.document.hash);
@@ -82,6 +86,242 @@ async function feedbackMcpFixture(run, args = ['--tool-profile', 'full']) {
     await run({ registrations, resources, prompts, calls, call, fixture });
   } finally { hooks.deregister(); delete globalThis[key]; }
 }
+
+test('roundtrip feedback MCP rejects process constraints at exact input paths before core execution', async () => {
+  await feedbackMcpFixture(async ({ registrations, calls }) => {
+    const schema = registrations.get('compile_report').config.inputSchema;
+    const report = { title: 'Synthetic limits', subtitle: '', period: '', source: 'Synthetic fixture', sections: [{ title: 'Process', layout: 'process', body: ['First', 'x'.repeat(81)] }] };
+    const invalid = schema.safeParse({ report });
+    assert.equal(invalid.success, false);
+    const issue = invalid.error.issues.find(issue => issue.path.join('.') === 'report.sections.0.body.1');
+    assert.ok(issue, JSON.stringify(invalid.error.issues));
+    assert.match(issue.message, /actual=81.*limit=80/);
+    assert.equal(calls.length, 0);
+    for (const scalar of ['x', '\u754c', '\u{1f680}']) {
+      report.sections[0].body[1] = scalar.repeat(80);
+      assert.equal(schema.safeParse({ report }).success, true);
+    }
+    report.sections[0].body = ['Only one'];
+    const tooFew = schema.safeParse({ report });
+    assert.equal(tooFew.success, false);
+    assert.ok(tooFew.error.issues.some(issue => issue.path.join('.') === 'report.sections.0.body'));
+    report.sections[0].layout = 'columns';
+    report.sections[0].body = ['\u{1f680}'.repeat(240)];
+    assert.equal(schema.safeParse({ report }).success, true);
+    report.sections[0].body[0] += 'x';
+    assert.equal(schema.safeParse({ report }).success, false);
+    const section = z.toJSONSchema(schema, { io: 'input' }).properties.report.properties.sections.items;
+    assert.equal(section.properties.body.items.maxLength, 240);
+    const processRule = section.allOf.find(rule => rule.if?.properties?.layout?.const === 'process');
+    assert.equal(processRule.then.properties.body.minItems, 2);
+    assert.equal(processRule.then.properties.body.items.maxLength, 80);
+  });
+});
+
+test('roundtrip feedback MCP sends notes headers and accessibility in one guarded batch', async () => {
+  await feedbackMcpFixture(async ({ call, calls, registrations }) => {
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic metadata batch' });
+    const operations = Array.from({ length: 25 }, (_, index) => ({ op: 'update_notes', slide_id: `slide-${index + 1}`, notes: `Synthetic notes ${index + 1}` }));
+    operations.push(...Array.from({ length: 7 }, (_, index) => ({ op: 'set_table_headers', slide_id: `slide-${index + 1}`, element_id: 'table', policy: 'first_row' })));
+    operations.push(...Array.from({ length: 5 }, (_, index) => ({ op: 'set_accessibility', slide_id: `slide-${index + 1}`, element_id: 'picture', metadata: { description: `Synthetic alternative ${index + 1}`, decorative: false } })));
+    const before = calls.length;
+    const result = await call('apply_operations', { deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), operations });
+    assert.equal(calls.length, before + 1);
+    assert.deepEqual(calls.at(-1).request.operations, operations);
+    assert.equal(result.revision, 1);
+    assert.equal(result.can_undo, true);
+    const schema = registrations.get('apply_operations').config.inputSchema;
+    for (const operation of [
+      { op: 'update_notes', slide_id: 'slide-1', notes: 'x'.repeat(8001) },
+      { op: 'set_table_headers', slide_id: 'slide-1', element_id: 'table', policy: 'all' },
+      { op: 'set_accessibility', slide_id: 'slide-1', element_id: 'picture' },
+      { op: 'set_accessibility', slide_id: 'slide-1', element_id: 'picture', metadata: { unknown: true } },
+    ]) assert.equal(schema.safeParse({ deck_id, expected_revision: 1, expected_hash: result.hash, operations: [operation] }).success, false);
+    assert.equal(schema.safeParse({ deck_id, expected_revision: 1, expected_hash: result.hash, operations: [{ op: 'update_notes', slide_id: 'slide-1', notes: '\u{1f680}'.repeat(8000) }, { op: 'set_accessibility', slide_id: 'slide-1', element_id: 'picture', metadata: null }] }).success, true);
+    for (const name of ['update_notes', 'set_table_headers', 'set_accessibility']) assert.ok(registrations.has(name));
+  });
+});
+
+test('roundtrip feedback MCP timings count core calls without duplicating document content', async () => {
+  await feedbackMcpFixture(async ({ registrations, fixture, calls }) => {
+    const invoke = (name, input) => {
+      const tool = registrations.get(name);
+      return tool.callback(tool.config.inputSchema.parse(input), { signal: new AbortController().signal });
+    };
+    const created = await invoke('create_presentation', { title: 'Synthetic timed operation' });
+    const timings = created._meta.aislide_timing;
+    assert.equal(timings.core_calls, 1);
+    assert.ok(timings.core_roundtrip_ms >= 0);
+    assert.ok(timings.handler_elapsed_ms >= timings.core_roundtrip_ms);
+    assert.deepEqual(Object.keys(timings).sort(), ['core_calls', 'core_roundtrip_ms', 'handler_elapsed_ms']);
+    const { deck_id } = JSON.parse(created.content[0].text);
+    const state = await invoke('get_deck_summary', { deck_id });
+    assert.equal(state._meta.aislide_timing.core_calls, 0);
+    assert.equal(state._meta.aislide_timing.core_roundtrip_ms, 0);
+    assert.equal(calls.length, 1);
+    const pending = Promise.withResolvers();
+    const started = Promise.withResolvers();
+    fixture.onRequest = async () => { started.resolve(); return pending.promise; };
+    const first = invoke('create_graph_icon', { base64: 'c3ludGhldGlj', mime_type: 'image/png' });
+    await started.promise;
+    const concurrent = await invoke('get_deck_summary', { deck_id });
+    assert.equal(concurrent._meta.aislide_timing.core_calls, 0);
+    pending.reject(new Error('Synthetic core failure'));
+    const failed = await first;
+    assert.equal(failed.isError, true);
+    assert.equal(failed._meta.aislide_timing.core_calls, 1);
+    assert.ok(failed._meta.aislide_timing.handler_elapsed_ms >= failed._meta.aislide_timing.core_roundtrip_ms);
+    assert.ok(Buffer.byteLength(JSON.stringify(failed._meta)) < 256);
+    assert.doesNotMatch(JSON.stringify(failed._meta), /Synthetic|base64|deck_id|sha256/);
+  }, []);
+});
+
+test('retest preview contention explains sequential recovery for reads and edits', async () => {
+  await feedbackMcpFixture(async ({ call, calls, fixture, registrations }) => {
+    const created = await call('create_presentation', { title: 'Synthetic preview contention' });
+    const pending = Promise.withResolvers();
+    const started = Promise.withResolvers();
+    const invoke = (name, input) => {
+      const tool = registrations.get(name);
+      return tool.callback(tool.config.inputSchema.parse(input), { signal: new AbortController().signal });
+    };
+    fixture.onRequest = async () => { started.resolve(); return pending.promise; };
+    const preview = invoke('preview_presentation', { deck_id: created.deck_id });
+    await started.promise;
+    const before = calls.length;
+    try {
+      for (const [name, input] of [
+        ['preview_presentation', { deck_id: created.deck_id }],
+        ['apply_operations', { deck_id: created.deck_id, expected_revision: created.revision, expected_hash: created.hash, operations: [{ op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' }] }],
+      ]) {
+        const response = await invoke(name, input);
+        assert.equal(response.isError, true);
+        assert.match(response.content[0].text, /busy.*sequentially.*revision\/hash/i);
+      }
+      assert.equal(calls.length, before);
+    } finally {
+      pending.reject(new Error('Synthetic preview stopped'));
+      await preview;
+    }
+    assert.equal((await call('get_deck_summary', { deck_id: created.deck_id })).revision, created.revision);
+  }, []);
+});
+
+test('roundtrip feedback skill and initialization expose the short safe authoring path', async () => {
+  const skillUrl = new URL('../.github/skills/aislide-authoring/SKILL.md', import.meta.url);
+  const skill = (await readFile(skillUrl, 'utf8')).replace(/^\uFEFF/, '');
+  assert.match(skill, /^---\r?\nname: aislide-authoring\r?\ndescription: '[^\r\n]+'\r?\n---/);
+  assert.ok(Buffer.byteLength(skill) < 6000);
+  for (const text of ['asset_id', 'apply_operations', 'set_table_headers', 'set_accessibility', 'update_notes', '80 Unicode', 'Serialize core-backed AISlide calls', 'aislide_timing', 'unmet requirements']) assert.ok(skill.includes(text), text);
+  for (const path of ['../../../docs/api.md', '../../../docs/authoring/README.md']) assert.ok((await readFile(new URL(path, skillUrl), 'utf8')).length > 0);
+  await feedbackMcpFixture(async ({ fixture }) => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'short-path-instructions', version: '1.0.0' });
+    try {
+      await McpServer.prototype.connect.call(fixture.instance, serverTransport);
+      await client.connect(clientTransport);
+      const instructions = client.getInstructions();
+      assert.ok(Buffer.byteLength(instructions) < 1024);
+      for (const text of ['Serialize core-backed AISlide calls', 'apply_operations', 'asset_id', 'get_deck_summary', 'unmet requirements']) assert.ok(instructions.includes(text), text);
+    } finally { await client.close(); }
+  }, []);
+});
+
+test('retest registered rasters expose validated dimensions and preserve image fit inputs', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-raster-info-'));
+  const bytes = Buffer.from('Synthetic inspector input');
+  try {
+    await writeFile(join(directory, 'image.png'), bytes);
+    await writeFile(join(directory, 'invalid.png'), Buffer.from('Invalid image'));
+    await feedbackMcpFixture(async ({ call, calls, fixture, registrations }) => {
+      const created = await call('create_presentation', { title: 'Synthetic image fitting' });
+      fixture.onRequest = async request => {
+        assert.equal(request.op, 'inspect_raster');
+        assert.equal(request.mime_type, 'image/png');
+        const input = Buffer.from(request.base64, 'base64');
+        if (!input.equals(bytes)) throw new Error('Invalid raster image');
+        return { width: 200, height: 100, mime_type: 'image/png', byte_length: input.length, sha256: createHash('sha256').update(input).digest('hex') };
+      };
+      const asset = await call('register_asset', { path: 'image.png' });
+      assert.equal(asset.width, 200);
+      assert.equal(asset.height, 100);
+      assert.equal(asset.base64, undefined);
+      const before = calls.length;
+      assert.equal((await call('register_asset', { path: 'image.png' })).asset_id, asset.asset_id);
+      assert.equal(calls.length, before, 'Immutable raster metadata must be reused');
+      const tool = registrations.get('register_asset');
+      const invalid = await tool.callback(tool.config.inputSchema.parse({ path: 'invalid.png' }), { signal: new AbortController().signal });
+      assert.equal(invalid.isError, true);
+      assert.equal((await call('list_assets')).assets.length, 1);
+      fixture.onRequest = undefined;
+      for (const fit of ['contain', 'cover', 'stretch']) {
+        const input = { deck_id: created.deck_id, expected_revision: calls.filter(call => call.request.op === 'apply_operations').length, slide_id: 'slide-1', id: fit, asset_id: asset.asset_id, alt: 'Synthetic', frame: { x: 100, y: 100, width: 300, height: 200 }, fit };
+        await call('add_picture', input);
+        assert.equal(calls.at(-1).request.operations[0].fit, fit);
+        assert.equal(calls.at(-1).request.operations[0].base64, bytes.toString('base64'));
+        assert.equal(registrations.get('add_picture').config.inputSchema.safeParse({ ...input, fit: 'fill' }).success, false);
+      }
+    }, ['--asset-dir', directory]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('retest raster registration rejects invalid dimensions and late cancellation atomically', async () => {
+  const { McpAssets } = await import('./mcp-assets.mjs');
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-raster-atomic-'));
+  const bytes = Buffer.from('Synthetic inspection fixture');
+  try {
+    await writeFile(join(directory, 'image.png'), bytes);
+    const assets = await McpAssets.create([directory]);
+    const info = { width: 200, height: 100, mime_type: 'image/png', byte_length: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+    for (const change of [{ width: undefined, height: undefined }, { width: 0 }, { height: NaN }, { width: 4097 }, { height: 0.5 }, { sha256: '0'.repeat(64) }, { mime_type: 'image/jpeg' }, { byte_length: 0 }]) {
+      await assert.rejects(() => assets.registerFile({ path: 'image.png' }, new AbortController().signal, async () => ({ ...info, ...change })), /inspection|dimensions/i);
+      assert.deepEqual(assets.list().assets, []);
+    }
+    const controller = new AbortController();
+    await assert.rejects(() => assets.registerFile({ path: 'image.png' }, controller.signal, async () => { controller.abort(); return info; }), /abort/i);
+    assert.deepEqual(assets.list().assets, []);
+    const result = await assets.registerFile({ path: 'image.png' }, new AbortController().signal, async () => info);
+    assert.equal(result.width, 200);
+    assert.equal(result.height, 100);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('retest default batch schema defers advanced shapes while full runtime validation remains strict', async context => {
+  await feedbackMcpFixture(async ({ fixture, calls }) => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'progressive-batch-schema', version: '1.0.0' });
+    const call = async (name, arguments_ = {}) => client.callTool({ name, arguments: arguments_ });
+    const variants = schema => {
+      const items = resolveSchemaRef(schema, resolveSchemaRef(schema, schema.properties.operations).items);
+      return (items.oneOf ?? items.anyOf).map(variant => resolveSchemaRef(schema, variant));
+    };
+    try {
+      await McpServer.prototype.connect.call(fixture.instance, serverTransport);
+      await client.connect(clientTransport);
+      const listed = await client.listTools();
+      const basic = listed.tools.find(tool => tool.name === 'apply_operations').inputSchema;
+      assert.ok(Buffer.byteLength(JSON.stringify(listed)) < 40 * 1024);
+      assert.equal(variants(basic).some(variant => resolveSchemaRef(basic, variant.properties.op).const === 'add_graph'), false);
+      const expanded = JSON.parse((await call('get_tool_schema', { name: 'apply_operations' })).content[0].text);
+      assert.ok(variants(expanded.inputSchema).some(variant => resolveSchemaRef(expanded.inputSchema, variant.properties.op).const === 'add_graph'));
+      const detailed = (await client.listTools()).tools.find(tool => tool.name === 'apply_operations').inputSchema;
+      assert.deepEqual(detailed, expanded.inputSchema);
+      const created = JSON.parse((await call('create_presentation', { title: 'Synthetic advanced schema' })).content[0].text);
+      const operation = { op: 'add_elements', slide_id: 'slide-1', elements: [{ type: 'table', id: 'table', x: 0, y: 0, width: 200, height: 100, rows: [['Synthetic', 'Header']], font_size: 20 }] };
+      const accepted = await call('apply_operations', { deck_id: created.deck_id, expected_revision: 0, expected_hash: created.hash, operations: [operation] });
+      assert.equal(accepted.isError, undefined);
+      const before = calls.length;
+      operation.elements[0].rows = [['x'.repeat(201)]];
+      const invalid = await call('apply_operations', { deck_id: created.deck_id, expected_revision: 1, expected_hash: 'b'.repeat(64), operations: [operation] });
+      assert.equal(invalid.isError, true);
+      assert.equal(calls.length, before);
+      for (const name of ['get_document', 'undo', 'redo', 'get_graph']) await call('get_tool_schema', { name });
+      const restored = (await client.listTools()).tools.find(tool => tool.name === 'apply_operations').inputSchema;
+      assert.deepEqual(restored, basic);
+      context.diagnostic(JSON.stringify({ default_tool_list_bytes: Buffer.byteLength(JSON.stringify(listed)), basic_batch_bytes: Buffer.byteLength(JSON.stringify(basic)), full_batch_bytes: Buffer.byteLength(JSON.stringify(detailed)) }));
+    } finally { await client.close(); }
+  }, []);
+});
 
 test('lightweight MCP publishes deduplicated local schema references without weakening validation', async context => {
   await feedbackMcpFixture(async ({ fixture, registrations, calls }) => {
@@ -210,13 +450,15 @@ test('lightweight MCP reuses bounded approved local assets without round-trippin
       assert.equal(asset.byte_length, image.length);
       assert.equal(asset.mime_type, 'image/png');
       assert.equal(asset.base64, undefined);
-      assert.equal(calls.length, 0);
+      assert.equal(asset.width, 1);
+      assert.equal(asset.height, 1);
+      assert.equal(calls.length, 1);
       assert.equal((await call('register_asset', { path: 'image.png' })).asset_id, asset.asset_id);
       assert.equal((await call('list_assets')).assets.length, 1);
       const created = await call('create_presentation', { title: 'Synthetic asset reuse' });
       await writeFile(join(directory, 'image.png'), Buffer.from('changed after registration'));
       const added = await call('apply_operations', { deck_id: created.deck_id, expected_revision: 0, expected_hash: created.hash, operations: [{ op: 'add_picture', slide_id: 'slide-1', id: 'picture', asset_id: asset.asset_id, alt: 'Synthetic image' }] });
-      assert.equal(calls.length, 2);
+      assert.equal(calls.length, 3);
       assert.equal(calls.at(-1).request.operations[0].base64, image.toString('base64'));
       assert.equal(calls.at(-1).request.operations[0].mime_type, 'image/png');
       assert.equal(calls.at(-1).request.operations[0].asset_id, undefined);
@@ -377,6 +619,68 @@ test('lightweight MCP live 14-slide authoring resumes and exports a complete nat
   } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test('roundtrip feedback live metadata batch configures twenty-five slides with one core call', { timeout: 180000 }, async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-metadata-batch-'));
+  const sharp = (await import('sharp')).default;
+  const image = await sharp({ create: { width: 200, height: 100, channels: 4, background: { r: 30, g: 150, b: 110, alpha: 1 } } }).png().toBuffer();
+  await writeFile(join(directory, 'synthetic.png'), image);
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory, '--asset-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const client = new Client({ name: 'roundtrip-metadata-proof', version: '1.0.0' });
+  const invoke = async (name, arguments_ = {}) => {
+    const response = await client.callTool({ name, arguments: arguments_ }, undefined, { timeout: 120000 });
+    assert.ok(!response.isError, `${name}: ${JSON.stringify(response.content)}`);
+    return { response, result: JSON.parse(response.content[0].text) };
+  };
+  const call = async (name, arguments_) => (await invoke(name, arguments_)).result;
+  try {
+    await client.connect(transport);
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic twenty-five-slide metadata' });
+    const before = await call('edit_slides', { deck_id, expected_revision: 0, operations: Array.from({ length: 24 }, (_, index) => ({ op: 'insert', id: `slide-${index + 2}`, after: `slide-${index + 1}`, title: `Synthetic ${index + 2}` })) });
+    const asset = await call('register_asset', { path: 'synthetic.png' });
+    assert.equal(asset.width, 200);
+    assert.equal(asset.height, 100);
+    const operations = [];
+    for (let index = 0; index < 25; index += 1) {
+      const slide_id = `slide-${index + 1}`;
+      if (index < 7) operations.push({ op: 'add_elements', slide_id, elements: [{ type: 'table', id: 'table', x: 80, y: 200, width: 400, height: 120, font_size: 20, rows: [['Synthetic', 'Value'], ['Row', String(index + 1)]] }] });
+      if (index < 5) operations.push({ op: 'add_picture', slide_id, id: 'picture', asset_id: asset.asset_id, alt: 'Before description', frame: { x: 600, y: 200, width: 64, height: 64 }, fit: 'contain' });
+      operations.push({ op: 'update_notes', slide_id, notes: `Synthetic speaker notes ${index + 1}` });
+      if (index < 7) operations.push({ op: 'set_table_headers', slide_id, element_id: 'table', policy: 'first_row' });
+      if (index < 5) operations.push({ op: 'set_accessibility', slide_id, element_id: 'picture', metadata: { title: 'Synthetic picture', description: `Synthetic alternative ${index + 1}` } });
+    }
+    const { response, result } = await invoke('apply_operations', { deck_id, expected_revision: before.revision, expected_hash: before.hash, operations });
+    assert.equal(response._meta.aislide_timing.core_calls, 1);
+    assert.equal(result.revision, before.revision + 1);
+    const check = document => {
+      assert.equal(document.deck.slides.length, 25);
+      for (const [index, slide] of document.deck.slides.entries()) {
+        assert.equal(slide.notes, `Synthetic speaker notes ${index + 1}`);
+        if (index < 7) assert.equal(slide.review.table_headers.table, 'first_row');
+        if (index < 5) {
+          const picture = slide.elements.find(element => element.id === 'picture');
+          assert.equal(picture.type, 'picture');
+          assert.equal(picture.alt, `Synthetic alternative ${index + 1}`);
+          assert.equal(picture.width, 64);
+          assert.equal(picture.height, 32);
+          assert.deepEqual(Buffer.from(picture.base64, 'base64'), image);
+        }
+      }
+    };
+    check(await call('get_document', { deck_id }));
+    assert.equal((await call('undo', { deck_id })).hash, before.hash);
+    assert.equal((await call('redo', { deck_id })).hash, result.hash);
+    const saved = await call('export_pptx', { deck_id, filename: 'synthetic-metadata.pptx' });
+    const bytes = await readFile(saved.path);
+    const presentationAsset = await call('register_asset', { path: 'synthetic-metadata.pptx' });
+    const reopened = await call('open_pptx', { asset_id: presentationAsset.asset_id });
+    check(await call('get_document', { deck_id: reopened.deck_id }));
+    assert.deepEqual(await readFile(saved.path), bytes);
+    context.diagnostic(JSON.stringify({ slides: 25, notes: 25, table_headers: 7, images_with_alt: 5, operations: operations.length, core_calls: response._meta.aislide_timing.core_calls, timing: response._meta.aislide_timing, source_unchanged: true }));
+    await call('close_deck', { deck_id: reopened.deck_id });
+    await call('close_deck', { deck_id });
+  } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('graph feedback MCP schemas and committed diagnostics stay bounded and single-request', async () => {
   await feedbackMcpFixture(async ({ call, calls, registrations, fixture }) => {
     const { deck_id } = await call('create_presentation', { title: 'Graph feedback' });
@@ -525,7 +829,10 @@ function assertFeedbackWorkflow(prompt, resource) {
     /never automatically fall back.*timeout/, /128 metadata entries.*capacity limits/, /Reduce chunk size for progress and cancellation/,
     /batch update_graph has no layout field and preserves the existing PartLayout/, /corner_label.*48 Unicode scalars.*default empty/,
     /Set theme before add_part\/add_graph/, /no automatic theme-driven regeneration/,
-    /set_accessibility after the target exists in a separate revision/, /at least 65 seconds.*size-aware.*180 seconds.*opt-in MCP progress/,
+    /set_accessibility after its target exists.*same apply_operations batch/, /at least 65 seconds.*size-aware.*180 seconds.*opt-in MCP progress/,
+    /Batch update_notes.*set_table_headers.*set_accessibility across slides in one Undo/, /Serialize core-backed AISlide calls/,
+    /process sections require 2-4 body entries of at most 80 Unicode scalars/, /_meta.aislide_timing.*handler_elapsed_ms.*core_calls.*core_roundtrip_ms/,
+    /disclose substitutions and unmet requirements/,
     /All three venn variants support PartSpec\.layout\.show_title=false/,
     /Keep card text at least 8 slide pixels/, /CONTAINER_CORNER_OVERFLOW and CONTAINER_PADDING.*require preview review/,
     /CONNECTOR_BADGE_OVERLAP is info.*not a visual approval/, /propose guarded edits and inspect before\/after previews/,
@@ -817,7 +1124,7 @@ test('managed batch MCP stub accepts strict parts and graphs with one guarded re
     const schema = registrations.get('apply_operations').config.inputSchema;
     assert.deepEqual(schema.parse(guarded), guarded);
     const published = z.toJSONSchema(schema, { io: 'input' });
-    assert.equal(published.properties.operations.items.oneOf.length, 13);
+    assert.equal(published.properties.operations.items.oneOf.length, 16);
     for (const operation of operations) {
       assert.equal(schema.safeParse({ ...guarded, operations: [operation] }).success, true);
       assert.equal(schema.safeParse({ ...guarded, operations: [{ ...operation, unknown: true }] }).success, false);
@@ -887,7 +1194,7 @@ test('managed batch MCP stub failures cancellation busy and no-op retain state w
     try {
       await entered;
       const count = calls.length;
-      await assert.rejects(() => call('apply_operations', input), /in progress|busy/i);
+      await assert.rejects(() => call('apply_operations', input), /in progress.*sequentially/i);
       assert.equal(calls.length, count);
       assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
     } finally { release(); await pending; }
@@ -1077,7 +1384,7 @@ test('managed batch MCP live 39 slides and 21 managed roots retain metadata thro
     const items = resolveSchemaRef(batchSchema, resolveSchemaRef(batchSchema, batchSchema.properties.operations).items);
     const variants = items.oneOf ?? items.anyOf;
     const operations = variants.map(variant => resolveSchemaRef(batchSchema, resolveSchemaRef(batchSchema, variant).properties.op).const).sort();
-    assert.equal(operations.length, 13);
+    assert.equal(operations.length, 16);
     const capabilities = await call('authoring_capabilities');
     assert.deepEqual([...capabilities.typed_authoring.operations].sort(), operations);
     assert.equal(capabilities.typed_authoring.batch_limit, 128);

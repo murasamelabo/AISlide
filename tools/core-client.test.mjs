@@ -22,6 +22,8 @@ test('managed batch timeout scales with bounded work without changing ordinary r
 
 test('accessibility updates receive a finite authoring budget without changing ordinary requests', () => {
   assert.equal(coreTimeout({ op: 'set_accessibility' }), 65000);
+  assert.equal(coreTimeout({ op: 'apply_operations', operations: [{ op: 'set_accessibility' }] }), 65000);
+  assert.equal(coreTimeout({ op: 'apply_operations', operations: [{ op: 'update_notes' }, { op: 'set_table_headers' }] }), 20000);
   assert.equal(coreTimeout({ op: 'set_accessibility' }, 5 * 1048576), 120000);
   assert.equal(coreTimeout({ op: 'set_accessibility', timeout: Infinity }), 65000);
   assert.equal(coreTimeout({ op: 'sample' }), 20000);

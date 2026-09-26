@@ -652,6 +652,9 @@ fn bounded_custom_graph_layout_handles_both_original_title_modes() {
     assert_eq!(inserted["document"]["parts"][0]["spec"]["data"]["graph"]["nodes"][1]["y"], 400.0);
     assert_eq!(inserted["document"]["parts"][0]["stale"], false);
     spec["layout"]["show_title"] = json!(true);
+    let still_untitled = execute_request(json!({"op":"create_part","id":"reserved-band","spec":spec})).unwrap();
+    assert!(!still_untitled["children"].as_array().unwrap().iter().any(|child| child["text"] == "Services" || child["text"] == "Synthetic"));
+    spec["data"]["graph"]["show_title"] = json!(true);
     assert!(execute_request(json!({"op":"create_part","id":"reserved-band","spec":spec})).is_err());
 }
 

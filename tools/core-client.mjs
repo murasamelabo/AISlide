@@ -31,7 +31,7 @@ export function coreTimeout(request, encodedBytes = 0) {
   const compositeBudget = ['preview_slide_revision', 'prepare_delivery'].includes(request?.op) ? 120_000 : 20_000;
   const base = Math.max(documentBudget, recoveryBudget, operationBudget, compositeBudget);
   const managed = request?.op === 'apply_operations' && Array.isArray(request.operations)
-    ? request.operations.slice(0, 128).filter(operation => ['add_part', 'update_part', 'add_graph', 'update_graph'].includes(operation?.op)).length
+    ? request.operations.slice(0, 128).filter(operation => ['add_part', 'update_part', 'add_graph', 'update_graph', 'set_accessibility'].includes(operation?.op)).length
     : ['insert_part', 'update_part', 'insert_graph', 'update_graph', 'apply_graph', 'set_accessibility'].includes(request?.op) ? 1 : 0;
   return managed ? Math.min(300_000, Math.max(base, 60_000 + managed * 5_000)) : base;
 }
@@ -60,7 +60,7 @@ export async function requestCore(request, { signal } = {}) {
   const payload = encodeCoreRequest(request);
   const timeout = coreTimeout(request, Buffer.byteLength(payload));
   const worker = ['render_element_preview', 'compute_chart_presentation'].includes(request?.op) ? 'chart-preview' : ['prepare_recovery', 'verify_recovery_record', 'verify_session_recovery'].includes(request?.op) ? 'recovery' : 'editing';
-  if (active.has(worker)) throw new Error('Core is busy; retry after the current operation');
+  if (active.has(worker)) throw new Error('Core is busy; wait for the current operation to finish and submit requests sequentially. Inspect the current revision/hash before retrying a planned edit.');
   active.add(worker);
   try {
     return await new Promise((resolveResponse, reject) => {

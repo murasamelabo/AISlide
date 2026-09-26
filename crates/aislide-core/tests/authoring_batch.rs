@@ -119,6 +119,82 @@ fn assert_managed_history(before: &Value, changed: &Value) {
 }
 
 #[test]
+fn roundtrip_metadata_batch_matches_dedicated_tools_and_keeps_one_undo() {
+    let authored = execute_request(request(&managed_fixture(2), json!([
+        {"op":"add_elements","slide_id":"slide-1","elements":all_elements()},
+        {"op":"add_elements","slide_id":"slide-2","elements":all_elements()}
+    ]))).unwrap()["document"].clone();
+    let exported = execute_request(json!({"op":"export_presentation","document":authored})).unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"metadata-native","base64":exported["base64"]})).unwrap()["document"].clone();
+    let operations = json!([
+        {"op":"update_notes","slide_id":"slide-1","notes":"Synthetic speaker notes\n\u{65e5}\u{672c}\u{8a9e}"},
+        {"op":"set_table_headers","slide_id":"slide-1","element_id":"table","policy":"first_row"},
+        {"op":"set_accessibility","slide_id":"slide-1","element_id":"picture","metadata":{"title":"Synthetic picture","description":"Descriptive alternative text","decorative":false}},
+        {"op":"update_notes","slide_id":"slide-2","notes":"Second slide notes"},
+        {"op":"set_table_headers","slide_id":"slide-2","element_id":"nested-table","policy":"both"},
+        {"op":"set_accessibility","slide_id":"slide-2","element_id":"shape","metadata":{"description":"Synthetic shape"}}
+    ]);
+    for before in [authored, opened] {
+        let changed = execute_request(request(&before, operations.clone())).unwrap();
+        assert_eq!(changed["document"]["revision"].as_u64(), before["revision"].as_u64().map(|revision| revision + 1));
+        let mut sequential = before.clone();
+        for operation in operations.as_array().unwrap() {
+            let mut input = operation.clone();
+            if input["op"] == "update_notes" {
+                let index = sequential["deck"]["slides"].as_array().unwrap().iter().position(|slide| slide["id"] == input["slide_id"]).unwrap();
+                input = json!({"op":"transaction","document":sequential,"transaction":{"expected_revision":sequential["revision"],"expected_hash":sequential["hash"],"operations":[{"op":"replace","path":format!("/deck/slides/{index}/notes"),"value":operation["notes"]}]}});
+            } else {
+                input["document"] = sequential.clone();
+                input["expected_revision"] = sequential["revision"].clone();
+            }
+            sequential = execute_request(input).unwrap()["document"].clone();
+        }
+        assert_eq!(changed["document"]["deck"], sequential["deck"]);
+        assert_eq!(changed["document"]["hash"], sequential["hash"]);
+        assert_eq!(element(&changed["document"], "picture")["alt"], "Descriptive alternative text");
+        assert_eq!(changed["document"]["deck"]["slides"][1]["review"]["table_headers"]["nested-table"], "both");
+        assert_managed_history(&before, &changed);
+        let no_op = execute_request(request(&changed["document"], operations.clone())).unwrap();
+        assert_eq!(no_op["document"], changed["document"]);
+        assert!(no_op["receipt"].is_null());
+        let saved = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+        let reopened = execute_request(json!({"op":"open_presentation","id":"metadata-reopened","base64":saved["base64"]})).unwrap();
+        assert_eq!(reopened["document"]["deck"]["slides"][0]["notes"], "Synthetic speaker notes\n\u{65e5}\u{672c}\u{8a9e}");
+        assert_eq!(element(&reopened["document"], "picture")["alt"], "Descriptive alternative text");
+    }
+}
+
+#[test]
+fn roundtrip_metadata_batch_invalid_targets_and_notes_are_atomic() {
+    let before = populated();
+    for operation in [
+        json!({"op":"set_table_headers","slide_id":"slide-1","element_id":"text","policy":"first_row"}),
+        json!({"op":"set_accessibility","slide_id":"slide-1","element_id":"missing","metadata":{"description":"No target"}}),
+        json!({"op":"update_notes","slide_id":"slide-1","notes":"x".repeat(8001)}),
+        json!({"op":"update_notes","slide_id":"slide-1","notes":"bad\0notes"}),
+    ] { reject_atomic(&before, operation, "operation 2"); }
+    let with_rich_notes = execute_request(json!({"op":"update_rich_notes","document":before,"expected_revision":before["revision"],"slide_id":"slide-1","paragraphs":[{"runs":[{"text":"Rich notes","style":{"bold":true}}]}]})).unwrap()["document"].clone();
+    assert!(execute_request(request(&with_rich_notes, json!([{"op":"update_notes","slide_id":"slide-1","notes":"Different plain notes"}]))).is_err());
+}
+
+#[test]
+fn retest_graph_title_visibility_cannot_be_reenabled_by_default_layout() {
+    let mut graph = managed_graph();
+    graph["title"] = json!("Hidden graph heading");
+    graph["show_title"] = json!(false);
+    for layout in [None, Some(json!({"x":64,"y":144,"width":1152,"height":512})), Some(json!({"x":64,"y":144,"width":1152,"height":512,"show_title":true})), Some(json!({"x":64,"y":144,"width":1152,"height":512,"show_title":false}))] {
+        let mut operation = json!({"op":"add_graph","slide_id":"slide-1","id":"flow","spec":graph});
+        if let Some(layout) = layout { operation["layout"] = layout; }
+        let result = execute_request(request(&original(), json!([operation]))).unwrap();
+        let children = result["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap();
+        assert!(children.iter().all(|element| element["text"] != "Hidden graph heading"), "A hidden graph title must remain hidden");
+    }
+    let before = original();
+    let result = execute_request(json!({"op":"insert_graph","document":before,"expected_revision":before["revision"],"slide_id":"slide-1","id":"flow","spec":graph})).unwrap();
+    assert!(result["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap().iter().all(|element| element["text"] != "Hidden graph heading"));
+}
+
+#[test]
 fn managed_batch_twenty_one_roots_match_sequential_inserts_on_thirty_nine_slides() {
     use base64::{Engine, engine::general_purpose::STANDARD};
     let mut deck = managed_fixture(39)["deck"].clone();
@@ -447,8 +523,8 @@ fn typed_authoring_and_slide_import_are_discoverable_without_claiming_office_par
     assert_eq!(capabilities["typed_authoring"]["scale_fonts"], false);
     assert_eq!(capabilities["typed_authoring"]["one_undo"], true);
     let operations = capabilities["typed_authoring"]["operations"].as_array().unwrap();
-    assert_eq!(operations.len(), 13);
-    for operation in ["add_elements", "set_frame", "set_text_style", "set_slide_background", "set_connector", "set_picture_crop", "set_hyperlink", "set_shape_adjustment", "add_picture", "add_part", "update_part", "add_graph", "update_graph"] {
+    assert_eq!(operations.len(), 16);
+    for operation in ["add_elements", "set_frame", "set_text_style", "set_slide_background", "set_connector", "set_picture_crop", "set_hyperlink", "set_shape_adjustment", "add_picture", "add_part", "update_part", "add_graph", "update_graph", "update_notes", "set_table_headers", "set_accessibility"] {
         assert!(operations.contains(&json!(operation)), "missing {operation}");
     }
     assert_eq!(capabilities["typed_authoring"]["managed_parts_limit"], 128);
@@ -727,6 +803,48 @@ fn typed_batch_picture_placement_crop_and_add_are_one_transaction() {
     reject_atomic(&added["document"], operation, "geometry or ID");
     let populated = populated();
     reject_atomic(&populated, json!({"op":"set_picture_crop","slide_id":"slide-1","id":"text","crop":{}}), "requires a picture");
+}
+
+#[test]
+fn retest_picture_fit_preserves_aspect_crop_and_source_bytes() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    for (width, height) in [(200, 100), (100, 200)] {
+        let image = image::RgbImage::from_pixel(width, height, image::Rgb([30, 140, 100]));
+        let mut output = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut output, image::ImageFormat::Png).unwrap();
+        let base64 = STANDARD.encode(output.into_inner());
+        for crop in [json!({"left":0.0,"top":0.0,"right":0.0,"bottom":0.0}), json!({"left":0.1,"top":0.05,"right":0.2,"bottom":0.15})] {
+            for fit in ["contain", "cover", "stretch"] {
+                let before = original();
+                let operation = json!({"op":"add_picture","slide_id":"slide-1","id":"fitted","base64":base64,"mime_type":"image/png","alt":"Synthetic image","frame":{"x":100,"y":100,"width":300,"height":200},"crop":crop,"fit":fit});
+                let result = execute_request(request(&before, json!([operation]))).unwrap();
+                let fitted = element(&result["document"], "fitted");
+                assert_eq!(fitted["base64"], base64);
+                let visible_ratio = f64::from(width) * (1.0 - fitted["crop"]["left"].as_f64().unwrap() - fitted["crop"]["right"].as_f64().unwrap())
+                    / (f64::from(height) * (1.0 - fitted["crop"]["top"].as_f64().unwrap() - fitted["crop"]["bottom"].as_f64().unwrap()));
+                let frame_width = fitted["width"].as_f64().unwrap();
+                let frame_height = fitted["height"].as_f64().unwrap();
+                if fit == "contain" {
+                    assert_eq!(fitted["crop"], crop);
+                    assert!(frame_width <= 300.0 + 1e-9 && frame_height <= 200.0 + 1e-9);
+                    assert!((fitted["x"].as_f64().unwrap() - (100.0 + (300.0 - frame_width) / 2.0)).abs() < 1e-9);
+                    assert!((fitted["y"].as_f64().unwrap() - (100.0 + (200.0 - frame_height) / 2.0)).abs() < 1e-9);
+                } else {
+                    assert_eq!(frame_width, 300.0);
+                    assert_eq!(frame_height, 200.0);
+                }
+                if fit != "stretch" { assert!((visible_ratio - frame_width / frame_height).abs() < 1e-9); }
+                else { assert_eq!(fitted["crop"], crop); }
+                assert_managed_history(&before, &result);
+                let saved = execute_request(json!({"op":"export_presentation","document":result["document"]})).unwrap();
+                let reopened = execute_request(json!({"op":"open_presentation","id":"fitted-native","base64":saved["base64"]})).unwrap();
+                let native = element(&reopened["document"], "fitted");
+                assert_eq!(native["base64"], base64);
+                for key in ["x", "y", "width", "height"] { assert!((native[key].as_f64().unwrap() - fitted[key].as_f64().unwrap()).abs() < 0.001); }
+                for key in ["left", "top", "right", "bottom"] { assert!((native["crop"][key].as_f64().unwrap() - fitted["crop"][key].as_f64().unwrap()).abs() < 0.00002); }
+            }
+        }
+    }
 }
 
 #[test]

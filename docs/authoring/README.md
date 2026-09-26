@@ -66,11 +66,19 @@ reference-site slide images, branding or proprietary artwork are bundled.
 
 ## MCP Workflow
 
+The short project-owned [AISlide authoring SKILL](../../.github/skills/aislide-authoring/SKILL.md) provides the normal path and failure rules; load detailed sections below only as needed. MCP initialization also advertises the short serialization, batching, asset and completion rules without requiring a separate guide call.
+
 The default connection is lightweight: ten common tools are initially exposed. `discover_tools({query})` searches advanced operations without their full schemas; `get_tool_schema({name})` returns the needed schema and publishes that tool. The four most recently requested advanced tools remain in the additional list. Existing direct calls are still valid; `--tool-profile full` restores full discovery and legacy response defaults.
 
 For ordinary freeform authoring, use `create_presentation`, `edit_slides`, and bounded `apply_operations` batches with final content/geometry. Compact mutation replies carry the next revision/hash. `list_decks` restores lost handles and last successful operations/exports; `get_deck_summary` returns small paginated slide or element indexes without core calls, image/source bytes, notes or rendering. This removes the need for a manual progress file or repeated full-document reads just to continue working. It does not persist across server restarts or determine whether content is complete.
 
 With operator-approved `--asset-dir` roots, `register_asset({path:"image.png"})` reads the file once. Use its `asset_id` in binary tools, `apply_operations` with `add_picture`, or graph `icon` values. Prepared graph icons and catalog icon assets already return handles in compact mode. `list_assets` recovers them and `close_asset` releases unused registry bytes. No arbitrary paths, external relationship fetching or source overwrite is enabled. See [local asset bounds and contracts](../api.md#local-asset-handles).
+
+PNG/JPEG registration returns verified pixel `width`/`height`. Prefer `add_picture` with `fit:"contain"` for complete diagrams or `fit:"cover"` for an intentionally cropped frame; omitted fit preserves legacy stretching. `IMAGE_ASPECT_DISTORTED` warns when the local picture frame differs by over 5% from the cropped source ratio. It is a renderer warning, not a blocking error or a full audit of ancestor transforms. No visual warning is promised when all rendering/preflight is explicitly disabled.
+
+The initial batch declaration includes common elements and metadata. Before using tables, charts, polygons, groups or managed parts/graphs, fetch `get_tool_schema({name:"apply_operations"})`; this exposes the complete strict schema. Combine notes, table header policies and alternative text in the same bounded plan after target insertion, using `element_id` for metadata targets. This is one model/tool round trip and one Undo, not a sequence of individual settings calls. Stop on errors and retain the expected revision/hash of the planned base.
+
+Graph title visibility is the conjunction of the graph and part-layout settings: either `show_title:false` suppresses it. Font fallback warnings retain requested/used families in one record per rendered element. Delivery layout measurement excludes unused layouts/masters and non-rendered inherited placeholders; explicit `measure_layout` keeps its all-definition inspection contract. The manifest records `layout_scope`.
 
 The evidence-led guided path remains available through discovery:
 

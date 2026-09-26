@@ -163,7 +163,7 @@ pub(crate) fn graph_render_context(id: &str, spec: &PartSpec) -> Result<(String,
     let PartData::Diagram { graph } = &spec.data else { return Err(Error::Invalid("graph context requires diagram data".into())); };
     let Some(layout) = &spec.layout else { return Ok((id.into(), graph.clone(), 512.0)); };
     let mut rendered_graph = graph.clone();
-    rendered_graph.show_title = layout.show_title;
+    rendered_graph.show_title = graph.show_title && layout.show_title;
     let content_height = if graph.show_title && !layout.show_title {
         for node in &mut rendered_graph.nodes { node.y -= 88.0; }
         for group in &mut rendered_graph.groups { group.y -= 88.0; }

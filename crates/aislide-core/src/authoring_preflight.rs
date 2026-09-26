@@ -261,6 +261,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			let suggestions: &[&str] = match warning.code.as_str() {
 				"TEXT_OVERFLOW" => &["Enlarge or reflow the text frame", "Shorten or split content only with author approval"],
 				"MISSING_GLYPHS" | "FONT_FALLBACK" => &["Select an available font or explicitly supply a licensed document font"],
+				"IMAGE_ASPECT_DISTORTED" => &["Use contain or cover when placing the image", "Preserve the cropped source aspect ratio or confirm intentional stretching"],
 				_ => &["Inspect the preview and compare in Office when visual parity matters"],
 			};
 			push_finding(&mut report, page, &slide.id, &evidence, &warning.code, severity, "renderer", &warning.message, suggestions)?;

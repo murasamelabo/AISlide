@@ -106,6 +106,8 @@ pub fn prepare_delivery(document: &Document, expected_revision: u64, expected_ha
             bundle.add("preview", suffix, &image.mime_type, pages, STANDARD.decode(&image.base64).map_err(|_| Error::Invalid("preview encoding".into()))?, Some((image.width, image.height)))?;
         }
     }
+    let mut warning_keys = BTreeSet::new();
+    render_warnings.retain(|warning| warning_keys.insert((warning.page_index, warning.element_id.clone(), warning.code.clone(), warning.message.clone())));
     if options.notes {
         let mut notes = format!("\u{feff}{}\n\nDocument: {}\nRevision: {}\nContent SHA-256: {}\n\nSpeaker notes and evidence are user-authored; not independently verified.\n", document.deck.title, document.id, document.revision, document.hash);
         for (index, slide) in document.deck.slides.iter().enumerate() {
@@ -129,6 +131,7 @@ pub fn prepare_delivery(document: &Document, expected_revision: u64, expected_ha
         "options":options,"files":files,"preview_pages":preview_pages,"multi_file_atomic":false,
         "checks":{"document_verified":true,"pptx_exported":true,"native_preservation_checked":document.origin.is_some(),"source_bindings_current":true,
             "layout_measured":!presentation["layout"].is_null(),"layout_issues":presentation["layout"].get("issues").cloned().unwrap_or(json!([])),
+            "layout_scope":if presentation["layout"].is_null() {"not_measured_for_native_origin"} else {"visible_slide_elements_and_used_design"},
             "preflight_page_indices":if options.preflight {selected.clone()} else {Vec::new()},
             "static_render_page_indices":if options.pdf || !matches!(options.preview,DeliveryPreview::None) {selected} else {Vec::new()},
             "office_visual_parity":false,"source_authenticity_verified":false,"source_freshness_verified":false,"semantic_truth_verified":false,"accessibility_checked":false},

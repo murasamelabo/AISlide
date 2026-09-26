@@ -65,20 +65,35 @@ fn rect(id: &str, bounds: [f64; 4], fill: &str) -> Element {
     Element::Rect { visual: None, id: id.into(), x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3], fill: fill.into() }
 }
 
+fn validate_text_at(value: &str, limit: usize, path: &str) -> Result<()> {
+    valid_text(value, limit).map_err(|error| match error {
+        Error::Limit(message) => Error::Limit(format!("{path}: {message}; actual={} Unicode scalars, limit={limit}", value.chars().count())),
+        Error::Invalid(message) => Error::Invalid(format!("{path}: {message}")),
+        other => other,
+    })
+}
+
 pub fn compile_report(report: &ReportInput) -> Result<CompiledReport> {
-    valid_text(&report.title, 120)?;
-    valid_text(&report.subtitle, 200)?;
-    valid_text(&report.period, 80)?;
-    valid_text(&report.source, 1200)?;
+    validate_text_at(&report.title, 120, "report.title")?;
+    validate_text_at(&report.subtitle, 200, "report.subtitle")?;
+    validate_text_at(&report.period, 80, "report.period")?;
+    validate_text_at(&report.source, 1200, "report.source")?;
     if report.title.trim().is_empty() || report.sections.is_empty() || report.sections.len() > crate::limits::LARGE.slides {
         return Err(Error::Invalid("a title and 1-128 sections are required".into()));
     }
     let mut slides = Vec::new();
     for (index, section) in report.sections.iter().enumerate() {
-        valid_text(&section.title, 100)?;
-        if section.body.len() > 4 || section.metrics.len() > 4 { return Err(Error::Limit("maximum four body blocks or metrics".into())); }
-        for body in &section.body { valid_text(body, 240)?; }
-        for metric in &section.metrics { valid_text(&metric.label, 48)?; valid_text(&metric.value, 20)?; }
+        let path = format!("report.sections[{index}]");
+        validate_text_at(&section.title, 100, &format!("{path}.title"))?;
+        if section.body.len() > 4 { return Err(Error::Limit(format!("{path}.body: actual={} blocks, limit=4", section.body.len()))); }
+        if section.metrics.len() > 4 { return Err(Error::Limit(format!("{path}.metrics: actual={} metrics, limit=4", section.metrics.len()))); }
+        if section.layout == Layout::Process && section.body.len() < 2 { return Err(Error::Invalid(format!("{path}.body: process requires 2-4 steps; actual={}", section.body.len()))); }
+        let body_limit = if section.layout == Layout::Process { 80 } else { 240 };
+        for (body_index, body) in section.body.iter().enumerate() { validate_text_at(body, body_limit, &format!("{path}.body[{body_index}]"))?; }
+        for (metric_index, metric) in section.metrics.iter().enumerate() {
+            validate_text_at(&metric.label, 48, &format!("{path}.metrics[{metric_index}].label"))?;
+            validate_text_at(&metric.value, 20, &format!("{path}.metrics[{metric_index}].value"))?;
+        }
         if !section.rows.is_empty() { validate_rows(&section.rows)?; }
         let mut elements = vec![
             rect("accent", [64.0, 52.0, 40.0, 5.0], TEAL),
