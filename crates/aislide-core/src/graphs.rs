@@ -105,6 +105,13 @@ impl GraphLabelOverlap {
     fn is_warn(&self) -> bool { *self == Self::Warn }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphLabelFit { #[default] Wrap, Shrink }
+impl GraphLabelFit {
+    fn is_wrap(&self) -> bool { *self == Self::Wrap }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GraphLabelPlacement {
@@ -153,6 +160,7 @@ pub struct GraphNode {
     #[schemars(range(min = 12, max = 40))] pub detail_font_size: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub text_align: Option<GraphTextAlign>,
     #[serde(default = "enabled", skip_serializing_if = "is_true")] pub heading_bold: bool,
+    #[serde(default, skip_serializing_if = "GraphLabelFit::is_wrap")] pub label_fit: GraphLabelFit,
     #[serde(default)] pub kind: NodeKind,
     #[serde(default, skip_serializing_if = "GraphPresentation::is_card")] pub presentation: GraphPresentation,
     pub x: f64, pub y: f64,
@@ -206,6 +214,7 @@ pub struct GraphGroup {
     #[schemars(range(min = 20, max = 128))] pub header_height: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 8, max = 32))] pub header_font_size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub header_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub parent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<GraphIcon>,
 }
@@ -287,6 +296,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
         if !ids.insert(&region.id) { return Err(Error::Invalid("duplicate graph ID".into())); }
         bounds(region.x, region.y, region.width, region.height, spec.content_top())?;
         valid_color(&region.fill)?; valid_color(&region.stroke)?;
+        if let Some(color) = &region.header_color { valid_color(color)?; }
         if !region.padding().is_finite() || !(0.0..=64.0).contains(&region.padding())
             || !region.header_height().is_finite() || !(20.0..=128.0).contains(&region.header_height())
             || !region.header_font_size().is_finite() || !(8.0..=32.0).contains(&region.header_font_size())
@@ -586,12 +596,23 @@ fn label_obstacles(prefix: &str, spec: &GraphSpec, elements: &[Element]) -> Vec<
         Some((id.to_owned(), [left, top, width, height]))
     }).collect();
     for group in &spec.groups {
-        if !group.label.is_empty() || group.icon.is_some() {
-            let role = if group.label.is_empty() { "gi" } else { "gt" };
-            let group_id = format!("{prefix}-g-{}", group.id);
-            if let Some(element) = elements.iter().find(|element| element.bounds().0 == group_id) {
-                let (_, left, top, width, height) = element.bounds();
+        let group_id = format!("{prefix}-g-{}", group.id);
+        if let Some(element) = elements.iter().find(|element| element.bounds().0 == group_id) {
+            let (_, left, top, width, height) = element.bounds();
+            if !group.label.is_empty() || group.icon.is_some() {
+                let role = if group.label.is_empty() { "gi" } else { "gt" };
                 obstacles.push((format!("{prefix}-{role}-{}", group.id), [left, top, width, group.header_height() * height / group.height]));
+            }
+            if let Element::Shape { stroke, stroke_width, .. } = element {
+                if *stroke_width > 0.0 && stroke != "none" {
+                    let half = stroke_width / 2.0;
+                    for border in [
+                        [left - half, top - half, width + *stroke_width, *stroke_width],
+                        [left - half, top + height - half, width + *stroke_width, *stroke_width],
+                        [left - half, top - half, *stroke_width, height + *stroke_width],
+                        [left + width - half, top - half, *stroke_width, height + *stroke_width],
+                    ] { obstacles.push((group_id.clone(), border)); }
+                }
             }
         }
     }
@@ -627,6 +648,153 @@ pub(crate) fn validate_label_overlaps(id: &str, spec: &GraphSpec, children: &[El
     Ok(())
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GraphFinding {
+    pub code: String,
+    pub severity: String,
+    pub graph_id: String,
+    pub entity_id: String,
+    pub element_ids: Vec<String>,
+    pub bounds: [f64; 4],
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")] pub slide_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub lines: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub font_size: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GraphDiagnostics {
+    pub status: String,
+    pub findings: Vec<GraphFinding>,
+}
+
+impl Default for GraphDiagnostics {
+    fn default() -> Self { Self { status: "complete".into(), findings: Vec::new() } }
+}
+
+impl GraphDiagnostics {
+    pub(crate) fn push(&mut self, finding: GraphFinding) {
+        if self.findings.len() >= 64 { self.status = "partial".into(); return; }
+        self.findings.push(finding);
+        if serde_json::to_vec(self).map_or(true, |bytes| bytes.len() > 32700) {
+            self.findings.pop();
+            self.status = "partial".into();
+        }
+    }
+}
+
+pub(crate) fn diagnostics(id: &str, spec: &GraphSpec, element: &Element, theme: &Theme) -> GraphDiagnostics {
+    let mut report = GraphDiagnostics::default();
+    let Element::Group { children, .. } = element else { report.status = "unavailable".into(); return report; };
+    let Ok(prefix) = render_prefix(id, spec) else { report.status = "unavailable".into(); return report; };
+    let obstacles = label_obstacles(&prefix, spec, children);
+    let group_ids: BTreeSet<_> = spec.groups.iter().map(|group| format!("{prefix}-g-{}", group.id)).collect();
+    for edge in spec.edges.iter().filter(|edge| !edge.label.is_empty()) {
+        let label_id = format!("{prefix}-et-{}", edge.id);
+        let Some(label) = children.iter().find(|element| element.bounds().0 == label_id) else { report.status = "partial".into(); continue; };
+        let (_, left, top, width, height) = label.bounds();
+        let bounds = [left, top, width, height];
+        for border in [false, true] {
+            let conflicts: BTreeSet<_> = obstacles.iter().filter(|(other, frame)| *other != label_id && group_ids.contains(other) == border && label_overlap(bounds, *frame, 0.0)).map(|(other, _)| other.clone()).collect();
+            if conflicts.is_empty() { continue; }
+            let mut element_ids = vec![label_id.clone()];
+            if conflicts.len() > 12 { report.status = "partial".into(); }
+            element_ids.extend(conflicts.into_iter().take(12));
+            report.push(GraphFinding {
+                code: if border { "GRAPH_LABEL_BORDER_OVERLAP" } else { "GRAPH_LABEL_OVERLAP" }.into(), severity: "warning".into(),
+                graph_id: id.into(), entity_id: edge.id.clone(), element_ids, bounds,
+                message: if border { "Label crosses a group border; increase spacing or revise label_placement." } else { "Label overlaps visible graph content; adjust placement, badge position or node spacing." }.into(),
+                slide_id: None, lines: None, font_size: None,
+            });
+        }
+    }
+    for node in &spec.nodes {
+        let label_id = format!("{prefix}-nt-{}", node.id);
+        let Some(Element::Text { text, x, y, width, height, font_size, bold, .. }) = children.iter().find(|element| element.bounds().0 == label_id) else { report.status = "partial".into(); continue; };
+        let Ok((metrics, _)) = crate::layout::graph_text_metrics(text, *width, *height, *font_size, *bold, theme) else { report.status = "partial".into(); continue; };
+        if metrics.lines <= node.label.lines().count().max(1) { continue; }
+        let shrink_limit = node.label_fit == GraphLabelFit::Shrink && !node.label.contains('\n') && !node.label.contains('\r');
+        report.push(GraphFinding {
+            code: if shrink_limit { "GRAPH_NODE_LABEL_SHRINK_LIMIT" } else { "GRAPH_NODE_LABEL_WRAPPED" }.into(),
+            severity: if shrink_limit { "warning" } else { "info" }.into(), graph_id: id.into(), entity_id: node.id.clone(),
+            element_ids: vec![label_id], bounds: [*x, *y, *width, *height],
+            message: if shrink_limit { "A single line does not fit at the 12px floor; retained wrapping. Widen the node or shorten the label." } else { "Node label wraps into additional lines; widen the node or opt into label_fit:shrink." }.into(),
+            slide_id: None, lines: Some(metrics.lines), font_size: Some(*font_size),
+        });
+    }
+    report
+}
+
+pub(crate) fn annotate_transaction(mut result: crate::document::TransactionResult, targets: &BTreeSet<(String, String)>) -> crate::document::TransactionResult {
+    if targets.is_empty() { return result; }
+    let mut report = GraphDiagnostics::default();
+    for (slide_id, id) in targets {
+        let Some(part) = result.document.parts.iter().find(|part| part.slide_id == *slide_id && part.element_id == *id) else { continue; };
+        if !matches!(part.spec.data, crate::parts::PartData::Diagram { .. }) { continue; }
+        let Some(slide) = result.document.deck.slides.iter().find(|slide| slide.id == *slide_id) else { report.status = "partial".into(); continue; };
+        let Some(element) = slide.elements.iter().find(|element| element.bounds().0 == id) else { report.status = "partial".into(); continue; };
+        if part.stale || crate::parts::state::render_hash(element).map_or(true, |hash| hash != part.render_sha256) { report.status = "partial".into(); continue; }
+        let Ok((render_id, spec, _)) = crate::parts::graph_render_context(id, &part.spec) else { report.status = "partial".into(); continue; };
+        let fallback = Theme::default();
+        let theme = crate::design::slide_theme(slide, result.document.deck.design.as_ref()).unwrap_or(&fallback);
+        let found = diagnostics(&render_id, &spec, element, theme);
+        if found.status != "complete" { report.status = "partial".into(); }
+        for mut finding in found.findings {
+            finding.graph_id = id.clone(); finding.slide_id = Some(slide_id.clone());
+            report.push(finding);
+        }
+    }
+    result.diagnostics = Some(report);
+    result
+}
+
+pub(crate) fn managed_badge_pairs(document: &crate::document::Document, slide_id: &str) -> BTreeSet<(String, String)> {
+    let mut pairs = BTreeSet::new();
+    let Some(slide) = document.deck.slides.iter().find(|slide| slide.id == slide_id) else { return pairs; };
+    for part in document.parts.iter().filter(|part| part.slide_id == slide_id && !part.stale) {
+        let crate::parts::PartData::Diagram { .. } = &part.spec.data else { continue; };
+        let Some(element) = slide.elements.iter().find(|element| element.bounds().0 == part.element_id) else { continue; };
+        if crate::parts::state::render_hash(element).map_or(true, |hash| hash != part.render_sha256) { continue; }
+        let Ok((id, spec, content_height)) = crate::parts::graph_render_context(&part.element_id, &part.spec) else { continue; };
+        let Ok(prefix) = render_prefix(&id, &spec) else { continue; };
+        let Element::Group { view_width, view_height, children, .. } = element else { continue; };
+        let scale = [view_width / WIDTH, view_height / content_height];
+        for edge in spec.edges.iter().filter(|edge| edge.badge.is_some()) {
+            let badge_id = format!("{prefix}-eb-{}", edge.id);
+            let edge_id = format!("{prefix}-e-{}", edge.id);
+            let Some(badge) = children.iter().find(|element| element.bounds().0 == badge_id) else { continue; };
+            let Some(connector) = children.iter().find(|element| element.bounds().0 == edge_id) else { continue; };
+            if badge_pair_matches(&prefix, &spec, edge, badge, connector, scale) { pairs.insert((badge_id, edge_id)); }
+        }
+    }
+    pairs
+}
+
+fn badge_pair_matches(prefix: &str, spec: &GraphSpec, edge: &GraphEdge, element: &Element, connector: &Element, scale: [f64; 2]) -> bool {
+    let Some(badge) = &edge.badge else { return false; };
+    let Some(source) = spec.nodes.iter().find(|node| node.id == edge.source) else { return false; };
+    let Some(target) = spec.nodes.iter().find(|node| node.id == edge.target) else { return false; };
+    let points = edge_points(source, target, edge);
+    let Ok((center, _)) = route_anchor(&points, badge.position) else { return false; };
+    let Element::Shape { preset, text, fill, stroke, color, bold, rotation, format, .. } = element else { return false; };
+    if preset != "ellipse" || text != &badge.number.to_string() || fill != &badge.fill || stroke != &edge.color || color != &badge.color
+        || !bold || *rotation != 0.0 || format.alignment != TextAlign::Center || format.vertical != VerticalAlign::Middle
+        || !format.paragraphs.is_empty() || format.italic || format.underline
+        || element.visual().is_some() || connector.visual().is_some() { return false; }
+    let (_, left, top, width, height) = element.bounds();
+    let expected = [(center[0] - badge.size / 2.0) * scale[0], (center[1] - badge.size / 2.0) * scale[1], badge.size * scale[0], badge.size * scale[1]];
+    let tolerance = 1.0 / 9525.0 + WIDTH.max(HEIGHT) * scale[0].max(scale[1]) * 0.000001;
+    if [left, top, width, height].iter().zip(expected).any(|(actual, expected)| (actual - expected).abs() > tolerance) { return false; }
+    let Element::Connector { x, y, width, height, color, arrow, flip_v, start, end, routing: Some(routing), .. } = connector else { return false; };
+    if color != &edge.color || *arrow != edge.arrow || *flip_v || routing.start_arrow != edge.start_arrow || routing.dashed != edge.dashed
+        || routing.custom != (edge.route == Route::Manual) || routing.points.len() != points.len()
+        || start.as_ref().is_none_or(|binding| binding.element_id != format!("{prefix}-n-{}", source.id))
+        || end.as_ref().is_none_or(|binding| binding.element_id != format!("{prefix}-n-{}", target.id)) { return false; }
+    routing.points.iter().zip(points).all(|(actual, expected)|
+        (x + actual[0] * width - expected[0] * scale[0]).abs() <= tolerance
+        && (y + actual[1] * height - expected[1] * scale[1]).abs() <= tolerance)
+}
+
 pub(crate) fn small_annotation_ids(id: &str, spec: &GraphSpec) -> Result<BTreeSet<String>> {
     let prefix = render_prefix(id, spec)?;
     let mut ids = BTreeSet::new();
@@ -651,6 +819,25 @@ pub(crate) fn cap_detail_fonts(id: &str, spec: &GraphSpec, children: &mut [Eleme
         for element in children.iter_mut() {
             if let Element::Text { id, font_size, .. } = element {
                 if id == &detail_id { *font_size = font_size.min(heading_size); }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn fit_node_labels(id: &str, spec: &GraphSpec, children: &mut [Element], theme: &Theme) -> Result<()> {
+    let prefix = render_prefix(id, spec)?;
+    for node in spec.nodes.iter().filter(|node| node.label_fit == GraphLabelFit::Shrink && !node.label.contains('\n') && !node.label.contains('\r')) {
+        let heading_id = format!("{prefix}-nt-{}", node.id);
+        for child in children.iter_mut() {
+            let Element::Text { id, text, width, height, font_size, bold, .. } = child else { continue; };
+            if id != &heading_id { continue; }
+            let mut size = *font_size;
+            loop {
+                let (metrics, _) = crate::layout::graph_text_metrics(text, *width, *height, size, *bold, theme)?;
+                if metrics.lines <= 1 && !metrics.overflow && metrics.missing_glyphs == 0 { *font_size = size; break; }
+                if size <= 12.0 { break; }
+                size = (size - 0.5).max(12.0);
             }
         }
     }
@@ -709,7 +896,7 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
             children.push(icon_picture(&format!("{prefix}-gi-{}", region.id), icon, [region.x + inset, region.y + 4.0, size, region.header_height() - 8.0])?);
             size + 8.0
         } else { 0.0 };
-        children.push(text(format!("{prefix}-gt-{}", region.id), [region.x + inset + offset, region.y + 8.0, region.width - inset * 2.0 - offset, region.header_height() - 12.0], &region.label, region.header_font_size(), "@dk1", TextAlign::Left, true));
+        children.push(text(format!("{prefix}-gt-{}", region.id), [region.x + inset + offset, region.y + 8.0, region.width - inset * 2.0 - offset, region.header_height() - 12.0], &region.label, region.header_font_size(), region.header_color.as_deref().unwrap_or("@dk1"), TextAlign::Left, true));
     }
     for edge in &spec.edges {
         let source = spec.nodes.iter().find(|node| node.id == edge.source).ok_or_else(|| Error::Invalid("unknown source node".into()))?;
@@ -795,6 +982,7 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
         children.push(text(format!("{prefix}-et-{}", edge.id), bounds, &edge.label, size, edge.label_color.as_deref().unwrap_or("@dk1"), TextAlign::Center, false));
     }
     crate::layout::fit_part_text_with_small_annotations(&mut children, theme, &small_annotation_ids(id, spec)?)?;
+    fit_node_labels(id, spec, &mut children, theme)?;
     cap_detail_fonts(id, spec, &mut children)?;
     fit_detail_widows(id, spec, &mut children, theme)?;
     validate_label_overlaps(id, spec, &children)?;
@@ -935,7 +1123,8 @@ pub fn apply(document: &crate::document::Document, expected_revision: u64, slide
         if crate::model::element_list(std::slice::from_ref(current)).iter().any(|element| element.visual().is_some_and(|visual| visual.locked || visual.hidden)) {
             return Err(Error::Unsupported("unlock and show the managed part before updating".into()));
         }
-        return crate::document::transact(document, crate::document::Transaction { expected_revision, expected_hash: document.hash.clone(), operations: serde_json::from_value(json!([{"op":"replace","path":"/deck","value":document.deck}]))? });
+        let result = crate::document::transact(document, crate::document::Transaction { expected_revision, expected_hash: document.hash.clone(), operations: serde_json::from_value(json!([{"op":"replace","path":"/deck","value":document.deck}]))? })?;
+        return Ok(annotate_transaction(result, &BTreeSet::from([(slide_id.into(), id.into())])));
     }
     change(document, expected_revision, slide_id, id, &next, true)
 }

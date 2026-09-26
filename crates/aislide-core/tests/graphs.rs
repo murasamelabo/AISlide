@@ -36,6 +36,216 @@ fn graph_child<'a>(rendered: &'a Value, suffix: &str) -> &'a Value {
     rendered["children"].as_array().unwrap().iter().find(|child| child["id"].as_str().unwrap().ends_with(suffix)).unwrap()
 }
 
+fn boundary_feedback_graph() -> Value {
+    json!({"version":1,"title":"Boundary clearance","show_title":false,
+        "groups":[{"id":"left","label":"Left","x":0,"y":20,"width":480,"height":300},{"id":"right","label":"Right","x":560,"y":20,"width":560,"height":300}],
+        "nodes":[{"id":"source","label":"Source","x":360,"y":140,"width":96,"height":72,"group":"left"},{"id":"target","label":"Target","x":600,"y":140,"width":96,"height":72,"group":"right"}],
+        "edges":[{"id":"boundary","source":"source","target":"target","source_port":"right","target_port":"left","label":"Boundary","label_placement":{"position":0.5,"side":"above","offset":8}}]
+    })
+}
+
+#[test]
+fn feedback_boundary_lines_are_checked_without_treating_group_bodies_as_obstacles() {
+    let mut spec = boundary_feedback_graph();
+    let original = execute_request(json!({"op":"create_graph","id":"border-test","spec":spec})).unwrap();
+    assert_eq!(graph_rect(graph_child(&original, "-et-boundary")), [488.0,140.0,80.0,28.0]);
+    spec["edges"][0]["label_placement"]["on_overlap"] = json!("error");
+    for label in ["Right", ""] {
+        spec["groups"][1]["label"] = json!(label);
+        let error = execute_request(json!({"op":"create_graph","id":"border-test","spec":spec})).unwrap_err().to_string();
+        assert!(error.contains("-g-right") && error.contains("boundary"), "{error}");
+    }
+    let mut clear = graph();
+    clear["groups"] = json!([{"id":"container","label":"Container","x":0,"y":88,"width":1120,"height":400}]);
+    for node in clear["nodes"].as_array_mut().unwrap() { node["group"] = json!("container"); }
+    clear["edges"][0]["label_placement"] = json!({"position":0.5,"side":"above","offset":16,"on_overlap":"error"});
+    assert!(execute_request(json!({"op":"create_graph","id":"clear-border","spec":clear})).is_ok());
+}
+
+#[test]
+fn feedback_boundary_lines_are_avoided_by_automatic_labels() {
+    let mut spec = boundary_feedback_graph();
+    spec["edges"][0].as_object_mut().unwrap().remove("label_placement");
+    let rendered = execute_request(json!({"op":"create_graph","id":"automatic-border","spec":spec})).unwrap();
+    let label = graph_rect(graph_child(&rendered, "-et-boundary"));
+    for border in [[479.25,20.0,1.5,300.0], [559.25,20.0,1.5,300.0]] { assert!(!rects_overlap(label, border), "label crosses border: {label:?}"); }
+}
+
+#[test]
+fn feedback_group_header_color_is_optional_validated_and_theme_linked() {
+    let mut spec = boundary_feedback_graph();
+    let original = execute_request(json!({"op":"create_graph","id":"header-color","spec":spec})).unwrap();
+    assert_eq!(graph_child(&original, "-gt-left")["color"], "@dk1");
+    spec["groups"][0]["header_color"] = json!("@accent2");
+    let colored = execute_request(json!({"op":"create_graph","id":"header-color","spec":spec})).unwrap();
+    assert_eq!(graph_child(&colored, "-gt-left")["color"], "@accent2");
+    assert_eq!(graph_rect(graph_child(&colored, "-gt-left")), graph_rect(graph_child(&original, "-gt-left")));
+    for value in [json!("none"), json!("red"), json!(17)] {
+        spec["groups"][0]["header_color"] = value;
+        assert!(execute_request(json!({"op":"create_graph","id":"header-color","spec":spec})).is_err());
+    }
+    spec["groups"][0].as_object_mut().unwrap().remove("header_color");
+    assert_eq!(execute_request(json!({"op":"create_graph","id":"header-color","spec":spec})).unwrap(), original);
+}
+
+#[test]
+fn feedback_single_line_fit_is_opt_in_bounded_and_preserves_hard_breaks() {
+    let mut single_line_cases = 0;
+    for width in [96, 112, 128, 144, 160] {
+        let mut spec = json!({"version":1,"title":"Label fit","show_title":false,"nodes":[{"id":"service","label":"Microsoft Graph","x":64,"y":80,"width":width,"height":120,"font_size":18} ]});
+        let legacy = execute_request(json!({"op":"create_graph","id":"label-fit","spec":spec})).unwrap();
+        spec["nodes"][0]["label_fit"] = json!("wrap");
+        assert_eq!(execute_request(json!({"op":"create_graph","id":"label-fit","spec":spec})).unwrap(), legacy);
+        spec["nodes"][0]["label_fit"] = json!("shrink");
+        let fitted = execute_request(json!({"op":"create_graph","id":"label-fit","spec":spec})).unwrap();
+        let label = graph_child(&fitted, "-nt-service");
+        assert_eq!(label["text"], "Microsoft Graph");
+        assert!((12.0..=18.0).contains(&label["font_size"].as_f64().unwrap()));
+        let measured = execute_request(json!({"op":"measure_layout","deck":deck(fitted.clone())})).unwrap();
+        let measured = measured["measurements"].as_array().unwrap().iter().find(|entry| entry["element_id"].as_str().unwrap().ends_with("-nt-service")).unwrap();
+        if label["font_size"].as_f64().unwrap() < 18.0 { assert_eq!(measured["lines"], 1); single_line_cases += 1; }
+        spec["nodes"][0]["label"] = json!("Microsoft\nGraph");
+        let hard_break = execute_request(json!({"op":"create_graph","id":"label-fit","spec":spec})).unwrap();
+        assert_eq!(graph_child(&hard_break, "-nt-service")["text"], "Microsoft\nGraph");
+        assert_eq!(graph_child(&hard_break, "-nt-service")["font_size"], 18.0);
+    }
+    assert!(single_line_cases > 0);
+}
+
+#[test]
+fn feedback_creation_diagnostics_are_opt_in_and_leave_the_element_unchanged() {
+    let spec = boundary_feedback_graph();
+    let element = execute_request(json!({"op":"create_graph","id":"diagnostic-graph","spec":spec})).unwrap();
+    let result = execute_request(json!({"op":"create_graph","id":"diagnostic-graph","spec":spec,"include_diagnostics":true})).unwrap();
+    assert_eq!(result["element"], element);
+    assert_eq!(result["diagnostics"]["status"], "complete");
+    assert!(result["diagnostics"]["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "GRAPH_LABEL_BORDER_OVERLAP" && finding["entity_id"] == "boundary"));
+    let explicit_false = execute_request(json!({"op":"create_graph","id":"diagnostic-graph","spec":spec,"include_diagnostics":false})).unwrap();
+    assert_eq!(explicit_false, element);
+}
+
+#[test]
+fn feedback_creation_diagnostics_report_badges_wrapping_and_shrink_limits() {
+    let mut spec = json!({"version":1,"title":"Graph diagnostics","show_title":false,
+        "nodes":[{"id":"source","label":"Microsoft Graph","x":64,"y":160,"width":96,"height":100,"font_size":18},{"id":"target","label":"Target","x":560,"y":160,"width":160,"height":100}],
+        "edges":[{"id":"e5","source":"source","target":"target","source_port":"right","target_port":"left","label":"Request","badge":{"number":5,"size":32},"label_placement":{"position":0.5,"side":"above","offset":0}}]
+    });
+    let result = execute_request(json!({"op":"create_graph","id":"diagnostic-graph","spec":spec,"include_diagnostics":true})).unwrap();
+    let findings = result["diagnostics"]["findings"].as_array().unwrap();
+    assert!(findings.iter().any(|finding| finding["code"] == "GRAPH_LABEL_OVERLAP" && finding["entity_id"] == "e5" && finding["element_ids"].as_array().unwrap().iter().any(|id| id.as_str().unwrap().ends_with("-eb-e5"))));
+    assert!(findings.iter().any(|finding| finding["code"] == "GRAPH_NODE_LABEL_WRAPPED" && finding["entity_id"] == "source" && finding["severity"] == "info"));
+    spec["nodes"][0]["width"] = json!(64);
+    spec["nodes"][0]["label_fit"] = json!("shrink");
+    let result = execute_request(json!({"op":"create_graph","id":"diagnostic-graph","spec":spec,"include_diagnostics":true})).unwrap();
+    assert!(result["diagnostics"]["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "GRAPH_NODE_LABEL_SHRINK_LIMIT" && finding["entity_id"] == "source" && finding["severity"] == "warning"));
+    assert!(serde_json::to_vec(&result["diagnostics"]).unwrap().len() <= 32768);
+}
+
+#[test]
+fn feedback_graph_mutations_return_final_diagnostics_outside_document_and_history() {
+    let spec = boundary_feedback_graph();
+    let document = execute_request(json!({"op":"create_presentation","id":"diagnostic-session","title":"Diagnostics"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_graph","document":document,"expected_revision":0,"slide_id":"slide-1","id":"flow","spec":spec})).unwrap();
+    assert!(inserted["document"].get("diagnostics").is_none());
+    assert!(inserted["receipt"].get("diagnostics").is_none());
+    assert_eq!(inserted["diagnostics"]["status"], "complete");
+    assert!(inserted["diagnostics"]["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "GRAPH_LABEL_BORDER_OVERLAP" && finding["slide_id"] == "slide-1" && finding["graph_id"] == "flow"));
+    let unchanged = execute_request(json!({"op":"apply_graph","document":inserted["document"],"expected_revision":1,"slide_id":"slide-1","id":"flow","operations":[{"op":"move","ids":["source"],"dx":0,"dy":0}]})).unwrap();
+    assert!(unchanged["receipt"].is_null());
+    assert_eq!(unchanged["document"], inserted["document"]);
+    assert_eq!(unchanged["diagnostics"], inserted["diagnostics"]);
+    let bounded = execute_request(json!({"op":"apply_operations","document":document,"expected_revision":0,"expected_hash":document["hash"],"operations":[
+        {"op":"add_graph","slide_id":"slide-1","id":"bounded","spec":spec,"layout":{"x":24,"y":36,"width":1080,"height":512,"show_title":false}},
+        {"op":"set_slide_background","slide_id":"slide-1","color":"F0F0F0"}
+    ]})).unwrap();
+    assert_eq!(bounded["diagnostics"]["status"], "complete");
+    let label = graph_child(&bounded["document"]["deck"]["slides"][0]["elements"][0], "-et-boundary");
+    let finding = bounded["diagnostics"]["findings"].as_array().unwrap().iter().find(|finding| finding["code"] == "GRAPH_LABEL_BORDER_OVERLAP").unwrap();
+    assert_eq!(finding["bounds"], json!(graph_rect(label)));
+    assert_eq!(finding["graph_id"], "bounded");
+    let undone = execute_request(json!({"op":"undo_transaction","document":bounded["document"],"expected_revision":1,"receipt":bounded["receipt"]})).unwrap();
+    assert_eq!(undone["document"]["hash"], document["hash"]);
+}
+
+#[test]
+fn feedback_preflight_suppresses_only_verified_own_graph_badge_pairs() {
+    let spec = json!({"version":1,"title":"Known badges","show_title":false,
+        "nodes":[{"id":"source","label":"Source","x":64,"y":160,"width":160,"height":80},{"id":"target","label":"Target","x":560,"y":160,"width":160,"height":80}],
+        "edges":[{"id":"flow","source":"source","target":"target","source_port":"right","target_port":"left","badge":{"number":5}}]
+    });
+    let document = execute_request(json!({"op":"create_presentation","id":"badge-provenance","title":"Known badges"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_graph","document":document,"expected_revision":0,"slide_id":"slide-1","id":"known","spec":spec})).unwrap();
+    let report = execute_request(json!({"op":"preflight_presentation","document":inserted["document"]})).unwrap();
+    assert!(!report["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "CONNECTOR_BADGE_OVERLAP"));
+    let saved = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"badge-native","base64":saved["base64"]})).unwrap();
+    let report = execute_request(json!({"op":"preflight_presentation","document":opened["document"]})).unwrap();
+    assert!(!report["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "CONNECTOR_BADGE_OVERLAP"));
+    let rendered = execute_request(json!({"op":"create_graph","id":"known","spec":spec})).unwrap();
+    let unmanaged = execute_request(json!({"op":"new_document","id":"unmanaged-badge","deck":deck(rendered)})).unwrap();
+    let report = execute_request(json!({"op":"preflight_presentation","document":unmanaged})).unwrap();
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "CONNECTOR_BADGE_OVERLAP"));
+    let badge_id = graph_child(&inserted["document"]["deck"]["slides"][0]["elements"][0], "-eb-flow")["id"].clone();
+    let changed = execute_request(json!({"op":"apply_operations","document":inserted["document"],"expected_revision":1,"expected_hash":inserted["document"]["hash"],"operations":[{"op":"set_text_style","slide_id":"slide-1","ids":[badge_id],"style":{"bold":false}}]})).unwrap();
+    assert_eq!(changed["document"]["parts"][0]["stale"], true);
+    let report = execute_request(json!({"op":"preflight_presentation","document":changed["document"]})).unwrap();
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "CONNECTOR_BADGE_OVERLAP"));
+    fn normalize(value: &mut Value) {
+        match value {
+            Value::Number(number) => if let Some(value) = number.as_f64() { if value.fract() == 0.0 { *number = (value as i64).into(); } },
+            Value::Array(values) => for value in values { normalize(value); },
+            Value::Object(values) => for value in values.values_mut() { normalize(value); },
+            _ => {},
+        }
+    }
+    use sha2::{Digest, Sha256};
+    let mut forged_render = changed["document"]["deck"]["slides"][0]["elements"][0].clone();
+    for field in ["x", "y", "width", "height"] { forged_render.as_object_mut().unwrap().remove(field); }
+    normalize(&mut forged_render);
+    let forged_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&forged_render).unwrap()));
+    let forged = execute_request(json!({"op":"transaction","document":changed["document"],"transaction":{"expected_revision":2,"expected_hash":changed["document"]["hash"],"operations":[
+        {"op":"replace","path":"/parts/0/render_sha256","value":forged_hash}
+    ]}})).unwrap();
+    assert_eq!(forged["document"]["parts"][0]["stale"], false);
+    let report = execute_request(json!({"op":"preflight_presentation","document":forged["document"]})).unwrap();
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "CONNECTOR_BADGE_OVERLAP"));
+    let badge_index = inserted["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap().iter().position(|element| element["id"].as_str().unwrap().ends_with("-eb-flow")).unwrap();
+    let rich = execute_request(json!({"op":"transaction","document":inserted["document"],"transaction":{"expected_revision":1,"expected_hash":inserted["document"]["hash"],"operations":[
+        {"op":"add","path":format!("/deck/slides/0/elements/0/children/{badge_index}/format/paragraphs"),"value":[{"runs":[{"text":"5","style":{"bold":false,"color":"FFFFFF"}}]}]}
+    ]}})).unwrap();
+    let mut rich_render = rich["document"]["deck"]["slides"][0]["elements"][0].clone();
+    for field in ["x", "y", "width", "height"] { rich_render.as_object_mut().unwrap().remove(field); }
+    normalize(&mut rich_render);
+    let rich_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&rich_render).unwrap()));
+    let rich = execute_request(json!({"op":"transaction","document":rich["document"],"transaction":{"expected_revision":2,"expected_hash":rich["document"]["hash"],"operations":[
+        {"op":"replace","path":"/parts/0/render_sha256","value":rich_hash}
+    ]}})).unwrap();
+    assert_eq!(rich["document"]["parts"][0]["stale"], false);
+    let report = execute_request(json!({"op":"preflight_presentation","document":rich["document"]})).unwrap();
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "CONNECTOR_BADGE_OVERLAP"));
+    let foreign = execute_request(json!({"op":"apply_operations","document":document,"expected_revision":0,"expected_hash":document["hash"],"operations":[
+        {"op":"add_elements","slide_id":"slide-1","elements":[{"type":"connector","id":"foreign-route","x":288,"y":344,"width":336,"height":0.01,"color":"@accent2","stroke_width":2,"arrow":true}]},
+        {"op":"add_graph","slide_id":"slide-1","id":"known","spec":spec}
+    ]})).unwrap();
+    let report = execute_request(json!({"op":"preflight_presentation","document":foreign["document"]})).unwrap();
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "CONNECTOR_BADGE_OVERLAP" && finding["element_ids"].as_array().unwrap().contains(&json!("foreign-route"))));
+}
+
+#[test]
+fn feedback_titleless_manual_waypoints_follow_the_removed_header_band() {
+    let mut graph = graph();
+    graph["nodes"][1]["y"] = json!(160); graph["nodes"][1]["height"] = json!(96);
+    graph["edges"][0]["route"] = json!("manual"); graph["edges"][0]["waypoints"] = json!([[400,208]]);
+    graph["edges"][0]["label"] = json!("");
+    let part = json!({"version":1,"preset":"diagram/custom","title":graph["title"],"subtitle":graph["subtitle"],"data":{"kind":"diagram","graph":graph},"layout":{"x":0,"y":0,"width":1152,"height":424,"show_title":false}});
+    let rendered = execute_request(json!({"op":"create_part","id":"manual-titleless","spec":part})).unwrap();
+    let connector = graph_child(&rendered, "-e-request");
+    for point in connector["routing"]["points"].as_array().unwrap() {
+        let vertical = connector["y"].as_f64().unwrap() + point[1].as_f64().unwrap() * connector["height"].as_f64().unwrap();
+        assert!((vertical - 120.0).abs() < 0.001, "{connector}");
+    }
+}
+
 #[test]
 fn feedback_explicit_overlap_policy_preserves_default_and_rejects_strict_collision() {
     let mut spec = feedback_graph();

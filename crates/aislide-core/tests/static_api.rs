@@ -103,6 +103,26 @@ fn visual_authoring_capabilities_publish_bounded_shared_contracts() {
 }
 
 #[test]
+fn chart_parity_notices_are_summarized_without_hiding_specific_preview_limits() {
+    let mut scene = document()["deck"].clone();
+    scene["slides"][0]["elements"] = json!((0..3).map(|index| json!({
+        "type":"chart","id":format!("chart-{index}"),"x":24+index*400,"y":100,"width":380,"height":280,"kind":"line",
+        "categories":["One","Two","Three"],"series":[{"name":"Synthetic","values":[1,2,3],"color":"1976D2"}],
+        "options":{"primary_axis":{"number_format":"invalid-format"}}
+    })).collect::<Vec<_>>());
+    let state = execute_request(json!({"op":"new_document","id":"chart-notice-summary","deck":scene})).unwrap();
+    let report = execute_request(json!({"op":"preflight_presentation","document":state})).unwrap();
+    let findings = report["findings"].as_array().unwrap();
+    let notices: Vec<_> = findings.iter().filter(|finding| finding["code"] == "CHART_PREVIEW").collect();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0]["severity"], "info");
+    assert_eq!(notices[0]["element_ids"].as_array().unwrap().len(), 3);
+    assert!(notices[0]["message"].as_str().unwrap().contains("not Office"));
+    assert!(findings.iter().any(|finding| finding["code"] == "CHART_PRESENTATION" && finding["severity"] == "warning" && finding["message"].as_str().unwrap().contains("Unsupported number format")));
+    assert_eq!(report["office_visual_parity"], false);
+}
+
+#[test]
 fn authoring_preflight_reports_renderer_clipping_and_connector_label_interference() {
     let elements = json!([
         {"type":"rect","id":"background","x":0,"y":0,"width":640,"height":360,"fill":"FFFFFF"},

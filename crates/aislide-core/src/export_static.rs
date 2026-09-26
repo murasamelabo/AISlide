@@ -16,6 +16,8 @@
 //! three raster buffers in the remaining 64 MiB. These are allocation budgets,
 //! not an OS RSS/deadline guarantee: installed-font caches and library overhead
 //! are outside that accounting. Hosts needing hard isolation must supply it.
+//! Preview shrink retries may retain up to 16 MiB of SVG/warning allocations
+//! within that same working budget. Trees and rasters are rebuilt at each scale.
 //! Transparent PNG includes RGBA; JPEG composites onto the explicit RGB matte.
 //! Warnings may be escalated with deny_warnings; unsupported content always
 //! rejects. Source validation, image validation and scene limits are not waived.
@@ -31,6 +33,93 @@ pub const MAX_DIMENSION: u32 = 8192;
 pub const MAX_RENDER_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_SVG_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PREVIEW_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
+struct PreviewScene {
+    svg: String,
+    warnings: Vec<RenderWarning>,
+}
+
+impl PreviewScene {
+    fn allocated_bytes(&self) -> usize {
+        self.svg.capacity()
+            + self.warnings.capacity() * std::mem::size_of::<RenderWarning>()
+            + self.warnings.iter().map(|warning| {
+                warning.code.capacity() + warning.element_id.capacity() + warning.message.capacity()
+            }).sum::<usize>()
+    }
+}
+
+struct CachedPreviewScene {
+    page_index: usize,
+    validated_scale: f64,
+    transparent: bool,
+    scene: PreviewScene,
+}
+
+enum PreviewSceneRef<'a> {
+    Cached(&'a PreviewScene),
+    Uncached(PreviewScene),
+}
+
+impl AsRef<PreviewScene> for PreviewSceneRef<'_> {
+    fn as_ref(&self) -> &PreviewScene {
+        match self { Self::Cached(scene) => scene, Self::Uncached(scene) => scene }
+    }
+}
+
+struct PreviewSceneCache {
+    entries: [Option<CachedPreviewScene>; 8],
+    allocated_bytes: usize,
+    limit: usize,
+}
+
+impl PreviewSceneCache {
+    /// Reserve the largest possible page or montage (plus rounding) and three
+    /// raster buffers before retaining anything, including on failed encodes.
+    fn new(options: &PreviewOptions) -> Self {
+        let edge = options.max_dimension as usize + 1;
+        let working_bytes = 64 * 1024 * 1024 + edge * edge * 4 * 3 + std::mem::size_of::<Self>();
+        let limit = if matches!(options.overflow, PreviewOverflow::Shrink) {
+            MAX_PREVIEW_CACHE_BYTES.min(MAX_RENDER_BYTES.saturating_sub(working_bytes))
+        } else { 0 };
+        Self { entries: std::array::from_fn(|_| None), allocated_bytes: 0, limit }
+    }
+
+    /// render_at_scale uses scale only for its monotone filter-budget check;
+    /// the outlined SVG and warnings are scale independent. A successful check
+    /// covers smaller scales for this immutable request, never larger ones.
+    /// Do not retain RenderedSlide text/glyph metadata, trees or decoded images.
+    fn scene(&mut self, deck: &Deck, page_index: usize, options: &ExportOptions) -> Result<PreviewSceneRef<'_>> {
+        if let Some(slot) = self.entries.iter().position(|entry| {
+            entry.as_ref().is_some_and(|entry| entry.page_index == page_index
+                && entry.transparent == options.transparent && options.scale <= entry.validated_scale)
+        }) {
+            return self.entries[slot].as_ref().map(|entry| PreviewSceneRef::Cached(&entry.scene))
+                .ok_or_else(|| Error::Invalid("preview cache entry missing".into()));
+        }
+        let scene = render_preview_scene(deck, page_index, options)?;
+        let bytes = scene.allocated_bytes();
+        if bytes > self.limit.saturating_sub(self.allocated_bytes) {
+            return Ok(PreviewSceneRef::Uncached(scene));
+        }
+        let Some(slot) = self.entries.iter().position(Option::is_none) else {
+            return Ok(PreviewSceneRef::Uncached(scene));
+        };
+        self.allocated_bytes += bytes;
+        let entry = self.entries[slot].insert(CachedPreviewScene {
+            page_index, validated_scale: options.scale, transparent: options.transparent, scene,
+        });
+        Ok(PreviewSceneRef::Cached(&entry.scene))
+    }
+}
+
+fn render_preview_scene(deck: &Deck, page_index: usize, options: &ExportOptions) -> Result<PreviewScene> {
+    #[cfg(test)]
+    preview_cache_tests::SCENE_RENDERS.with(|count| count.set(count.get() + 1));
+    let scene = render::render_at_scale(deck, page_index, options.transparent, options.scale)?;
+    Ok(PreviewScene { svg: scene.svg, warnings: scene.warnings })
+}
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -129,11 +218,12 @@ pub fn preview_presentation(document: &crate::document::Document, options: &Prev
     if !(160..=1600).contains(&options.max_dimension) || options.max_output_bytes == 0 || options.max_output_bytes > 2 * 1024 * 1024 {
         return Err(Error::Limit("preview requires 160-1600 pixels and at most 2 MiB encoded images".into()));
     }
+    let mut cache = PreviewSceneCache::new(options);
     let mut attempted = Vec::new();
     for dimension in [options.max_dimension, (options.max_dimension * 3 / 4).max(160), (options.max_dimension * 9 / 16).max(160)] {
         if attempted.contains(&dimension) { continue; }
         attempted.push(dimension);
-        match preview_attempt(document, options, &selected, dimension) {
+        match preview_attempt(document, options, &selected, dimension, &mut cache) {
             Ok(preview) => return Ok(preview),
             Err(StaticExportError::OutputBudget) => {
                 if matches!(options.overflow, PreviewOverflow::Error) { break; }
@@ -149,6 +239,7 @@ pub fn preview_presentation(document: &crate::document::Document, options: &Prev
 
 fn preview_attempt(
     document: &crate::document::Document, options: &PreviewOptions, selected: &[usize], max_dimension: u32,
+    cache: &mut PreviewSceneCache,
 ) -> std::result::Result<PresentationPreview, StaticExportError> {
     use base64::Engine;
     use sha2::{Digest, Sha256};
@@ -163,7 +254,7 @@ fn preview_attempt(
     let output = export_static_inner(deck, &ExportOptions {
         format: match options.format { PreviewFormat::Png => ExportFormat::Png, PreviewFormat::Jpeg => ExportFormat::Jpeg },
         page_indices: Some(selected.to_vec()), scale: scale.max(0.01), max_output_bytes: options.max_output_bytes, ..Default::default()
-    })?;
+    }, Some(cache))?;
     let mut pages = Vec::new();
     let mut artifacts = output.artifacts;
     let mut remaining = options.max_output_bytes;
@@ -416,10 +507,12 @@ fn preflight(deck: &Deck, options: &ExportOptions) -> Result<(Vec<usize>, u32, u
 /// All-or-error: no partial artifact list escapes on unsupported content,
 /// validation failure, or budget exhaustion. Caller owns publication/printing.
 pub fn export_static(deck: &Deck, options: &ExportOptions) -> Result<StaticExport> {
-    export_static_inner(deck, options).map_err(StaticExportError::into_error)
+    export_static_inner(deck, options, None).map_err(StaticExportError::into_error)
 }
 
-fn export_static_inner(deck: &Deck, options: &ExportOptions) -> std::result::Result<StaticExport, StaticExportError> {
+fn export_static_inner(
+    deck: &Deck, options: &ExportOptions, mut cache: Option<&mut PreviewSceneCache>,
+) -> std::result::Result<StaticExport, StaticExportError> {
     let (pages, width, height) = preflight(deck, options)?;
     if options.format == ExportFormat::Pdf {
         return export_pdf(deck, options, pages, width, height).map_err(StaticExportError::from);
@@ -432,13 +525,17 @@ fn export_static_inner(deck: &Deck, options: &ExportOptions) -> std::result::Res
     };
     let mut remaining = options.max_output_bytes;
     for page_index in pages {
-        let scene = render::render_at_scale(deck, page_index, options.transparent, options.scale)?;
+        let scene = match cache.as_deref_mut() {
+            Some(cache) => cache.scene(deck, page_index, options)?,
+            None => PreviewSceneRef::Uncached(render_preview_scene(deck, page_index, options)?),
+        };
+        let scene = scene.as_ref();
         if options.deny_warnings && !scene.warnings.is_empty() {
             return Err(Error::Unsupported(
                 "static export has render warnings".into(),
             ).into());
         }
-        result.warnings.extend(scene.warnings);
+        result.warnings.extend(scene.warnings.iter().cloned());
         let tree = resvg::usvg::Tree::from_str(&scene.svg, &resvg::usvg::Options::default())
             .map_err(|error| Error::Invalid(format!("internal render SVG: {error}")))?;
         let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
@@ -901,4 +998,128 @@ fn pdf_effects(svg: &str) -> Result<(String, usize)> {
     }
     result.push_str(&svg[cursor..]);
     Ok((result, effects.len()))
+}
+
+#[cfg(test)]
+mod preview_cache_tests {
+    use super::*;
+
+    std::thread_local! {
+        pub(super) static SCENE_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn document() -> crate::document::Document {
+        let deck: Deck = serde_json::from_value(serde_json::json!({
+            "version": 1, "title": "Preview cache", "width": 320, "height": 320,
+            "slides": [{"id": "page", "title": "Pixels", "background": "FFFFFF", "notes": "",
+                "elements": [{"type": "rect", "id": "red", "x": 20, "y": 30,
+                    "width": 80, "height": 60, "fill": "FF0000"},
+                    {"type": "shape", "id": "approximation", "preset": "hexagon", "x": 140, "y": 30,
+                    "width": 40, "height": 40, "fill": "087F73", "stroke": "FFFFFF", "stroke_width": 0,
+                    "text": "", "font_size": 12, "color": "000000", "bold": false}]}]
+        })).unwrap();
+        crate::document::create("preview-cache".into(), deck, vec![], vec![], None).unwrap()
+    }
+
+    #[test]
+    fn preview_shrink_reuses_scene() {
+        let document = document();
+        let reference = export_static(&document.deck, &ExportOptions { scale: 0.75, ..Default::default() }).unwrap();
+        let options = PreviewOptions {
+            max_dimension: 320, max_output_bytes: reference.artifacts[0].bytes.len(), ..Default::default()
+        };
+        SCENE_RENDERS.with(|count| count.set(0));
+        let preview = preview_presentation(&document, &options).unwrap();
+        assert_eq!(preview.actual_max_dimension, 240);
+        let renders = SCENE_RENDERS.with(std::cell::Cell::get);
+        assert_eq!(renders, 1, "successful shrink must not regenerate the same page SVG");
+        assert_eq!(preview.warnings.iter().filter(|warning| warning.code == "SHAPE_APPROXIMATION").count(), 1);
+        preview_presentation(&document, &options).unwrap();
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 2, "cache must not survive a request");
+        eprintln!("PREVIEW_CACHE_METRIC successful_shrink_attempts=2 scene_generations={renders} requests=2 total_scene_generations=2");
+    }
+
+    #[test]
+    fn preview_cache_capacity_accounts_allocations_and_falls_back() {
+        let mut document = document();
+        let mut second = document.deck.slides[0].clone();
+        second.id = "second".into();
+        document.deck.slides.push(second);
+        let options = ExportOptions::default();
+        let scene = render_preview_scene(&document.deck, 0, &options).unwrap();
+        let bytes = scene.allocated_bytes();
+        assert!(bytes > scene.svg.capacity());
+        let mut cache = PreviewSceneCache::new(&PreviewOptions::default());
+        let edge = PreviewOptions::default().max_dimension as usize + 1;
+        assert!(cache.limit + std::mem::size_of::<PreviewSceneCache>() + 64 * 1024 * 1024 + edge * edge * 4 * 3 <= MAX_RENDER_BYTES);
+        assert_eq!(PreviewSceneCache::new(&PreviewOptions { max_dimension: 1600, ..Default::default() }).limit, MAX_PREVIEW_CACHE_BYTES);
+        assert_eq!(PreviewSceneCache::new(&PreviewOptions { overflow: PreviewOverflow::Error, ..Default::default() }).limit, 0);
+        cache.limit = bytes - 1;
+        SCENE_RENDERS.with(|count| count.set(0));
+        for scale in [1.0, 0.75] {
+            assert!(matches!(cache.scene(&document.deck, 0, &ExportOptions { scale, ..options.clone() }).unwrap(), PreviewSceneRef::Uncached(_)));
+        }
+        assert_eq!(cache.allocated_bytes, 0);
+        assert!(cache.entries.iter().all(Option::is_none));
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 2);
+        cache.limit = bytes;
+        let pointer = cache.scene(&document.deck, 0, &options).unwrap().as_ref().svg.as_ptr();
+        assert_eq!(cache.allocated_bytes, bytes);
+        let smaller = ExportOptions { scale: 0.75, ..options.clone() };
+        assert_eq!(cache.scene(&document.deck, 0, &smaller).unwrap().as_ref().svg.as_ptr(), pointer);
+        for _ in 0..2 {
+            assert!(matches!(cache.scene(&document.deck, 1, &smaller).unwrap(), PreviewSceneRef::Uncached(_)));
+            assert_eq!(cache.allocated_bytes, bytes);
+        }
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 5);
+        assert_eq!(cache.entries.iter().flatten().map(|entry| entry.scene.allocated_bytes()).sum::<usize>(), bytes);
+        eprintln!("PREVIEW_CACHE_METRIC retained_bytes={bytes} limit_bytes={} overflow_pages_retained=0", cache.limit);
+    }
+
+    #[test]
+    fn preview_cache_full_keeps_fallback_bytes_and_strict_stops_once() {
+        let document = document();
+        let reference = export_static(&document.deck, &ExportOptions { scale: 0.75, ..Default::default() }).unwrap();
+        let options = PreviewOptions { max_dimension: 320, max_output_bytes: reference.artifacts[0].bytes.len(), ..Default::default() };
+        let mut cache = PreviewSceneCache::new(&options);
+        cache.limit = 0;
+        SCENE_RENDERS.with(|count| count.set(0));
+        assert!(matches!(preview_attempt(&document, &options, &[0], 320, &mut cache), Err(StaticExportError::OutputBudget)));
+        let uncached = preview_attempt(&document, &options, &[0], 240, &mut cache).ok().unwrap();
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 2);
+        assert_eq!(cache.allocated_bytes, 0);
+        let cached = preview_presentation(&document, &options).unwrap();
+        assert_eq!(serde_json::to_value(uncached).unwrap(), serde_json::to_value(cached).unwrap());
+        SCENE_RENDERS.with(|count| count.set(0));
+        let error = preview_presentation(&document, &PreviewOptions { overflow: PreviewOverflow::Error, ..options.clone() }).unwrap_err();
+        assert!(matches!(error, Error::Limit(_)) && error.to_string().contains("1 attempt"));
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 1);
+        SCENE_RENDERS.with(|count| count.set(0));
+        let error = preview_presentation(&document, &PreviewOptions { max_output_bytes: 1, ..options }).unwrap_err();
+        assert!(matches!(error, Error::Limit(_)) && error.to_string().contains("3 attempt"));
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 1);
+    }
+
+    #[test]
+    fn preview_cache_does_not_bypass_scale_checks_or_retry_render_errors() {
+        let mut source = document().deck;
+        source.slides[0].elements = vec![serde_json::from_value(serde_json::json!({
+            "type": "rect", "id": "effect", "x": 0, "y": 0, "width": 300, "height": 300, "fill": "FF0000",
+            "visual": {"shadow": {"color": "000000", "opacity": 0.5, "blur": 100, "distance": 200, "angle": 45}}
+        })).unwrap()];
+        let document = crate::document::create("preview-filter".into(), source, vec![], vec![], None).unwrap();
+        let options = PreviewOptions { max_dimension: 320, max_output_bytes: 1, ..Default::default() };
+        let mut cache = PreviewSceneCache::new(&options);
+        assert!(cache.scene(&document.deck, 0, &ExportOptions { scale: 0.75, ..Default::default() }).is_ok());
+        assert!(matches!(cache.scene(&document.deck, 0, &ExportOptions::default()), Err(Error::Limit(message)) if message.contains("filter working budget")));
+        SCENE_RENDERS.with(|count| count.set(0));
+        let error = preview_presentation(&document, &options).unwrap_err();
+        assert!(matches!(error, Error::Limit(message) if message.contains("filter working budget") && !message.contains("attempt")));
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 1);
+        assert_eq!(cache.entries.iter().flatten().count(), 1, "failed scenes must not be cached");
+        let opaque = cache.scene(&document.deck, 0, &ExportOptions { scale: 0.5, ..Default::default() }).unwrap().as_ref().svg.clone();
+        let transparent = cache.scene(&document.deck, 0, &ExportOptions { scale: 0.5, transparent: true, ..Default::default() }).unwrap();
+        assert_ne!(opaque, transparent.as_ref().svg);
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 2);
+    }
 }

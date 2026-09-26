@@ -280,6 +280,46 @@ fn preview_contact_sheet_shrink_preserves_order_padding_and_all_coordinates() {
 }
 
 #[test]
+fn preview_shrink_matches_fresh_scale_with_effects_for_png_and_jpeg() {
+    let mut source = noisy_preview_document().deck;
+    let effect: aislide_core::model::Element = serde_json::from_value(json!({
+        "type":"group", "id":"effects", "x":50, "y":40, "width":100, "height":80,
+        "view_width":100, "view_height":80,
+        "visual":{"rotation":12,"shadow":{"color":"000000","opacity":0.5,"blur":8,"distance":10,"angle":45}},
+        "children":[{"type":"rect","id":"soft","x":5,"y":5,"width":70,"height":25,"fill":"FF0000",
+            "visual":{"soft_edge":3,"reflection":{"blur":2,"distance":4,"start_opacity":0.5,"end_opacity":0,"end_position":1}}},
+            {"type":"text","id":"label","x":5,"y":55,"width":85,"height":20,"text":"Scale test",
+            "font_size":12,"color":"000000","bold":false}]
+    })).unwrap();
+    for slide in &mut source.slides { slide.elements.push(effect.clone()); }
+    let document = aislide_core::document::create("preview-effects".into(), source, vec![], vec![], None).unwrap();
+    let before = serde_json::to_vec(&document).unwrap();
+    for format in [PreviewFormat::Png, PreviewFormat::Jpeg] {
+        for (layout, original, smaller) in [(PreviewLayout::Pages, 320, 240), (PreviewLayout::ContactSheet, 640, 480)] {
+            let options = PreviewOptions {
+                page_indices: Some(vec![2, 0, 1]), max_dimension: smaller, layout, format,
+                overflow: PreviewOverflow::Error, ..Default::default()
+            };
+            let reference = preview_presentation(&document, &options).unwrap();
+            let budget = reference.images.iter().map(|image| image.byte_length).sum();
+            assert!(preview_presentation(&document, &PreviewOptions {
+                max_dimension: original, max_output_bytes: budget, ..options.clone()
+            }).is_err());
+            let preview = preview_presentation(&document, &PreviewOptions {
+                max_dimension: original, max_output_bytes: budget, overflow: PreviewOverflow::Shrink, ..options
+            }).unwrap();
+            assert_eq!(preview.actual_max_dimension, smaller);
+            assert!(preview.quality_reduced);
+            assert_eq!(serde_json::to_value(&preview.images).unwrap(), serde_json::to_value(&reference.images).unwrap());
+            assert_eq!(serde_json::to_value(&preview.pages).unwrap(), serde_json::to_value(&reference.pages).unwrap());
+            let warnings: Vec<_> = preview.warnings.iter().filter(|warning| warning.code != "PREVIEW_DOWNSCALED").collect();
+            assert_eq!(serde_json::to_value(warnings).unwrap(), serde_json::to_value(&reference.warnings).unwrap());
+        }
+    }
+    assert_eq!(serde_json::to_vec(&document).unwrap(), before);
+}
+
+#[test]
 fn preview_jpeg_pages_and_contact_sheet_are_decodable_and_keep_metadata() {
     let document = noisy_preview_document();
     let before = serde_json::to_vec(&document).unwrap();

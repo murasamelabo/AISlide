@@ -5,6 +5,163 @@ import { AislideClient, DocumentSession } from '../packages/client/index.mjs';
 import { requestCore } from './core-client.mjs';
 import { guidedExamples } from './guided-demo.mjs';
 
+test('lightweight SDK summary is paginated, detached and excludes source and image payloads', () => {
+  const slides = Array.from({ length: 40 }, (_, index) => ({ id: `slide-${index}`, title: `Synthetic ${index}`, background: 'FFFFFF', notes: 'Private notes', elements: [
+    { type: 'group', id: `group-${index}`, x: 10, y: 20, width: 600, height: 400, children: [
+      { type: 'text', id: `text-${index}`, x: 0, y: 0, width: 100, height: 100, text: '\u{1f600}'.repeat(200), font_size: 20, color: '000000', bold: false },
+      { type: 'picture', id: `image-${index}`, x: 100, y: 0, width: 100, height: 100, base64: 'PRIVATE_IMAGE_BYTES', mime_type: 'image/png', alt: 'Image' },
+    ] },
+  ] }));
+  const document = { id: 'summary', revision: 3, hash: 'a'.repeat(64), origin: { base64: 'PRIVATE_ORIGIN_BYTES' }, sources: [{ text: 'PRIVATE_SOURCE_TEXT' }], deck: { title: 'Synthetic summary', width: 1280, height: 720, slides } };
+  const session = new DocumentSession(() => { throw new Error('Summary must not call core'); }, document);
+  Object.defineProperty(session, 'document', { get() { throw new Error('Summary must not clone the full document'); } });
+  const summary = session.getSummary();
+  assert.equal(summary.slide_count, 40);
+  assert.equal(summary.revision, 3);
+  assert.equal(summary.hash, document.hash);
+  assert.equal(summary.slides.length, 16);
+  assert.equal(summary.next_offset, 16);
+  assert.equal(summary.slides[0].has_notes, true);
+  assert.equal(summary.slides[0].element_count, 1);
+  summary.slides[0].title = 'Modified outside the session';
+  assert.equal(session.getSummary().slides[0].title, 'Synthetic 0');
+  const finalPage = session.getSummary({ offset: 32, limit: 16 });
+  assert.equal(finalPage.slides.length, 8);
+  assert.equal(finalPage.next_offset, null);
+  assert.deepEqual(session.getSummary({ limit: 0 }).slides, []);
+  const detail = session.getSummary({ slideId: 'slide-0', offset: 1, limit: 2 });
+  assert.equal(detail.element_count, 3);
+  assert.equal(detail.elements[0].id, 'text-0');
+  assert.equal(detail.elements[0].parent_id, 'group-0');
+  assert.equal(Array.from(detail.elements[0].text_preview).length, 160);
+  assert.equal(detail.elements[0].text_truncated, true);
+  assert.equal(detail.elements[1].id, 'image-0');
+  assert.equal(detail.next_offset, null);
+  assert.doesNotMatch(JSON.stringify({ summary, finalPage, detail }), /PRIVATE_|Private notes|base64/);
+  assert.ok(Buffer.byteLength(JSON.stringify(detail)) < 4096);
+  for (const options of [{ limit: 33 }, { limit: -1 }, { limit: 1.5 }, { offset: -1 }, { offset: Infinity }, { slideId: 'missing' }]) assert.throws(() => session.getSummary(options));
+});
+
+test('graph feedback SDK diagnostics follow accepted state without extra requests', async () => {
+  const document = { id: 'graph-feedback', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
+  const finding = { code: 'GRAPH_NODE_LABEL_WRAPPED', severity: 'info', graph_id: 'graph', entity_id: 'node', element_ids: ['graph-nt-node'], bounds: [0, 0, 100, 40], message: 'Label wraps.', slide_id: 'slide-1', lines: 2, font_size: 18 };
+  const diagnostics = { status: 'complete', findings: [finding] };
+  let result = { document: { ...document, revision: 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] }, diagnostics };
+  const calls = [];
+  let failure = false;
+  let cancel;
+  const session = new DocumentSession(async request => {
+    calls.push(structuredClone(request));
+    if (failure) throw new Error('Rejected graph');
+    cancel?.abort();
+    return result;
+  }, document);
+  assert.equal(session.graphDiagnostics, null);
+  const spec = { version: 1, title: 'Synthetic', nodes: [{ id: 'node', label: 'Node', x: 0, y: 88, label_fit: 'shrink' }], groups: [{ id: 'group', label: 'Group', x: 0, y: 88, width: 500, height: 300, header_color: '@accent2' }] };
+  for (const method of ['addGraph', 'updateGraph', 'applyGraph', 'addPart', 'updatePart', 'applyOperations']) {
+    const input = method === 'applyGraph' ? { id: 'graph', operations: [{ op: 'move', ids: ['node'], dx: 0, dy: 0 }] }
+      : { id: 'graph', spec: method.endsWith('Part') ? { version: 1, preset: 'diagram/custom', title: '', data: { kind: 'diagram', graph: spec } } : spec };
+    const before = calls.length;
+    const accepted = method === 'applyOperations' ? await session.applyOperations([{ op: 'add_graph', slide_id: 'slide-1', ...input }]) : await session[method]('slide-1', input);
+    assert.deepEqual(accepted, result.document);
+    assert.equal(calls.length, before + 1, method);
+    assert.deepEqual(session.graphDiagnostics, { revision: 1, hash: result.document.hash, ...diagnostics });
+  }
+  const snapshot = session.graphDiagnostics;
+  snapshot.findings[0].bounds[0] = 999;
+  snapshot.findings[0].element_ids.push('changed');
+  snapshot.findings[0].message = 'Changed';
+  assert.deepEqual(session.graphDiagnostics.findings[0], finding);
+  finding.message = 'Transport changed';
+  assert.equal(session.graphDiagnostics.findings[0].message, 'Label wraps.');
+  const retained = session.graphDiagnostics;
+  const recovery = session.recoveryEnvelope;
+  assert.equal(JSON.stringify(recovery).includes('diagnostics'), false);
+  failure = true;
+  await assert.rejects(() => session.applyOperations([]), /Rejected/);
+  failure = false;
+  cancel = new AbortController();
+  await assert.rejects(() => session.applyOperations([], { signal: cancel.signal }), /cancelled/);
+  cancel = undefined;
+  assert.deepEqual(session.graphDiagnostics, retained);
+  assert.deepEqual(session.recoveryEnvelope, recovery);
+  result = { ...result, receipt: null, diagnostics: { status: 'partial', findings: [] } };
+  await session.applyGraph('slide-1', { id: 'graph', operations: [] });
+  assert.deepEqual(session.graphDiagnostics, { revision: 1, hash: result.document.hash, status: 'partial', findings: [] });
+  await session.undo();
+  assert.equal(session.graphDiagnostics, null);
+  result = { ...result, receipt: { inverse: [] } };
+  await session.applyOperations([]);
+  await session.undo();
+  await session.redo();
+  assert.equal(session.graphDiagnostics, null);
+  await session.applyOperations([]);
+  result = { document: { ...document, revision: 2, hash: 'c'.repeat(64) }, receipt: null };
+  await session.applyOperations([]);
+  assert.equal(session.graphDiagnostics, null);
+});
+
+test('graph feedback SDK malformed optional diagnostics cannot lose a successful commit', async () => {
+  const document = { id: 'graph-feedback-invalid', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
+  const finding = { code: 'GRAPH_LABEL_BORDER_OVERLAP', severity: 'warning', graph_id: 'graph', entity_id: 'edge', element_ids: ['label'], bounds: [1, 2, 3, 4], message: 'Border overlap.' };
+  const valid = { status: 'complete', findings: [finding] };
+  const cyclic = { ...valid }; cyclic.findings = [cyclic];
+  const throwing = { get status() { throw new Error('Malformed metadata'); } };
+  for (const diagnostics of [null, false, 'bad', {}, cyclic, throwing, { ...valid, status: 'approved' }, { ...valid, findings: Array(65).fill(finding) },
+    { ...valid, findings: [{ ...finding, bounds: [0, 0, Infinity, 1] }] }, { ...valid, findings: [{ ...finding, severity: 'fatal' }] },
+    { ...valid, findings: [{ ...finding, message: '\u754c'.repeat(12000) }] }, { ...valid, findings: [{ ...finding, element_ids: Array(32769).fill('label') }] },
+    { ...valid, findings: [{ ...finding, lines: 'two' }] }, { ...valid, findings: [{ ...finding, font_size: NaN }] },
+  ]) {
+    const changed = { ...document, revision: 1, hash: 'b'.repeat(64) };
+    let calls = 0;
+    const session = new DocumentSession(async () => { calls += 1; return { document: changed, receipt: { inverse: [] }, diagnostics }; }, document);
+    assert.deepEqual(await session.applyOperations([]), changed);
+    assert.equal(calls, 1);
+    assert.equal(session.canUndo, true);
+    assert.deepEqual(session.graphDiagnostics, { revision: 1, hash: changed.hash, status: 'unavailable', findings: [] });
+    assert.ok(new TextEncoder().encode(JSON.stringify(session.graphDiagnostics)).length < 32768);
+  }
+  const result = { document: { ...document, revision: 1 }, receipt: { inverse: [] }, get diagnostics() { throw new Error('Metadata accessor'); } };
+  const session = new DocumentSession(async () => result, document);
+  await session.applyOperations([]);
+  assert.equal(session.revision, 1);
+  assert.equal(session.graphDiagnostics.status, 'unavailable');
+});
+
+test('graph feedback SDK createGraph preserves bare default and opt-in envelope', async () => {
+  const element = { type: 'group', id: 'graph', children: [] };
+  const diagnostics = { status: 'complete', findings: [] };
+  const calls = [];
+  const client = new AislideClient(async request => { calls.push(request); return request.include_diagnostics ? { element, diagnostics } : element; });
+  const input = { id: 'graph', spec: { version: 1, title: '', nodes: [] } };
+  assert.equal(await client.createGraph(input), element);
+  assert.equal(Object.hasOwn(calls[0], 'include_diagnostics'), false);
+  assert.equal(await client.createGraph({ ...input, include_diagnostics: false }), element);
+  assert.deepEqual(await client.createGraph({ ...input, include_diagnostics: true }), { element, diagnostics });
+  assert.equal(calls.length, 3);
+});
+
+test('graph feedback SDK snapshots reject accessors and unsafe array payloads', async () => {
+  const document = { id: 'graph-feedback-accessors', revision: 1, hash: 'b'.repeat(64), deck: { slides: [] } };
+  const finding = { code: 'GRAPH_LABEL_OVERLAP', severity: 'warning', graph_id: 'graph', entity_id: 'edge', element_ids: ['label'], bounds: [1, 2, 3, 4], message: 'Overlap.' };
+  let reads = 0;
+  const accessor = { get status() { reads += 1; return reads === 1 ? 'complete' : () => {}; }, findings: [finding] };
+  for (const diagnostics of [accessor, { status: 'complete', findings: [{ ...finding, bounds: Array(4) }] },
+    { status: 'complete', findings: [{ ...finding, element_ids: [() => {}] }] },
+  ]) {
+    const session = new DocumentSession(async () => ({ document, receipt: null, diagnostics }), document);
+    assert.deepEqual(await session.applyOperations([]), document);
+    assert.deepEqual(session.graphDiagnostics, { revision: 1, hash: document.hash, status: 'unavailable', findings: [] });
+  }
+  assert.equal(reads, 0);
+  const elementIds = ['label'];
+  elementIds.map = () => { throw new Error('Do not call supplied methods'); };
+  const diagnostics = { status: 'complete', findings: [{ ...finding, element_ids: elementIds }], extra: 'x'.repeat(100000) };
+  const session = new DocumentSession(async () => ({ document, receipt: null, diagnostics }), document);
+  await session.applyOperations([]);
+  assert.deepEqual(session.graphDiagnostics, { revision: 1, hash: document.hash, status: 'complete', findings: [finding] });
+});
+
 test('feedback SDK batches use one guarded request and one history receipt', async () => {
   const document = { id: 'feedback', revision: 2, hash: 'a'.repeat(64), deck: { slides: [] } };
   const changed = { ...document, revision: 3, hash: 'b'.repeat(64) };
@@ -152,9 +309,10 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
   const { fileURLToPath } = await import('node:url');
   const filename = fileURLToPath(new URL('../packages/client/feedback-types.mts', import.meta.url)).replaceAll('\\', '/');
   const preamble = `
-    import type { DocumentSession, AislideDocument, AuthoringOptions, AuthoringOperation, Frame, Crop,
+    import type { AislideClient, DocumentSession, AislideDocument, Element, GraphCreation, GraphDiagnostics, GraphDiagnosticsSnapshot, GraphNode, AuthoringOptions, AuthoringOperation, Frame, Crop,
       Connection, ConnectorRouting, ConnectorSettings, VisualStyle, GraphEdge, GraphGroup, PictureInput, SlideImportInput, GraphSpec, PartSpec, PartPreset, GuidedAuthoring, PreflightFinding, PreviewOptions, PreviewImage, PresentationPreview } from './index.mjs';
     declare const session: DocumentSession;
+    declare const client: AislideClient;
     declare const source: AislideDocument;
     const options: AuthoringOptions = { expectedRevision: 0, expectedHash: 'hash', signal: new AbortController().signal };
     const frame: Frame = { x: 0, y: 0, width: 300, height: 150 };
@@ -190,11 +348,21 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
       session.addPicture('slide-1', picture, options), session.importSlides(source, imported, options),
     ];
     const graph: GraphSpec = { version: 1, title: 'Synthetic', show_title: false, nodes: [{ id: 'node', label: 'Heading', detail: 'Detail', detail_font_size: 12, text_align: 'right', heading_bold: false, x: 0, y: 0, height: 512 }] };
+    graph.nodes[0].label_fit = 'shrink';
+    graph.nodes.push({ ...graph.nodes[0], label_fit: 'wrap' });
+    const creation: Promise<GraphCreation> = client.createGraph({ id: 'graph', spec: graph, include_diagnostics: true });
+    const bare: Promise<Element> = client.createGraph({ id: 'graph', spec: graph });
+    const explicitBare: Promise<Element> = client.createGraph({ id: 'graph', spec: graph, include_diagnostics: false });
+    declare const include_diagnostics: boolean;
+    const dynamic: Promise<Element | GraphCreation> = client.createGraph({ id: 'graph', spec: graph, include_diagnostics });
+    const snapshot: GraphDiagnosticsSnapshot | null = session.graphDiagnostics;
+    const graphDiagnostics: GraphDiagnostics = { status: 'partial', findings: [{ code: 'GRAPH_NODE_LABEL_WRAPPED', severity: 'info', graph_id: 'graph', entity_id: 'node', element_ids: ['label'], bounds: [0, 0, 100, 40], message: 'Wrapped', lines: 2, font_size: 18, slide_id: 'slide-1' }] };
+    void [creation, bare, explicitBare, dynamic, snapshot, graphDiagnostics];
     const edge: GraphEdge = { id: 'edge', source: 'node', target: 'other', route: 'manual', waypoints: [[400, 200]], stroke_width: 4, label_color: '@accent2', label_font_size: 20, source_offset: -0.25, target_offset: 0.25, label_placement: { position: 0.3, side: 'below', offset: 12 }, badge: { number: 7, position: 0.7, size: 28, font_size: 14, fill: '@lt1', color: '@dk1' } };
-    const group: GraphGroup = { id: 'group', label: 'Group', ...frame, padding: 16, header_height: 64, header_font_size: 24 };
+    const group: GraphGroup = { id: 'group', label: 'Group', ...frame, padding: 16, header_height: 64, header_font_size: 24, header_color: '@accent2' };
     const visual: VisualStyle = { connection_sites: [{ x: 1, y: 0.25, angle: 0 }] };
     graph.edges = [edge, { ...edge, stroke_width: null, label_color: null, label_font_size: null, source_offset: null, target_offset: null, label_placement: null, badge: null }];
-    graph.groups = [group, { ...group, padding: null, header_height: null, header_font_size: null }];
+    graph.groups = [group, { ...group, padding: null, header_height: null, header_font_size: null, header_color: null }];
     results.push(session.addElements('slide-1', [{ type: 'connector', id: 'edge', ...frame, ...connector, visual }]));
     const part: PartSpec = { version: 1, preset: 'synthetic', title: 'Synthetic', data: { kind: 'diagram', graph }, layout: { ...frame, show_title: false } };
     const matrix: PartSpec = { ...part, data: { kind: 'matrix', corner_label: 'Criterion', rows: ['A', 'B'], columns: ['C', 'D'], cells: [['a', 'b'], ['c', 'd']] } };
@@ -223,6 +391,14 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
   `);
   assert.deepEqual(diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')), []);
   for (const invalid of [
+    "const invalid: GraphNode['label_fit'] = 'truncate';",
+    "const invalid: GraphNode['label_fit'] = null;",
+    "const invalid: GraphGroup['header_color'] = 123;",
+    "const invalid: GraphDiagnostics['status'] = 'approved';",
+    "session.graphDiagnostics = null;",
+    "const invalid: Promise<Element> = client.createGraph({ id: 'graph', spec: { version: 1, title: '', nodes: [] }, include_diagnostics: true });",
+    "const invalid: Promise<GraphCreation> = client.createGraph({ id: 'graph', spec: { version: 1, title: '', nodes: [] } });",
+    "declare const flag: boolean; const invalid: Promise<GraphCreation> = client.createGraph({ id: 'graph', spec: { version: 1, title: '', nodes: [] }, include_diagnostics: flag });",
     "const invalid: PartPreset['recommended'] = 'yes';",
     "const invalid: PartPreset['use_when'] = 7;",
     "const invalid: PreviewOptions = { format: 'pdf' };",

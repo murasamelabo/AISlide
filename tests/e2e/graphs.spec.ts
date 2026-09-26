@@ -3,7 +3,107 @@ import { openSample, waitForCoreOperation } from './fixtures';
 import AxeBuilder from '@axe-core/playwright';
 import { readFile } from 'node:fs/promises';
 import { icons as lucideIcons } from 'lucide-react';
-import type { ArchitectureIconCatalog, ArchitectureIconAssets, Element, GraphSpec } from '../../packages/client/types';
+import type { ArchitectureIconCatalog, ArchitectureIconAssets, Element, GraphCreation, GraphSpec } from '../../packages/client/types';
+
+test('graph feedback diagnostics show wrapping borders and shrink controls with native retention', async ({ page }) => {
+  test.setTimeout(120_000);
+  const initialized = waitForCoreOperation(page, 'create_presentation');
+  await page.goto('/');
+  await initialized;
+  await expect(page.getByRole('button', { name: 'Architecture diagram', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+  const initial: GraphSpec = { version: 1, title: 'Graph feedback diagnostics', show_title: false, nodes: [
+    { id: 'source', label: 'Gateway service', x: 100, y: 200, width: 160, height: 120, font_size: 32, group: 'region' },
+    { id: 'target', label: 'Target', x: 800, y: 200, width: 160, height: 120 },
+  ], edges: [{ id: 'boundary', source: 'source', target: 'target', source_port: 'right', target_port: 'left', label: 'Boundary link', label_font_size: 20, label_placement: { position: 0.5, side: 'above', offset: 8, on_overlap: 'warn' } }],
+  groups: [{ id: 'region', label: 'Region', x: 20, y: 80, width: 540, height: 400 }] };
+  async function previewAfter(action: () => Promise<unknown>) {
+    await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+    const requested = page.waitForRequest(request => request.url().endsWith('/api/core') && request.method() === 'POST'
+      && request.postDataJSON().op === 'create_graph' && request.postDataJSON().spec.title === initial.title);
+    const completed = page.waitForResponse(async response => response.request() === await requested);
+    await action();
+    const response = await completed;
+    expect((await requested).postDataJSON().include_diagnostics).toBe(true);
+    expect(response.ok()).toBe(true);
+    const result = await response.json() as GraphCreation;
+    expect(result.element.type).toBe('group');
+    await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+    return result;
+  }
+  async function graphJson() {
+    await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+    return JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue()) as GraphSpec;
+  }
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  await dialog.getByLabel('Graph JSON', { exact: true }).fill(JSON.stringify(initial));
+  const first = await previewAfter(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  expect(first.diagnostics.findings.map(finding => finding.code)).toEqual(expect.arrayContaining(['GRAPH_NODE_LABEL_WRAPPED', 'GRAPH_LABEL_BORDER_OVERLAP']));
+  const diagnostics = dialog.getByRole('region', { name: 'Graph diagnostics', exact: true });
+  await expect(diagnostics.getByRole('status')).toContainText('complete');
+  await expect(diagnostics.getByRole('list')).toContainText('GRAPH_NODE_LABEL_WRAPPED');
+  await expect(diagnostics.getByRole('list')).toContainText('GRAPH_LABEL_BORDER_OVERLAP');
+  await expect(dialog.getByRole('button', { name: 'Insert graph', exact: true })).toBeEnabled();
+  await dialog.getByRole('button', { name: 'Select node source', exact: true }).click();
+  await expect(dialog.getByLabel('Node label fit', { exact: true })).toHaveValue('wrap');
+  await previewAfter(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  expect((await graphJson()).nodes[0].label_fit).toBeUndefined();
+  await previewAfter(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await dialog.getByLabel('Node label fit', { exact: true }).selectOption('shrink');
+  const shrunk = await previewAfter(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  if (shrunk.element.type !== 'group') throw new Error('Expected native graph');
+  const label = shrunk.element.children.find(element => element.id.endsWith('-nt-source'));
+  if (label?.type !== 'text') throw new Error('Expected native label');
+  expect(label.font_size).toBeGreaterThanOrEqual(12);
+  expect(label.font_size).toBeLessThan(32);
+  expect(await dialog.locator('.react-flow__node[data-id="source"] .slide-text').evaluate(element => parseFloat(getComputedStyle(element).fontSize))).toBeCloseTo(label.font_size, 2);
+  await dialog.getByLabel('Node label', { exact: true }).fill('W'.repeat(40));
+  const limited = await previewAfter(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  expect(limited.diagnostics.findings.some(finding => finding.code === 'GRAPH_NODE_LABEL_SHRINK_LIMIT')).toBe(true);
+  await expect(diagnostics.getByRole('list')).toContainText('GRAPH_NODE_LABEL_SHRINK_LIMIT');
+  await dialog.getByLabel('Node label', { exact: true }).fill('Gateway\nService');
+  const multiline = await previewAfter(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  if (multiline.element.type !== 'group') throw new Error('Expected native graph');
+  expect(multiline.element.children.find(element => element.id.endsWith('-nt-source'))).toMatchObject({ text: 'Gateway\nService' });
+  await dialog.getByRole('button', { name: 'Select group region', exact: true }).click();
+  await previewAfter(() => dialog.getByRole('button', { name: 'Apply group', exact: true }).click());
+  expect((await graphJson()).groups![0].header_color).toBeUndefined();
+  await previewAfter(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await dialog.getByLabel('Group header color', { exact: true }).fill('#117744');
+  const colored = await previewAfter(() => dialog.getByRole('button', { name: 'Apply group', exact: true }).click());
+  if (colored.element.type !== 'group') throw new Error('Expected native graph');
+  expect(colored.element.children.find(element => element.id.endsWith('-gt-region'))).toMatchObject({ color: '117744' });
+  await expect(dialog.locator('.react-flow__node[data-id="region"] .slide-text')).toHaveCSS('color', 'rgb(17, 119, 68)');
+  const authored = await graphJson();
+  expect(authored.nodes[0].label_fit).toBe('shrink');
+  expect(authored.groups![0].header_color).toBe('117744');
+  const strict = structuredClone(authored);
+  strict.edges![0].label_placement!.on_overlap = 'error';
+  await dialog.getByLabel('Graph JSON', { exact: true }).fill(JSON.stringify(strict));
+  const refused = page.waitForResponse(response => response.url().endsWith('/api/core') && response.request().method() === 'POST'
+    && response.request().postDataJSON().op === 'create_graph' && response.request().postDataJSON().spec.edges?.[0].label_placement?.on_overlap === 'error');
+  await dialog.getByRole('button', { name: 'Validate JSON', exact: true }).click();
+  expect((await refused).ok()).toBe(false);
+  await expect(dialog.getByRole('alert')).toBeVisible();
+  await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+  await dialog.getByLabel('Graph JSON', { exact: true }).fill(JSON.stringify(authored));
+  await previewAfter(() => dialog.getByRole('tab', { name: 'Preview', exact: true }).click());
+  await expect(dialog.locator('.graph-native-preview')).toContainText('Gateway');
+  await expect(diagnostics.getByRole('list')).toContainText('GRAPH_LABEL_BORDER_OVERLAP');
+  await dialog.getByRole('button', { name: 'Insert graph', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  const file = await download;
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: file.suggestedFilename(), mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await readFile((await file.path())!) });
+  await page.getByRole('button', { name: /^Select graph-/ }).click();
+  await page.getByRole('button', { name: 'Edit graph', exact: true }).click();
+  await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+  expect(await graphJson()).toEqual(authored);
+});
 
 test('graph authoring controls retain manual paths custom ports badges and group spacing', async ({ page }) => {
   test.setTimeout(120_000);
@@ -39,7 +139,7 @@ test('graph authoring controls retain manual paths custom ports badges and group
     expect(await response.finished()).toBeNull();
     await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
     await expect(dialog.getByRole('alert')).toHaveCount(0);
-    return await response.json() as Element;
+    return (await response.json() as GraphCreation).element;
   }
   async function graphJson() {
     await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();

@@ -121,7 +121,9 @@ pub fn change(document:&Document,expected_revision:u64,slide_id:&str,id:&str,spe
     let mut parts=document.parts.clone();let mut deck=document.deck.clone();
     let mut native_guard=NativeRegenerationGuard::new(document);
     change_in_deck(&mut deck,&mut parts,slide_id,id,spec,update,&mut native_guard)?;
-    crate::document::transact(document,Transaction {expected_revision,expected_hash:document.hash.clone(),operations:serde_json::from_value(json!([{"op":"replace","path":"/deck","value":deck},{"op":"add","path":"/parts","value":parts}]))?})
+    let result=crate::document::transact(document,Transaction {expected_revision,expected_hash:document.hash.clone(),operations:serde_json::from_value(json!([{"op":"replace","path":"/deck","value":deck},{"op":"add","path":"/parts","value":parts}]))?})?;
+    let targets=if matches!(spec.data,super::PartData::Diagram {..}) {BTreeSet::from([(slide_id.into(),id.into())])} else {BTreeSet::new()};
+    Ok(crate::graphs::annotate_transaction(result,&targets))
 }
 
 pub(crate) fn change_in_deck(deck:&mut Deck,parts:&mut Vec<PartInstance>,slide_id:&str,id:&str,spec:&PartSpec,update:bool,native_guard:&mut NativeRegenerationGuard<'_>)->Result<()> {

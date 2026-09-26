@@ -204,5 +204,11 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
         vec![json!({"op":"replace","path":"/deck/slides","value":deck.slides})]
     } else { changed.into_iter().map(|index| json!({"op":"replace","path":format!("/deck/slides/{index}"),"value":deck.slides[index]})).collect() };
     if metadata_changed { patches.push(json!({"op":"add","path":"/parts","value":parts})); }
-    document::transact(document, Transaction { expected_revision, expected_hash: expected_hash.into(), operations: serde_json::from_value(json!(patches))? })
+    let result = document::transact(document, Transaction { expected_revision, expected_hash: expected_hash.into(), operations: serde_json::from_value(json!(patches))? })?;
+    let targets = operations.iter().filter_map(|operation| match operation {
+        Operation::AddGraph { slide_id, id, .. } | Operation::UpdateGraph { slide_id, id, .. } => Some((slide_id.clone(), id.clone())),
+        Operation::AddPart { slide_id, id, spec } | Operation::UpdatePart { slide_id, id, spec } if matches!(spec.data, crate::parts::PartData::Diagram { .. }) => Some((slide_id.clone(), id.clone())),
+        _ => None,
+    }).collect();
+    Ok(crate::graphs::annotate_transaction(result, &targets))
 }

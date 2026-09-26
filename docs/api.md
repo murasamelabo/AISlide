@@ -6,7 +6,7 @@ Every operation is strict JSON with a discriminator `op`. Unknown JSON request p
 
 Requests default to fixed `large`: 256 slides, 8192 total elements, 32 MiB complete UTF-8 document including immutable origin, 96 MiB JSON request/response, and 16 MiB raw archive. `capacity_profile: "standard"` retains 128 slides / 8 MiB document / 16 MiB wire / 8 MiB archive; `legacy` retains 32 slides / 2048 elements / 2 MiB document / 4 MiB wire. All limits apply together. Profiles are request-local, including intermediate transactions and responses, not a Deck field or global mutable context. SDK creation/open options accept `capacityProfile`; sessions retain it, and `setCapacityProfile()` validates current document and both history chains before committing a change. Unknown/null/custom/unlimited profiles reject. Capacity profiles do not themselves expand model/guided input grammar; guided authoring has a separate explicit `authoring.slide_limit` opt-in described below. Independent image/source/static-output limits remain unchanged. See [Phase 5 budgets and verification](testing/phase5-recovery-capacity.md).
 
-MCP results above 64 KiB omit the duplicate `structuredContent`; parse `content[0].text` when it is absent. The fully serialized outer tool response remains byte-bounded.
+MCP defaults to the lightweight `compact` tool profile: JSON appears once in `content[0].text`, without a duplicate `structuredContent`. `--tool-profile full` retains legacy duplication for results up to 64 KiB. Both profiles retain the fully serialized response budget; tool profiles are independent of document capacity profiles.
 
 ## Single-file PPTX
 
@@ -233,7 +233,7 @@ Previews use the existing shared static renderer with 2MiB encoded/4MiB wire bud
 
 SDK methods: `session.previewPresentation(options?,requestOptions?)`, `preflightPresentation(options?,requestOptions?)`, `previewSlideRevision(slideId,edits,{expectedRevision?,expectedHash?,maxDimension?,signal?})`, and `applySlideRevision(slideId,edits,{expectedRevision,expectedHash,candidateHash,signal?})`. Session reads serialize with writes and reject early/late cancellation. Pure core candidates carry no session authority; callers supply and recheck the base and candidate hashes.
 
-MCP substitutes `deck_id` for `document`. Preview tools return metadata in the first text block and standard MCP `image` blocks; `include_images:false` omits images. Existing JSON-only tool responses remain unchanged. `preview_slide_revision` retains only bounded edit instructions under an opaque process-local candidate ID (16 candidates, ten-minute expiry, 128KiB each). `apply_slide_revision` accepts that ID plus the exact base revision/hash rather than replacement edits. Stale/closed-deck candidates release capacity; applied candidates are single-use. No-op applies do not add history. `author_presentation` and `aislide://authoring/workflow` expose the workflow through the official MCP prompt/resource APIs.
+MCP substitutes `deck_id` for `document`. Preview tools return metadata in the first text block and standard MCP `image` blocks; `include_images:false` omits images but still renders. Compact `preview_presentation` defaults to a 640px JPEG contact sheet with a 384KiB image budget and the first eight pages. Explicit options override these defaults; `page_scope` discloses selected/unselected counts. `detail:"full"` restores the core preview defaults. Use `get_deck_summary` for metadata without rendering. `preview_slide_revision` retains only bounded edit instructions under an opaque process-local candidate ID (16 candidates, ten-minute expiry, 128KiB each). `apply_slide_revision` accepts that ID plus the exact base revision/hash rather than replacement edits. Stale/closed-deck candidates release capacity; applied candidates are single-use. No-op applies do not add history. `author_presentation` and `aislide://authoring/workflow` expose the workflow through the official MCP prompt/resource APIs.
 
 Typed edits: `translate{ids,dx,dy}`, `align{ids,alignment,relative_to}`, `set_text_frame{id,x,y,width,height}`, `replace_text{id,text}`, `update_part{id,spec}`, and `update_graph{id,spec}`. One slide, 1-16 edits and up to 32 unique targets per selection; no arbitrary JSON Patch, file path, XML or source authority. Nested text coordinates remain parent-local. Locked/hidden targets and native loss reject. Generic child edits may make managed metadata stale; the preview reports this. Existing raw `transaction` remains a separate lower-level API.
 
@@ -243,7 +243,7 @@ Typed edits: `translate{ids,dx,dy}`, `align{ids,alignment,relative_to}`, `set_te
 
 Options: `page_indices?`, `pdf:false`, `preview:"contact_sheet"` (`pages` / `none` also accepted), `notes:false`, `source_report:false`, `preflight:true`, `max_dimension:1280` (160-1600), `min_font_size:16` (8-48), and lower-only `max_output_bytes` (up to 32MiB). All options are strict. The complete PPTX is always included. Supplemental visual output/preflight is limited to eight selected pages; notes and source metadata span the whole deck. The report excludes raw source text, table rows, raw binding values and original bytes, but attributions/locators may still be sensitive. Separate plaintext notes and source-report output require explicit opt-in; the PPTX itself remains an ordinary unredacted export.
 
-MCP `finalize_presentation({deck_id,expected_revision,expected_hash,name,options?,include_images?})` prepares the same bundle, binds safe filenames, verifies hashes and budgets, then exclusively publishes beneath the startup-approved output root. At most 13 files including the manifest; 32MiB decoded total and at most 4MiB MCP response (profile limits also apply). A thumbnail plus actual file paths, hashes, sizes, check scope and manifest path are returned. `include_images:false` suppresses only the response image. Every destination is checked, all temporary files staged, and the manifest published last. Existing files are never replaced. No directory, URL or arbitrary file path is accepted from the request.
+MCP `finalize_presentation({deck_id,expected_revision,expected_hash,name,options?,include_images?,detail?})` prepares the same bundle, binds safe filenames, verifies hashes and budgets, then exclusively publishes beneath the startup-approved output root. Compact mode defaults to 640px and the first eight pages for supplemental previews/checks, disclosed by `page_scope` and the manifest; the PPTX always contains every slide. Explicit options override defaults; `detail:"full"` restores core defaults. At most 13 files including the manifest; 32MiB decoded total and at most 4MiB MCP response (capacity limits also apply). A thumbnail plus actual paths, hashes, sizes, check scope and manifest path are returned. `include_images:false` suppresses only the response image. Every destination is checked, all temporary files staged, and the manifest published last. Existing files are never replaced. No directory, URL or arbitrary file path is accepted from the request.
 
 The manifest format is `aislide.delivery`, version 1. It records actual producer/core versions and MCP transport, document revision/hash, file hashes, visual page scope, checks, findings and limitations. `complete` is publication success, not quality approval; preflight can report findings. No source authenticity/freshness, semantic truth, accessibility certification or Office parity is asserted. Files are not a crash-atomic group. A structured `BUNDLE_PUBLICATION_FAILED` result lists exact successful paths and pending filenames with a `not_published`, `partially_published` or `published_with_error` status. Published files are never cleaned up automatically; only owned temporary paths are removed. Cancellation after a link may leave outputs; inspect the manifest and hashes before retrying with a new name. Root checks do not establish hard immunity to hostile local path races. See [delivery workflow and example](authoring/README.md#delivery-bundles).
 
@@ -366,7 +366,7 @@ Element operations are `{op:"duplicate",id,new_id}`, `{op:"remove",id}` or `{op:
 
 Assets support PNG/JPEG, inert SVG and a bounded EMF/WMF record subset converted locally to SVG. `size` is the displayed longest side, 8-640px; aspect ratio is retained. Raster files use the existing 1 MiB, 4096px and 64 MiB decode limits. SVG is limited to 256 KiB, 2,048 elements, XML depth 32, viewport 4096px, reference depth 48 and expanded reference cost 4,096. Safe text and embedded PNG/JPEG are supported within validation limits; cycles, missing/wrong-type fragment targets, external resources, scripts, `foreignObject`, styles, filters and unsupported effects reject. Outlined paths, basic shapes, gradients, clipping and masks remain supported. Raster output has a 1024px longest side, transparency and a 1 MiB limit, and is decoded again as PNG before use. Accepted SVG bytes are retained in the picture's optional `svg` field and embedded through the native SVG picture extension alongside the PNG fallback. This is not arbitrary SVG/metafile support, HTML execution or conversion into editable shape paths. These budgets are not an OS process sandbox.
 
-SDK: `client.createPresentation(id,title?,options?)`, `session.editSlides(operations,options?)`, `session.editElements(slideId,operations,options?)`, `client.createAsset(input,options?)`, `session.addAsset(slideId,input,options?)`. Session options retain `expectedRevision` and cancellation. MCP exposes the same names with `add_asset` for insertion; mutations take `deck_id`, `expected_revision` and, for assets/elements, `slide_id`. `create_asset` is stateless. No additional filesystem/network authority is exposed.
+SDK: `client.createPresentation(id,title?,options?)`, `session.editSlides(operations,options?)`, `session.editElements(slideId,operations,options?)`, `client.createAsset(input,options?)`, `session.addAsset(slideId,input,options?)`. Session options retain `expectedRevision` and cancellation. MCP exposes the same names with `add_asset` for insertion; mutations take `deck_id`, `expected_revision` and, for assets/elements, `slide_id`. Core/SDK `create_asset` remains stateless and has no filesystem/network authority. Compact MCP `create_asset` retains the prepared bytes under a process-local asset handle; `detail:"full"` retains the legacy complete Element result.
 
 ## Guided Authoring
 
@@ -479,14 +479,14 @@ Graphs have a separate catalog, not an additional preset counted among the 111 p
 | `architecture_icons` | None | Read-only `{version:1,release,configured,message,providers,icons}` compiled catalog |
 | `architecture_icon_assets` | `ids`: 1-60 distinct catalog strings, each at most 256 bytes | Read-only `{icons:[{id,base64,mime_type,alt,width,height}]}`; PNG bytes from the consented local pack |
 | `create_graph_icon` | `base64`, `mime_type`, optional `alt` | Validated `GraphIcon`; SVG to PNG, larger PNG/JPEG fitted to 256px, no document mutation |
-| `create_graph` | `id`, `spec`, optional `theme` | Native group for preview; no persistent metadata |
+| `create_graph` | `id`, `spec`, optional `theme`, `include_diagnostics` | Native group by default; `{element,diagnostics}` when explicitly requested |
 | `transform_graph` | `spec`, `operations` | Validated candidate specification; no document mutation |
 | `insert_graph` / `update_graph` | `document`, `expected_revision`, `slide_id`, `id`, `spec` | Atomic transaction, metadata and inverse receipt |
 | `apply_graph` | Same identity fields, `operations` instead of `spec` | Applies operations to a current managed graph in one transaction |
 
 `GraphSpec` remains backward-compatible version 1: `{version:1,title,subtitle?,show_title?,nodes,edges?,groups?}`. Coordinates are absolute within 1152x512, with nodes/boundaries below the 88px title band by default. `show_title:false` omits title/subtitle objects and permits content from y=0; omission retains the band. Minimum size is 64x40; card nodes default to 176x80. There are 1-48 nodes, at most 64 edges and 16 boundaries, with boundary depth at most four. IDs are 1-24 ASCII letters/digits/hyphens/underscores, unique across all three collections. Root ID limit is 40 characters. Title/subtitle limits are 80/120; node labels 160, edge/boundary labels 64. The rendered scene still obeys 256 elements per slide and document size limits; not every combination of collection maxima fits.
 
-- Node: `{id,label,detail?,detail_font_size?,text_align?,heading_bold?,kind?,x,y,width?,height?,fill?,stroke?,color?,font_size?,group?,icon?,presentation?}`. Kinds: `rectangle`, `rounded_rectangle`, `ellipse`, `diamond`, `cylinder`, `cloud`. Font size 12-40, default 18; colors accept RGB/theme references. Default fill/outline/text: `@lt1`/`@accent1`/`@dk1`. `presentation` is `card` (default) or `icon`; icon mode requires an icon and retains the six kinds and four logical ports.
+- Node: `{id,label,label_fit?,detail?,detail_font_size?,text_align?,heading_bold?,kind?,x,y,width?,height?,fill?,stroke?,color?,font_size?,group?,icon?,presentation?}`. Kinds: `rectangle`, `rounded_rectangle`, `ellipse`, `diamond`, `cylinder`, `cloud`. Font size 12-40, default 18; colors accept RGB/theme references. Default fill/outline/text: `@lt1`/`@accent1`/`@dk1`. `presentation` is `card` (default) or `icon`; icon mode requires an icon and retains the six kinds and four logical ports.
 - Edge: `{id,source,target,source_port?,target_port?,label?,route?,color?,arrow?,start_arrow?,dashed?}`. Ports: `auto`, `top`, `left`, `bottom`, `right`. Route: `straight` (default) or `elbow`. End arrow defaults true; start arrow/dashed false; color `@dk2`. Endpoints must reference distinct existing nodes.
 - Boundary: `{id,label,x,y,width,height,fill?,stroke?,parent?,icon?}`. Defaults `@lt2`/`@dk2`, with solid outlines. A member or child boundary must fit below its parent's 40px heading with 8px side/bottom padding. Missing parents, cycles, excess depth and containment violations reject. Core coordinates stay absolute; React Flow uses relative child positions only in the UI, with stable outer-first rendering.
 
@@ -500,6 +500,51 @@ Omission retains the previous label-only presentation. Small frames or long
 text can fail fitting. `diagram/custom` parts also accept an explicit
 `PartSpec.layout`; its `show_title` controls the rendered graph title, with
 the old band removed from coordinates when hiding a previously titled graph.
+Manual waypoints receive the same coordinate translation as nodes and groups.
+
+`GraphGroup.header_color?: string | null` selects an RGB/theme text color,
+defaulting to `@dk1`; it never implicitly adopts a potentially pale outline
+color. `GraphNode.label_fit` is `wrap` (default, omitted from serialization)
+or `shrink`. Shrink prefers one line, testing the final text frame in 0.5px
+steps down to 12px without altering hard newlines. If one line still cannot
+fit, normal readable wrapping remains and diagnostics report the limit.
+These options preserve legacy rendering when omitted.
+
+### Graph Diagnostics
+
+`create_graph` keeps its bare `Element` response unless
+`include_diagnostics:true` is supplied. The opt-in result is
+`{element,diagnostics:{status,findings}}`; the element is identical to the
+default result. Status is `complete`, `partial` or `unavailable`, never an
+Office or semantic-quality approval. Findings are capped at 64 and the report
+at 32 KiB, and contain `code`, `severity`, `graph_id`, `entity_id`, `element_ids`,
+`bounds:[x,y,width,height]`, `message`, and optional `slide_id`, `lines`, `font_size`.
+Bounds are in the final graph group's local coordinate space.
+
+Codes include `GRAPH_LABEL_BORDER_OVERLAP`, `GRAPH_LABEL_OVERLAP`,
+`GRAPH_NODE_LABEL_WRAPPED` (info), and `GRAPH_NODE_LABEL_SHRINK_LIMIT` (warning).
+Automatic label search includes group-border stroke strips as well as nodes,
+headers and badges; it can retain a warned fallback when space is exhausted.
+Explicit positions remain authoritative. `on_overlap:error` rejects those
+collisions, including borders; default `warn` retains the position.
+
+Successful graph insert/update/apply, including no-ops and diagram parts in
+mixed batches, add optional core transaction `diagnostics` for the final
+affected graphs. SDK mutations still return `AislideDocument`; read the
+defensive-copy `session.graphDiagnostics` snapshot, bound to revision/hash.
+MCP mutation replies expose this as optional `graphDiagnostics`. Later
+successful operations without diagnostics and Undo/Redo clear the snapshot;
+failed operations retain the previous accepted state. Diagnostic failure is
+nonfatal and reported as incomplete; it must not discard a successful edit.
+Diagnostics are not stored in documents, hashes, PPTX metadata or Undo receipts.
+
+Preflight omits a graph badge's overlap with its own connector only when
+current managed metadata, render fingerprints, actual badge attributes and
+the specified route agree. Hand-authored, stale, unverifiable and other-edge
+crossings remain reportable, as do badge/label collisions. Generic chart
+parity notices become one informational `CHART_PREVIEW` finding per selected
+page; specific `CHART_PRESENTATION` limits remain warnings. Raw renderer and
+preview warnings remain available, and `office_visual_parity` remains false.
 
 `GraphIcon` is `{base64,mime_type,alt?}` with PNG/JPEG bytes, not a path, URL or raw SVG. Set `icon` to null or omit it on a complete replacement to remove an icon; an icon-mode node must also return to `presentation: "card"`. Each payload uses the existing 1 MiB/4096px/64 MiB decoder bounds; total encoded node and boundary icons share a 3 MiB budget. Document/metadata/response budgets can reject a graph before these maxima. Use `create_graph_icon` for generic imported images: inert SVG becomes PNG at a 256px longest side, larger PNG/JPEG images are downsampled in their format, and smaller rasters retain their bytes. Prepared cloud PNGs bypass this helper to preserve originals up to 512px. Normal `create_asset` behavior is unchanged. Alt text is at most 500 characters.
 
@@ -535,8 +580,17 @@ seven fixed section layouts are `cover`, `metrics`, `table`, `columns`,
 engine. Use guided technical outlines, parts/native graphs or complete typed
 elements according to the required evidence structure and placement control.
 Design presets remain optional, unchanged styles. Typed batches do not add
-SVG caching, a stateful core, a general report-layout catalog, or preflight
-overlap aggregation, finding prioritization or contrast analysis.
+a stateful core, a general report-layout catalog, general preflight overlap
+aggregation, finding prioritization or contrast analysis. Preview shrink
+retries separately reuse at most eight request-local SVG/warning entries,
+up to 16 MiB and within the existing 128 MiB working-allocation budget.
+Only equal or smaller already-validated scales reuse scenes; parsing,
+rasterization and encoding still run at the requested scale. There is no
+cross-request cache. Ordinary transaction processing avoids unneeded JSON
+copies of unbound elements and duplicate byte scans, but still validates
+each operation, source bindings, hashes, native origins and resource limits.
+Requests still serialize complete documents and start a core process;
+latency remains workload-dependent, not constant-time.
 
 `generate` takes `input: {prompt, source_text?, slide_count, allow_remote?, max_repairs?, outline?}`. Each outline entry is `{title, layout}`. Model configuration comes only from the host environment. `max_repairs` accepts 0 or 1, default 0; repair is a separately authorized model call for report validation, not HTTP retry. Provenance includes model, local/remote mode, source hash, duration, attempts and `verified:false`. Model output never grants filesystem/network authority.
 
@@ -594,6 +648,26 @@ Core/MCP `authoring_capabilities` and SDK `client.authoringCapabilities()` repor
 See the [current support boundaries](support-matrix.md#current-single-file-path), [local proofing and text-format painter](authoring/proofing-format-painter.md), [local-only model assistance and segmentation](authoring/local-ai.md), [opt-in document fonts](authoring/fonts.md), [master fields and themes](authoring/master-fields-themes.md), and [chartEx contract](authoring/chart-ex.md). Capability discovery itself performs no inference and certifies neither model quality nor Office/font compatibility. Optional proofread/translation and U2NetP segmentation use the separate local-only contracts, review/revision/cancellation guards and rights requirements.
 
 ## MCP Mapping
+
+### Lightweight Discovery And State
+
+The default `compact` profile initially advertises ten tools: `discover_tools`, `get_tool_schema`, `list_decks`, `get_deck_summary`, `create_presentation`, `edit_slides`, `apply_operations`, `preview_presentation`, `finalize_presentation`, and `register_asset`. `discover_tools({query?,offset?,limit?})` returns names and concise descriptions; `get_tool_schema({name})` returns one self-contained JSON Schema and announces a tool-list change. At most four recently requested advanced tools are additionally advertised. Profiles control discovery and response defaults, not authorization: existing named calls remain supported and strictly validated. `--tool-profile full` exposes all tools and restores legacy response defaults.
+
+Published schemas use local `$defs`/`$ref` within each tool, generated lazily and cached. No cross-tool schema registry is assumed. The official SDK still validates calls against the original Zod schema. The regression measurement for this surface is about 1.26MB for an expanded full list, 624KB for the referenced full list and 54KB for the default ten-tool list. These are serialized JSON bytes, not token counts or an end-to-end timing guarantee.
+
+`list_decks()` returns current IDs, titles, revisions/hashes, slide counts, Undo/Redo state, last successful operation and last presentation export. `get_deck_summary({deck_id,offset?,limit?,slide_id?})` returns up to 32 slides (16 by default); selecting a slide instead returns paginated element IDs, parent IDs, parent-local frames and at most 160 Unicode scalars of text per element. `next_offset` identifies more entries. Neither call clones the complete document, calls core, renders, writes files or includes image bytes, original packages, source text or notes. SDK consumers can use `session.getSummary({offset?,limit?,slideId?})`. Summaries do not prove a slide is finished or visually correct.
+
+Compact successful mutation replies include current revision/hash and Undo/Redo flags. Stale revision/hash guards are unchanged: hashes are not silently omitted or replaced with the latest value. The server automatically tracks successful operations and exports; callers do not need a manual progress file to recover an open handle after context loss. This is process-local memory, not crash recovery or automatic plaintext persistence. Export or explicitly retain recovery data before reconnecting.
+
+Compact `part_catalog` returns 12 entries without examples/schema by default; `preset_id` returns one example. `architecture_icons` defaults to 20 metadata entries and supports a provider filter. Both accept `query`, `offset`, `limit`, and `detail:"full"`. Full detail without filters returns the legacy complete catalog. Generated `create_asset`, `create_graph_icon`, and `architecture_icon_assets` results use reusable asset IDs by default; `detail:"full"` preserves the original byte-bearing results. Core and SDK contracts are unchanged.
+
+### Local Asset Handles
+
+The operator can add up to eight repeatable `--asset-dir path` startup options. No roots are enabled implicitly by `--output-dir`, and requests cannot add or widen them. `register_asset({path:"image.png",root:0})` snapshots a relative regular file and returns `asset_id`, name, type, size and SHA-256, never bytes or absolute source paths. Parent traversal, absolute paths, symbolic links/junctions, alternate streams and device names reject. Root, path and handle identity, size and timestamps are checked around bounded reads. Roots must be trusted against hostile concurrent local filesystem modification; this is not an OS sandbox or a protection-removal API.
+
+Limits: PNG/JPEG 1MiB, SVG 256KiB, PPTX/POTX/THMX 16MiB, TTF/OTF 12MiB, and CSV/JSON/XLSX/Markdown/text/PDF evidence 2MiB. At most 32 immutable handles and 64MiB of raw bytes are retained, deduplicated by format and SHA-256; base64 storage additionally costs about one third. Multi-icon retention is all-or-nothing on capacity failure. `list_assets()` recovers IDs without scanning folders or returning content; `close_asset({asset_id})` releases registry bytes without changing documents that already contain the asset. Registry success identifies bytes, not validated image/Office content or a license.
+
+Existing top-level binary inputs accept exactly one of `base64` or `asset_id`; MIME type can be inferred for a handle. `apply_operations` supports handles in `add_picture`, and managed graph/part inputs support `icon:{asset_id,alt?}`. For example, `open_pptx({asset_id})` reuses registered archive bytes. Expansion is budgeted and passed through strict input validation and the same shared core, retaining type, source protection and font-consent requirements. Existing document-capacity limits can be lower than registry limits. Generated icon handles require no filesystem root; up to 32 icons can be retained per compact catalog-asset call, subject to remaining registry capacity. No URL fetch, imported relationship execution or source overwrite is added.
 
 MCP retains up to eight document and source handles. `ingest_source` returns a source handle; `compile_data_report` consumes it. `get_document` includes revision and sources, while `get_deck` retains the legacy scene-only shape. `apply_transaction` requires a revision. `update_text`, `undo`, `redo`, `add_picture`, `add_diagram`, `measure_layout`, `import_pptx`, `open_project`, `export_project` and legacy `export_pptx` use the shared document/session behavior.
 

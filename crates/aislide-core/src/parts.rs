@@ -159,6 +159,22 @@ pub(super) fn validate_spec(spec: &PartSpec) -> Result<(&str, usize)> {
 
 pub fn create(id: &str, spec: &PartSpec) -> Result<Element> { create_with_theme(id, spec, &crate::design::Theme::default()) }
 
+pub(crate) fn graph_render_context(id: &str, spec: &PartSpec) -> Result<(String, crate::graphs::GraphSpec, f64)> {
+    let PartData::Diagram { graph } = &spec.data else { return Err(Error::Invalid("graph context requires diagram data".into())); };
+    let Some(layout) = &spec.layout else { return Ok((id.into(), graph.clone(), 512.0)); };
+    let mut rendered_graph = graph.clone();
+    rendered_graph.show_title = layout.show_title;
+    let content_height = if graph.show_title && !layout.show_title {
+        for node in &mut rendered_graph.nodes { node.y -= 88.0; }
+        for group in &mut rendered_graph.groups { group.y -= 88.0; }
+        for edge in &mut rendered_graph.edges { for point in &mut edge.waypoints { point[1] -= 88.0; } }
+        424.0
+    } else { 512.0 };
+    use sha2::{Digest, Sha256};
+    let identity = format!("{:x}", Sha256::digest(crate::canonical::bytes(&(id, spec))?));
+    Ok((format!("part-{}", &identity[..24]), rendered_graph, content_height))
+}
+
 pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme) -> Result<Element> {
     valid_text(id,40)?; if id.is_empty() {return Err(Error::Invalid("part identity".into()));}
     crate::design::validate_theme(theme)?;
@@ -166,20 +182,12 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
     if let PartData::Diagram { graph } = &spec.data {
         if category != "diagram" { return Err(Error::Invalid("graph data requires diagram/custom".into())); }
         let Some(layout) = &spec.layout else { return crate::graphs::create(id, graph, theme); };
-        let mut rendered_graph = graph.clone();
-        rendered_graph.show_title = layout.show_title;
-        let content_height = if graph.show_title && !layout.show_title {
-            for node in &mut rendered_graph.nodes { node.y -= 88.0; }
-            for group in &mut rendered_graph.groups { group.y -= 88.0; }
-            424.0
-        } else { 512.0 };
-        use sha2::{Digest, Sha256};
-        let identity = format!("{:x}", Sha256::digest(crate::canonical::bytes(&(id, spec))?));
-        let graph_id = format!("part-{}", &identity[..24]);
+        let (graph_id, rendered_graph, content_height) = graph_render_context(id, spec)?;
         let mut result = crate::graphs::create(&graph_id, &rendered_graph, theme)?;
         if let Element::Group { id: root_id, .. } = &mut result { *root_id = id.into(); }
         adopt_layout(&mut result, layout, 0.0, content_height, theme, &crate::graphs::small_annotation_ids(&graph_id, &rendered_graph)?)?;
         if let Element::Group { children, .. } = &mut result {
+            crate::graphs::fit_node_labels(&graph_id, &rendered_graph, children, theme)?;
             crate::graphs::cap_detail_fonts(&graph_id, &rendered_graph, children)?;
             crate::graphs::fit_detail_widows(&graph_id, &rendered_graph, children, theme)?;
             crate::graphs::validate_label_overlaps(&graph_id, &rendered_graph, children)?;

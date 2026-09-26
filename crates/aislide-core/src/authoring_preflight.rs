@@ -237,14 +237,25 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 	}
 	let mut report = PreflightReport { revision: document.revision, hash: document.hash.clone(), page_indices: selected.clone(), findings: Vec::new(),
 		checks: ["renderer_warnings", "off_slide", "text_overlap", "connector_label_interference", "connector_badge_overlap", "container_clearance", "small_text", "density"].map(String::from).to_vec(),
-		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed frame bounds, not glyph intersection; intentional overlapping text needs human review", "Connector checks exclude attached endpoint nodes; compact opaque numbered ellipses painted over a center-crossing connector are informational, not an automatic visual approval", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
+		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed frame bounds, not glyph intersection; intentional overlapping text needs human review", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices are summarized per page as info; specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
 		office_visual_parity: false, semantic_truth_verified: false };
 	for page in selected {
 		let slide = &deck.slides[page];
+		let known_badges = crate::graphs::managed_badge_pairs(document, &slide.id);
 		let objects = page_objects(deck, page)?;
 		let rendered = crate::render::render_slide_svg(deck, page, false)?;
+		let mut chart_notices: Vec<&Object<'_>> = Vec::new();
 		for warning in rendered.warnings {
 			let object = objects.iter().rev().find(|object| warning.element_id == object.id || warning.element_id.starts_with(&format!("{}[", object.id)));
+			let generic_chart_notice = matches!((warning.code.as_str(), warning.message.as_str()),
+				("CHART_PREVIEW", "Plotters chart layout; axis/legend placement is not Office parity")
+				| ("CHART_PRESENTATION", "AISlide bounded chart projection; not Office visual parity"));
+			if generic_chart_notice {
+				if let Some(object) = object {
+					if !chart_notices.iter().any(|previous| std::ptr::eq(*previous, object)) { chart_notices.push(object); }
+					continue;
+				}
+			}
 			let evidence = object.into_iter().collect::<Vec<_>>();
 			let severity = if matches!(warning.code.as_str(), "TEXT_OVERFLOW" | "MISSING_GLYPHS") { "error" } else { "warning" };
 			let suggestions: &[&str] = match warning.code.as_str() {
@@ -256,6 +267,11 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			if object.is_none() {
 				if let Some(finding) = report.findings.last_mut() { finding.element_ids.push(warning.element_id); }
 			}
+		}
+		if !chart_notices.is_empty() {
+			push_finding(&mut report, page, &slide.id, &chart_notices, "CHART_PREVIEW", "info", "renderer",
+				&format!("{} chart preview(s) use bounded rendering; axis and legend placement are not Office visual parity", chart_notices.len()),
+				&["Compare the listed charts in Office when visual parity matters", "Review specific chart warnings separately"])?;
 		}
 		container_findings(&mut report, page, &slide.id, &objects)?;
 		for (index, object) in objects.iter().enumerate() {
@@ -277,6 +293,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				let inverse = object.transform.inverse();
 				if connector.route.windows(2).any(|segment| crosses_frame(inverse * segment[0], inverse * segment[1], object.frame)) {
 					if object.numbered_badge && index > connector_index && object.scope == connector.scope && route_crosses_badge_center(object, connector) {
+						if object.scope == "slide" && known_badges.contains(&(object.id.into(), connector.id.into())) { continue; }
 						push_finding(&mut report, page, &slide.id, &[object, connector], "CONNECTOR_BADGE_OVERLAP", "info", "heuristic", "A compact opaque numbered badge covers a connector near its center; this may be intentional", &["Keep the connector behind the badge", "Confirm that the number and nearby labels remain readable in the preview"])?;
 					} else {
 						push_finding(&mut report, page, &slide.id, &[object, connector], "CONNECTOR_LABEL_INTERFERENCE", "warning", "geometry", "A connector crosses a text or label frame; a label fill may hide the line", &["Place the label above, below or beside the route", "Reserve a separate label region with clearance from connectors and badges"])?;

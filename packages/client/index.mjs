@@ -139,6 +139,7 @@ export class DocumentSession {
   #future = [];
   #busy = false;
   #fieldWarnings = [];
+  #graphDiagnostics = null;
   #profile;
   #historyBoundary = null;
   constructor(transport, document, options = {}) {
@@ -178,6 +179,33 @@ export class DocumentSession {
   get canRedo() { return this.#future.length > 0; }
   get busy() { return this.#busy; }
   get fieldWarnings() { return [...this.#fieldWarnings]; }
+  get graphDiagnostics() { return structuredClone(this.#graphDiagnostics); }
+
+  getSummary({ offset = 0, limit = 16, slideId } = {}) {
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 0 || limit > 32) throw new Error('Summary requires a nonnegative offset and limit 0..32');
+    const { id, revision, hash, deck } = this.#document;
+    const summary = { document_id: id, revision, hash, title: deck.title, width: deck.width, height: deck.height, slide_count: deck.slides.length,
+      capacity_profile: this.#profile, can_undo: this.canUndo, can_redo: this.canRedo, busy: this.#busy };
+    if (slideId === undefined) return { ...summary, slides: deck.slides.slice(offset, offset + limit).map(slide => ({ id: slide.id, title: slide.title, element_count: slide.elements.length, has_notes: Boolean(slide.notes) })),
+      next_offset: limit > 0 && offset + limit < deck.slides.length ? offset + limit : null };
+    const slide = deck.slides.find(value => value.id === slideId);
+    if (!slide) throw new Error('Unknown slide ID');
+    const stack = slide.elements.map(element => ({ element, parent_id: null })).reverse();
+    const elements = [];
+    let count = 0;
+    while (stack.length > 0) {
+      const { element, parent_id } = stack.pop();
+      if (count >= offset && elements.length < limit) {
+        const text = typeof element.text === 'string' ? Array.from(element.text) : [];
+        elements.push({ id: element.id, type: element.type, parent_id, frame: { x: element.x, y: element.y, width: element.width, height: element.height },
+          ...(text.length ? { text_preview: text.slice(0, 160).join(''), text_truncated: text.length > 160 } : {}),
+          ...(element.type === 'group' ? { child_count: element.children.length } : {}) });
+      }
+      count += 1;
+      if (element.type === 'group') for (let index = element.children.length - 1; index >= 0; index -= 1) stack.push({ element: element.children[index], parent_id: element.id });
+    }
+    return { ...summary, slides: [], slide_id: slide.id, element_count: count, elements, next_offset: limit > 0 && offset + limit < count ? offset + limit : null };
+  }
 
   #retain(history, receipt) {
     if (!receipt) return;
@@ -226,6 +254,7 @@ export class DocumentSession {
     if (options.signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError');
     if (result.receipt) { this.#retain(this.#past, result.receipt); this.#future = []; }
     this.#document = result.document;
+    this.#graphDiagnostics = graphDiagnosticsSnapshot(result, this.#document);
     return this.document;
   }
   #part(op, slideId, input, options = {}) {
@@ -409,6 +438,7 @@ export class DocumentSession {
       const result = await this.#request({ op: 'undo_transaction', document: this.#document, expected_revision: this.#document.revision, receipt }, { signal: options.signal });
       if (options.signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError');
       from.pop(); this.#retain(to, result.receipt); this.#document = result.document;
+      this.#graphDiagnostics = null;
       return this.document;
     }, options);
   }
@@ -419,3 +449,58 @@ export class DocumentSession {
 }
 
 export const FONT_LIMITS = Object.freeze({ face_bytes: 12 * 1048576, total_bytes: 24 * 1048576, faces: 8 });
+
+function graphDiagnosticsSnapshot(result, document) {
+  const binding = { revision: document.revision, hash: document.hash };
+  try {
+    const data = (value, key) => {
+      if (!value || typeof value !== 'object') throw new Error('Invalid graph diagnostic object');
+      const property = Object.getOwnPropertyDescriptor(value, key);
+      if (!property) return undefined;
+      if (!Object.hasOwn(property, 'value')) throw new Error('Invalid graph diagnostic accessor');
+      return property.value;
+    };
+    const array = (value, limit, copy) => {
+      if (!Array.isArray(value)) throw new Error('Invalid graph diagnostic array');
+      const length = data(value, 'length');
+      if (!Number.isSafeInteger(length) || length < 0 || length > limit) throw new Error('Graph diagnostic array limit');
+      const copied = [];
+      for (let index = 0; index < length; index += 1) copied.push(copy(data(value, String(index))));
+      return copied;
+    };
+    const diagnostics = data(result, 'diagnostics');
+    if (diagnostics === undefined) return null;
+    const status = data(diagnostics, 'status');
+    if (!['complete', 'partial', 'unavailable'].includes(status)) throw new Error('Invalid graph diagnostic status');
+    let remaining = 32768;
+    const text = value => {
+      if (typeof value !== 'string' || value.length > remaining) throw new Error('Invalid graph diagnostic text');
+      remaining -= value.length;
+      return value;
+    };
+    const findings = array(data(diagnostics, 'findings'), 64, finding => {
+      const severity = data(finding, 'severity');
+      if (!['warning', 'info'].includes(severity)) throw new Error('Invalid graph finding severity');
+      const bounds = array(data(finding, 'bounds'), 4, value => {
+        if (!Number.isFinite(value)) throw new Error('Invalid graph finding bounds');
+        return value;
+      });
+      if (bounds.length !== 4) throw new Error('Invalid graph finding bounds');
+      const copy = { code: text(data(finding, 'code')), severity, graph_id: text(data(finding, 'graph_id')), entity_id: text(data(finding, 'entity_id')), element_ids: array(data(finding, 'element_ids'), 128, text), bounds, message: text(data(finding, 'message')) };
+      const slideId = data(finding, 'slide_id'), lines = data(finding, 'lines'), fontSize = data(finding, 'font_size');
+      if (slideId !== undefined) copy.slide_id = text(slideId);
+      if (lines !== undefined) {
+        if (!Number.isSafeInteger(lines) || lines < 1) throw new Error('Invalid graph line count');
+        copy.lines = lines;
+      }
+      if (fontSize !== undefined) {
+        if (!Number.isFinite(fontSize) || fontSize <= 0) throw new Error('Invalid graph font size');
+        copy.font_size = fontSize;
+      }
+      return copy;
+    });
+    const normalized = { status, findings };
+    if (new TextEncoder().encode(JSON.stringify(normalized)).byteLength > 32768) throw new Error('Graph diagnostics byte limit');
+    return { ...binding, ...normalized };
+  } catch { return { ...binding, status: 'unavailable', findings: [] }; }
+}

@@ -1,5 +1,5 @@
 ﻿import type { AislideDocument, Checkpoint, DataMapping, DataReport, Deck, Design, Element, ImportedObject, ObjectCatalog, ObjectKind, PatchOperation, PresentationExport, ProjectExport, Report, SourceBinding, SourceDocument, SourceInput, Theme } from './types'
-import type { PartCatalog, PartSpec, GraphCatalog, GraphIcon, GraphSpec, GraphOperation, SlideOperation, ElementOperation, AssetInput, DesignPreset } from './types'
+import type { PartCatalog, PartSpec, GraphCatalog, GraphIcon, GraphSpec, GraphOperation, GraphCreation, GraphDiagnosticsSnapshot, SlideOperation, ElementOperation, AssetInput, DesignPreset } from './types'
 import type { AuthoringProfile, BestPracticeGuide, BestPracticeProfiles, GuidedInput, GuidedReview } from './types'
 import type { ArchitectureIconCatalog, ArchitectureIconAssets } from './types'
 import type { MasterSourceInput, MasterSourceInspection, MasterImportInput, MasterImportPreview } from './types'
@@ -21,6 +21,13 @@ export function encodeCoreRequest(request: unknown): string
 import type { StaticExportOptions, StaticExport, VerifiedRecoveryDocument, PreviewOptions, PresentationPreview, PreflightOptions, PreflightReport, RevisionEdit, RevisionPreview, DeliveryOptions, PreparedDelivery } from './types'
 export type TransactionOptions = RequestOptions & { expectedRevision?: number }
 export type AuthoringOptions = TransactionOptions & { expectedHash?: string }
+export type SessionSummary = {
+  document_id: string; revision: number; hash: string; title: string; width: number; height: number; slide_count: number
+  capacity_profile: CapacityProfile; can_undo: boolean; can_redo: boolean; busy: boolean; next_offset: number | null
+  slides: { id: string; title: string; element_count: number; has_notes: boolean }[]
+  slide_id?: string; element_count?: number
+  elements?: { id: string; type: Element['type']; parent_id: string | null; frame: Frame; text_preview?: string; text_truncated?: boolean; child_count?: number }[]
+}
 export type AssignLayoutOptions = TransactionOptions & { preserveFreeform?: boolean }
 export type ReplaceOptions = TransactionOptions & { sources?: SourceDocument[]; bindings?: SourceBinding[]; report?: Report | null }
 export type CoreTransport = <T>(request: unknown, options?: RequestOptions) => Promise<T>
@@ -70,7 +77,9 @@ export class AislideClient {
   architectureIcons(options?: RequestOptions): Promise<ArchitectureIconCatalog>
   architectureIconAssets(ids: string[], options?: RequestOptions): Promise<ArchitectureIconAssets>
   createGraphIcon(input: Pick<AssetInput, 'base64' | 'mime_type'> & { alt?: string }, options?: RequestOptions): Promise<GraphIcon>
-  createGraph(input: { id: string; spec: GraphSpec; theme?: Theme }, options?: RequestOptions): Promise<Element>
+  createGraph(input: { id: string; spec: GraphSpec; theme?: Theme; include_diagnostics: true }, options?: RequestOptions): Promise<GraphCreation>
+  createGraph(input: { id: string; spec: GraphSpec; theme?: Theme; include_diagnostics?: false }, options?: RequestOptions): Promise<Element>
+  createGraph(input: { id: string; spec: GraphSpec; theme?: Theme; include_diagnostics?: boolean }, options?: RequestOptions): Promise<Element | GraphCreation>
   transformGraph(spec: GraphSpec, operations: GraphOperation[], options?: RequestOptions): Promise<GraphSpec>
   createPart(input: { id: string; spec: PartSpec; theme?: Theme }, options?: RequestOptions): Promise<Element>
   createObject(input: ObjectInput, options?: RequestOptions): Promise<Element>
@@ -94,6 +103,8 @@ export class DocumentSession {
   readonly canRedo: boolean
   readonly busy: boolean
   readonly fieldWarnings: string[]
+  readonly graphDiagnostics: GraphDiagnosticsSnapshot | null
+  getSummary(options?: { offset?: number; limit?: number; slideId?: string }): SessionSummary
   transact(operations: PatchOperation[], options?: TransactionOptions): Promise<AislideDocument>
   /** 1..128 typed operations, one core transaction and Undo per changed batch. Prefer add_part/add_graph for regenerable metadata; add_elements is unmanaged. add_graph accepts layout here only; update_graph retains its existing PartLayout. Core capacity and 128 total metadata entries still apply. */
   applyOperations(operations: AuthoringOperation[], options?: AuthoringOptions): Promise<AislideDocument>

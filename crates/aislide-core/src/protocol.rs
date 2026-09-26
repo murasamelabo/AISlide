@@ -28,7 +28,7 @@ enum Request {
     ArchitectureIcons {},
     ArchitectureIconAssets { ids: Vec<String> },
     CreateGraphIcon { base64: String, mime_type: String, #[serde(default)] alt: String },
-    CreateGraph { id: String, spec: crate::graphs::GraphSpec, #[serde(default)] theme: Option<crate::design::Theme> },
+    CreateGraph { id: String, spec: crate::graphs::GraphSpec, #[serde(default)] theme: Option<crate::design::Theme>, #[serde(default)] include_diagnostics: bool },
     InsertGraph { document: crate::document::Document, expected_revision: u64, slide_id: String, id: String, spec: crate::graphs::GraphSpec },
     UpdateGraph { document: crate::document::Document, expected_revision: u64, slide_id: String, id: String, spec: crate::graphs::GraphSpec },
     TransformGraph { spec: crate::graphs::GraphSpec, operations: Vec<crate::graphs::GraphOperation> },
@@ -215,7 +215,12 @@ fn execute(request: Request, profile: crate::limits::CapacityProfile) -> Result<
         Request::ArchitectureIcons {} => Ok(serde_json::to_value(crate::architecture_icons::catalog()?)?),
         Request::ArchitectureIconAssets { ids } => Ok(serde_json::to_value(crate::architecture_icons::assets(&ids)?)?),
         Request::CreateGraphIcon { base64, mime_type, alt } => Ok(serde_json::to_value(crate::graphs::create_icon(base64, &mime_type, &alt)?)?),
-        Request::CreateGraph { id, spec, theme } => Ok(serde_json::to_value(crate::graphs::create(&id, &spec, &theme.unwrap_or_default())?)?),
+        Request::CreateGraph { id, spec, theme, include_diagnostics } => {
+            let theme = theme.unwrap_or_default();
+            let element = crate::graphs::create(&id, &spec, &theme)?;
+            if include_diagnostics { Ok(serde_json::json!({"diagnostics":crate::graphs::diagnostics(&id, &spec, &element, &theme),"element":element})) }
+            else { Ok(serde_json::to_value(element)?) }
+        },
         Request::InsertGraph { document, expected_revision, slide_id, id, spec } => Ok(serde_json::to_value(crate::graphs::change(&document, expected_revision, &slide_id, &id, &spec, false)?)?),
         Request::UpdateGraph { document, expected_revision, slide_id, id, spec } => Ok(serde_json::to_value(crate::graphs::change(&document, expected_revision, &slide_id, &id, &spec, true)?)?),
         Request::TransformGraph { spec, operations } => Ok(serde_json::to_value(crate::graphs::transform(&spec, &operations)?)?),

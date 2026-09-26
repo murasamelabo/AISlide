@@ -1,7 +1,9 @@
 ﻿import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { randomUUID, createHash } from 'node:crypto';
+import { parseArgs } from 'node:util';
 import { mkdir, realpath, lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { requestCore, MAX_REQUEST_BYTES } from './core-client.mjs';
@@ -9,27 +11,35 @@ import { CAPACITY_PROFILES, FONT_LIMITS } from '../packages/client/index.mjs';
 import { publishNewFile, publishNewBundle, BundlePublicationError } from './atomic-output.mjs';
 import { publishProject } from './atomic-project.mjs';
 import { AislideClient } from '../packages/client/index.mjs';
+import { McpAssets } from './mcp-assets.mjs';
 
 const serverInfo = { name: 'aislide', version: '0.1.0' };
 const server = new McpServer(serverInfo);
-const args = process.argv.slice(2);
-if (args.length !== 0 && (args.length !== 2 || args[0] !== '--output-dir')) {
-	throw new Error('Usage: node tools/mcp.mjs [--output-dir path]');
-}
+const { values: args } = parseArgs({ options: { 'output-dir': { type: 'string' }, 'tool-profile': { type: 'string', default: 'compact' }, 'asset-dir': { type: 'string', multiple: true, default: [] } }, allowPositionals: false });
+const toolProfile = z.enum(['compact', 'full']).parse(args['tool-profile']);
+const assets = await McpAssets.create(args['asset-dir']);
 let outputDirectory;
-if (args[1]) {
-	await mkdir(resolve(args[1]), { recursive: true });
-	outputDirectory = await realpath(resolve(args[1]));
+if (args['output-dir']) {
+	await mkdir(resolve(args['output-dir']), { recursive: true });
+	outputDirectory = await realpath(resolve(args['output-dir']));
 }
 const decks = new Map();
+const deckActivity = new Map();
 const sources = new Map();
 const revisionCandidates = new Map();
+const toolDefinitions = [];
+const publishedTools = new Map();
+const loadedTools = new Set();
+const compactTools = new Set(['discover_tools', 'get_tool_schema', 'list_decks', 'get_deck_summary', 'create_presentation', 'edit_slides', 'apply_operations', 'preview_presentation', 'finalize_presentation', 'register_asset']);
+const nestedAssetTools = new Set(['apply_operations', 'create_graph', 'add_graph', 'update_graph', 'transform_graph', 'apply_graph', 'create_part', 'add_part', 'update_part', 'create_guided_presentation', 'validate_guided_presentation', 'preview_slide_revision']);
 const candidateLifetimeMs = 10 * 60 * 1000;
 const client = new AislideClient(requestCore);
 const imageResult = Symbol('imageResult');
 let activeMutation = false;
 const handle = z.string().uuid();
 const shortText = z.string().max(120);
+const detailSchema = z.enum(['summary', 'full']).optional();
+const catalogPage = { query: z.string().max(160).optional(), offset: z.number().int().min(0).max(2048).optional(), limit: z.number().int().min(1).max(50).optional(), detail: detailSchema };
 const fontBase64 = z.string().max(Math.ceil(FONT_LIMITS.face_bytes / 3) * 4);
 const capacityProfileSchema = z.enum(['legacy', 'standard', 'large']);
 const archiveBase64 = z.string().max(Math.ceil(CAPACITY_PROFILES.large.archive_bytes / 3) * 4);
@@ -236,19 +246,19 @@ const authoringVariants = [
 	z.object({ op: z.literal('add_graph'), slide_id: slideId, id: z.string().min(1).max(40), spec: z.lazy(() => graphSpec), layout: optional(z.lazy(() => partLayout)) }).strict(),
 	z.object({ op: z.literal('update_graph'), slide_id: slideId, id: z.string().min(1).max(40), spec: z.lazy(() => graphSpec) }).strict(),
 ];
-const authoringOperations = z.array(z.discriminatedUnion('op', authoringVariants)).min(1).max(128);
+const authoringOperations = z.array(z.discriminatedUnion('op', authoringVariants.map(variant => variant.shape.op.value === 'add_picture' ? withAssetReference(variant) : variant))).min(1).max(128);
 const objectInput = { id: slideId, kind: z.enum(['text', 'shape', 'table', 'chart', 'line', 'arrow']), preset: z.string().max(80).optional(), rows: z.number().int().min(1).max(12).optional(), columns: z.number().int().min(1).max(8).optional() };
 const templateKind = z.enum(['potx', 'thmx']);
 const templateFilename = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}\.(?:potx|thmx)$/).refine((name) => !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])\./i.test(name), 'Reserved Windows filename');
 
 const graphId = z.string().regex(/^[A-Za-z0-9_-]{1,24}$/);
 const graphPort = z.enum(['auto', 'top', 'left', 'bottom', 'right']);
-const graphIcon = z.object({ base64: z.string().min(1).max(1398104), mime_type: z.enum(['image/png', 'image/jpeg']), alt: z.string().max(500).optional() }).strict();
-const graphNode = z.object({ id: graphId, label: z.string().max(160), detail: optional(z.string().max(480).refine(value => value.trim().length > 0 && Array.from(value).length <= 240, 'Detail requires 1-240 Unicode scalars and must not be blank')), detail_font_size: optional(z.number().min(12).max(40)), text_align: optional(z.enum(['left', 'center', 'right'])), heading_bold: z.boolean().optional(), kind: z.enum(['rectangle', 'rounded_rectangle', 'ellipse', 'diamond', 'cylinder', 'cloud']).optional(), presentation: z.enum(['card', 'icon']).optional(), x: z.number().min(0).max(1152), y: z.number().min(0).max(512), width: z.number().min(64).max(1152).optional(), height: z.number().min(40).max(512).optional(), fill: colorSchema.optional(), stroke: colorSchema.optional(), color: colorSchema.optional(), font_size: z.number().min(12).max(40).optional(), group: graphId.nullable().optional(), icon: graphIcon.nullable().optional() }).strict();
+const graphIcon = withAssetReference(z.object({ base64: z.string().min(1).max(1398104), mime_type: z.enum(['image/png', 'image/jpeg']), alt: z.string().max(500).optional() }).strict());
+const graphNode = z.object({ id: graphId, label: z.string().max(160), label_fit: z.enum(['wrap', 'shrink']).optional().describe('Default wrap is omitted. Shrink prefers a single line down to 12px, preserves hard newlines, and may still wrap at the floor.'), detail: optional(z.string().max(480).refine(value => value.trim().length > 0 && Array.from(value).length <= 240, 'Detail requires 1-240 Unicode scalars and must not be blank')), detail_font_size: optional(z.number().min(12).max(40)), text_align: optional(z.enum(['left', 'center', 'right'])), heading_bold: z.boolean().optional(), kind: z.enum(['rectangle', 'rounded_rectangle', 'ellipse', 'diamond', 'cylinder', 'cloud']).optional(), presentation: z.enum(['card', 'icon']).optional(), x: z.number().min(0).max(1152), y: z.number().min(0).max(512), width: z.number().min(64).max(1152).optional(), height: z.number().min(40).max(512).optional(), fill: colorSchema.optional(), stroke: colorSchema.optional(), color: colorSchema.optional(), font_size: z.number().min(12).max(40).optional(), group: graphId.nullable().optional(), icon: graphIcon.nullable().optional() }).strict();
 const graphLabelPlacement = z.object({ position: alpha, side: z.enum(['above', 'below']).optional(), offset: z.number().min(0).max(128).optional(), on_overlap: z.enum(['warn', 'error']).optional() }).strict();
 const graphBadge = z.object({ number: z.number().int().min(1).max(99), position: alpha.optional(), size: z.number().min(16).max(64).optional(), font_size: z.number().min(8).max(32).optional(), fill: colorSchema.optional(), color: colorSchema.optional() }).strict();
 const graphEdge = z.object({ id: graphId, source: graphId, target: graphId, source_port: graphPort.optional(), target_port: graphPort.optional(), label: z.string().max(64).optional(), route: z.enum(['straight', 'elbow', 'manual']).optional(), waypoints: z.array(z.tuple([z.number().min(0).max(1152), z.number().min(0).max(512)])).max(16).optional(), color: colorSchema.optional(), arrow: z.boolean().optional(), start_arrow: z.boolean().optional(), dashed: z.boolean().optional(), stroke_width: optional(z.number().min(0.5).max(12)), label_color: optional(colorSchema), label_font_size: optional(z.number().min(8).max(40)), source_offset: optional(z.number().min(-0.5).max(0.5)), target_offset: optional(z.number().min(-0.5).max(0.5)), label_placement: optional(graphLabelPlacement), badge: optional(graphBadge) }).strict();
-const graphGroup = z.object({ id: graphId, label: z.string().max(64), x: z.number().min(0).max(1152), y: z.number().min(0).max(512), width: z.number().min(64).max(1152), height: z.number().min(40).max(512), fill: colorSchema.optional(), stroke: colorSchema.optional(), parent: graphId.nullable().optional(), icon: graphIcon.nullable().optional(), padding: optional(z.number().min(0).max(64)), header_height: optional(z.number().min(20).max(128)), header_font_size: optional(z.number().min(8).max(32)) }).strict();
+const graphGroup = z.object({ id: graphId, label: z.string().max(64), x: z.number().min(0).max(1152), y: z.number().min(0).max(512), width: z.number().min(64).max(1152), height: z.number().min(40).max(512), fill: colorSchema.optional(), stroke: colorSchema.optional(), parent: graphId.nullable().optional(), icon: graphIcon.nullable().optional(), padding: optional(z.number().min(0).max(64)), header_height: optional(z.number().min(20).max(128)), header_font_size: optional(z.number().min(8).max(32)), header_color: optional(colorSchema).describe('Header text RGB or theme color; omitted or null defaults to @dk1.') }).strict();
 const graphSpec = z.object({ version: z.literal(1), title: z.string().max(80), subtitle: z.string().max(120).optional(), show_title: z.boolean().optional(), nodes: z.array(graphNode).min(1).max(48), edges: z.array(graphEdge).max(64).optional(), groups: z.array(graphGroup).max(16).optional() }).strict();
 const graphSelection = z.array(graphId).min(1).max(120);
 const graphOperations = z.array(z.discriminatedUnion('op', [
@@ -305,10 +315,57 @@ const guidedInput = z.object({
 	slides: z.array(z.object({ id: slideId, section: z.string().min(1).max(80), headline: z.string().min(1).max(240), sentence_form: z.enum(['causal', 'conditional', 'contrast', 'causal-focus', 'evaluation', 'proposal', 'explanation', 'comparison', 'outcome']), pattern_id: z.string().min(1).max(80), question: z.string().min(1).max(240), parent_message: z.string().min(1).max(80), transition: z.string().min(1).max(80), parallel_basis: z.string().min(1).max(80), part: partSpec.nullable().optional(), speaker_notes: optional(z.string().max(8000).refine(value => Array.from(value).length <= 4000, 'Speaker notes exceed 4000 Unicode scalars')), support: z.array(z.object({ clause: z.string().min(1).max(240), body_paths: z.array(z.string().min(1).max(512)).min(1).max(16), evidence_ids: z.array(evidenceId).min(1).max(16) }).strict()).max(8), numbers: z.array(z.object({ path: z.string().min(1).max(512), value: z.union([partValue, z.string().max(120), z.boolean(), z.null()]), evidence_id: evidenceId }).strict()).max(256).optional() }).strict()).min(1).max(128),
 }).strict();
 
+function withAssetReference(schema) {
+	const hasMime = Boolean(schema.shape.mime_type);
+	return schema.safeExtend({ base64: schema.shape.base64.optional(), asset_id: handle.optional(), ...(hasMime ? { mime_type: schema.shape.mime_type.optional() } : {}) })
+		.refine(value => value.base64 === undefined ? value.asset_id !== undefined : value.asset_id === undefined && (!hasMime || value.mime_type !== undefined), 'Supply either base64 (with mime_type where applicable) or asset_id, never both')
+		.meta({ oneOf: [{ required: hasMime ? ['base64', 'mime_type'] : ['base64'], not: { required: ['asset_id'] } }, { required: ['asset_id'], not: { required: ['base64'] } }] });
+}
+
+function expandAssetReferences(input, name, rootMime, budget) {
+	let size = Buffer.byteLength(JSON.stringify(input));
+	const expand = (value, root = false) => {
+		if (!value || typeof value !== 'object') return value;
+		if (Array.isArray(value)) return value.map(item => expand(item));
+		if (Object.hasOwn(value, 'asset_id')) {
+			const asset = assets.get(value.asset_id);
+			const { asset_id: _assetId, ...fields } = value;
+			if (fields.base64 !== undefined) throw new Error('Supply base64 or asset_id, not both');
+			const expectedFormat = root && (['open_pptx', 'import_pptx', 'inspect_pptx_fonts', 'open_project'].includes(name) ? 'pptx' : name === 'ingest_source' ? fields.format : ['import_template', 'inspect_master_source'].includes(name) ? fields.kind : undefined);
+			if (expectedFormat && asset.format !== expectedFormat) throw new Error('Asset format does not match the requested input');
+			if (root && ['inspect_font', 'embed_font'].includes(name) && !['ttf', 'otf'].includes(asset.format)) throw new Error('Expected a registered TTF/OTF asset');
+			if (fields.mime_type !== undefined && fields.mime_type !== asset.mime_type) throw new Error('Asset MIME type mismatch');
+			size += asset.base64.length + 128;
+			if (size > budget) throw new Error('Expanded asset input exceeds selected capacity profile');
+			return { ...fields, base64: asset.base64, ...(!root || rootMime ? { mime_type: asset.mime_type } : {}) };
+		}
+		return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, expand(item)]));
+	};
+	return expand(input, true);
+}
+
 function getDeck(id) {
 	const state = decks.get(id);
-	if (!state) throw new Error('Unknown deck handle; create or compile a deck first');
+	if (!state) throw new Error('Unknown deck handle; use list_decks to find an open deck, or create one');
 	return state;
+}
+
+function deckSummary(deck_id, options = { limit: 0 }) {
+	return { deck_id, ...getDeck(deck_id).getSummary(options), ...deckActivity.get(deck_id) };
+}
+
+function compactResponse(detail) { return detail === 'summary' || (detail !== 'full' && toolProfile === 'compact'); }
+
+function previewSelection(total, options) {
+	return options?.page_indices ?? Array.from({ length: Math.min(total, 8) }, (_unused, index) => index);
+}
+
+function retainedImages(images) {
+	const retained = assets.retainMany(images.map(image => {
+		if (!['image/png', 'image/jpeg'].includes(image.mime_type)) throw new Error('Expected a core-prepared PNG/JPEG');
+		return { bytes: Buffer.from(image.base64, 'base64'), format: image.mime_type === 'image/png' ? 'png' : 'jpeg', name: image.id ?? 'generated-image' };
+	}));
+	return images.map(({ base64: _base64, ...image }, index) => ({ ...image, asset_id: retained[index].asset_id }));
 }
 
 function previewResult(result, includeImages = true) {
@@ -329,7 +386,12 @@ function expireCandidates() {
 function toolResponse(result) {
 	const metadata = result?.[imageResult] ? result.metadata : result;
 	const text = JSON.stringify(metadata);
-	return { content: [{ type: 'text', text }, ...(result?.[imageResult] ? result.images : [])], ...(Buffer.byteLength(text) <= 65536 ? { structuredContent: metadata } : {}) };
+	return { content: [{ type: 'text', text }, ...(result?.[imageResult] ? result.images : [])], ...(toolProfile === 'full' && Buffer.byteLength(text) <= 65536 ? { structuredContent: metadata } : {}) };
+}
+
+function publishedTool({ schema, ...definition }) {
+	if (!publishedTools.has(definition.name)) publishedTools.set(definition.name, { ...definition, inputSchema: z.toJSONSchema(schema, { target: 'draft-2020-12', io: 'input', reused: 'ref' }) });
+	return publishedTools.get(definition.name);
 }
 
 function managedProgress(name, readOnly, extra) {
@@ -360,23 +422,42 @@ function managedProgress(name, readOnly, extra) {
 
 function register(name, description, inputSchema, readOnly, action) {
 	const selectsProfile = ['create_presentation', 'compile_report', 'open_pptx', 'import_pptx', 'open_project', 'import_template', 'inspect_master_source', 'create_guided_presentation', 'verify_recovery', 'recover_presentation'].includes(name);
+	const originalSchema = z.object({ ...inputSchema, ...(selectsProfile ? { capacity_profile: capacityProfileSchema.optional() } : {}) }).strict();
+	const binary = Boolean(inputSchema.base64);
+	const schema = binary ? withAssetReference(originalSchema) : originalSchema;
+	if (binary) description += ' Accepts base64 or a registered asset_id; MIME type can be inferred from the asset.';
+	const annotations = { readOnlyHint: readOnly, destructiveHint: false, openWorldHint: name === 'generate_report' };
+	toolDefinitions.push({ name, description, schema, annotations });
 	server.registerTool(name, {
 		description,
-		inputSchema: z.object({ ...inputSchema, ...(selectsProfile ? { capacity_profile: capacityProfileSchema.optional() } : {}) }).strict(),
-		annotations: { readOnlyHint: readOnly, destructiveHint: false, openWorldHint: name === 'generate_report' },
+		inputSchema: schema,
+		annotations,
 	}, async (input, extra) => {
 		if (!readOnly && activeMutation) return { isError: true, content: [{ type: 'text', text: 'Another mutation is in progress' }] };
 		if (!readOnly) activeMutation = true;
 		let stopProgress;
 		try {
-			const { capacity_profile, ...parameters } = input;
+			const { capacity_profile } = input;
 			const profile = capacity_profile ?? (input.deck_id ? getDeck(input.deck_id).capacityProfile : 'large');
 			const budget = CAPACITY_PROFILES[profile].request_bytes;
 			if (Buffer.byteLength(JSON.stringify(input), 'utf8') > budget) throw new Error('JSON input exceeds selected capacity profile');
 			if (extra.signal.aborted) throw new Error('Operation cancelled');
+			const expanded = binary || nestedAssetTools.has(name) ? expandAssetReferences(input, name, Boolean(inputSchema.mime_type), budget) : input;
+			const { capacity_profile: _capacityProfile, ...parameters } = originalSchema.parse(expanded);
 			stopProgress = managedProgress(name, readOnly, extra);
 			const result = await action(parameters, extra.signal, { signal: extra.signal, capacityProfile: profile });
 			if (readOnly && extra.signal.aborted) throw new Error('Operation cancelled');
+			const metadata = result?.[imageResult] ? result.metadata : result;
+			const deck_id = metadata?.deck_id ?? input.deck_id;
+			const state = decks.get(deck_id);
+			if (!readOnly && state) {
+				const summary = state.getSummary({ limit: 0 });
+				const activity = { ...deckActivity.get(deck_id), last_operation: { name, revision: summary.revision, at: new Date().toISOString() } };
+				if (name === 'export_pptx' || name === 'finalize_presentation') activity.last_export = { revision: summary.revision, hash: summary.hash,
+					path: metadata.path ?? metadata.files.find(file => file.kind === 'pptx')?.path, ...(metadata.manifest ? { manifest_path: metadata.manifest.path } : {}) };
+				deckActivity.set(deck_id, activity);
+				if (toolProfile === 'compact') Object.assign(metadata, { deck_id, revision: summary.revision, hash: summary.hash, can_undo: summary.can_undo, can_redo: summary.can_redo });
+			}
 			const response = toolResponse(result);
 			if (Buffer.byteLength(JSON.stringify(response), 'utf8') > Math.min(budget, result?.[imageResult] ? 4 * 1048576 : budget)) throw new Error('JSON tool output exceeds selected capacity profile; request a smaller result');
 			return response;
@@ -392,6 +473,29 @@ function register(name, description, inputSchema, readOnly, action) {
 	});
 }
 
+register('discover_tools', 'Search advanced AISlide tool names and concise descriptions without loading their schemas. Use get_tool_schema(name) to expose one tool. Profiles change discovery, not permissions; all existing named calls retain strict validation.', { query: z.string().max(160).optional(), offset: z.number().int().min(0).max(1024).optional(), limit: z.number().int().min(1).max(20).optional() }, true, async ({ query = '', offset = 0, limit = 10 }) => {
+	const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+	const matching = toolDefinitions.filter(tool => terms.every(term => `${tool.name} ${tool.description}`.toLowerCase().includes(term)));
+	return { profile: toolProfile, total: matching.length, tools: matching.slice(offset, offset + limit).map(({ name, description, annotations }) => ({ name, description: description.slice(0, 180), read_only: annotations.readOnlyHint, loaded: toolProfile === 'full' || compactTools.has(name) || loadedTools.has(name) })), next_offset: offset + limit < matching.length ? offset + limit : null };
+});
+register('get_tool_schema', 'Return one exact self-contained tool schema and expose that tool through tools/list. Compact mode keeps the four most recently requested advanced tools; notifications/tools/list_changed announces changes. Full mode retains all tools. No document or file changes.', { name: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/) }, true, async ({ name }) => {
+	const tool = toolDefinitions.find(definition => definition.name === name);
+	if (!tool) throw new Error('Unknown tool name; use discover_tools');
+	const definition = publishedTool(tool);
+	if (toolProfile === 'compact' && !compactTools.has(name)) {
+		const changed = !loadedTools.has(name);
+		loadedTools.delete(name);
+		loadedTools.add(name);
+		if (loadedTools.size > 4) loadedTools.delete(loadedTools.values().next().value);
+		if (changed && server.isConnected()) await server.server.sendToolListChanged();
+	}
+	return definition;
+});
+register('register_asset', 'Read one relative file inside an operator-approved --asset-dir (root defaults to 0). Return an immutable reusable asset_id, name, type, size and SHA-256, never base64. PNG/JPEG 1MiB, SVG 256KiB, PPTX/POTX/THMX 16MiB, TTF/OTF 12MiB, evidence files 2MiB. At most 32 assets / 64MiB. Reject links, traversal and changing files. Core validates content when used; no external fetch or writes.', { path: z.string().min(1).max(512), root: z.number().int().min(0).max(7).optional() }, false, async (input, signal) => assets.registerFile(input, signal));
+register('list_assets', 'Recover registered asset IDs, types, hashes and sizes without returning bytes or scanning directories. Process-local state only.', {}, true, async () => assets.list());
+register('close_asset', 'Release registered source bytes from this MCP process. Pictures and source packages already stored in documents remain unchanged.', { asset_id: handle }, false, async ({ asset_id }) => assets.close(asset_id));
+register('list_decks', 'Resume work after lost context: list open handles, titles, revision/hash, slide counts, Undo state, last successful operation and last export. Metadata only; no core call, rendering, source/image bytes or filesystem writes. State lasts only for this MCP process.', {}, true, async () => ({ persisted: false, mutation_in_progress: activeMutation, decks: [...decks.keys()].map(deck_id => deckSummary(deck_id)) }));
+register('get_deck_summary', 'Read compact current state and a page of slide IDs/titles/counts without rendering or copying the full document. Set slide_id for a paginated flattened element index with parent IDs, local frames and 160-character text excerpts. No image, notes, source or original-package bytes. Use returned revision/hash for guarded edits; next_offset indicates more results.', { deck_id: handle, slide_id: slideId.optional(), offset: z.number().int().min(0).max(8192).optional(), limit: z.number().int().min(1).max(32).optional() }, true, async ({ deck_id, slide_id, offset, limit }) => deckSummary(deck_id, { slideId: slide_id, offset, limit }));
 register('sample_report', 'Return a twelve-slide structured example. All numbers are synthetic, and no model or network request is used.', {}, true, async (_input, signal) => requestCore({ op: 'sample' }, { signal }));
 register('inspect_font', 'Inspect explicitly selected TTF/OTF bytes, family/style, OS/2 fsType and hash. No installation, file access or license verification. Metadata-only fonts are not usable.', { base64: fontBase64 }, true, async ({ base64 }, signal) => client.inspectFont(base64, { signal }));
 register('inspect_pptx_fonts', 'Inspect only the presentation-root embedded font list and referenced internal bytes. Reports hashes and opaque encodings. Never loads fonts, follows external relationships or removes protection.', { base64: z.string().max(MAX_REQUEST_BYTES - 1024) }, true, async ({ base64 }, signal) => client.inspectPptxFonts(base64, { signal }));
@@ -553,15 +657,21 @@ register('recover_presentation', 'Verify supplied recovery JSON and create a NEW
 	const id = randomUUID(); decks.set(id, state);
 	return { deck_id: id, revision: state.revision, hash: state.document.hash, slides: state.document.deck.slides.length };
 });
-register('preview_presentation', 'Read selected pages as actual MCP PNG/JPEG images or one contact sheet, with slide IDs, coordinates, revision/hash and renderer warnings. 1-8 unique zero-based pages; omission selects all only when at most eight slides exist. Maximum edge 1600px, encoded images 2MiB, response 4MiB. Defaults: format=png, overflow=shrink. Only encoded-byte overflow retries at 75% then 56.25% of requested size, minimum 160px; all pages are retained. quality_reduced and actual_max_dimension disclose reduction. overflow=error forbids shrink. No files, network, document or Undo changes. include_images=false omits images but still renders; use get_document for revision/hash. Stale bindings are warned; not Office parity.', { deck_id: handle, options: previewOptions.optional(), include_images: z.boolean().optional() }, true, async ({ deck_id, options, include_images }, signal) => {
-	return previewResult({ deck_id, ...await getDeck(deck_id).previewPresentation(options, { signal }) }, include_images);
+register('preview_presentation', 'Read selected pages as actual MCP PNG/JPEG images with slide IDs, coordinates, revision/hash and warnings. Compact default: 640px JPEG contact sheet, 384KiB images, first 1-8 pages with page_scope showing unselected pages. detail=full restores core defaults (PNG, explicit selection for decks over eight pages). Explicit options override defaults; maximum 1600px, 2MiB encoded, 4MiB response. Only encoded-byte overflow shrinks at 75% then 56.25%, minimum 160px; selected pages are retained. quality_reduced and actual_max_dimension disclose reduction; overflow=error forbids shrink. include_images=false still renders; use get_deck_summary for metadata without rendering. No files, network or Undo changes; not Office parity.', { deck_id: handle, options: previewOptions.optional(), include_images: z.boolean().optional(), detail: detailSchema }, true, async ({ deck_id, options, include_images, detail }, signal) => {
+	const state = getDeck(deck_id);
+	const total = state.getSummary({ limit: 0 }).slide_count;
+	if (compactResponse(detail)) options = { max_dimension: 640, layout: 'contact_sheet', format: 'jpeg', max_output_bytes: 384 * 1024, ...options, page_indices: previewSelection(total, options) };
+	const result = await state.previewPresentation(options, { signal });
+	return previewResult({ deck_id, ...result, ...(compactResponse(detail) ? { page_scope: { total, selected: result.pages.length, unselected: total - result.pages.length } } : {}) }, include_images);
 });
-register('preflight_presentation', 'Read bounded visual diagnostics for 1-8 selected pages: renderer clipping/glyph/font warnings, transformed off-slide frames, text overlap, connector-label interference, rounded-container corner and padding heuristics, small text and density. Likely intentional opaque numbered badges are info, not approved. Returns IDs, scopes, bounds, evidence and repair suggestions. No automatic edits, external fetch, factual verification, Office parity or accessibility certification. Backgrounds are not text collisions; likely rounded containers are checked separately. Attached connector endpoints are excluded. Run check_accessibility separately.', { deck_id: handle, options: z.object({ page_indices: previewOptions.shape.page_indices, min_font_size: z.number().min(8).max(48).optional() }).strict().optional() }, true, async ({ deck_id, options }, signal) => {
+register('preflight_presentation', 'Read bounded visual diagnostics for 1-8 selected pages: renderer clipping/glyph/font warnings, transformed off-slide frames, text overlap, connector-label interference, rounded-container corner and padding heuristics, small text and density. Verified managed graph badge/own-edge pairs are excluded; hand-made, changed or other-edge crossings remain reportable. Generic chart parity notices are summarized once per page as info; specific chart limits remain warnings. Returns IDs, scopes, bounds, evidence and repair suggestions. No automatic edits, external fetch, factual verification, Office parity or accessibility certification. Backgrounds are not text collisions; attached connector endpoints are excluded. Run check_accessibility separately.', { deck_id: handle, options: z.object({ page_indices: previewOptions.shape.page_indices, min_font_size: z.number().min(8).max(48).optional() }).strict().optional() }, true, async ({ deck_id, options }, signal) => {
 	return { deck_id, ...await getDeck(deck_id).preflightPresentation(options, { signal }) };
 });
-register('finalize_presentation', 'Prepare and exclusively publish a delivery from the exact current revision/hash under the operator-approved output directory. Always includes the complete PPTX and a manifest; optional PDF/PNG preview/diagnostics select at most eight pages (zero-based). Defaults: contact sheet and preflight on, PDF/notes/source-report off. notes/source_report explicitly export plaintext metadata; PPTX already retains notes and may contain source data. All generation, byte budgets and destination names are checked before publication; manifest last. No overwrite, source mutation, automatic persistence, source freshness or Office parity guarantee. Partial failures report actual published paths; multi-file output is not crash-atomic. Returns one preview image unless include_images=false.', { ...mutationInput, expected_hash: contentHash, name: deliveryName, options: deliveryOptions.optional(), include_images: z.boolean().optional() }, false, async ({ deck_id, expected_revision, expected_hash, name, options, include_images }, signal) => {
+register('finalize_presentation', 'Publish a delivery from the exact revision/hash in the approved output directory. Always includes the complete PPTX and manifest; optional PDF/PNG preview/diagnostics select at most eight zero-based pages. Compact default: 640px contact sheet and preflight for the first eight pages, with page_scope and manifest reporting coverage. detail=full restores core defaults. PDF/notes/source-report are off by default; notes/source_report explicitly export plaintext. All generation, byte budgets and destination names are checked before publication; manifest last. No overwrite, source mutation, automatic persistence, factual verification or Office parity guarantee. Partial failures report published paths; multi-file output is not crash-atomic. Returns one preview unless include_images=false.', { ...mutationInput, expected_hash: contentHash, name: deliveryName, options: deliveryOptions.optional(), include_images: z.boolean().optional(), detail: detailSchema }, false, async ({ deck_id, expected_revision, expected_hash, name, options, include_images, detail }, signal) => {
 	if (!outputDirectory) throw new Error('Saving requires --output-dir at server startup');
 	const state = getDeck(deck_id);
+	const total = state.getSummary({ limit: 0 }).slide_count;
+	if (compactResponse(detail)) options = { max_dimension: 640, ...options, page_indices: previewSelection(total, options) };
 	const result = await state.prepareDelivery(options, { expectedRevision: expected_revision, expectedHash: expected_hash, signal });
 	if (signal.aborted) throw new Error('Operation cancelled');
 	if (state.revision !== expected_revision || state.document.hash !== expected_hash) throw new Error('Delivery base changed; inspect the current deck before exporting');
@@ -582,6 +692,7 @@ register('finalize_presentation', 'Prepare and exclusively publish a delivery fr
 	const checks = { ...result.manifest.checks, preflight_errors: result.manifest.preflight?.findings.filter(finding => finding.severity === 'error').length ?? null,
 		preflight_warnings: result.manifest.preflight?.findings.filter(finding => finding.severity === 'warning').length ?? null, render_warning_count: result.manifest.render_warnings.length };
 	const response = { [imageResult]: true, metadata: { status: 'complete', deck_id, revision: result.revision, hash: result.hash, files, manifest, checks,
+		...(compactResponse(detail) ? { page_scope: { total, selected: options.page_indices.length, unselected: total - options.page_indices.length } } : {}),
 		multi_file_atomic: false, limitations: result.manifest.limitations }, images: thumbnail && include_images !== false ? [{ type: 'image', data: thumbnail.base64, mimeType: thumbnail.mime_type }] : [] };
 	if (Buffer.byteLength(JSON.stringify(toolResponse(response))) > Math.min(4 * 1048576, CAPACITY_PROFILES[state.capacityProfile].request_bytes)) throw new Error('Delivery response exceeds budget; lower max_dimension or disable images');
 	try { await publishNewBundle(outputDirectory, items, signal); }
@@ -649,7 +760,13 @@ register('edit_slides', 'Insert, duplicate, remove, move or rename slides in one
 	const state = getDeck(deck_id); await state.editSlides(operations, { expectedRevision: expected_revision, signal });
 	return { deck_id, revision: state.revision, slides: state.document.deck.slides.length };
 });
-register('create_asset', 'Validate PNG/JPEG or prepare inert SVG with a PNG fallback. SVG literal text uses local fonts; up to 8 embedded data PNG/JPEG images and 16 million decoded pixels. EMF v1/WMF placeable explicitly convert supported solid-pen/brush rectangle, ellipse, line and polygon records to SVG; unknown records reject. Vector input 256 KiB. No scripts, external targets, OS execution or network fetches.', assetInput, true, async (input, signal) => client.createAsset(input, { signal }));
+register('create_asset', 'Validate PNG/JPEG or prepare inert SVG with a PNG fallback. Compact mode returns an asset_id and dimensions for add_asset; detail=full returns the complete native Element. SVG permits only bounded inert content; supported EMF/WMF records convert explicitly, unknown records reject. Vector input 256KiB. No scripts, external targets, OS execution or network fetches.', { ...assetInput, detail: detailSchema }, true, async ({ detail, ...input }, signal) => {
+	const element = await client.createAsset(input, { signal });
+	if (!compactResponse(detail)) return element;
+	signal.throwIfAborted();
+	const format = element.svg ? 'svg' : element.mime_type === 'image/png' ? 'png' : 'jpeg';
+	return { ...assets.retain(Buffer.from(element.svg ?? element.base64, 'base64'), format, input.id), width: element.width, height: element.height, alt: element.alt };
+});
 register('edit_elements', 'Duplicate, remove or reorder a top-level element in one undoable revision. Preserve part metadata and bindings; reject lossy native copies and remove connectors that lose their target.', { deck_id: handle, expected_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), slide_id: slideId, operations: elementOperations }, false, async ({ deck_id, expected_revision, slide_id, operations }, signal) => {
 	const state = getDeck(deck_id); await state.editElements(slide_id, operations, { expectedRevision: expected_revision, signal });
 	return { deck_id, revision: state.revision, slide_id };
@@ -659,27 +776,58 @@ register('add_asset', 'Insert an SVG/PNG/JPEG asset in one undoable revision. SV
 	return { deck_id, revision: state.revision, element_id: input.id };
 });
 register('graph_catalog', 'List architecture diagram shapes, ports, routing styles, typed schemas, limits and editable examples. Does not create a document or contact a network.', {}, true, async (_input, signal) => client.graphCatalog({ signal }));
-register('architecture_icons', 'Return the fixed 1498-entry Azure/Entra, AWS and GCP metadata catalog with vendor notices, archive/source provenance and PNG pins. configured checks local vendor consent only, not full pack integrity or redistribution rights. Metadata has no artwork; this read-only API never downloads, installs or follows source URLs.', {}, true, async (_input, signal) => client.architectureIcons({ signal }));
-register('architecture_icon_assets', 'Read explicitly selected local catalog PNGs after consent, size, SHA-256 and raster verification. Returns icons with id, original base64, image/png mime_type, full service name alt and actual width/height. Requires 1..60 distinct catalog IDs, at most 4 MiB raw PNG bytes per atomic batch; use fewer IDs if needed. No paths, URLs, downloads or artwork transformations. Strip id/width/height before supplying GraphIcon.', { ids: z.array(z.string().min(1).max(256)).min(1).max(60).refine(ids => new Set(ids).size === ids.length, 'Duplicate architecture icon IDs are not allowed') }, true, async ({ ids }, signal) => client.architectureIconAssets(ids, { signal }));
-register('create_graph_icon', 'Prepare a bounded node icon from SVG, PNG or JPEG. SVG becomes transparent PNG; large rasters are fitted to a 256px longest side. Returns image data for GraphNode.icon, with no document or filesystem mutation. External resources and active SVG are rejected.', { base64: assetInput.base64, mime_type: assetInput.mime_type, alt: z.string().max(500).optional() }, true, async (input, signal) => client.createGraphIcon(input, { signal }));
-register('create_graph', 'Render a typed graph without inserting it. Prefer apply_operations with add_graph and explicit layout for regenerable metadata. create_graph plus add_elements is an explicit unmanaged choice, never a timeout fallback. Canvas: 1152x512; y starts at 88 unless show_title=false. Core checks bounds and detail font size. No HTML, executable content or draw.io XML.', { id: z.string().min(1).max(40), spec: graphSpec, theme: themeSchema.optional() }, true, async (input, signal) => client.createGraph(input, { signal }));
+register('architecture_icons', 'Search the fixed 1498-entry Azure/Entra, AWS and GCP catalog. Compact mode returns 20 entries per page with vendor notices/provenance; query/provider/offset/limit narrow results. detail=full without filters returns the full catalog. configured checks consent, not integrity or redistribution rights. No artwork, downloads, installation or external fetching.', { ...catalogPage, provider: z.enum(['azure', 'aws', 'gcp']).optional() }, true, async ({ query, provider, offset, limit, detail }, signal) => {
+	const catalog = await client.architectureIcons({ signal });
+	if (!compactResponse(detail) && query === undefined && provider === undefined && offset === undefined && limit === undefined) return catalog;
+	const term = (query ?? '').toLowerCase();
+	const matching = catalog.icons.filter(icon => (!provider || icon.provider === provider) && [icon.id, icon.name, ...icon.categories, ...icon.aliases].join(' ').toLowerCase().includes(term));
+	const start = offset ?? 0, count = limit ?? 20;
+	return { ...catalog, icons: matching.slice(start, start + count), total: matching.length, next_offset: start + count < matching.length ? start + count : null };
+});
+register('architecture_icon_assets', 'Read selected local catalog PNGs after consent, SHA-256 and raster checks. Compact mode returns reusable asset_id instead of base64 (up to 32 IDs and available registry capacity). detail=full returns original bytes for up to 60 distinct IDs, 4MiB per batch. No paths, downloads or transformations. Use asset_id/mime_type/alt for GraphIcon; strip id/width/height.', { ids: z.array(z.string().min(1).max(256)).min(1).max(60).refine(ids => new Set(ids).size === ids.length, 'Duplicate architecture icon IDs are not allowed'), detail: detailSchema }, true, async ({ ids, detail }, signal) => {
+	if (compactResponse(detail) && ids.length > 32) throw new Error('Compact icon batches allow at most 32 IDs; request a smaller batch or detail=full');
+	const result = await client.architectureIconAssets(ids, { signal });
+	if (!compactResponse(detail)) return result;
+	signal.throwIfAborted();
+	return { ...result, icons: retainedImages(result.icons) };
+});
+register('create_graph_icon', 'Prepare a node icon from SVG/PNG/JPEG, fitted to a 256px longest side. Compact mode returns asset_id/mime_type/alt for GraphNode.icon; detail=full returns image bytes. External resources and active SVG reject. No document or filesystem mutation.', { base64: assetInput.base64, mime_type: assetInput.mime_type, alt: z.string().max(500).optional(), detail: detailSchema }, true, async ({ detail, ...input }, signal) => {
+	const result = await client.createGraphIcon(input, { signal });
+	if (!compactResponse(detail)) return result;
+	signal.throwIfAborted();
+	return retainedImages([result])[0];
+});
+register('create_graph', 'Render a typed graph without inserting it. Default returns the native Element; include_diagnostics=true returns {element,diagnostics}, at most 64 findings and 32 KiB diagnostics. Status is complete/partial/unavailable, not visual approval. Node label_fit=shrink prefers one line down to 12px and preserves hard newlines; default wrap is unchanged. Group header_color accepts RGB/theme, default @dk1. Prefer apply_operations with add_graph and explicit layout for regenerable metadata. create_graph plus add_elements is an explicit unmanaged choice, never a timeout fallback. Canvas: 1152x512; y starts at 88 unless show_title=false. Core checks bounds and detail font size. No HTML, executable content or draw.io XML.', { id: z.string().min(1).max(40), spec: graphSpec, theme: themeSchema.optional(), include_diagnostics: z.boolean().optional() }, true, async (input, signal) => client.createGraph(input, { signal }));
 register('transform_graph', 'Apply bounded graph operations to a candidate specification. Nodes, edges, group movement, alignment and grid layout are computed and validated in Rust. No document mutation.', { spec: graphSpec, operations: graphOperations }, true, async ({ spec, operations }, signal) => client.transformGraph(spec, operations, { signal }));
 register('get_graph', 'Read one managed graph specification and stale status without returning unrelated document source data.', { deck_id: handle, slide_id: z.string().min(1).max(80), id: z.string().min(1).max(40) }, true, async ({ deck_id, slide_id, id }) => {
 	const state = getDeck(deck_id); const part = state.document.parts?.find((entry) => entry.slide_id === slide_id && entry.element_id === id && entry.spec.data.kind === 'diagram');
 	if (!part) throw new Error('Managed graph not found');
 	return { deck_id, revision: state.revision, slide_id, element_id: id, spec: part.spec.data.graph, stale: part.stale };
 });
+function graphDiagnosticMetadata(state) {
+	const graphDiagnostics = state.graphDiagnostics;
+	return graphDiagnostics === null ? {} : { graphDiagnostics };
+}
+const graphDiagnosticDescription = ' Returns optional revision/hash-bound graphDiagnostics from the accepted operation, including no-ops: complete/partial/unavailable, at most 64 findings and 32 KiB. Diagnostic failure does not undo a successful commit; no extra render request. Diagnostics are not persisted. Label warnings are nonblocking unless on_overlap=error.';
 for (const name of ['add_graph', 'update_graph', 'apply_graph']) {
-	register(name, name === 'add_graph' ? 'Insert an architecture graph as native shapes and attached connectors in one undoable revision. Does not rearrange existing slide objects.' : 'Update a managed architecture graph in one undoable revision. Preserves root placement and rejects stale metadata rather than overwriting external/manual changes.', { deck_id: handle, expected_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), slide_id: z.string().min(1).max(80), id: z.string().min(1).max(40), ...(name === 'apply_graph' ? { operations: graphOperations } : { spec: graphSpec }) }, false, async ({ deck_id, expected_revision, slide_id, ...input }, signal) => {
+	register(name, (name === 'add_graph' ? 'Insert an architecture graph as native shapes and attached connectors in one undoable revision. Does not rearrange existing slide objects.' : 'Update a managed architecture graph in one undoable revision. Preserves root placement and rejects stale metadata rather than overwriting external/manual changes.') + graphDiagnosticDescription, { deck_id: handle, expected_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), slide_id: z.string().min(1).max(80), id: z.string().min(1).max(40), ...(name === 'apply_graph' ? { operations: graphOperations } : { spec: graphSpec }) }, false, async ({ deck_id, expected_revision, slide_id, ...input }, signal) => {
 		const state = getDeck(deck_id); const options = { signal, expectedRevision: expected_revision };
 		if (name === 'add_graph') await state.addGraph(slide_id, input, options);
 		else if (name === 'update_graph') await state.updateGraph(slide_id, input, options);
 		else await state.applyGraph(slide_id, input, options);
-		return { deck_id, revision: state.revision, element_id: input.id };
+		return { deck_id, revision: state.revision, element_id: input.id, ...graphDiagnosticMetadata(state) };
 	});
 }
 register('object_catalog', 'List native preset shapes, supported chart types and table limits. Insertion examples contain clearly named synthetic chart values.', {}, true, async (_input, signal) => client.objectCatalog({ signal }));
-register('part_catalog', 'List 111 original metadata-driven presets across 36 categories, with synthetic examples and the core input schema. New frameless list/rows, list-horizontal/columns and list-enumeration/grid include recommended, use_when and avoid_when guidance for equal-status topics. Choose relationships before decoration; steps and comparisons need their matching diagrams. Legacy IDs retain their rendering. No model calls, downloads or document mutation.', {}, true, async (_input, signal) => client.partCatalog({ signal }));
+register('part_catalog', 'Search 111 original presets across 36 categories. Compact default returns 12 concise entries, next_offset, recommended/use_when/avoid_when; preset_id returns one synthetic example. detail=full without filters returns all examples and the core schema. Frameless list/rows, list-horizontal/columns and list-enumeration/grid suit equal-status topics; stages/comparisons need matching diagrams. Legacy rendering is retained. No model calls, downloads or mutation.', { ...catalogPage, preset_id: z.string().min(1).max(100).optional() }, true, async ({ query, preset_id, offset, limit, detail }, signal) => {
+	const catalog = await client.partCatalog({ signal });
+	if (!compactResponse(detail) && query === undefined && preset_id === undefined && offset === undefined && limit === undefined) return catalog;
+	const term = (query ?? '').toLowerCase();
+	const matching = catalog.presets.filter(preset => (!preset_id || preset.id === preset_id) && [preset.id, preset.name, preset.category, preset.category_name, preset.use_when, preset.avoid_when].join(' ').toLowerCase().includes(term));
+	const start = offset ?? 0, count = limit ?? 12;
+	const presets = matching.slice(start, start + count).map(({ example, ...preset }) => ({ ...preset, ...(!compactResponse(detail) || preset_id ? { example } : {}) }));
+	return { version: catalog.version, style: catalog.style, default_bounds: catalog.default_bounds, total: matching.length, presets, next_offset: start + count < matching.length ? start + count : null, ...(!compactResponse(detail) ? { schema: catalog.schema } : {}) };
+});
 register('best_practice_profiles', 'List four evidence-led authoring profiles: consulting decisions, technical explanations, event talks and reports. English guides are retrieved separately; no file or model access.', {}, true, async (_input, signal) => client.bestPracticeProfiles({ signal }));
 register('best_practice_guide', 'Retrieve the English five-stage workflow, profile-specific guidance and strict creation schema. The consulting catalog retains 48 patterns with honest native-template, composition-required or guidance-only status. Read this before planning; guidance does not verify truth.', { profile_id: authoringProfile }, true, async ({ profile_id }, signal) => client.bestPracticeGuide(profile_id, { signal }));
 register('validate_guided_presentation', 'Dry-run a structured outline, clause-to-body evidence, numeric source declarations and native layout. ready means compilable, not semantically proven or Office-qualified. Returns unmet checks and human-review requirements; no deck handle or file is created.', { input: guidedInput }, true, async ({ input }, signal) => client.validateGuidedPresentation(input, { signal }));
@@ -692,10 +840,10 @@ register('create_guided_presentation', 'Create a NEW evidence-led presentation a
 });
 register('create_part', 'Preview a part without inserting it. Choose a preset from part_catalog by information relationship and use_when/avoid_when, not item count alone. Prefer apply_operations with add_part and PartSpec.layout for regenerable metadata. create_part plus add_elements is an explicit unmanaged choice, never a timeout fallback. Core validates bounds, numeric meaning and references. Deterministic design, not AI generation.', { id: z.string().min(1).max(40), spec: partSpec, theme: themeSchema.optional() }, true, async (input, signal) => client.createPart(input, { signal }));
 for (const name of ['add_part', 'update_part']) {
-	register(name, name === 'add_part' ? 'Insert a native metadata-driven part in one undoable revision. Presets and metadata schema come from part_catalog. Placement does not rearrange existing content.' : 'Update a part from metadata while retaining its placement, in one undoable revision. Rejects stale metadata after native edits; never restores a cached scene over external changes.', { deck_id: handle, expected_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), slide_id: z.string().min(1).max(80), id: z.string().min(1).max(40), spec: partSpec }, false, async ({ deck_id, expected_revision, slide_id, ...input }, signal) => {
+	register(name, (name === 'add_part' ? 'Insert a native metadata-driven part in one undoable revision. Presets and metadata schema come from part_catalog. Placement does not rearrange existing content.' : 'Update a part from metadata while retaining its placement, in one undoable revision. Rejects stale metadata after native edits; never restores a cached scene over external changes.') + graphDiagnosticDescription, { deck_id: handle, expected_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), slide_id: z.string().min(1).max(80), id: z.string().min(1).max(40), spec: partSpec }, false, async ({ deck_id, expected_revision, slide_id, ...input }, signal) => {
 		const state = getDeck(deck_id);
 		await (name === 'add_part' ? state.addPart(slide_id, input, { signal, expectedRevision: expected_revision }) : state.updatePart(slide_id, input, { signal, expectedRevision: expected_revision }));
-		return { deck_id, revision: state.revision, element_id: input.id };
+		return { deck_id, revision: state.revision, element_id: input.id, ...graphDiagnosticMetadata(state) };
 	});
 }
 register('design_defaults', 'Return a theme and editable native master/layout templates. Does not mutate a document.', {}, true, async (_input, signal) => client.designDefaults({ signal }));
@@ -720,10 +868,10 @@ register('assign_layout', 'Apply or reset a native slide layout while preserving
 	const state = getDeck(deck_id); await state.assignLayout(slide_id, layout_id, { signal, expectedRevision: expected_revision, preserveFreeform: preserve_freeform }); return { deck_id, revision: state.revision };
 });
 register('create_object', 'Create a typed default object without inserting it. Charts contain synthetic examples. Supply final content and geometry through add_elements or apply_operations; core validates complete elements there.', objectInput, true, async (input, signal) => client.createObject(input, { signal }));
-register('apply_operations', 'Apply 1-128 typed operations atomically with one Undo and revision/hash checks. Prefer add_part/add_graph with explicit layouts for regenerable metadata; add_elements is for unmanaged final elements. update_graph preserves existing PartLayout. Child edits followed by managed updates reject stale render hashes. Core retains locks, hidden-group, source and native guards, 128 total metadata entries and other capacity limits. Use smaller bounded chunks for progress/cancellation; never automatically fall back after timeout. set_text_style overlays; set_connector replaces settings. No raw Patch paths.', { ...mutationInput, expected_hash: contentHash, operations: authoringOperations }, false, async ({ deck_id, expected_revision, expected_hash, operations }, signal) => {
+register('apply_operations', 'Apply 1-128 typed operations atomically with one Undo and revision/hash checks. Prefer add_part/add_graph with explicit layouts for regenerable metadata; add_elements is for unmanaged final elements. update_graph preserves existing PartLayout. Child edits followed by managed updates reject stale render hashes. Core retains locks, hidden-group, source and native guards, 128 total metadata entries and other capacity limits. Use smaller bounded chunks for progress/cancellation; never automatically fall back after timeout. set_text_style overlays; set_connector replaces settings. No raw Patch paths.' + graphDiagnosticDescription, { ...mutationInput, expected_hash: contentHash, operations: authoringOperations }, false, async ({ deck_id, expected_revision, expected_hash, operations }, signal) => {
 	const state = getDeck(deck_id);
 	await state.applyOperations(operations, { signal, expectedRevision: expected_revision, expectedHash: expected_hash });
-	return { deck_id, revision: state.revision, hash: state.document.hash, can_undo: state.canUndo };
+	return { deck_id, revision: state.revision, hash: state.document.hash, can_undo: state.canUndo, ...graphDiagnosticMetadata(state) };
 });
 const authoringDescriptions = {
 	add_elements: 'Append 1-128 complete typed native elements in one Undo. Includes rich text, geometry, visual styles, tables, charts and groups. Core validates all content; no external fetches.',
@@ -826,6 +974,7 @@ register('export_pptx', 'Save one native PPTX including optional sources/binding
 register('close_deck', 'Release the in-memory deck and its undo history. Saved files remain unchanged.', { deck_id: handle }, false, async ({ deck_id }) => {
 	getDeck(deck_id);
 	decks.delete(deck_id);
+	deckActivity.delete(deck_id);
 	expireCandidates();
 	return { closed: deck_id };
 });
@@ -880,20 +1029,25 @@ server.registerResource('report-example', 'aislide://report/example', { mimeType
 
 const authoringWorkflow = [
 	'Create an editable presentation using the AISlide MCP tools in this connection.',
-	'Read authoring_capabilities, including typed_authoring, and choose the authoring path for the task. Establish audience, purpose, evidence and assumptions; do not invent facts or fetch imported relationships.',
-	'For freeform, exact recreation or high-volume authoring, use create_presentation and apply_operations with complete add_elements at their final frames. Each atomic batch accepts 1..128 typed operations; successful changed batches create one Undo entry, while no-ops create none. Supply expected_revision and expected_hash from get_document. set_frame/set_frames change geometry only. set_text_style is a partial style update; apply_format copies a complete compatible style. Do not force a preview_slide_revision candidate for every frame change. Finish with preview_presentation and preflight_presentation.',
+	'Default compact mode exposes ten common tools. Search discover_tools and use get_tool_schema(name) only for a needed advanced operation; it returns the exact schema and publishes the tool. Start or resume with list_decks and get_deck_summary, which read current handles, revision/hash, slide IDs and last successful operation without rendering or source/image bytes. No manual progress file or full-document read is required for state recovery while this server process remains alive.',
+	'Choose the authoring path for the task; authoring_capabilities, including typed_authoring, remains available for deeper inspection. Establish audience, purpose, evidence and assumptions; do not invent facts or fetch imported relationships.',
+	'For freeform, exact recreation or high-volume authoring, use create_presentation and apply_operations with complete add_elements at their final frames. Each atomic batch accepts 1..128 typed operations; successful changed batches create one Undo entry, while no-ops create none. Supply expected_revision and expected_hash from the last successful compact mutation response or get_deck_summary. set_frame/set_frames change geometry only. set_text_style is a partial style update; apply_format copies a complete compatible style. Do not force a preview_slide_revision candidate for every frame change. Finish with preview_presentation and preflight_presentation.',
+	'Register local files once with register_asset using an operator-approved asset root. Pass asset_id instead of base64 to image/archive/source/font tools, batch add_picture, and GraphNode.icon or GraphGroup.icon. Prepared graph icons and catalog icon assets return reusable IDs in compact mode. list_assets recovers IDs; close_asset releases unused bytes. Original files are never overwritten and imported content is never executed or fetched.',
+	'Compact preview_presentation defaults to a 640px JPEG contact sheet and first eight pages. page_scope reports unselected pages; explicitly select later pages before claiming review of the whole deck. include_images=false still renders; metadata-only reads use get_deck_summary. Catalogs accept query/offset/limit and part_catalog(preset_id) returns one example. detail=full on these tools restores full detail; get_document/get_session_recovery remain explicit large plaintext reads, not the routine progress path.',
 	'When parts or graphs need later regeneration, prefer apply_operations with add_part/add_graph and explicit layouts: the batch retains both native elements and managed metadata in one transaction. Mixed batches supersede separate per-part calls without removing the existing individual tools. Use create_part/create_graph plus add_elements ONLY as an explicit unmanaged choice; never automatically fall back to ordinary groups after a timeout or rejection. Editing a managed child then update_part/update_graph in the same batch rejects the stale render hash atomically.',
 	'Choose the information relationship before the layout: peers, ordered stages, comparisons, definitions or grouped categories. For peers, prefer list/rows (2-8 heading/detail rows), list-horizontal/columns (2-4 open columns), or list-enumeration/grid (2-8 unordered topics). Read recommended, use_when and avoid_when in part_catalog. Steps, ranks and comparisons should use their matching diagrams rather than a list selected only by item count.',
 	'Use aligned typography and whitespace before enclosing every item. Do not assign a different accent color to every item by position; color should encode an explicit category, state or selected emphasis. Do not stack a background, outline, accent rail, icon disc and number by default. Keep the visual language consistent across the deck and change composition when the information relationship changes; do not randomize layouts or rotate decorations merely for variety. Legacy preset IDs keep their existing rendering and remain explicit choices; existing slides are never migrated automatically.',
 	'Set theme before add_part/add_graph. Applying a theme afterward can change rendered child styles and mark managed metadata stale; there is no automatic theme-driven regeneration. Use set_accessibility after the target exists in a separate revision, not inside add_part/add_graph or apply_operations. Accessibility updates use at least 65 seconds with a size-aware finite budget up to 180 seconds, and support opt-in MCP progress; the client deadline must allow the operation to finish. Do not blindly retry mutations. All three venn variants support PartSpec.layout.show_title=false; this does not remove clipping guards from other presets.',
-	'Keep batches bounded: 1..128 operations, at most 128 metadata entries in the document, plus all selected capacity limits. Reduce chunk size for progress and cancellation responsiveness; these do not make limits unlimited. Each committed chunk has its own Undo. After timeout or cancellation, inspect get_document/get_session_recovery before retrying; do not blindly repeat a mutation.',
+	'Keep batches bounded: 1..128 operations, at most 128 metadata entries in the document, plus all selected capacity limits. Reduce chunk size for progress and cancellation responsiveness; these do not make limits unlimited. Each committed chunk has its own Undo. After timeout or cancellation, inspect list_decks/get_deck_summary before retrying; do not blindly repeat a mutation.',
 	'For evidence-led guided decks, read best_practice_guide for the chosen profile. Guided defaults remain sentence headlines and a 32-slide limit. Set input.authoring.headline_style="keyword" to opt into keyword-headline validation. For a 39-slide deck, use input.authoring.slide_limit=39 or a higher ceiling (explicit range 32..128). Evidence support and numeric declarations still apply. Consulting issues are required only for the consulting-decision profile.',
 	'Use optional input.authoring for reading/projection context, density, spacing, body_font_min, headline_font_size and font_family; existing brand_color controls the palette. Add speaker_notes to each input slide when supplied.',
 	'For the guided path, run validate_guided_presentation, resolve unmet checks, then create_guided_presentation. ready means compilable, not factual truth or Office parity. compile_report is a fixed structured-layout shortcut, not the best path for exact recreation.',
 	'For positioned native parts, use PartSpec.layout with show_title=false and an explicit body box (x, y, width, height). For graphs, GraphSpec.show_title=false removes the fixed title band; node.detail, text_align and heading_bold separate heading and detail presentation. Native part fitting enforces a 12px text floor and can reject a box that is too small. Keep layout when updating parts or graphs across APIs. Only batch add_graph accepts a top-level layout (PartLayout or null); batch update_graph has no layout field and preserves the existing PartLayout. Matrix and contrast data accept corner_label, at most 48 Unicode scalars, default empty; core omits empty labels from serialization.',
 	'For cross-document reuse, import_slides takes an authored source_deck_id handle and selected source_slide_ids, reusing matching masters. Source and target must use the same canvas. It does not support arbitrary native cross-package slide import; opening native bytes does not turn them into an authored source or permit origin rewriting.',
+	'Graph node.label_fit defaults to wrap; shrink prefers a single line down to 12px while preserving hard newlines. Group header_color accepts RGB/theme colors and defaults to @dk1. Opt into create_graph include_diagnostics=true for {element,diagnostics}; false or omitted retains the bare native Element. Managed graph mutations and diagram parts return optional graphDiagnostics bound to the accepted revision/hash without another core request. Inspect status complete/partial/unavailable and at most 64 findings within 32 KiB: GRAPH_LABEL_BORDER_OVERLAP, GRAPH_LABEL_OVERLAP, GRAPH_NODE_LABEL_WRAPPED (info), GRAPH_NODE_LABEL_SHRINK_LIMIT (warning). Diagnostics are best-effort, never persisted in the document or history; unavailable does not mean no issues. Warnings do not block mutation, but explicit on_overlap=error remains fatal. Native element geometry remains authoritative; review the resulting slide.',
 	'Use preview_presentation for actual PNG/JPEG pages or a contact_sheet; choose at most eight unique zero-based page_indices per call. Defaults are format=png and overflow=shrink; encoded-byte overflow can lower dimensions in at most three attempts while retaining all pages. Inspect quality_reduced, actual_max_dimension and PREVIEW_DOWNSCALED. Use overflow=error to forbid shrinking or format=jpeg for photo-heavy pages. include_images=false returns metadata only but still renders; get_document reads revision/hash without rendering.',
 	'Run preflight_presentation for the same pages and a suitable min_font_size. Findings include geometry and readability heuristics, not guaranteed defects. Run check_accessibility separately when needed.',
+	'Preflight excludes only verified managed graph badge/own-edge pairs whose actual attributes and route still match the specification. Other badge collisions remain visible. Generic CHART_PREVIEW and general parity notices are summarized per page as info; specific CHART_PRESENTATION limitations remain warnings. Raw preview warnings are not suppressed, and Office visual parity is still unverified.',
 	'Keep card text at least 8 slide pixels from the container edges and clear of rounded corners. Inset or shorten an accent bar so it does not protrude beyond a rounded outline; use a rectangular card when a flush full-height accent is intentional. Reserve separate regions for connector labels, numbered badges and node descriptions instead of shrinking every font. CONTAINER_CORNER_OVERFLOW and CONTAINER_PADDING infer containers and require preview review. CONNECTOR_BADGE_OVERLAP is info for a compact opaque numbered ellipse over a center-crossing line, not a visual approval; retain real label-interference warnings. For an existing native slide, propose guarded edits and inspect before/after previews instead of silently moving objects or suppressing all overlap findings.',
 	'When a correction needs before/after review before mutation, use preview_slide_revision with deck_id, expected_revision, expected_hash, slide_id and typed edits. Inspect before/after images, affected_ids, stale_part_ids and source_bindings_stale. No changes have been applied yet.',
 	'Apply only the agreed candidate using apply_slide_revision with the candidate_id and exact base revision/hash. Candidates expire after ten minutes, deck closure or any revision change; at most sixteen are retained. Undo reverses one applied batch. Native preservation may reject unsupported edits.',
@@ -904,4 +1058,5 @@ const authoringWorkflow = [
 server.registerResource('authoring-workflow', 'aislide://authoring/workflow', { mimeType: 'text/plain', description: 'Choose typed batches, guided decks, positioned parts or authored-slide reuse, then visually review and export.' }, async () => ({ contents: [{ uri: 'aislide://authoring/workflow', mimeType: 'text/plain', text: authoringWorkflow }] }));
 server.registerPrompt('author_presentation', { description: 'Choose an authoring path, create, preview, diagnose, revise and export an editable presentation with AISlide.' }, async () => ({ messages: [{ role: 'user', content: { type: 'text', text: authoringWorkflow } }] }));
 
+server.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions.filter(tool => toolProfile === 'full' || compactTools.has(tool.name) || loadedTools.has(tool.name)).map(publishedTool) }));
 await server.connect(new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: MAX_REQUEST_BYTES }));

@@ -1,10 +1,11 @@
 ﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, readdir, symlink, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { guidedExamples } from './guided-demo.mjs';
 import { registerHooks } from 'node:module';
 import { randomUUID } from 'node:crypto';
@@ -13,7 +14,19 @@ import { z } from 'zod';
 
 const coreEnvironment = process.env.AISLIDE_CORE_BINARY ? { AISLIDE_CORE_BINARY: process.env.AISLIDE_CORE_BINARY } : undefined;
 
-async function feedbackMcpFixture(run) {
+function resolveSchemaRef(root, value) {
+  const visited = new Set();
+  while (typeof value?.$ref === 'string') {
+    const ref = value.$ref;
+    assert.ok(ref.startsWith('#/') && !visited.has(ref), `Invalid schema reference: ${ref}`);
+    visited.add(ref);
+    value = ref.slice(2).split('/').reduce((current, key) => current?.[key.replaceAll('~1', '/').replaceAll('~0', '~')], root);
+    assert.ok(value, `Unresolved schema reference: ${ref}`);
+  }
+  return value;
+}
+
+async function feedbackMcpFixture(run, args = ['--tool-profile', 'full']) {
   const registrations = new Map();
   const resources = new Map();
   const prompts = new Map();
@@ -22,6 +35,7 @@ async function feedbackMcpFixture(run) {
   const entry = new URL(`./mcp.mjs?${key}`, import.meta.url).href;
   const fixture = {
     McpServer: class extends McpServer {
+      constructor(...args) { super(...args); fixture.instance = this; }
       registerTool(name, config, callback) { assert.equal(registrations.has(name), false, `Duplicate tool: ${name}`); registrations.set(name, { config, callback }); return super.registerTool(name, config, callback); }
       registerResource(name, uri, config, callback) { resources.set(uri, { config, callback }); return super.registerResource(name, uri, config, callback); }
       registerPrompt(name, config, callback) { prompts.set(name, { config, callback }); return super.registerPrompt(name, config, callback); }
@@ -53,8 +67,10 @@ async function feedbackMcpFixture(run) {
     const source = names.map(name => `export const ${name} = globalThis[${JSON.stringify(key)}].${name};`).join('\n');
     return { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true };
   } });
+  const previousArgv = process.argv;
   try {
-    await import(entry);
+    process.argv = [...previousArgv.slice(0, 2), ...args];
+    try { await import(entry); } finally { process.argv = previousArgv; }
     const call = async (name, input = {}, signal = new AbortController().signal) => {
       const tool = registrations.get(name);
       assert.ok(tool, `Missing tool: ${name}`);
@@ -66,6 +82,365 @@ async function feedbackMcpFixture(run) {
     await run({ registrations, resources, prompts, calls, call, fixture });
   } finally { hooks.deregister(); delete globalThis[key]; }
 }
+
+test('lightweight MCP publishes deduplicated local schema references without weakening validation', async context => {
+  await feedbackMcpFixture(async ({ fixture, registrations, calls }) => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'schema-size-regression', version: '1.0.0' });
+    try {
+      await McpServer.prototype.connect.call(fixture.instance, serverTransport);
+      await client.connect(clientTransport);
+      const listed = await client.listTools();
+      const schema = listed.tools.find(tool => tool.name === 'add_elements').inputSchema;
+      const original = z.toJSONSchema(registrations.get('add_elements').config.inputSchema, { target: 'draft-7', io: 'input' });
+      const originalBytes = Buffer.byteLength(JSON.stringify(original));
+      const publishedBytes = Buffer.byteLength(JSON.stringify(schema));
+      const expandedList = { tools: [...registrations].map(([name, { config }]) => ({ name, description: config.description, inputSchema: z.toJSONSchema(config.inputSchema, { target: 'draft-7', io: 'input' }), annotations: config.annotations })) };
+      context.diagnostic(JSON.stringify({ tool: 'add_elements', expanded_bytes: originalBytes, compact_bytes: publishedBytes, expanded_full_list_bytes: Buffer.byteLength(JSON.stringify(expandedList)), full_list_bytes: Buffer.byteLength(JSON.stringify(listed)), tool_count: listed.tools.length }));
+      assert.ok(publishedBytes < originalBytes * 0.6, `Published schema ${publishedBytes} bytes versus expanded ${originalBytes}`);
+      const refs = [];
+      const visit = value => {
+        if (!value || typeof value !== 'object') return;
+        if (typeof value.$ref === 'string') refs.push(value.$ref);
+        for (const item of Object.values(value)) visit(item);
+      };
+      visit(schema);
+      assert.ok(refs.length > 0);
+      for (const ref of refs) {
+        assert.ok(ref.startsWith('#/'), ref);
+        let value = schema;
+        for (const segment of ref.slice(2).split('/')) value = value?.[segment.replaceAll('~1', '/').replaceAll('~0', '~')];
+        assert.ok(value, `Unresolved local schema reference: ${ref}`);
+      }
+      const before = calls.length;
+      const invalid = await client.callTool({ name: 'add_elements', arguments: { deck_id: randomUUID(), expected_revision: 0, expected_hash: 'a'.repeat(64), slide_id: 'slide-1', elements: [{ type: 'text', id: 'invalid', x: 0, y: 0, width: 20, height: 20, text: 'Synthetic', font_size: 20, color: 'not-a-color', bold: false }] } });
+      assert.equal(invalid.isError, true);
+      assert.equal(calls.length, before);
+    } finally { await client.close(); }
+  });
+});
+
+test('lightweight MCP defaults to a bounded tool surface with on-demand schemas', async context => {
+  await feedbackMcpFixture(async ({ fixture, calls }) => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'compact-tools-regression', version: '1.0.0' });
+    try {
+      await McpServer.prototype.connect.call(fixture.instance, serverTransport);
+      await client.connect(clientTransport);
+      const initial = await client.listTools();
+      assert.ok(initial.tools.length <= 10, `Unexpected initial tool count: ${initial.tools.length}`);
+      assert.ok(Buffer.byteLength(JSON.stringify(initial)) < 65536);
+      for (const name of ['discover_tools', 'get_tool_schema', 'create_presentation', 'edit_slides', 'apply_operations', 'preview_presentation', 'finalize_presentation']) assert.ok(initial.tools.some(tool => tool.name === name), name);
+      assert.equal(initial.tools.some(tool => tool.name === 'get_document'), false);
+      const search = await client.callTool({ name: 'discover_tools', arguments: { query: 'graph', limit: 4 } });
+      const catalog = JSON.parse(search.content[0].text);
+      assert.equal(search.isError, undefined);
+      assert.equal(catalog.tools.length, 4);
+      assert.ok(catalog.total > 4);
+      assert.equal(catalog.tools.some(tool => Object.hasOwn(tool, 'inputSchema')), false);
+      assert.ok(Buffer.byteLength(JSON.stringify(search)) < 4096);
+      const detail = await client.callTool({ name: 'get_tool_schema', arguments: { name: 'add_graph' } });
+      const definition = JSON.parse(detail.content[0].text);
+      assert.equal(definition.name, 'add_graph');
+      assert.equal(definition.inputSchema.type, 'object');
+      assert.ok((await client.listTools()).tools.some(tool => tool.name === 'add_graph'));
+      for (const name of ['get_document', 'undo', 'redo', 'get_graph', 'apply_theme']) {
+        const result = await client.callTool({ name: 'get_tool_schema', arguments: { name } });
+        assert.equal(result.isError, undefined);
+      }
+      assert.ok((await client.listTools()).tools.length <= initial.tools.length + 4);
+      const invalid = await client.callTool({ name: 'get_tool_schema', arguments: { name: 'does_not_exist' } });
+      assert.equal(invalid.isError, true);
+      assert.equal(calls.length, 0);
+      context.diagnostic(JSON.stringify({ default_tool_count: initial.tools.length, default_list_bytes: Buffer.byteLength(JSON.stringify(initial)) }));
+    } finally { await client.close(); }
+  }, []);
+});
+
+test('lightweight MCP recovers current handles and operation state without document or preview reads', async () => {
+  await feedbackMcpFixture(async ({ fixture, registrations, call, calls }) => {
+    assert.deepEqual((await call('list_decks')).decks, []);
+    const create = registrations.get('create_presentation');
+    const response = await create.callback(create.config.inputSchema.parse({ title: 'Synthetic resumable deck' }), { signal: new AbortController().signal });
+    const created = JSON.parse(response.content[0].text);
+    assert.equal(response.structuredContent, undefined);
+    assert.equal(created.hash, 'a'.repeat(64));
+    assert.equal(created.can_undo, false);
+    const { deck_id } = created;
+    const before = calls.length;
+    const inventory = await call('list_decks');
+    assert.equal(inventory.decks[0].deck_id, deck_id);
+    assert.equal(inventory.decks[0].last_operation.name, 'create_presentation');
+    assert.equal(inventory.persisted, false);
+    const summary = await call('get_deck_summary', { deck_id });
+    assert.equal(summary.slides[0].id, 'slide-1');
+    assert.equal(summary.hash, created.hash);
+    assert.equal(calls.length, before);
+    const changed = await call('apply_operations', { deck_id, expected_revision: 0, expected_hash: created.hash, operations: [{ op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' }] });
+    assert.equal(changed.revision, 1);
+    const resumed = await call('list_decks');
+    assert.equal(resumed.decks[0].revision, changed.revision);
+    assert.equal(resumed.decks[0].hash, changed.hash);
+    assert.equal(resumed.decks[0].last_operation.name, 'apply_operations');
+    assert.equal(resumed.decks[0].can_undo, true);
+    const mutate = registrations.get('apply_operations');
+    const stale = await mutate.callback(mutate.config.inputSchema.parse({ deck_id, expected_revision: 0, expected_hash: created.hash, operations: [{ op: 'set_slide_background', slide_id: 'slide-1', color: '000000' }] }), { signal: new AbortController().signal });
+    assert.equal(stale.isError, true);
+    assert.equal(calls.length, before + 1);
+    assert.deepEqual((await call('list_decks')).decks[0], resumed.decks[0]);
+    await call('close_deck', { deck_id });
+    assert.deepEqual((await call('list_decks')).decks, []);
+    assert.ok(Buffer.byteLength(JSON.stringify(resumed)) < 2048);
+    assert.equal(fixture.instance.isConnected(), false);
+  }, []);
+});
+
+test('lightweight MCP reuses bounded approved local assets without round-tripping base64', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-assets-'));
+  const outside = await mkdtemp(join(tmpdir(), 'aislide-assets-outside-'));
+  const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==', 'base64');
+  try {
+    await writeFile(join(directory, 'image.png'), image);
+    await writeFile(join(outside, 'outside.png'), image);
+    await symlink(outside, join(directory, 'outside-link'), process.platform === 'win32' ? 'junction' : 'dir');
+    await writeFile(join(directory, 'large.png'), '');
+    await truncate(join(directory, 'large.png'), 1048577);
+    await feedbackMcpFixture(async ({ call, calls, registrations }) => {
+      const asset = await call('register_asset', { path: 'image.png' });
+      assert.equal(asset.byte_length, image.length);
+      assert.equal(asset.mime_type, 'image/png');
+      assert.equal(asset.base64, undefined);
+      assert.equal(calls.length, 0);
+      assert.equal((await call('register_asset', { path: 'image.png' })).asset_id, asset.asset_id);
+      assert.equal((await call('list_assets')).assets.length, 1);
+      const created = await call('create_presentation', { title: 'Synthetic asset reuse' });
+      await writeFile(join(directory, 'image.png'), Buffer.from('changed after registration'));
+      const added = await call('apply_operations', { deck_id: created.deck_id, expected_revision: 0, expected_hash: created.hash, operations: [{ op: 'add_picture', slide_id: 'slide-1', id: 'picture', asset_id: asset.asset_id, alt: 'Synthetic image' }] });
+      assert.equal(calls.length, 2);
+      assert.equal(calls.at(-1).request.operations[0].base64, image.toString('base64'));
+      assert.equal(calls.at(-1).request.operations[0].mime_type, 'image/png');
+      assert.equal(calls.at(-1).request.operations[0].asset_id, undefined);
+      const spec = { version: 1, title: '', nodes: [{ id: 'node', label: 'Synthetic', x: 0, y: 88, icon: { asset_id: asset.asset_id } }] };
+      await call('create_graph', { id: 'graph', spec });
+      assert.deepEqual(calls.at(-1).request.spec.nodes[0].icon, { base64: image.toString('base64'), mime_type: 'image/png' });
+      const assetTool = registrations.get('register_asset');
+      for (const input of [{ path: '../outside.png' }, { path: '..\\outside.png' }, { path: join(outside, 'outside.png') }, { path: 'https://example.com/image.png' }, { path: 'image.png:alternate' }, { path: 'outside-link/outside.png' }, { path: 'large.png' }, { path: 'image.png', root: 1 }]) {
+        const result = await assetTool.callback(assetTool.config.inputSchema.parse(input), { signal: new AbortController().signal });
+        assert.equal(result.isError, true, JSON.stringify(input));
+      }
+      const picture = registrations.get('add_picture');
+      const invalidBoth = picture.config.inputSchema.safeParse({ deck_id: created.deck_id, expected_revision: added.revision, slide_id: 'slide-1', id: 'invalid', alt: '', base64: image.toString('base64'), mime_type: 'image/png', asset_id: asset.asset_id });
+      assert.equal(invalidBoth.success, false);
+      await call('close_asset', { asset_id: asset.asset_id });
+      const before = calls.length;
+      const missing = await picture.callback(picture.config.inputSchema.parse({ deck_id: created.deck_id, expected_revision: added.revision, slide_id: 'slide-1', id: 'missing', alt: '', asset_id: asset.asset_id }), { signal: new AbortController().signal });
+      assert.equal(missing.isError, true);
+      assert.equal(calls.length, before);
+      assert.deepEqual((await call('list_assets')).assets, []);
+      await call('close_deck', { deck_id: created.deck_id });
+    }, ['--asset-dir', directory]);
+    await feedbackMcpFixture(async ({ registrations }) => {
+      const tool = registrations.get('register_asset');
+      const result = await tool.callback(tool.config.inputSchema.parse({ path: 'image.png' }), { signal: new AbortController().signal });
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /asset-dir/);
+    }, []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test('lightweight asset cache retains batches atomically at its capacity boundary', async () => {
+  const { McpAssets } = await import('./mcp-assets.mjs');
+  const assets = await McpAssets.create([]);
+  const inputs = Array.from({ length: 31 }, (_, index) => ({ bytes: Buffer.from(`Synthetic asset ${index}`), format: 'png', name: `asset-${index}` }));
+  const saved = assets.retainMany(inputs);
+  const before = assets.list();
+  assert.throws(() => assets.retainMany([{ bytes: Buffer.from('New one'), format: 'png', name: 'new-one' }, { bytes: Buffer.from('New two'), format: 'png', name: 'new-two' }]), /limit/);
+  assert.deepEqual(assets.list(), before);
+  const reused = assets.retainMany([inputs[0], { bytes: Buffer.from('New one'), format: 'png', name: 'new-one' }]);
+  assert.equal(reused[0].asset_id, saved[0].asset_id);
+  assert.equal(assets.list().assets.length, 32);
+  assets.close(saved[0].asset_id);
+  assert.equal(assets.list().assets.length, 31);
+  assert.throws(() => assets.retain(Buffer.alloc(1048577), 'png', 'oversize'), /oversized/);
+  assert.equal(assets.list().assets.length, 31);
+});
+
+test('lightweight MCP bounds default previews and catalogs while allowing explicit full detail', async () => {
+  await feedbackMcpFixture(async ({ call, calls, fixture, registrations }) => {
+    const image = { base64: 'aW1hZ2U=', mime_type: 'image/png', width: 10, height: 10, alt: 'Synthetic' };
+    const presets = Array.from({ length: 30 }, (_, index) => ({ id: `list/${index}`, category: 'list', name: `Synthetic ${index}`, example: { version: 1, preset: `list/${index}` }, recommended: index === 0, use_when: 'Equal-status topics' }));
+    fixture.onRequest = async request => {
+      if (request.op === 'create_presentation') return { version: 1, id: request.id, revision: 0, hash: 'a'.repeat(64), sources: [], bindings: [], parts: [], deck: { version: 1, title: request.title, width: 1280, height: 720, slides: Array.from({ length: 14 }, (_, index) => ({ id: `slide-${index + 1}`, title: `Synthetic ${index}`, background: 'FFFFFF', elements: [], notes: '' })) } };
+      if (request.op === 'preview_presentation') return { revision: 0, hash: request.document.hash, pages: (request.options.page_indices ?? [0]).map(page_index => ({ page_index, slide_id: `slide-${page_index + 1}`, image_index: 0 })), images: [{ ...image, mime_type: `image/${request.options.format ?? 'png'}` }], warnings: [], office_visual_parity: false };
+      if (request.op === 'part_catalog') return { version: 1, presets, schema: { marker: 'FULL_SCHEMA' }, style: 'Synthetic', default_bounds: {} };
+      if (request.op === 'architecture_icons') return { version: 1, release: 'synthetic', configured: false, message: 'Not installed', providers: [], icons: Array.from({ length: 100 }, (_, index) => ({ id: `vendor/${index}`, name: `Synthetic ${index}`, provider: 'aws', categories: ['compute'], aliases: [] })) };
+      if (request.op === 'create_graph_icon') return { base64: image.base64, mime_type: image.mime_type, alt: image.alt };
+      if (request.op === 'architecture_icon_assets') return { icons: [{ id: 'vendor/1', ...image }] };
+      throw new Error(`Unexpected request: ${request.op}`);
+    };
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic compact preview' });
+    const tool = registrations.get('preview_presentation');
+    const response = await tool.callback(tool.config.inputSchema.parse({ deck_id }), { signal: new AbortController().signal });
+    assert.equal(response.isError, undefined);
+    assert.equal(response.structuredContent, undefined);
+    assert.equal(response.content[1].mimeType, 'image/jpeg');
+    assert.deepEqual(calls.at(-1).request.options, { max_dimension: 640, layout: 'contact_sheet', format: 'jpeg', max_output_bytes: 393216, page_indices: [0, 1, 2, 3, 4, 5, 6, 7] });
+    const preview = JSON.parse(response.content[0].text);
+    assert.deepEqual(preview.page_scope, { total: 14, selected: 8, unselected: 6 });
+    assert.ok(Buffer.byteLength(response.content[0].text) < 4096);
+    await call('preview_presentation', { deck_id, detail: 'full', options: { page_indices: [0], max_dimension: 1600 } });
+    assert.deepEqual(calls.at(-1).request.options, { page_indices: [0], max_dimension: 1600 });
+    const catalog = await call('part_catalog');
+    assert.equal(catalog.presets.length, 12);
+    assert.equal(catalog.total, 30);
+    assert.equal(catalog.next_offset, 12);
+    assert.equal(catalog.schema, undefined);
+    assert.equal(catalog.presets[0].example, undefined);
+    assert.equal(catalog.presets[0].recommended, true);
+    const selected = await call('part_catalog', { preset_id: 'list/0' });
+    assert.deepEqual(selected.presets[0].example, presets[0].example);
+    assert.equal((await call('part_catalog', { detail: 'full' })).presets.length, 30);
+    const icons = await call('architecture_icons', { provider: 'aws', limit: 5, offset: 95 });
+    assert.equal(icons.icons.length, 5);
+    assert.equal(icons.next_offset, null);
+    const prepared = await call('create_graph_icon', { base64: image.base64, mime_type: image.mime_type });
+    assert.equal(prepared.base64, undefined);
+    assert.equal(typeof prepared.asset_id, 'string');
+    assert.deepEqual(await call('create_graph_icon', { base64: image.base64, mime_type: image.mime_type, detail: 'full' }), { base64: image.base64, mime_type: image.mime_type, alt: image.alt });
+    const iconAssets = await call('architecture_icon_assets', { ids: ['vendor/1'] });
+    assert.equal(iconAssets.icons[0].asset_id, prepared.asset_id);
+    assert.equal(iconAssets.icons[0].base64, undefined);
+    await call('close_deck', { deck_id });
+  }, []);
+});
+
+test('lightweight MCP live 14-slide authoring resumes and exports a complete native presentation', { timeout: 180000 }, async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-compact-live-'));
+  const sharp = (await import('sharp')).default;
+  const image = await sharp({ create: { width: 32, height: 32, channels: 4, background: { r: 25, g: 190, b: 115, alpha: 1 } } }).png().toBuffer();
+  await writeFile(join(directory, 'synthetic.png'), image);
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory, '--asset-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const client = new Client({ name: 'compact-authoring-proof', version: '1.0.0' });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args }, undefined, { timeout: 120000 });
+    assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
+    assert.equal(result.structuredContent, undefined);
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const listed = await client.listTools();
+    assert.equal(listed.tools.length, 10);
+    assert.ok(Buffer.byteLength(JSON.stringify(listed)) < 65536);
+    const created = await call('create_presentation', { title: 'Synthetic compact fourteen-slide proof' });
+    const blank = await call('edit_slides', { deck_id: created.deck_id, expected_revision: created.revision, operations: Array.from({ length: 13 }, (_, index) => ({ op: 'insert', id: `slide-${index + 2}`, after: `slide-${index + 1}`, title: `Synthetic ${index + 2}` })) });
+    const asset = await call('register_asset', { path: 'synthetic.png' });
+    const operations = Array.from({ length: 14 }, (_, index) => ({ op: 'add_elements', slide_id: `slide-${index + 1}`, elements: [{ type: 'text', id: `heading-${index + 1}`, x: 80, y: 100, width: 1050, height: 90, text: `Synthetic slide ${index + 1}`, font_size: 32, color: '@dk1', bold: true }] }));
+    operations.push({ op: 'add_picture', slide_id: 'slide-1', id: 'synthetic-picture', asset_id: asset.asset_id, alt: 'Synthetic square', frame: { x: 900, y: 400, width: 64, height: 64 } });
+    const authored = await call('apply_operations', { deck_id: blank.deck_id, expected_revision: blank.revision, expected_hash: blank.hash, operations });
+    const inventory = await call('list_decks');
+    const resumed = inventory.decks.find(deck => deck.title === 'Synthetic compact fourteen-slide proof');
+    assert.equal(resumed.deck_id, authored.deck_id);
+    assert.equal(resumed.hash, authored.hash);
+    assert.equal(resumed.last_operation.name, 'apply_operations');
+    const summary = await call('get_deck_summary', { deck_id: resumed.deck_id });
+    assert.equal(summary.slides.length, 14);
+    assert.ok(summary.slides.every(slide => slide.element_count >= 1));
+    assert.ok(Buffer.byteLength(JSON.stringify(summary)) < 8192);
+    const preview = await client.callTool({ name: 'preview_presentation', arguments: { deck_id: resumed.deck_id } }, undefined, { timeout: 120000 });
+    assert.ok(!preview.isError, JSON.stringify(preview.content));
+    const previewMetadata = JSON.parse(preview.content[0].text);
+    assert.deepEqual(previewMetadata.page_scope, { total: 14, selected: 8, unselected: 6 });
+    const previewImage = preview.content.find(item => item.type === 'image');
+    assert.equal(previewImage.mimeType, 'image/jpeg');
+    const previewBytes = Buffer.from(previewImage.data, 'base64');
+    assert.equal((await sharp(previewBytes).metadata()).format, 'jpeg');
+    assert.ok(previewBytes.length <= 393216);
+    const delivery = await call('finalize_presentation', { deck_id: resumed.deck_id, expected_revision: resumed.revision, expected_hash: resumed.hash, name: 'synthetic-compact', include_images: false });
+    const presentation = delivery.files.find(file => file.filename.endsWith('.pptx'));
+    assert.ok(presentation);
+    const bytes = await readFile(presentation.path);
+    assert.equal(bytes.subarray(0, 2).toString(), 'PK');
+    assert.equal((await call('list_decks')).decks[0].last_export.path, presentation.path);
+    const registered = await call('register_asset', { path: presentation.filename });
+    const reopened = await call('open_pptx', { asset_id: registered.asset_id });
+    assert.equal(reopened.slides, 14);
+    const reopenedSummary = await call('get_deck_summary', { deck_id: reopened.deck_id });
+    assert.ok(reopenedSummary.slides.every(slide => slide.element_count >= 1));
+    assert.deepEqual(await readFile(presentation.path), bytes);
+    context.diagnostic(JSON.stringify({ slides: 14, default_list_bytes: Buffer.byteLength(JSON.stringify(listed)), summary_bytes: Buffer.byteLength(JSON.stringify(summary)), preview_image_bytes: previewBytes.length, delivery_response_bytes: Buffer.byteLength(JSON.stringify(delivery)), pptx_bytes: bytes.length, original_unchanged: true }));
+    await call('close_deck', { deck_id: reopened.deck_id });
+    await call('close_deck', { deck_id: resumed.deck_id });
+  } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('graph feedback MCP schemas and committed diagnostics stay bounded and single-request', async () => {
+  await feedbackMcpFixture(async ({ call, calls, registrations, fixture }) => {
+    const { deck_id } = await call('create_presentation', { title: 'Graph feedback' });
+    const node = { id: 'node', label: 'Synthetic label', x: 0, y: 88, label_fit: 'shrink' };
+    const group = { id: 'group', label: 'Boundary', x: 0, y: 88, width: 500, height: 300, header_color: '@accent2' };
+    const spec = { version: 1, title: '', nodes: [node], groups: [group] };
+    const part = { version: 1, preset: 'diagram/custom', title: '', data: { kind: 'diagram', graph: spec } };
+    const element = { type: 'group', id: 'graph', children: [] };
+    const diagnostics = { status: 'complete', findings: [{ code: 'GRAPH_LABEL_BORDER_OVERLAP', severity: 'warning', graph_id: 'graph', entity_id: 'edge', element_ids: ['label'], bounds: [10, 20, 80, 28], message: 'Border overlap.', slide_id: 'slide-1' }] };
+    let supplied = diagnostics;
+    let noOp = false;
+    fixture.onRequest = async request => {
+      if (request.op === 'create_graph') return request.include_diagnostics ? { element, diagnostics } : element;
+      assert.ok(['insert_graph', 'update_graph', 'apply_graph', 'insert_part', 'update_part', 'apply_operations'].includes(request.op), `Unexpected post-commit request: ${request.op}`);
+      return { document: noOp ? request.document : { ...request.document, revision: request.document.revision + 1, hash: 'b'.repeat(64) }, receipt: noOp ? null : { inverse: [] }, ...(supplied === undefined ? {} : { diagnostics: supplied }) };
+    };
+    assert.deepEqual(await call('create_graph', { id: 'graph', spec }), element);
+    assert.equal(Object.hasOwn(calls.at(-1).request, 'include_diagnostics'), false);
+    assert.deepEqual(await call('create_graph', { id: 'graph', spec, include_diagnostics: false }), element);
+    assert.deepEqual(await call('create_graph', { id: 'graph', spec, include_diagnostics: true }), { element, diagnostics });
+    const schema = registrations.get('create_graph').config.inputSchema;
+    for (const value of [null, 'true', 1]) assert.equal(schema.safeParse({ id: 'graph', spec, include_diagnostics: value }).success, false);
+    for (const label_fit of ['wrap', 'shrink']) assert.ok(schema.safeParse({ id: 'graph', spec: { ...spec, nodes: [{ ...node, label_fit }] } }).success);
+    for (const label_fit of [null, 'truncate', true]) assert.equal(schema.safeParse({ id: 'graph', spec: { ...spec, nodes: [{ ...node, label_fit }] } }).success, false);
+    for (const header_color of ['123ABC', '@dk1', null]) assert.ok(schema.safeParse({ id: 'graph', spec: { ...spec, groups: [{ ...group, header_color }] } }).success);
+    for (const header_color of ['red', '@bad', 123]) assert.equal(schema.safeParse({ id: 'graph', spec: { ...spec, groups: [{ ...group, header_color }] } }).success, false);
+    assert.ok(registrations.get('transform_graph').config.inputSchema.safeParse({ spec, operations: [{ op: 'put_node', node }, { op: 'put_group', group }] }).success);
+    assert.ok(registrations.get('create_part').config.inputSchema.safeParse({ id: 'part', spec: part }).success);
+    assert.ok(registrations.get('preview_slide_revision').config.inputSchema.safeParse({ deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), slide_id: 'slide-1', edits: [{ op: 'update_graph', id: 'graph', spec }, { op: 'update_part', id: 'part', spec: part }] }).success);
+    let revision = 0;
+    for (const name of ['add_graph', 'update_graph', 'apply_graph', 'add_part', 'update_part', 'apply_operations']) {
+      const input = name === 'apply_operations' ? { expected_hash: 'b'.repeat(64), operations: [
+        { op: 'add_graph', slide_id: 'slide-1', id: 'graph', spec }, { op: 'update_graph', slide_id: 'slide-1', id: 'graph', spec },
+        { op: 'add_part', slide_id: 'slide-1', id: 'part', spec: part }, { op: 'update_part', slide_id: 'slide-1', id: 'part', spec: part },
+      ] } : { slide_id: 'slide-1', id: 'graph', ...(name === 'apply_graph' ? { operations: [{ op: 'put_node', node }, { op: 'put_group', group }] } : { spec: name.endsWith('part') ? part : spec }) };
+      const count = calls.length;
+      const result = await call(name, { deck_id, expected_revision: revision, ...input });
+      revision += 1;
+      assert.equal(calls.length, count + 1, name);
+      assert.deepEqual(result.graphDiagnostics, { revision, hash: 'b'.repeat(64), ...diagnostics }, name);
+      assert.equal(result.revision, revision);
+      assert.ok(Buffer.byteLength(JSON.stringify(result)) < 40000);
+    }
+    noOp = true;
+    supplied = { status: 'partial', findings: [] };
+    const count = calls.length;
+    const unchanged = await call('apply_graph', { deck_id, expected_revision: revision, slide_id: 'slide-1', id: 'graph', operations: [{ op: 'move', ids: ['node'], dx: 0, dy: 0 }] });
+    assert.equal(calls.length, count + 1);
+    assert.equal(unchanged.revision, revision);
+    assert.deepEqual(unchanged.graphDiagnostics, { revision, hash: 'b'.repeat(64), ...supplied });
+    noOp = false;
+    supplied = { status: 'complete', findings: Array(65).fill(diagnostics.findings[0]) };
+    const malformed = await call('update_graph', { deck_id, expected_revision: revision++, slide_id: 'slide-1', id: 'graph', spec });
+    assert.deepEqual(malformed.graphDiagnostics, { revision, hash: 'b'.repeat(64), status: 'unavailable', findings: [] });
+    supplied = undefined;
+    const legacy = await call('update_part', { deck_id, expected_revision: revision++, slide_id: 'slide-1', id: 'part', spec: part });
+    assert.equal(Object.hasOwn(legacy, 'graphDiagnostics'), false);
+    const recovery = await call('get_session_recovery', { deck_id });
+    assert.equal(JSON.stringify(recovery).includes('diagnostics'), false);
+    assert.equal(recovery.document.revision, revision);
+    assert.match(registrations.get('create_graph').config.description, /include_diagnostics.*64.*32 KiB/);
+    assert.match(registrations.get('add_graph').config.description, /graphDiagnostics/);
+  });
+});
 
 test('graph authoring MCP preserves manual routes and waypoints', async () => {
   await feedbackMcpFixture(async ({ call, calls, registrations }) => {
@@ -134,6 +509,9 @@ function assertFeedbackWorkflow(prompt, resource) {
   const text = prompt.messages[0].content.text;
   assert.equal(resource.contents[0].text, text);
   for (const pattern of [
+    /Default compact mode exposes ten common tools/, /discover_tools.*get_tool_schema/, /list_decks and get_deck_summary/,
+    /No manual progress file or full-document read/, /last successful compact mutation response or get_deck_summary/,
+    /Pass asset_id instead of base64/, /page_scope reports unselected pages/,
     /typed_authoring/, /freeform.*high-volume/, /apply_operations.*complete add_elements/,
     /1\.\.128.*one Undo/, /expected_revision and expected_hash/, /set_frame\/set_frames change geometry only/,
     /set_text_style is a partial style update.*apply_format copies/, /Do not force a preview_slide_revision candidate for every frame/,
@@ -154,6 +532,10 @@ function assertFeedbackWorkflow(prompt, resource) {
     /Choose the information relationship before the layout/, /list\/rows.*list-horizontal\/columns.*list-enumeration\/grid/,
     /recommended.*use_when.*avoid_when/, /Do not assign a different accent color to every item/,
     /do not randomize layouts/, /Legacy preset IDs keep their existing rendering/,
+    /node\.label_fit defaults to wrap/, /Group header_color.*@dk1/, /include_diagnostics=true.*bare native Element/,
+    /graphDiagnostics bound to the accepted revision\/hash without another core request/, /64 findings within 32 KiB/,
+    /GRAPH_LABEL_BORDER_OVERLAP.*GRAPH_LABEL_OVERLAP.*GRAPH_NODE_LABEL_WRAPPED.*GRAPH_NODE_LABEL_SHRINK_LIMIT/,
+    /unavailable does not mean no issues/, /on_overlap=error remains fatal/,
   ]) assert.match(text, pattern);
 }
 
@@ -561,7 +943,7 @@ test('managed batch MCP stub matrix corner labels share Unicode bounds and defau
 
 test('feedback MCP stub guided graph and part schemas preserve optional field semantics', async () => {
   await feedbackMcpFixture(async ({ registrations, calls, call }) => {
-    const graph = { version: 1, title: 'Synthetic', show_title: false, nodes: [{ id: 'node', label: 'Heading', detail: '\u{20000}'.repeat(240), detail_font_size: 12, text_align: 'left', heading_bold: false, font_size: 18, x: 0, y: 0, height: 512 }] };
+    const graph = { version: 1, title: 'Synthetic', show_title: false, nodes: [{ id: 'node', label: 'Heading', label_fit: 'shrink', detail: '\u{20000}'.repeat(240), detail_font_size: 12, text_align: 'left', heading_bold: false, font_size: 18, x: 0, y: 0, height: 512 }], groups: [{ id: 'region', label: 'Region', x: 0, y: 0, width: 1152, height: 512, header_color: '@accent2' }] };
     await call('create_graph', { id: 'graph', spec: graph });
     assert.deepEqual(calls.at(-1).request.spec, graph);
     const graphSchema = registrations.get('create_graph').config.inputSchema;
@@ -579,14 +961,17 @@ test('feedback MCP stub guided graph and part schemas preserve optional field se
     const partSchema = registrations.get('create_part').config.inputSchema;
     for (const layout of [{ ...part.layout, width: 0 }, { ...part.layout, x: 4097 }, { ...part.layout, font_size: 12 }]) assert.equal(partSchema.safeParse({ id: 'part', spec: { ...part, layout } }).success, false);
     const input = structuredClone(guidedExamples()[0]);
+    input.slides[0].part = { version: 1, preset: 'diagram/custom', title: '', data: { kind: 'diagram', graph } };
     const evidenceIds = Array.from({ length: 16 }, (_, index) => `evidence-${index}`);
     input.slides[0].support = [{ clause: 'Synthetic', body_paths: ['/data/items/0'], evidence_ids: evidenceIds }];
     input.authoring = { headline_style: 'keyword', slide_limit: 128 };
     input.slides = Array.from({ length: 128 }, (_, index) => ({ ...input.slides[0], id: `slide-${index}` }));
     await call('validate_guided_presentation', { input });
+    assert.deepEqual(calls.at(-1).request.input.slides[0].part.data.graph, graph);
     assert.deepEqual(calls.at(-1).request.input.authoring, { headline_style: 'keyword', slide_limit: 128 });
     const guidedSchema = registrations.get('validate_guided_presentation').config.inputSchema;
     for (const name of ['validate_guided_presentation', 'create_guided_presentation']) {
+      assert.ok(registrations.get(name).config.inputSchema.safeParse({ input }).success);
       assertGuidedFeedbackSchema(z.toJSONSchema(registrations.get(name).config.inputSchema, { io: 'input' }));
     }
     for (const authoring of [{ slide_limit: 31 }, { slide_limit: 129 }, { slide_limit: 32.5 }, { headline_style: 'freeform' }, { headline_style: 'keyword', unknown: true }]) assert.equal(guidedSchema.safeParse({ input: { ...input, authoring } }).success, false);
@@ -649,7 +1034,7 @@ test('feedback MCP stub complete elements and ergonomic tools retain strict nest
 test('managed batch MCP live 39 slides and 21 managed roots retain metadata through native updates and Undo', { timeout: 360000 }, async context => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-managed-batch-mcp-'));
   const client = new Client({ name: 'managed-batch-transport-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const requests = [];
   const progressEvents = [];
   const request = async (name, args = {}) => {
@@ -688,8 +1073,10 @@ test('managed batch MCP live 39 slides and 21 managed roots retain metadata thro
     await client.connect(transport);
     const tools = (await client.listTools()).tools;
     assert.equal(new Set(tools.map(tool => tool.name)).size, tools.length);
-    const variants = tools.find(tool => tool.name === 'apply_operations').inputSchema.properties.operations.items.oneOf;
-    const operations = variants.map(variant => variant.properties.op.const).sort();
+    const batchSchema = tools.find(tool => tool.name === 'apply_operations').inputSchema;
+    const items = resolveSchemaRef(batchSchema, resolveSchemaRef(batchSchema, batchSchema.properties.operations).items);
+    const variants = items.oneOf ?? items.anyOf;
+    const operations = variants.map(variant => resolveSchemaRef(batchSchema, resolveSchemaRef(batchSchema, variant).properties.op).const).sort();
     assert.equal(operations.length, 13);
     const capabilities = await call('authoring_capabilities');
     assert.deepEqual([...capabilities.typed_authoring.operations].sort(), operations);
@@ -829,7 +1216,7 @@ test('managed batch MCP live 39 slides and 21 managed roots retain metadata thro
 test('feedback MCP live typed batches and authored slide import preserve content and atomic history', { timeout: 120000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-feedback-mcp-'));
   const client = new Client({ name: 'feedback-batch-transport-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
@@ -996,7 +1383,7 @@ test('feedback MCP live typed batches and authored slide import preserve content
 
 test('feedback MCP live guided keyword opt-in and titleless graph part layouts survive cross-API updates', { timeout: 120000 }, async () => {
   const client = new Client({ name: 'feedback-layout-transport-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
@@ -1146,7 +1533,7 @@ test('feedback MCP live guided keyword opt-in and titleless graph part layouts s
 
 test('master import MCP schemas are bounded, strict and expose read-only inspection and preview', async () => {
   const client = new Client({ name: 'master-import-schema-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   const deck_id = '00000000-0000-4000-8000-000000000001';
   const input = { kind: 'potx', base64: 'c3ludGhldGlj', source_sha256: 'a'.repeat(64), mode: 'masters', ids: ['master-1'], prefix: 'brand', name: 'Synthetic brand' };
   const guarded = { deck_id, expected_revision: 0, expected_hash: 'b'.repeat(64), input };
@@ -1154,7 +1541,7 @@ test('master import MCP schemas are bounded, strict and expose read-only inspect
     await client.connect(transport);
     const tools = (await client.listTools()).tools;
     for (const [name, readOnly, required] of [
-      ['inspect_master_source', true, ['kind', 'base64']],
+      ['inspect_master_source', true, ['kind']],
       ['preview_master_import', true, ['deck_id', 'expected_revision', 'expected_hash', 'input']],
       ['import_masters', false, ['deck_id', 'expected_revision', 'expected_hash', 'input', 'expected_candidate_hash']],
     ]) {
@@ -1164,16 +1551,21 @@ test('master import MCP schemas are bounded, strict and expose read-only inspect
       assert.equal(tool.annotations.openWorldHint, false);
       assert.equal(tool.inputSchema.additionalProperties, false);
       assert.deepEqual([...tool.inputSchema.required].sort(), required.sort());
-      if (name !== 'inspect_master_source') {
-        const schema = tool.inputSchema.properties.input;
+      if (name === 'inspect_master_source') {
+        assert.deepEqual(tool.inputSchema.oneOf, [{ required: ['base64'], not: { required: ['asset_id'] } }, { required: ['asset_id'], not: { required: ['base64'] } }]);
+      } else {
+        const schema = resolveSchemaRef(tool.inputSchema, tool.inputSchema.properties.input);
         assert.equal(schema.additionalProperties, false);
         assert.deepEqual([...schema.required].sort(), Object.keys(input).sort());
-        assert.equal(schema.properties.ids.minItems, 1);
-        assert.equal(schema.properties.ids.maxItems, 8);
-        assert.equal(schema.properties.ids.items.maxLength, 80);
+        const ids = resolveSchemaRef(tool.inputSchema, schema.properties.ids);
+        assert.equal(ids.minItems, 1);
+        assert.equal(ids.maxItems, 8);
+        assert.equal(resolveSchemaRef(tool.inputSchema, ids.items).maxLength, 80);
       }
     }
     const invalid = [
+      ['inspect_master_source', { kind: 'potx' }],
+      ['inspect_master_source', { kind: 'potx', base64: input.base64, asset_id: deck_id }],
       ['inspect_master_source', { kind: 'thmx', base64: input.base64 }],
       ['inspect_master_source', { kind: 'potx', base64: '' }],
       ['inspect_master_source', { kind: 'potx', base64: input.base64, path: 'source.potx' }],
@@ -1214,7 +1606,7 @@ test('master import MCP POTX inspection, preview, apply and one Undo preserve th
   const sourceBefore = source.recoveryEnvelope;
   const exported = await source.exportTemplate('potx');
   const client = new Client({ name: 'master-import-workflow-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content));
@@ -1291,7 +1683,7 @@ test('master import MCP POTX inspection, preview, apply and one Undo preserve th
 test('P1 MCP finalization publishes a traceable new bundle without changing the session', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-finalize-mcp-'));
   const client = new Client({ name: 'finalization-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return result;
@@ -1354,7 +1746,7 @@ test('P1 MCP finalization publishes a traceable new bundle without changing the 
 
 test('MCP open list recommendations render native text and keep failed edits atomic', async () => {
   const client = new Client({ name: 'open-list-integration-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content));
@@ -1390,7 +1782,7 @@ test('MCP open list recommendations render native text and keep failed edits ato
 
 test('MCP bounded graph annotations honor small fonts and report actionable group bounds', async () => {
   const client = new Client({ name: 'bounded-graph-feedback-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content));
@@ -1425,7 +1817,7 @@ test('MCP bounded graph annotations honor small fonts and report actionable grou
 
 test('MCP layout preflight reports rounded-container warnings and informational badges without mutation', async () => {
   const client = new Client({ name: 'layout-preflight-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content));
@@ -1454,7 +1846,7 @@ test('MCP layout preflight reports rounded-container warnings and informational 
 
 test('P0 MCP guided options, diagnostics and staged revisions form a guarded visual loop', async () => {
   const client = new Client({ name: 'authoring-loop-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text);
@@ -1518,7 +1910,7 @@ test('P0 MCP guided options, diagnostics and staged revisions form a guarded vis
 test('P0 MCP previews return bounded images without changing documents or writing files', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-preview-mcp-'));
   const client = new Client({ name: 'preview-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text);
@@ -1566,7 +1958,7 @@ test('P0 MCP previews return bounded images without changing documents or writin
 
 test('P0 MCP revision capacity rejects the seventeenth candidate and releases stale candidates', async () => {
   const client = new Client({ name: 'candidate-capacity-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text);
@@ -1594,7 +1986,7 @@ test('P0 MCP revision capacity rejects the seventeenth candidate and releases st
 
 test('phase3 MCP projection and generated SVG are strict read-only helpers', async () => {
   const client = new Client({ name: 'phase3-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text); };
   try {
     await client.connect(transport);
@@ -1614,7 +2006,7 @@ test('phase3 MCP projection and generated SVG are strict read-only helpers', asy
 
 test('G25 G27 MCP notes and auxiliary masters are strict atomic operations', async () => {
   const client = new Client({ name: 'native-notes-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text); };
   try {
     await client.connect(transport);
@@ -1638,7 +2030,7 @@ test('G25 G27 MCP notes and auxiliary masters are strict atomic operations', asy
 
 test('G23 G25 MCP master fields and themes use strict typed revisioned tools', async () => {
   const client = new Client({ name: 'design-fields-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text); };
   try {
     await client.connect(transport);
@@ -1659,7 +2051,7 @@ test('G23 G25 MCP master fields and themes use strict typed revisioned tools', a
 
 test('MCP cell-path helpers are strict read-only candidates and cell batches are atomic and undoable', async () => {
   const client = new Client({ name: 'cell-path-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text);
@@ -1700,7 +2092,7 @@ test('MCP cell-path helpers are strict read-only candidates and cell batches are
 test('MCP static export preflights every output and verifies recovery without replacing decks', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-static-mcp-'));
   const client = new Client({ name: 'static-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text);
@@ -1742,7 +2134,7 @@ test('MCP static export preflights every output and verifies recovery without re
 
 test('MCP generates, edits and saves with the GUI closed', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-mcp-'));
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'aislide-test', version: '1.0.0' });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });

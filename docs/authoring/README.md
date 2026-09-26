@@ -66,12 +66,20 @@ reference-site slide images, branding or proprietary artwork are bundled.
 
 ## MCP Workflow
 
+The default connection is lightweight: ten common tools are initially exposed. `discover_tools({query})` searches advanced operations without their full schemas; `get_tool_schema({name})` returns the needed schema and publishes that tool. The four most recently requested advanced tools remain in the additional list. Existing direct calls are still valid; `--tool-profile full` restores full discovery and legacy response defaults.
+
+For ordinary freeform authoring, use `create_presentation`, `edit_slides`, and bounded `apply_operations` batches with final content/geometry. Compact mutation replies carry the next revision/hash. `list_decks` restores lost handles and last successful operations/exports; `get_deck_summary` returns small paginated slide or element indexes without core calls, image/source bytes, notes or rendering. This removes the need for a manual progress file or repeated full-document reads just to continue working. It does not persist across server restarts or determine whether content is complete.
+
+With operator-approved `--asset-dir` roots, `register_asset({path:"image.png"})` reads the file once. Use its `asset_id` in binary tools, `apply_operations` with `add_picture`, or graph `icon` values. Prepared graph icons and catalog icon assets already return handles in compact mode. `list_assets` recovers them and `close_asset` releases unused registry bytes. No arbitrary paths, external relationship fetching or source overwrite is enabled. See [local asset bounds and contracts](../api.md#local-asset-handles).
+
+The evidence-led guided path remains available through discovery:
+
 1. `best_practice_profiles` lists the four profiles.
 2. `best_practice_guide({profile_id})` returns combined English guidance, pattern capabilities, limits and the Rust-derived `input_schema`.
 3. The assistant resolves the audience, purpose, evidence, logical ledger and body content. Missing quantities stay `xx` or are explicitly sourced assumptions.
 4. `validate_guided_presentation({input})` checks input relationships and compiles a temporary native layout. It creates no persistent handle or file.
 5. `create_guided_presentation({input})` repeats the same validation, then returns a new `deck_id`, actual `revision`, slide count and review report. No existing document is replaced.
-6. Use `preview_presentation({deck_id,options:{page_indices:[0],max_dimension:1280}})` for actual MCP PNG image content. Use `layout:"contact_sheet"` for an overview. No file write is needed.
+6. Use `preview_presentation({deck_id})` for a compact 640px JPEG contact sheet. Explicitly select later pages and/or a larger size when needed; specify `format:"png"` for lossless images. `detail:"full"` restores core defaults. No file write is needed.
 7. Run `preflight_presentation({deck_id,options:{page_indices:[0],min_font_size:24}})` for renderer warnings, possible collisions and readability heuristics. Review the image before treating geometry findings as defects.
 8. For direct edits, use `apply_operations` with current revision/hash and 1-128 typed operations, then review selected pages. When before/after approval is needed, use `preview_slide_revision`, inspect its images, then explicitly call `apply_slide_revision` with the candidate ID and exact base revision/hash. One Undo reverses a changed batch; a preview candidate is not required for every frame edit.
 9. `finalize_presentation` publishes a requested delivery bundle and a hash-bound manifest under the server's operator-approved output directory. Individual `export_pptx` / `export_static` saves remain available. Return the actual saved paths and validation scope.
@@ -117,6 +125,13 @@ detail and center without. `heading_bold` defaults true. Heading and detail
 render as separate editable native text with an 8px gap, subject to fitting.
 Omitting the new fields preserves the earlier title/label presentation.
 
+Node `label_fit:"shrink"` prefers a single-line heading by reducing its font
+only as far as 12px; default `wrap` retains the original behavior. Hard
+newlines are never removed. A node too narrow at that floor retains wrapping
+and reports `GRAPH_NODE_LABEL_SHRINK_LIMIT`; ordinary additional wrapping is
+reported as informational `GRAPH_NODE_LABEL_WRAPPED`. Widen the node instead
+of assuming every label can become one line.
+
 Graph edges also accept `stroke_width` (0.5-12, default 2), `label_color`
 (default `@dk1`) and `label_font_size` (8-40, default 16). These sizes are in
 graph pixels, before any explicit part-region fitting. Explicit font sizes
@@ -133,12 +148,13 @@ segment normal, or rightward for a vertical segment. At a bend, the incoming
 segment determines the normal. Omit placement for automatic avoidance.
 Explicit annotations outside the graph content area reject rather than move
 elsewhere. `on_overlap:"warn"` (default) preserves that placement and leaves
-overlap review to preflight. `on_overlap:"error"` rejects collisions with
-visible node content, group headers, badges or other labels, with IDs and
+overlap review to diagnostics and preflight. `on_overlap:"error"` rejects collisions with
+visible node content, group headers and border strokes, badges or other labels, with IDs and
 repair suggestions. It never silently moves an explicitly placed label.
 Automatic labels try bounded wrapping/font fitting close to their route and
 inside a shared endpoint group. They can retain a bounded best-effort
 candidate when collisions remain; preflight and preview are still required.
+No automatic background is added to hide boundaries or connection lines.
 Cylinder card text excludes the upper ellipse. Graph detail fitting reduces
 single-CJK-glyph soft-wrap tails when possible, after final part placement,
 without altering text or intentional newline-only lines. The 12px detail
@@ -165,12 +181,32 @@ of both endpoints translates their waypoints; moving only one endpoint keeps
 intermediate points fixed. Selecting the edge in `move` translates its
 waypoints without moving nodes. A no-op `apply_graph` retains the current
 native objects and history; `update_graph` remains an explicit regeneration.
+Hiding a previously present title band through `PartSpec.layout` translates
+manual waypoints by the same 88px as their nodes and groups.
 
 Groups accept `padding` (0-64px, default 8) on left/right/bottom,
 `header_height` (20-128px, default 40) as the reserved top band, and
-`header_font_size` (8-32px, default 18). Headers must fit the band, with
+`header_font_size` (8-32px, default 18), and `header_color` (RGB/theme reference,
+default `@dk1`). Omitting the color retains the previous rendering. Headers must fit the band, with
 `header_font_size * 1.25 <= header_height - 12`. Containment, grid layout,
 Studio placement and resize constraints use these values consistently.
+
+For a graph-only preview, request `create_graph` with
+`include_diagnostics:true` to receive `{element,diagnostics}`; omission still
+returns the bare element for existing callers. Studio displays these findings
+without making warnings block insertion. Managed mutation replies expose
+optional `graphDiagnostics` with the accepted revision/hash, up to 64 findings
+and 32 KiB. A `partial` or `unavailable` status is not an all-clear. Inspect the
+final graph-local bounds and entity IDs, not only a warning count. The SDK
+getter is `session.graphDiagnostics`; diagnostics are ephemeral and separate
+from document state, persisted metadata and Undo/Redo.
+
+Preflight suppresses only verified managed graph badge/own-connector pairs
+whose actual attributes and route still match their metadata. Hand-made or
+changed badges, crossings with other edges and label collisions remain
+reported. General chart non-Office notices are grouped once per page as info;
+specific chart limitations remain individual warnings. This is reduced noise,
+not Office visual-parity approval.
 The minimum node y is `group.y + header_height`, not that value plus padding;
 the minimum x is `group.x + padding`. Containment errors include node/group
 IDs, these minimum coordinates, the allowed right/bottom boundaries and the
@@ -711,16 +747,16 @@ In default sentence mode, Japanese consulting headlines target one 36-character 
 
 ### Visual Review And Revisions
 
-Preview and preflight accept 1-8 unique zero-based page indices. Omitting selection means all pages only if there are at most eight. Preview images have a 160-1600px maximum edge, 2MiB combined encoded-image budget, and 4MiB response budget. Images are returned directly, not as disk paths; metadata-only clients can use `include_images:false`.
+Preview and preflight accept 1-8 unique zero-based page indices. Compact MCP preview selects the first eight when omitted, defaults to a 640px JPEG contact sheet and a 384KiB image budget, and reports selected/unselected counts in `page_scope`. Explicit options override those defaults. Core/SDK and MCP `detail:"full"` select all pages only if there are at most eight. Maximum bounds remain 160-1600px, 2MiB combined encoded images and 4MiB response. Images are returned directly, not as disk paths; `include_images:false` hides them but still renders.
 
-Preview defaults to `format:"png", overflow:"shrink"`. Encoded-byte overflow
+Core/SDK and full-detail preview default to `format:"png", overflow:"shrink"`. Encoded-byte overflow
 alone retries at 75% and 56.25% of the requested edge, minimum 160px, at most
 three distinct attempts in total. No pages are omitted. The response reports
 `requested_max_dimension`, `actual_max_dimension`, `quality_reduced` and a
 `PREVIEW_DOWNSCALED` warning when reduced. Use `overflow:"error"` for strict
 resolution or `format:"jpeg"` (lossy quality 90) for photo-heavy pages. Other
 errors never trigger silent retry. `include_images:false` still renders;
-use `get_document` instead when only the current revision/hash is needed.
+use `get_deck_summary` instead when only the current revision/hash is needed.
 
 Preflight returns stable slide/element IDs, `scopes` (slide/master/layout), transformed bounds, severity, evidence category and repair suggestions. Renderer warnings include actual shape-padding/table clipping and font/glyph warnings. Geometry checks flag possible text-frame overlap, connector/label interference and off-slide objects; font floor and density are heuristics. Background containment and attached endpoint nodes are excluded. At most 1024 visible objects per selected page and 256 findings are allowed; exceedances fail explicitly. Orphan lines, semantic truth, full accessibility and Office parity remain separate checks.
 
@@ -776,7 +812,7 @@ Only enable `notes` / `source_report` when separate plaintext exports are intend
 | `name-notes.txt` | Optional, whole-deck notes and ledger; UTF-8 BOM, plain text, not executed |
 | `name-sources.json` | Optional, whole-deck source hashes/attributions/binding locators; no source body, rows or raw values |
 
-PDF, images and visual preflight select 1-8 unique zero-based pages. Omitted selection means all pages and rejects more than eight when any visual output/check is requested. A full-PPTX-only delivery can use `preview:"none", preflight:false` on larger decks. The manifest and each file record their actual scope; selected visual checks do not certify the other PPTX pages. PNGs retain the 160-1600px/2MiB preview limits; `min_font_size` defaults to 16. The combined decoded files plus manifest are limited to 32MiB (`max_output_bytes` may lower this), the core response also obeys its capacity profile, and the MCP response is at most 4MiB. A single returned preview can be omitted with `include_images:false` without disabling saved previews.
+PDF, images and visual preflight select 1-8 unique zero-based pages. Compact MCP delivery defaults to the first eight pages and a 640px contact sheet, with `page_scope` and the manifest disclosing coverage. Explicit options override these defaults. Core/SDK and MCP `detail:"full"` select all pages and reject more than eight when visual output/checks are requested. A full-PPTX-only delivery can use `preview:"none", preflight:false` on larger decks. The PPTX always includes every slide. The manifest and each file record their actual scope; selected visual checks do not certify other pages. PNGs retain the 160-1600px/2MiB preview limits; `min_font_size` defaults to 16. Decoded files plus manifest are limited to 32MiB (`max_output_bytes` may lower this), the core response obeys its capacity profile, and MCP response is at most 4MiB. `include_images:false` omits the response thumbnail without disabling saved previews.
 
 All artifact generation, hashes and response sizing finish before filesystem publication. Every destination is checked first, all files are staged with exclusive temporary creation, and outputs are hardlinked in order with the manifest last. This is **not crash-atomic** or a guarantee against hostile local directory replacement. No published file is removed on failure. `BUNDLE_PUBLICATION_FAILED` returns `not_published`, `partially_published` or `published_with_error`, exact `published_paths`, `pending_filenames` and cleanup diagnostics. Inspect existing files/manifest hashes; use a new name for another complete delivery. Cancellation can occur after publication, so never assume a cancelled request wrote nothing. There is no automatic retry or resume.
 

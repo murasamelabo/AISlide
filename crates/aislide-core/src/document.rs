@@ -88,7 +88,10 @@ pub fn verify_session_recovery(mut envelope: SessionRecovery) -> Result<SessionR
 }
 
 #[derive(Serialize)]
-pub struct TransactionResult { pub document: Document, pub receipt: Option<UndoReceipt>, pub changes: Vec<String> }
+pub struct TransactionResult {
+    pub document: Document, pub receipt: Option<UndoReceipt>, pub changes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub diagnostics: Option<crate::graphs::GraphDiagnostics>,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -137,7 +140,15 @@ fn seal(document: &mut Document) -> Result<()> {
         }
     }
     let mut elements = BTreeMap::new();
-    for slide in &document.deck.slides { for element in element_list(&slide.elements) { elements.insert((slide.id.as_str(), element.bounds().0), serde_json::to_value(element)?); } }
+    let targets: BTreeSet<_> = document.bindings.iter().map(|binding| (binding.slide_id.as_str(), binding.element_id.as_str())).collect();
+    if !targets.is_empty() {
+        for slide in &document.deck.slides {
+            for element in element_list(&slide.elements) {
+                let key = (slide.id.as_str(), element.bounds().0);
+                if targets.contains(&key) { elements.insert(key, serde_json::to_value(element)?); }
+            }
+        }
+    }
     for binding in &mut document.bindings {
         valid_text(&binding.field, 512)?;
         let source = document.sources.iter().find(|source| source.id == binding.source_id && source.sha256 == binding.source_sha256).ok_or_else(|| Error::Conflict("source binding refers to an unknown source".into()))?;
@@ -212,7 +223,9 @@ pub fn transact(document: &Document, transaction: Transaction) -> Result<Transac
         for field in ["path", "from"] { if encoded.get(field).and_then(Value::as_str).is_some_and(|path| path.len() > 2048) { return Err(Error::Limit("transaction path > 2048 bytes".into())); } }
         json_patch::patch(&mut working, &Patch(vec![operation.clone()])).map_err(|_| Error::Conflict("transaction precondition or path failed; no changes applied".into()))?;
         crate::preflight::value(&working, document.capacity_profile.limits(), None)?;
-        crate::preflight::serialized_bytes(&working, document.capacity_profile.limits().document_bytes, "transaction document")?;
+        if !working.as_object().is_some_and(|content| ["deck", "sources", "bindings"].iter().all(|key| content.contains_key(*key))) {
+            crate::preflight::serialized_bytes(&working, document.capacity_profile.limits().document_bytes, "transaction document")?;
+        }
     }
     let next: Content = serde_json::from_value(working)?;
     let mut updated = Document { capacity_profile: document.capacity_profile, version: document.version, id: document.id.clone(), revision: document.revision, hash: String::new(), deck: next.deck, sources: next.sources, bindings: next.bindings, parts: next.parts, report: next.report, origin: next.origin };
@@ -222,7 +235,7 @@ pub fn transact(document: &Document, transaction: Transaction) -> Result<Transac
         contains(&updated.deck) || !contains(&document.deck)
     });
     seal(&mut updated)?;
-    if updated.hash == document.hash { return Ok(TransactionResult { document: document.clone(), receipt: None, changes: Vec::new() }); }
+    if updated.hash == document.hash { return Ok(TransactionResult { document: document.clone(), receipt: None, changes: Vec::new(), diagnostics: None }); }
     updated.revision = document.revision.checked_add(1).filter(|revision| *revision <= MAX_REVISION).ok_or_else(|| Error::Limit("document revision exhausted".into()))?;
     crate::preflight::serialized_bytes(&updated, document.capacity_profile.limits().document_bytes, "complete transaction document")?;
     let updated_content = serde_json::to_value(content_ref(&updated))?;
@@ -242,7 +255,7 @@ pub fn transact(document: &Document, transaction: Transaction) -> Result<Transac
     }
     let changes = serde_json::to_value(&transaction.operations)?.as_array().into_iter().flatten().filter_map(|operation| operation["path"].as_str().map(String::from)).collect();
     let receipt = UndoReceipt { document_id: updated.id.clone(), after_hash: updated.hash.clone(), inverse };
-    Ok(TransactionResult { document: updated, receipt: Some(receipt), changes })
+    Ok(TransactionResult { document: updated, receipt: Some(receipt), changes, diagnostics: None })
 }
 
 pub fn undo(document: &Document, expected_revision: u64, receipt: UndoReceipt) -> Result<TransactionResult> {
