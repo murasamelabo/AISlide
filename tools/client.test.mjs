@@ -153,7 +153,7 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
   const filename = fileURLToPath(new URL('../packages/client/feedback-types.mts', import.meta.url)).replaceAll('\\', '/');
   const preamble = `
     import type { DocumentSession, AislideDocument, AuthoringOptions, AuthoringOperation, Frame, Crop,
-      Connection, ConnectorRouting, ConnectorSettings, VisualStyle, GraphEdge, GraphGroup, PictureInput, SlideImportInput, GraphSpec, PartSpec, GuidedAuthoring, PreflightFinding } from './index.mjs';
+      Connection, ConnectorRouting, ConnectorSettings, VisualStyle, GraphEdge, GraphGroup, PictureInput, SlideImportInput, GraphSpec, PartSpec, GuidedAuthoring, PreflightFinding, PreviewOptions, PreviewImage, PresentationPreview } from './index.mjs';
     declare const session: DocumentSession;
     declare const source: AislideDocument;
     const options: AuthoringOptions = { expectedRevision: 0, expectedHash: 'hash', signal: new AbortController().signal };
@@ -211,10 +211,19 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
       session.updateGraph('slide-1', { id: 'graph', spec: graph }));
     const authoring: GuidedAuthoring = { headline_style: 'keyword', slide_limit: 128 };
     const diagnosticLevels: PreflightFinding['severity'][] = ['info', 'warning', 'error'];
-    void [results, part, authoring, diagnosticLevels];
+    const previewOptions: PreviewOptions = { format: 'jpeg', overflow: 'shrink', max_dimension: 1280 };
+    const strictOptions: PreviewOptions = { format: 'png', overflow: 'error' };
+    const jpeg: PreviewImage = { base64: '', mime_type: 'image/jpeg', width: 960, height: 540, byte_length: 0, sha256: '' };
+    declare const preview: PresentationPreview;
+    const quality: [number, number, boolean] = [preview.requested_max_dimension, preview.actual_max_dimension, preview.quality_reduced];
+    edge.label_placement = { position: 0.5, on_overlap: 'error' };
+    void [results, part, authoring, diagnosticLevels, previewOptions, strictOptions, jpeg, quality];
   `);
   assert.deepEqual(diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')), []);
   for (const invalid of [
+    "const invalid: PreviewOptions = { format: 'pdf' };",
+    "const invalid: PreviewOptions = { overflow: 'unlimited' };",
+    "const invalid: GraphEdge = { id: 'edge', source: 'a', target: 'b', label_placement: { position: 0.5, on_overlap: 'ignore' } };",
     "const invalid: GraphEdge = { id: 'edge', source: 'a', target: 'b', waypoints: null };",
     "const invalid: GraphEdge = { id: 'edge', source: 'a', target: 'b', label_placement: { position: 0.5, side: 'left' } };",
     "const invalid: GraphEdge = { id: 'edge', source: 'a', target: 'b', badge: { number: '7' } };",

@@ -9,6 +9,373 @@ fn graph() -> Value {
     ],"edges":[{"id":"request","source":"client","target":"api","label":"HTTPS","source_port":"right","target_port":"left","route":"straight"}],"groups":[]})
 }
 
+fn feedback_graph() -> Value {
+    json!({"version":1,"title":"ISOC とデータの流れ（グラフ機能の検証）","subtitle":"","show_title":false,
+        "groups":[
+            {"id":"portal","label":"Microsoft Defender ポータル","x":24,"y":16,"width":620,"height":300,"padding":16,"header_height":44,"header_font_size":18,"fill":"EAF3FB","stroke":"0B6FC9"},
+            {"id":"azure","label":"Azure（サブスクリプション）","x":700,"y":16,"width":428,"height":300,"padding":16,"header_height":44,"header_font_size":18,"fill":"E6F5F2","stroke":"0E8C7F"}
+        ],"nodes":[
+            {"id":"xdr","label":"Defender XDR","detail":"インシデント・アラート","kind":"rounded_rectangle","x":48,"y":84,"width":220,"height":84,"group":"portal"},
+            {"id":"isoc","label":"ISOC","detail":"ケース・自動化・ワークブック","kind":"rounded_rectangle","x":380,"y":84,"width":240,"height":84,"group":"portal","fill":"FFFFFF","stroke":"0F2A44"},
+            {"id":"pb","label":"プレイブック生成","x":380,"y":216,"width":240,"height":72,"group":"portal"},
+            {"id":"ws","label":"ワークスペース","detail":"UEBA・TI・コネクタ","kind":"cylinder","x":724,"y":84,"width":180,"height":96,"group":"azure"},
+            {"id":"lake","label":"データレイク","detail":"未確認","kind":"cylinder","x":930,"y":84,"width":180,"height":96,"group":"azure","stroke":"D9730D"},
+            {"id":"src","label":"サードパーティ / Azure ログ","x":724,"y":224,"width":386,"height":64,"group":"azure"},
+            {"id":"analyst","label":"SOC アナリスト","kind":"ellipse","x":48,"y":400,"width":220,"height":72}
+        ],"edges":[
+            {"id":"e1","source":"xdr","target":"isoc","label":"相関済みインシデント","label_placement":{"position":0.5,"side":"above","offset":8},"badge":{"number":1}},
+            {"id":"e2","source":"isoc","target":"pb","source_port":"bottom","target_port":"top","source_offset":0.25,"target_offset":0.25,"label":"対応手順","label_placement":{"position":0.5,"side":"below","offset":6},"badge":{"number":2,"position":0.4}},
+            {"id":"e3","source":"src","target":"ws","source_port":"top","target_port":"bottom","route":"elbow","label":"取り込み（課金）","color":"0E8C7F","badge":{"number":3,"fill":"FFFFFF"}},
+            {"id":"e4","source":"ws","target":"isoc","source_port":"left","target_port":"right","route":"manual","waypoints":[[670,132],[670,126]],"label":"エンリッチ","label_placement":{"position":0.85,"side":"above","offset":8},"badge":{"number":4,"position":0.3}},
+            {"id":"e5","source":"ws","target":"lake","source_port":"right","target_port":"left","label":"未確認","dashed":true,"color":"D9730D","label_color":"D9730D","label_font_size":13},
+            {"id":"e6","source":"pb","target":"analyst","source_port":"left","target_port":"right","route":"manual","waypoints":[[320,252],[320,436]],"label":"承認して実行","stroke_width":3,"label_placement":{"position":0.8,"side":"above","offset":8},"badge":{"number":5,"position":0.35}}
+        ]})
+}
+
+fn graph_child<'a>(rendered: &'a Value, suffix: &str) -> &'a Value {
+    rendered["children"].as_array().unwrap().iter().find(|child| child["id"].as_str().unwrap().ends_with(suffix)).unwrap()
+}
+
+#[test]
+fn feedback_explicit_overlap_policy_preserves_default_and_rejects_strict_collision() {
+    let mut spec = feedback_graph();
+    let original = execute_request(json!({"op":"create_graph","id":"feedback","spec":spec})).unwrap();
+    let label = graph_child(&original, "-et-e1");
+    for (field, expected) in [("x",240.0),("y",90.0),("width",168.0),("height",28.0)] { assert_eq!(label[field], expected); }
+    spec["edges"][0]["label_placement"]["on_overlap"] = json!("warn");
+    assert_eq!(execute_request(json!({"op":"create_graph","id":"feedback","spec":spec})).unwrap(), original);
+    let typed: aislide_core::graphs::GraphSpec = serde_json::from_value(spec.clone()).unwrap();
+    assert_eq!(typed.edges[0].label_placement.as_ref().unwrap().on_overlap, aislide_core::graphs::GraphLabelOverlap::Warn);
+    assert!(serde_json::to_value(typed).unwrap()["edges"][0]["label_placement"].get("on_overlap").is_none());
+    for value in [json!("ignore"), Value::Null, json!(true), json!({})] {
+        let mut invalid = spec.clone(); invalid["edges"][0]["label_placement"]["on_overlap"] = value;
+        assert!(serde_json::from_value::<aislide_core::graphs::GraphSpec>(invalid).is_err());
+    }
+    spec["edges"][0]["label_placement"]["on_overlap"] = json!("error");
+    aislide_core::graphs::validate(&serde_json::from_value(spec.clone()).unwrap()).unwrap();
+    let error = execute_request(json!({"op":"create_graph","id":"feedback","spec":spec})).unwrap_err().to_string();
+    for expected in ["e1", "-n-xdr", "-n-isoc", "-eb-e1", "offset"] { assert!(error.contains(expected), "missing {expected}: {error}"); }
+}
+
+#[test]
+fn feedback_strict_labels_accept_clear_frames_and_report_headers_and_prior_labels() {
+    let mut spec = graph();
+    spec["nodes"][1]["y"] = json!(160); spec["nodes"][1]["height"] = json!(96);
+    spec["edges"][0]["label_placement"] = json!({"position":0.5,"side":"above","offset":8,"on_overlap":"error"});
+    let strict = execute_request(json!({"op":"create_graph","id":"clear-strict","spec":spec})).unwrap();
+    assert_eq!(graph_rect(graph_child(&strict, "-et-request")), [377.5,172.0,53.0,28.0]);
+    let document = execute_request(json!({"op":"create_presentation","id":"strict-history","title":"Strict labels"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_graph","document":document,"expected_revision":0,"slide_id":"slide-1","id":"flow","spec":spec})).unwrap();
+    let saved = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"strict-open","base64":saved["base64"]})).unwrap();
+    assert_eq!(opened["document"]["parts"][0]["stale"], false);
+    assert_eq!(opened["document"]["parts"][0]["spec"]["data"]["graph"]["edges"][0]["label_placement"]["on_overlap"], "error");
+    let mut repeated = spec.clone();
+    let mut second = spec["edges"][0].clone(); second["id"] = json!("second");
+    repeated["edges"].as_array_mut().unwrap().push(second);
+    let error = execute_request(json!({"op":"create_graph","id":"prior-label","spec":repeated})).unwrap_err().to_string();
+    assert!(error.contains("edge 'request'") && error.contains("-et-second"), "{error}");
+    spec["groups"] = json!([{"id":"boundary","label":"Boundary","x":0,"y":88,"width":1000,"height":400}]);
+    spec["edges"][0]["label_placement"]["offset"] = json!(80);
+    let error = execute_request(json!({"op":"create_graph","id":"header-collision","spec":spec})).unwrap_err().to_string();
+    assert!(error.contains("request") && error.contains("-gt-boundary"), "{error}");
+}
+
+#[test]
+fn feedback_strict_icon_labels_ignore_transparent_anchors_but_check_visible_text() {
+    let mut spec = graph();
+    spec["nodes"][0]["height"] = json!(160); spec["nodes"][0]["font_size"] = json!(12);
+    spec["nodes"][0]["presentation"] = json!("icon"); spec["nodes"][0]["icon"] = node_icon("#007a4d");
+    spec["nodes"][1]["height"] = json!(160); spec["nodes"][1]["y"] = json!(160);
+    spec["edges"][0]["label_placement"] = json!({"position":0,"side":"above","offset":8,"on_overlap":"error"});
+    let rendered = execute_request(json!({"op":"create_graph","id":"icon-clear","spec":spec})).unwrap();
+    assert!(rects_overlap(graph_rect(graph_child(&rendered, "-et-request")), graph_rect(graph_child(&rendered, "-n-client"))));
+    spec["edges"][0]["label_placement"] = json!({"position":0,"side":"below","offset":20,"on_overlap":"error"});
+    let error = execute_request(json!({"op":"create_graph","id":"icon-text","spec":spec})).unwrap_err().to_string();
+    assert!(error.contains("-nt-client") && !error.contains("-n-client"), "{error}");
+}
+
+#[test]
+fn review_strict_collision_checks_later_warn_labels_in_both_orders_atomically() {
+    let mut spec = graph();
+    spec["nodes"][1]["y"] = json!(160); spec["nodes"][1]["height"] = json!(96);
+    spec["edges"][0]["label_placement"] = json!({"position":0.5,"side":"above","offset":8,"on_overlap":"error"});
+    let document = execute_request(json!({"op":"create_presentation","id":"review-strict","title":"Strict labels"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_graph","document":document,"expected_revision":0,"slide_id":"slide-1","id":"flow","spec":spec})).unwrap();
+    let before = inserted["document"].clone();
+    let mut second = spec["edges"][0].clone(); second["id"] = json!("second");
+    second["label_placement"]["on_overlap"] = json!("warn");
+    spec["edges"].as_array_mut().unwrap().push(second);
+    for reverse in [false, true] {
+        let mut candidate = spec.clone();
+        if reverse { candidate["edges"].as_array_mut().unwrap().reverse(); }
+        let error = execute_request(json!({"op":"create_graph","id":"review-order","spec":candidate})).unwrap_err().to_string();
+        assert!(error.contains("request") && error.contains("-et-second"), "{error}");
+        let error = execute_request(json!({"op":"update_graph","document":before,"expected_revision":1,"slide_id":"slide-1","id":"flow","spec":candidate})).unwrap_err().to_string();
+        assert!(error.contains("request") && error.contains("-et-second"), "{error}");
+        let unchanged = execute_request(json!({"op":"apply_graph","document":before,"expected_revision":1,"slide_id":"slide-1","id":"flow","operations":[{"op":"move","ids":["api"],"dx":0,"dy":0}]})).unwrap();
+        assert_eq!(unchanged["document"], before); assert!(unchanged["receipt"].is_null());
+        let undone = execute_request(json!({"op":"undo_transaction","document":before,"expected_revision":1,"receipt":inserted["receipt"]})).unwrap();
+        assert_eq!(undone["document"]["hash"], document["hash"]);
+    }
+}
+
+#[test]
+fn feedback_native_roundtrip_undo_and_strict_failure_are_atomic() {
+    let spec = feedback_graph();
+    let document = execute_request(json!({"op":"create_presentation","id":"feedback-history","title":"Feedback history"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_graph","document":document,"expected_revision":0,"slide_id":"slide-1","id":"flow","spec":spec})).unwrap();
+    let before = inserted["document"].clone();
+    let preflight = execute_request(json!({"op":"preflight_presentation","document":before})).unwrap();
+    assert!(preflight["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "TEXT_OVERLAP" && finding["severity"] == "warning" && finding["element_ids"].as_array().unwrap().iter().any(|id| id.as_str().unwrap().ends_with("-et-e1"))));
+    let mut strict = spec.clone(); strict["edges"][0]["label_placement"]["on_overlap"] = json!("error");
+    let error = execute_request(json!({"op":"update_graph","document":before,"expected_revision":1,"slide_id":"slide-1","id":"flow","spec":strict})).unwrap_err().to_string();
+    assert!(error.contains("e1") && error.contains("-n-xdr"), "{error}");
+    let unchanged = execute_request(json!({"op":"apply_graph","document":before,"expected_revision":1,"slide_id":"slide-1","id":"flow","operations":[{"op":"move","ids":["ws"],"dx":0,"dy":0}]})).unwrap();
+    assert_eq!(unchanged["document"], before); assert!(unchanged["receipt"].is_null());
+    let saved = execute_request(json!({"op":"export_presentation","document":before})).unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"feedback-open","base64":saved["base64"]})).unwrap();
+    assert_eq!(opened["document"]["parts"][0]["stale"], false);
+    assert_eq!(opened["document"]["parts"][0]["spec"], before["parts"][0]["spec"]);
+    let original = &before["deck"]["slides"][0]["elements"][0];
+    let restored = &opened["document"]["deck"]["slides"][0]["elements"][0];
+    assert_eq!(original["children"].as_array().unwrap().iter().filter(|child| child["id"].as_str().unwrap().contains("-eb-")).count(), 5);
+    for suffix in ["-nt-ws", "-nd-ws", "-nt-lake", "-nd-isoc", "-et-e1", "-et-e3", "-et-e5"] {
+        let source = graph_child(original, suffix); let native = graph_child(restored, suffix);
+        assert_eq!(source["text"], native["text"]);
+        for (expected, actual) in graph_rect(source).iter().zip(graph_rect(native)) { assert!((expected - actual).abs() <= 1.0 / 9525.0); }
+        assert!((source["font_size"].as_f64().unwrap() - native["font_size"].as_f64().unwrap()).abs() <= 0.02);
+    }
+    let mut updated_spec = spec.clone(); updated_spec["nodes"][4]["detail"] = json!("確認待ち");
+    let updated = execute_request(json!({"op":"update_graph","document":opened["document"],"expected_revision":0,"slide_id":"slide-1","id":"flow","spec":updated_spec})).unwrap();
+    let undone = execute_request(json!({"op":"undo_transaction","document":updated["document"],"expected_revision":1,"receipt":updated["receipt"]})).unwrap();
+    assert_eq!(undone["document"]["hash"], opened["document"]["hash"]);
+    assert_eq!(execute_request(json!({"op":"export_presentation","document":undone["document"]})).unwrap()["base64"], saved["base64"]);
+    let undone_insert = execute_request(json!({"op":"undo_transaction","document":before,"expected_revision":1,"receipt":inserted["receipt"]})).unwrap();
+    assert_eq!(undone_insert["document"]["hash"], document["hash"]);
+}
+
+#[test]
+fn review_strict_collision_checks_automatic_fallback_in_both_orders() {
+    let mut spec = json!({"version":1,"title":"Strict fallback","show_title":false,
+        "groups":[{"id":"boundary","label":"Boundary","x":0,"y":0,"width":420,"height":160}],
+        "nodes":[
+            {"id":"source","label":"A","x":8,"y":40,"width":120,"height":112,"group":"boundary"},
+            {"id":"target","label":"B","x":292,"y":40,"width":120,"height":112,"group":"boundary"}
+        ],"edges":[
+            {"id":"above","source":"source","target":"target","source_port":"right","target_port":"left","label":"ABCDEFGHIJKLMNOPQ","label_placement":{"position":0.5,"side":"above","offset":8}},
+            {"id":"below","source":"source","target":"target","source_port":"right","target_port":"left","label":"ABCDEFGHIJKLMNOPQ","label_placement":{"position":0.5,"side":"below","offset":8}},
+            {"id":"automatic","source":"source","target":"target","source_port":"right","target_port":"left","label":"R"}
+        ]});
+    let warning = execute_request(json!({"op":"create_graph","id":"review-fallback","spec":spec})).unwrap();
+    let automatic = graph_rect(graph_child(&warning, "-et-automatic"));
+    assert!(["-et-above", "-et-below"].iter().any(|suffix| rects_overlap(automatic, graph_rect(graph_child(&warning, suffix)))));
+    for index in [0, 1] { spec["edges"][index]["label_placement"]["on_overlap"] = json!("error"); }
+    let document = execute_request(json!({"op":"create_presentation","id":"review-fallback-document","title":"Strict fallback"})).unwrap();
+    for reverse in [false, true] {
+        let mut candidate = spec.clone();
+        if reverse { candidate["edges"].as_array_mut().unwrap().reverse(); }
+        let error = execute_request(json!({"op":"create_graph","id":"review-fallback","spec":candidate})).unwrap_err().to_string();
+        assert!(error.contains("-et-automatic"), "{error}");
+        let error = execute_request(json!({"op":"apply_operations","document":document,"expected_revision":0,"expected_hash":document["hash"],"operations":[{
+            "op":"add_graph","slide_id":"slide-1","id":"review-fallback","spec":candidate,"layout":{"x":24,"y":36,"width":1080,"height":512,"show_title":false}
+        }]})).unwrap_err().to_string();
+        assert!(error.contains("-et-automatic"), "{error}");
+    }
+}
+
+#[test]
+fn review_strict_collision_checks_badges_inside_nested_groups() {
+    let mut spec = graph(); spec["show_title"] = json!(false);
+    spec["groups"] = json!([
+        {"id":"outer","label":"Outer","x":0,"y":0,"width":1000,"height":500},
+        {"id":"inner","label":"Inner","x":16,"y":56,"width":960,"height":400,"parent":"outer"}
+    ]);
+    for node in spec["nodes"].as_array_mut().unwrap() { node["group"] = json!("inner"); node["y"] = json!(160); node["height"] = json!(96); }
+    spec["edges"][0]["label_placement"] = json!({"position":0.5,"side":"above","offset":8});
+    let mut second = spec["edges"][0].clone(); second["id"] = json!("second"); second["label"] = json!("");
+    second.as_object_mut().unwrap().remove("label_placement"); second["badge"] = json!({"number":2,"position":0.5,"size":24});
+    spec["edges"].as_array_mut().unwrap().push(second);
+    let warning = execute_request(json!({"op":"create_graph","id":"review-nested","spec":spec})).unwrap();
+    assert!(rects_overlap(graph_rect(graph_child(&warning, "-et-request")), graph_rect(graph_child(&warning, "-eb-second"))));
+    spec["edges"][0]["label_placement"]["on_overlap"] = json!("error");
+    for reverse in [false, true] {
+        let mut candidate = spec.clone();
+        if reverse { candidate["edges"].as_array_mut().unwrap().reverse(); }
+        let error = execute_request(json!({"op":"create_graph","id":"review-nested","spec":candidate})).unwrap_err().to_string();
+        assert!(error.contains("request") && error.contains("-eb-second"), "{error}");
+    }
+}
+
+fn graph_rect(element: &Value) -> [f64; 4] {
+    ["x", "y", "width", "height"].map(|field| element[field].as_f64().unwrap())
+}
+
+fn rects_overlap(left: [f64; 4], right: [f64; 4]) -> bool {
+    left[0] < right[0] + right[2] && left[0] + left[2] > right[0]
+        && left[1] < right[1] + right[3] && left[1] + left[3] > right[1]
+}
+
+#[test]
+fn feedback_automatic_labels_stay_near_routes_inside_the_common_group() {
+    let spec = feedback_graph();
+    let rendered = execute_request(json!({"op":"create_graph","id":"feedback-auto","spec":spec})).unwrap();
+    for suffix in ["-et-e3", "-et-e5"] {
+        let label = graph_child(&rendered, suffix);
+        let [left, top, width, height] = graph_rect(label);
+        assert!(left >= 716.0 && left + width <= 1112.0 && top >= 60.0 && top + height <= 300.0, "outside common group body: {label}");
+        assert!(label["font_size"].as_f64().unwrap() >= 12.0);
+        for node in spec["nodes"].as_array().unwrap() { assert!(!rects_overlap(graph_rect(label), graph_rect(node)), "{suffix} overlaps {}: {label}", node["id"]); }
+        for badge in rendered["children"].as_array().unwrap().iter().filter(|child| child["id"].as_str().unwrap().contains("-eb-")) {
+            assert!(!rects_overlap(graph_rect(label), graph_rect(badge)), "{suffix} overlaps {}", badge["id"]);
+        }
+        assert!(top + height >= if suffix == "-et-e3" { 172.0 } else { 108.0 }, "label has drifted from its own route: {label}");
+    }
+    assert!(!rects_overlap(graph_rect(graph_child(&rendered, "-et-e3")), graph_rect(graph_child(&rendered, "-et-e5"))));
+    let typed: aislide_core::model::Deck = serde_json::from_value(deck(rendered.clone())).unwrap();
+    let report = aislide_core::layout::measure_layout(&typed).unwrap();
+    assert!(report.measurements.iter().filter(|entry| entry.element_id.contains("-et-")).all(|entry| !entry.overflow && entry.missing_glyphs == 0));
+    for suffix in ["-et-e3", "-et-e5"] { println!("{suffix}: {}", graph_child(&rendered, suffix)); }
+}
+
+#[test]
+fn feedback_automatic_labels_without_clear_space_keep_a_bounded_fallback() {
+    let spec = json!({"version":1,"title":"Crowded group","show_title":false,
+        "groups":[{"id":"boundary","label":"Boundary","x":0,"y":0,"width":420,"height":160}],
+        "nodes":[
+            {"id":"source","label":"A","x":8,"y":40,"width":200,"height":112,"group":"boundary"},
+            {"id":"target","label":"B","x":212,"y":40,"width":200,"height":112,"group":"boundary"}
+        ],"edges":[{"id":"crowded","source":"source","target":"target","source_port":"right","target_port":"left","label":"R"}]});
+    let rendered = execute_request(json!({"op":"create_graph","id":"fallback","spec":spec})).unwrap();
+    let label = graph_child(&rendered, "-et-crowded");
+    let [left, top, width, height] = graph_rect(label);
+    assert!(left >= 8.0 && left + width <= 412.0 && top >= 40.0 && top + height <= 152.0);
+    assert!(width >= 12.0 && height >= 12.0 && label["font_size"].as_f64().unwrap() >= 12.0);
+    assert!(spec["nodes"].as_array().unwrap().iter().any(|node| rects_overlap(graph_rect(label), graph_rect(node))));
+    assert!((top + height / 2.0 - 96.0).abs() <= height / 2.0 + 24.0);
+}
+
+#[test]
+fn feedback_cylinder_text_excludes_the_cap_without_moving_nodes_or_connections() {
+    let spec = feedback_graph();
+    let rendered = execute_request(json!({"op":"create_graph","id":"feedback-cylinder","spec":spec})).unwrap();
+    for node_id in ["ws", "lake"] {
+        let node = graph_child(&rendered, &format!("-n-{node_id}"));
+        let [left, top, width, height] = graph_rect(node);
+        assert_eq!([top, width, height], [84.0, 180.0, 96.0]);
+        for role in ["nt", "nd"] {
+            let label = graph_child(&rendered, &format!("-{role}-{node_id}"));
+            let [text_left, text_top, text_width, text_height] = graph_rect(label);
+            assert!(text_top >= top + height * 0.3, "text overlaps cylinder cap: {label}");
+            assert!(text_left >= left && text_left + text_width <= left + width && text_top + text_height <= top + height);
+            assert!(label["font_size"].as_f64().unwrap() >= 12.0);
+        }
+    }
+    let typed: aislide_core::graphs::GraphSpec = serde_json::from_value(spec).unwrap();
+    assert_eq!(aislide_core::graphs::endpoint(&typed.nodes[3], aislide_core::graphs::Port::Bottom, &typed.nodes[5]), (814.0, 180.0, 3));
+}
+
+#[test]
+fn feedback_cjk_soft_widow_is_fitted_without_changing_text_or_heading() {
+    let rendered = execute_request(json!({"op":"create_graph","id":"feedback-widow","spec":feedback_graph()})).unwrap();
+    let detail = graph_child(&rendered, "-nd-isoc");
+    assert_eq!(detail["text"], "ケース・自動化・ワークブック");
+    assert_eq!(graph_child(&rendered, "-nt-isoc")["font_size"], 18.0);
+    assert!((12.0..14.4).contains(&detail["font_size"].as_f64().unwrap()), "single soft glyph should be reflowed: {detail}");
+    let typed: aislide_core::model::Deck = serde_json::from_value(deck(rendered.clone())).unwrap();
+    let report = aislide_core::layout::measure_layout(&typed).unwrap();
+    let measured = report.measurements.iter().find(|entry| entry.element_id.ends_with("-nd-isoc")).unwrap();
+    assert_eq!(measured.lines, 1); assert!(!measured.overflow);
+    println!("ISOC detail: {detail}; lines={}", measured.lines);
+}
+
+#[test]
+fn feedback_cjk_intentional_newline_short_details_and_floor_are_retained() {
+    for (detail, width, size) in [("ケース・自動化・ワークブッ\nク",240,14.4), ("未確認",240,14.4), ("Short detail",240,14.4), ("ワークブッ",64,12.0)] {
+        let spec = json!({"version":1,"title":"Detail boundary","nodes":[{"id":"detail","label":"A","detail":detail,"detail_font_size":size,"x":80,"y":100,"width":width,"height":120}]});
+        let rendered = execute_request(json!({"op":"create_graph","id":"feedback-detail","spec":spec})).unwrap();
+        let body = graph_child(&rendered, "-nd-detail");
+        assert_eq!(body["text"], detail); assert_eq!(body["font_size"], size);
+    }
+}
+
+#[test]
+fn review_bounded_layout_refits_cjk_soft_widow_after_final_geometry() {
+    let spec = json!({"version":1,"title":"Final detail fitting","show_title":false,
+        "nodes":[{"id":"detail","label":"A","detail":"ケース・自動化・ワークブック","x":80,"y":100,"width":240,"height":120}]});
+    let original = execute_request(json!({"op":"create_graph","id":"review-widow","spec":spec})).unwrap();
+    let original_size = graph_child(&original, "-nd-detail")["font_size"].as_f64().unwrap();
+    let layout = json!({"x":24,"y":36,"width":1080,"height":512,"show_title":false});
+    let part = json!({"version":1,"preset":"diagram/custom","title":spec["title"],"data":{"kind":"diagram","graph":spec},"layout":layout});
+    let bounded = execute_request(json!({"op":"create_part","id":"review-widow","spec":part})).unwrap();
+    let document = execute_request(json!({"op":"create_presentation","id":"review-widow-document","title":"Final detail fitting"})).unwrap();
+    let inserted = execute_request(json!({"op":"apply_operations","document":document,"expected_revision":0,"expected_hash":document["hash"],"operations":[{
+        "op":"add_graph","slide_id":"slide-1","id":"review-widow","spec":spec,"layout":layout
+    }]})).unwrap();
+    for rendered in [&bounded, &inserted["document"]["deck"]["slides"][0]["elements"][0]] {
+        let detail = graph_child(rendered, "-nd-detail");
+        let heading = graph_child(rendered, "-nt-detail");
+        assert_eq!(detail["text"], spec["nodes"][0]["detail"]);
+        assert_eq!(heading["font_size"], graph_child(&original, "-nt-detail")["font_size"]);
+        let size = detail["font_size"].as_f64().unwrap();
+        assert!((12.0..original_size).contains(&size), "final soft widow was not refitted: {detail}");
+        assert!(size <= heading["font_size"].as_f64().unwrap());
+        for suffix in ["-n-detail", "-nt-detail", "-nd-detail"] {
+            let [left, top, width, height] = graph_rect(graph_child(&original, suffix));
+            assert_eq!(graph_rect(graph_child(rendered, suffix)), [left * 1080.0 / 1152.0, top, width * 1080.0 / 1152.0, height]);
+        }
+        let typed: aislide_core::model::Deck = serde_json::from_value(deck(rendered.clone())).unwrap();
+        let report = aislide_core::layout::measure_layout(&typed).unwrap();
+        let measured = report.measurements.iter().find(|entry| entry.element_id.ends_with("-nd-detail")).unwrap();
+        assert_eq!(measured.lines, 1); assert!(!measured.overflow); assert_eq!(measured.missing_glyphs, 0);
+    }
+}
+
+#[test]
+fn review_cjk_early_paragraph_widow_is_fitted_and_hard_lines_keep_their_size() {
+    for (detail, width, size, expected_lines, shrink) in [
+        ("ケース・自動化・ワークブック\nOK",240,14.4,2,true),
+        ("ケース・自動化・ワークブッ\nク",240,14.4,2,false),
+        ("ワークブッ\nOK",64,12.0,3,false),
+    ] {
+        let spec = json!({"version":1,"title":"Paragraph tails","show_title":false,
+            "nodes":[{"id":"detail","label":"A","detail":detail,"detail_font_size":size,"x":80,"y":100,"width":width,"height":160}]});
+        let rendered = execute_request(json!({"op":"create_graph","id":"review-paragraph","spec":spec})).unwrap();
+        let body = graph_child(&rendered, "-nd-detail");
+        let fitted_size = body["font_size"].as_f64().unwrap();
+        assert_eq!(body["text"], detail);
+        assert_eq!(graph_child(&rendered, "-nt-detail")["font_size"], 18.0);
+        if shrink { assert!((12.0..size).contains(&fitted_size), "early paragraph widow was lost: {body}"); }
+        else { assert_eq!(fitted_size, size); }
+        let typed: aislide_core::model::Deck = serde_json::from_value(deck(rendered)).unwrap();
+        let report = aislide_core::layout::measure_layout(&typed).unwrap();
+        let measured = report.measurements.iter().find(|entry| entry.element_id.ends_with("-nd-detail")).unwrap();
+        assert_eq!(measured.lines, expected_lines); assert!(!measured.overflow); assert_eq!(measured.missing_glyphs, 0);
+    }
+}
+
+#[test]
+fn review_bounded_layout_preserves_hard_lines_font_floor_and_unaffected_details() {
+    for (detail, width, size, layout_width) in [
+        ("ワークブッ\nク",240,14.4,1080), ("未確認",240,14.4,1080),
+        ("Short detail",240,14.4,1080), ("ワークブッ",64,12.0,576),
+    ] {
+        let spec = json!({"version":1,"title":"Bounded paragraph controls",
+            "nodes":[{"id":"detail","label":"A","detail":detail,"detail_font_size":size,"x":80,"y":100,"width":width,"height":160}]});
+        let document = execute_request(json!({"op":"create_presentation","id":"review-bounded-controls","title":"Bounded paragraph controls"})).unwrap();
+        let inserted = execute_request(json!({"op":"apply_operations","document":document,"expected_revision":0,"expected_hash":document["hash"],"operations":[{
+            "op":"add_graph","slide_id":"slide-1","id":"flow","spec":spec,"layout":{"x":24,"y":36,"width":layout_width,"height":424,"show_title":false}
+        }]})).unwrap();
+        let rendered = &inserted["document"]["deck"]["slides"][0]["elements"][0];
+        let body = graph_child(rendered, "-nd-detail");
+        assert_eq!(body["text"], detail); assert_eq!(body["font_size"], size);
+        assert_eq!(graph_child(rendered, "-nt-detail")["font_size"], 18.0);
+        let typed: aislide_core::model::Deck = serde_json::from_value(deck(rendered.clone())).unwrap();
+        let report = aislide_core::layout::measure_layout(&typed).unwrap();
+        assert!(report.measurements.iter().all(|entry| !entry.overflow && entry.missing_glyphs == 0));
+    }
+}
+
 #[test]
 fn graph_edge_styles_are_optional_bounded_and_rendered() {
     let original = graph();

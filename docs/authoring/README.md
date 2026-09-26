@@ -100,15 +100,24 @@ annotations into an 8px fitting floor, including bounded `add_graph` layouts.
 Omitted sizes or sizes of 12 and above retain the 12px fitting floor; node
 headings/details and ordinary parts always retain it. Fitting still rejects
 clipping or unavailable glyphs rather than shrinking below the applicable floor.
-Use `label_placement:{position,side?,offset?}` for an explicit label: `position`
+Use `label_placement:{position,side?,offset?,on_overlap?}` for an explicit label: `position`
 is 0-1 of the complete route length from the semantic source to target;
 `side` is `above` (default) or `below`, and `offset` is the 0-128px gap from
 the label frame to the segment (default 8). Above is the upward-facing
 segment normal, or rightward for a vertical segment. At a bend, the incoming
 segment determines the normal. Omit placement for automatic avoidance.
 Explicit annotations outside the graph content area reject rather than move
-elsewhere. Overlap with another object remains the author's responsibility;
-inspect previews and preflight before export.
+elsewhere. `on_overlap:"warn"` (default) preserves that placement and leaves
+overlap review to preflight. `on_overlap:"error"` rejects collisions with
+visible node content, group headers, badges or other labels, with IDs and
+repair suggestions. It never silently moves an explicitly placed label.
+Automatic labels try bounded wrapping/font fitting close to their route and
+inside a shared endpoint group. They can retain a bounded best-effort
+candidate when collisions remain; preflight and preview are still required.
+Cylinder card text excludes the upper ellipse. Graph detail fitting reduces
+single-CJK-glyph soft-wrap tails when possible, after final part placement,
+without altering text or intentional newline-only lines. The 12px detail
+floor and heading ceiling remain; unavoidable tails still need review.
 
 Use `badge:{number,position?,size?,font_size?,fill?,color?}` for a native
 editable numbered circle. Numbers are 1-99; position defaults to 0.5 along
@@ -254,9 +263,10 @@ are heuristics, not Office visual parity or accessibility certification.
 
 ### Regeneration Feedback
 
-`set_accessibility` now uses the finite authoring budget of 65 seconds, or
-120 seconds when the encoded request exceeds 4 MiB. Other ordinary requests
-retain their 20-second limit. Progress is opt-in through an MCP progress token:
+`set_accessibility` uses at least 65 seconds, with larger documents receiving
+the size-aware budget below. Ordinary small requests retain 20 seconds;
+document-scale writes and read-only work receive finite additional time.
+Progress is opt-in through an MCP progress token:
 the server reports elapsed time every five seconds, never an invented completion
 percentage or document content, and stops on completion or cancellation.
 Use a client deadline longer than the core budget; progress does not override
@@ -419,9 +429,15 @@ the four managed members are part of `AuthoringOperation`, not a new method.
 
 ### Time Budgets And Progress
 
-The Node core bridge starts with 20 seconds, or 120 seconds for encoded
-requests greater than 4 MiB or for the recovery verification/preparation
-operations listed in the [API timeout contract](../api.md#managed-timeouts-and-progress).
+The Node core bridge starts with 20 seconds. It counts at most 256 slides
+and 8192 nested elements and uses U = max(ceil(slides/8), ceil(elements/256),
+ceil(encoded bytes/1MiB)). For U > 1 the document budget is
+min(180, 20 + 10*U) seconds. Requests greater than 4MiB and recovery checks
+receive at least 120 seconds. PPTX open/import receives at least 60 seconds;
+preview receives at least 60 + 5*(page count - 1), up to 95 seconds for eight
+pages. Before/after revision previews and delivery preparation receive at
+least 120 seconds. The base is the maximum of these applicable budgets. See the
+[API timeout contract](../api.md#managed-timeouts-and-progress).
 For N top-level managed add/update part/graph entries in `apply_operations`,
 the budget is `min(300, max(base, 60 + N * 5))` seconds. Individual core
 insert/update part/graph and `apply_graph` count as one. With the ordinary
@@ -430,7 +446,8 @@ requests keep the base and existing AI operations keep 310 seconds. These
 are limits, not latency guarantees, unlimited execution or retry loops.
 
 Opt in through standard `_meta.progressToken`, received by the server as
-`extra._meta`. Managed calls send an initial elapsed-time notification and
+`extra._meta`. Mutation tools (including normal frame/note edits), imports
+and slow preview/inspection tools send an initial elapsed-time notification and
 then one on a five-second timer when no notification is in flight. There is
 no estimated percentage or `total`, and messages contain no private slide
 or source content. Notifications stop on completion, failure or abort;
@@ -438,6 +455,9 @@ notification failure does not fail the mutation. SDK `AbortSignal` remains
 supported. A client's overall timeout may need to cover the server budget
 plus transport margin, with progress reset enabled where supported; some
 clients ignore progress entirely. Progress does not extend the server limit.
+Timeout errors include both the configured limit and measured bridge elapsed
+time; process startup/termination and serialization can add to wall time.
+Preview failures say that preview was interrupted without document changes.
 After a client timeout inspect current guards before another mutation, not
 an automatic retry or unmanaged fallback. The core remains request-based,
 without a new persistent stateful core or differential protocol.
@@ -667,6 +687,15 @@ In default sentence mode, Japanese consulting headlines target one 36-character 
 ### Visual Review And Revisions
 
 Preview and preflight accept 1-8 unique zero-based page indices. Omitting selection means all pages only if there are at most eight. Preview images have a 160-1600px maximum edge, 2MiB combined encoded-image budget, and 4MiB response budget. Images are returned directly, not as disk paths; metadata-only clients can use `include_images:false`.
+
+Preview defaults to `format:"png", overflow:"shrink"`. Encoded-byte overflow
+alone retries at 75% and 56.25% of the requested edge, minimum 160px, at most
+three distinct attempts in total. No pages are omitted. The response reports
+`requested_max_dimension`, `actual_max_dimension`, `quality_reduced` and a
+`PREVIEW_DOWNSCALED` warning when reduced. Use `overflow:"error"` for strict
+resolution or `format:"jpeg"` (lossy quality 90) for photo-heavy pages. Other
+errors never trigger silent retry. `include_images:false` still renders;
+use `get_document` instead when only the current revision/hash is needed.
 
 Preflight returns stable slide/element IDs, `scopes` (slide/master/layout), transformed bounds, severity, evidence category and repair suggestions. Renderer warnings include actual shape-padding/table clipping and font/glyph warnings. Geometry checks flag possible text-frame overlap, connector/label interference and off-slide objects; font floor and density are heuristics. Background containment and attached endpoint nodes are excluded. At most 1024 visible objects per selected page and 256 findings are allowed; exceedances fail explicitly. Orphan lines, semantic truth, full accessibility and Office parity remain separate checks.
 

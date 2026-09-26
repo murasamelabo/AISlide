@@ -97,7 +97,7 @@ pub fn prepare_delivery(document: &Document, expected_revision: u64, expected_ha
     }
     if !matches!(options.preview, DeliveryPreview::None) {
         let preview = export_static::preview_presentation(document, &PreviewOptions { page_indices: Some(selected.clone()), max_dimension: options.max_dimension,
-            layout: if matches!(options.preview, DeliveryPreview::Pages) { PreviewLayout::Pages } else { PreviewLayout::ContactSheet }, max_output_bytes: bundle.remaining.min(2 * 1024 * 1024) })?;
+            layout: if matches!(options.preview, DeliveryPreview::Pages) { PreviewLayout::Pages } else { PreviewLayout::ContactSheet }, max_output_bytes: bundle.remaining.min(2 * 1024 * 1024), ..Default::default() })?;
         render_warnings.extend(preview.warnings);
         preview_pages = preview.pages;
         for (index, image) in preview.images.into_iter().enumerate() {

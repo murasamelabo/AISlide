@@ -17,6 +17,10 @@ pub struct LayoutReport { pub engine: String, pub office_parity_verified: bool, 
 
 fn measure(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width: f64, height: f64, size: f64, bold: bool, format: &TextFormat, theme: &Theme) -> Measurement {
     if !format.paragraphs.is_empty() { return measure_rich(fonts, slide, id, text, width, height, size, bold, format, theme); }
+    measure_plain(fonts, slide, id, text, width, height, size, bold, format, theme).0
+}
+
+fn measure_plain(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width: f64, height: f64, size: f64, bold: bool, format: &TextFormat, theme: &Theme) -> (Measurement, bool) {
     let family = if text.chars().any(|character| character >= '\u{3000}') { &theme.fonts.east_asian } else { match format.font_family.as_deref() { Some("@major") => &theme.fonts.major, None | Some("@minor") => &theme.fonts.minor, Some(family) => family } };
     let available_width = width - if format.bullet == Bullet::None { 0.0 } else { size };
     let mut buffer = Buffer::new(fonts, Metrics::new(size as f32, (size * 1.15) as f32));
@@ -26,15 +30,32 @@ fn measure(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width: f64
     buffer.shape_until_scroll(fonts, false);
     let mut measured_width = 0.0f32; let mut measured_height = 0.0f32; let mut lines = 0; let mut missing = 0;
     let mut used = BTreeSet::new();
-    for run in buffer.layout_runs() {
+    let mut previous_line = None;
+    let mut soft_cjk_orphan = false;
+    let mut runs = buffer.layout_runs().peekable();
+    while let Some(run) = runs.next() {
         measured_width = measured_width.max(run.line_w); measured_height = measured_height.max(run.line_top + run.line_height); lines += 1;
+        if previous_line == Some(run.line_i) && runs.peek().is_none_or(|next| next.line_i != run.line_i) {
+            let logical_text = buffer.lines[run.line_i].text();
+            let clusters: BTreeSet<_> = run.glyphs.iter().filter(|glyph| logical_text.get(glyph.start..glyph.end).is_some_and(|cluster| !cluster.chars().all(char::is_whitespace))).map(|glyph| (glyph.start, glyph.end)).collect();
+            soft_cjk_orphan |= clusters.len() == 1 && clusters.iter().any(|&(start, end)| {
+                logical_text.get(start..end).is_some_and(|cluster| cluster.chars().any(|character| matches!(character, '\u{3040}'..='\u{30ff}' | '\u{3400}'..='\u{9fff}' | '\u{ac00}'..='\u{d7af}' | '\u{f900}'..='\u{faff}' | '\u{20000}'..='\u{323af}')))
+            });
+        }
+        previous_line = Some(run.line_i);
         for glyph in run.glyphs {
             if glyph.glyph_id == 0 { missing += 1; }
             if let Some(face) = fonts.db().face(glyph.font_id) { if let Some((name, _)) = face.families.first() { used.insert(name.clone()); } }
         }
     }
-    Measurement { slide_id: slide.into(), element_id: id.into(), width, height, measured_width, measured_height, lines,
-        overflow: !text.is_empty() && (measured_width as f64 > width + 1.0 || measured_height as f64 > height + 1.0), missing_glyphs: missing, requested_family: family.into(), fonts: used.into_iter().collect() }
+    (Measurement { slide_id: slide.into(), element_id: id.into(), width, height, measured_width, measured_height, lines,
+        overflow: !text.is_empty() && (measured_width as f64 > width + 1.0 || measured_height as f64 > height + 1.0), missing_glyphs: missing, requested_family: family.into(), fonts: used.into_iter().collect() }, soft_cjk_orphan)
+}
+
+pub(crate) fn graph_text_metrics(text: &str, width: f64, height: f64, size: f64, bold: bool, theme: &Theme) -> Result<(Measurement, bool)> {
+    let mut fonts = FONTS.get_or_init(|| Mutex::new(FontSystem::new())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
+    if fonts.db().faces().next().is_none() { return Err(Error::Unsupported("installed fonts are required for graph text fitting".into())); }
+    Ok(measure_plain(&mut fonts, "graph", "text", text, width, height, size, bold, &TextFormat::default(), theme))
 }
 
 fn measure_rich(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width: f64, height: f64, size: f64, bold: bool, format: &TextFormat, theme: &Theme) -> Measurement {
@@ -182,4 +203,28 @@ pub(crate) fn fit_part_text_with_small_annotations(elements: &mut [Element], the
         Ok(())
     }
     fit(&mut fonts,elements,theme,small_annotations)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_cjk_metrics_only_accumulate_soft_tails_at_hard_paragraph_ends() {
+        let theme = Theme::default();
+        let (glyph, _) = graph_text_metrics("ア", 200.0, 200.0, 16.0, false, &theme).unwrap();
+        assert_eq!(glyph.missing_glyphs, 0);
+        let glyph_width = f64::from(glyph.measured_width);
+        for (text, width, expected) in [
+            ("アイウ\nOK", glyph_width * 2.1, true),
+            ("OK\nアイウ", glyph_width * 2.1, true),
+            ("アイウOK", glyph_width * 1.1, false),
+            ("アイ\nク", glyph_width * 2.1, false),
+        ] {
+            let (metrics, orphan) = graph_text_metrics(text, width, 200.0, 16.0, false, &theme).unwrap();
+            assert!(!metrics.overflow); assert_eq!(metrics.missing_glyphs, 0);
+            assert_eq!(orphan, expected, "{text}: {} lines", metrics.lines);
+            if text == "アイウOK" { assert!(metrics.lines >= 4, "fixture must have intermediate single-glyph wraps"); }
+        }
+    }
 }

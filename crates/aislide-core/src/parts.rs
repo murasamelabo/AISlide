@@ -177,7 +177,11 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
         let mut result = crate::graphs::create(&graph_id, &rendered_graph, theme)?;
         if let Element::Group { id: root_id, .. } = &mut result { *root_id = id.into(); }
         adopt_layout(&mut result, layout, 0.0, content_height, theme, &crate::graphs::small_annotation_ids(&graph_id, &rendered_graph)?)?;
-        if let Element::Group { children, .. } = &mut result { crate::graphs::cap_detail_fonts(&graph_id, &rendered_graph, children)?; }
+        if let Element::Group { children, .. } = &mut result {
+            crate::graphs::cap_detail_fonts(&graph_id, &rendered_graph, children)?;
+            crate::graphs::fit_detail_widows(&graph_id, &rendered_graph, children, theme)?;
+            crate::graphs::validate_label_overlaps(&graph_id, &rendered_graph, children)?;
+        }
         return Ok(result);
     }
     let identity = crate::canonical::bytes(spec)?;

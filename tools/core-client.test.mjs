@@ -27,6 +27,41 @@ test('accessibility updates receive a finite authoring budget without changing o
   assert.equal(coreTimeout({ op: 'sample' }), 20000);
 });
 
+test('document work and read-only rendering receive finite size-aware time budgets', () => {
+  const document = { deck: { slides: Array.from({ length: 42 }, () => ({ elements: Array.from({ length: 32 }, () => ({ type: 'text' })) })) } };
+  for (const op of ['transaction', 'apply_operations', 'measure_layout', 'preflight_presentation']) assert.equal(coreTimeout({ op, document }, 3653348), 80000, op);
+  assert.equal(coreTimeout({ op: 'apply_operations', document, operations: [{ op: 'add_graph' }] }), 80000);
+  assert.equal(coreTimeout({ op: 'open_presentation' }, 1461087), 60000);
+  assert.equal(coreTimeout({ op: 'import_document' }, 1048576), 60000);
+  assert.equal(coreTimeout({ op: 'preview_presentation', document, options: { page_indices: [0] } }), 80000);
+  assert.equal(coreTimeout({ op: 'preview_presentation', document, options: { page_indices: [0,1,2,3,4,5,6,7] } }), 95000);
+  assert.equal(coreTimeout({ op: 'preview_presentation', options: { page_indices: [0] } }), 60000);
+  for (const op of ['preview_slide_revision', 'prepare_delivery']) assert.equal(coreTimeout({ op }), 120000, op);
+  const nested = { deck: { slides: [{ elements: [{ type: 'group', children: Array.from({ length: 1344 }, () => ({ type: 'text' })) }] }] } };
+  assert.equal(coreTimeout({ op: 'transaction', document: nested }), 80000);
+  assert.equal(coreTimeout({ op: 'transaction', document: { deck: { slides: Array.from({ length: 10000 }, () => ({ elements: [] })) } } }), 180000);
+  assert.equal(coreTimeout({ op: 'transaction' }, 96 * 1048576), 180000);
+  assert.equal(coreTimeout({ op: 'sample' }, Number.NaN), 20000);
+  assert.equal(coreTimeout({ op: 'transaction', document, timeout: Infinity }), 80000);
+  assert.equal(coreTimeout({ op: 'apply_operations', document, operations: Array.from({ length: 128 }, () => ({ op: 'add_graph' })) }), 300000);
+});
+
+test('timeout diagnostics separate elapsed time limits and read-only outcomes', async () => {
+  const bridge = await import('./core-client.mjs');
+  assert.equal(typeof bridge.coreTimeoutMessage, 'function');
+  const preview = bridge.coreTimeoutMessage({ op: 'preview_presentation' }, 20000, 29526);
+  assert.match(preview, /preview.*timed out after 29\.5 seconds elapsed.*limit 20 seconds/i);
+  assert.match(preview, /preview interrupted.*no document changes/i);
+  assert.doesNotMatch(preview, /session was not committed/);
+  const opened = bridge.coreTimeoutMessage({ op: 'open_presentation' }, 60000, 62500);
+  assert.match(opened, /62\.5 seconds elapsed.*limit 60 seconds/);
+  assert.match(opened, /no presentation was opened/);
+  assert.match(bridge.coreTimeoutMessage({ op: 'import_document' }, 60000, 62500), /no presentation was opened/);
+  const changed = bridge.coreTimeoutMessage({ op: 'transaction' }, 80000, 81350);
+  assert.match(changed, /81\.4 seconds elapsed.*limit 80 seconds.*session was not committed/);
+  for (const op of ['measure_layout', 'preflight_presentation', 'preview_slide_revision', 'prepare_delivery', 'validate']) assert.match(bridge.coreTimeoutMessage({ op }, 80000, 80000), /no document changes/);
+});
+
 test('an operator can select an isolated local core binary without request-controlled paths', async () => {
   const bridge = await import('./core-client.mjs');
   assert.equal(typeof bridge.coreBinary, 'function');

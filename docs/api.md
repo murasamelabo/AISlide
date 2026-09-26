@@ -166,10 +166,22 @@ an automatic timeout workaround. See the [managed MCP acceptance sequence](autho
 
 ### Managed Timeouts And Progress
 
-The Node core bridge uses a 20-second base budget for ordinary requests, or
-120 seconds when the encoded core request is **greater than 4 MiB**, or its
-operation is `verify_session_recovery`, `prepare_recovery` or
-`verify_recovery_record`. For `apply_operations`, N counts only top-level
+The Node core bridge retains a 20-second budget for small ordinary requests.
+Let U be the maximum of rounded-up slide count / 8, nested element count / 256,
+and encoded request bytes / 1 MiB. The scan is bounded to 256 slides and 8192
+elements. For U > 1, the document budget is `min(180, 20 + U * 10)` seconds.
+The base is the maximum of that budget, 120 seconds for requests **greater
+than 4 MiB** or recovery verification/preparation, and the operation minimum:
+60 seconds for `open_presentation` / `import_document`, or
+`60 + 5 * (selectedPages - 1)` for `preview_presentation` (1-8 pages).
+Composite `preview_slide_revision` and `prepare_delivery` receive at least
+120 seconds because they perform additional rendering/export work.
+For example, a 42-slide/1344-element document gets 80 seconds for ordinary
+work and 95 seconds for an eight-page preview. These limits cover bridge
+execution; timeout messages separately report measured elapsed time,
+including serialization and process-exit delay. Read-only timeouts report
+interrupted reads rather than an uncommitted edit.
+For `apply_operations`, N counts only top-level
 `add_part`, `update_part`, `add_graph` and `update_graph` entries, not graph
 nodes or child elements. Valid batches contain at most 128 operations.
 Individual core `insert_part`, `update_part`, `insert_graph`, `update_graph`
@@ -184,12 +196,13 @@ Existing `generate`, `text_assist` and `segment_image` budgets remain
 unlimited execution or a retry loop. Full-document transport remains;
 no persistent stateful core or differential protocol is introduced.
 
-MCP managed mutations optionally emit standard `notifications/progress`
+MCP mutations, including direct element/frame/note edits and imports, plus
+preview/measurement/preflight/accessibility/validation operations optionally
+emit standard `notifications/progress`
 when `tools/call` params include `_meta.progressToken` (a string or safe
 integer, including zero); the handler receives it as `extra._meta`.
 `_meta` belongs beside `name` and `arguments`, not inside strict tool
-arguments. This applies to managed batches and the individual `add_part`,
-`update_part`, `add_graph`, `update_graph` and `apply_graph` tools.
+arguments. Cheap metadata-only reads do not start a progress timer.
 An initial notification and subsequent notifications on a five-second timer
 report elapsed time only. Slow in-flight sends skip ticks. No `total` or
 estimated completion percentage is supplied, and messages contain no slide
@@ -211,12 +224,12 @@ The shared core additionally exposes the following bounded read/preview/apply op
 
 | Core operation | Inputs besides op | Result |
 | --- | --- | --- |
-| `preview_presentation` | `document`, optional `options:{page_indices,max_dimension,layout,max_output_bytes}` | `revision`, `hash`, ordered page IDs/image coordinates, PNG images with base64/size/SHA-256 and renderer warnings |
+| `preview_presentation` | `document`, optional `options:{page_indices,max_dimension,layout,max_output_bytes,format,overflow}` | `revision`, `hash`, requested/actual max dimension, quality-reduction flag, ordered page IDs/image coordinates, PNG/JPEG images with base64/size/SHA-256 and renderer warnings |
 | `preflight_presentation` | `document`, optional `options:{page_indices,min_font_size}` | Bounded findings with IDs/scopes/bounds/evidence/suggestions; no mutation |
 | `preview_slide_revision` | `document`, `expected_revision`, `expected_hash`, `slide_id`, `edits`, optional `max_dimension` | Base/candidate hashes, before/after previews, affected IDs and stale part/source impact; no mutation |
 | `apply_slide_revision` | Same base and edits, plus `candidate_hash`, without `max_dimension` | Normal atomic transaction result with one inverse Undo receipt |
 
-Previews use the existing shared static renderer. PNG budgets are 2MiB encoded/4MiB wire, 160-1600px image edges and 1-8 selected pages. Before/after images reserve 1MiB each. No partial bundle, network fetch, automatic font installation or file write is performed. Stale bindings are reported for inspection; export still rejects them. Diagnostics distinguish renderer evidence, transformed-frame geometry and readability heuristics. They are not full accessibility, semantic truth or Office visual parity certification. Unsupported rendering fails explicitly.
+Previews use the existing shared static renderer with 2MiB encoded/4MiB wire budgets, 160-1600px edges and 1-8 selected pages. `format` is `png` (default) or `jpeg` (quality 90, lossy). `overflow` is `shrink` (default) or `error`. Only encoded-byte overflow retries at the original size, then floor(75%) and floor(56.25%), minimum 160px, at most three distinct attempts. All pages are retained; other errors do not trigger retry. `requested_max_dimension`, `actual_max_dimension` and `quality_reduced` disclose dimension reduction, accompanied by `PREVIEW_DOWNSCALED`. JPEG selection itself is not a dimension reduction. Strict `overflow:"error"` forbids shrinking. Exhaustion returns suggestions, not partial pages or a promised resolution that will fit. Before/after images reserve 1MiB each. No network fetch, automatic font installation or file write is performed. Stale bindings are reported for inspection; export still rejects them. Diagnostics remain heuristics, not Office parity or full accessibility certification.
 
 SDK methods: `session.previewPresentation(options?,requestOptions?)`, `preflightPresentation(options?,requestOptions?)`, `previewSlideRevision(slideId,edits,{expectedRevision?,expectedHash?,maxDimension?,signal?})`, and `applySlideRevision(slideId,edits,{expectedRevision,expectedHash,candidateHash,signal?})`. Session reads serialize with writes and reject early/late cancellation. Pure core candidates carry no session authority; callers supply and recheck the base and candidate hashes.
 

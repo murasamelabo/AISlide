@@ -14,7 +14,9 @@ test('graph authoring controls retain manual paths custom ports badges and group
     Object.assign(window, { graphAuthoringErrors: captured });
     window.addEventListener('error', event => captured.push(event.message));
   });
+  const initialized = waitForCoreOperation(page, 'create_presentation');
   await page.goto('/');
+  await initialized;
   await expect(page.getByRole('button', { name: 'Architecture diagram', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });

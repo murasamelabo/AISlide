@@ -40,6 +40,31 @@ pub enum PreviewLayout {
     ContactSheet,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewFormat {
+    #[default]
+    Png,
+    Jpeg,
+}
+
+impl PreviewFormat {
+    fn image_format(self) -> image::ImageFormat {
+        match self {
+            Self::Png => image::ImageFormat::Png,
+            Self::Jpeg => image::ImageFormat::Jpeg,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewOverflow {
+    #[default]
+    Shrink,
+    Error,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct PreviewOptions {
@@ -47,11 +72,14 @@ pub struct PreviewOptions {
     pub max_dimension: u32,
     pub layout: PreviewLayout,
     pub max_output_bytes: usize,
+    pub format: PreviewFormat,
+    pub overflow: PreviewOverflow,
 }
 
 impl Default for PreviewOptions {
     fn default() -> Self {
-        Self { page_indices: None, max_dimension: 1280, layout: PreviewLayout::Pages, max_output_bytes: 2 * 1024 * 1024 }
+        Self { page_indices: None, max_dimension: 1280, layout: PreviewLayout::Pages, max_output_bytes: 2 * 1024 * 1024,
+            format: PreviewFormat::Png, overflow: PreviewOverflow::Shrink }
     }
 }
 
@@ -80,6 +108,9 @@ pub struct PreviewPage {
 pub struct PresentationPreview {
     pub revision: u64,
     pub hash: String,
+    pub requested_max_dimension: u32,
+    pub actual_max_dimension: u32,
+    pub quality_reduced: bool,
     pub pages: Vec<PreviewPage>,
     pub images: Vec<PreviewImage>,
     pub warnings: Vec<RenderWarning>,
@@ -87,8 +118,6 @@ pub struct PresentationPreview {
 }
 
 pub fn preview_presentation(document: &crate::document::Document, options: &PreviewOptions) -> Result<PresentationPreview> {
-    use base64::Engine;
-    use sha2::{Digest, Sha256};
     crate::document::verify(document)?;
     let deck = &document.deck;
     let selected = options.page_indices.clone().unwrap_or_else(|| (0..deck.slides.len()).collect());
@@ -100,32 +129,54 @@ pub fn preview_presentation(document: &crate::document::Document, options: &Prev
     if !(160..=1600).contains(&options.max_dimension) || options.max_output_bytes == 0 || options.max_output_bytes > 2 * 1024 * 1024 {
         return Err(Error::Limit("preview requires 160-1600 pixels and at most 2 MiB encoded images".into()));
     }
+    let mut attempted = Vec::new();
+    for dimension in [options.max_dimension, (options.max_dimension * 3 / 4).max(160), (options.max_dimension * 9 / 16).max(160)] {
+        if attempted.contains(&dimension) { continue; }
+        attempted.push(dimension);
+        match preview_attempt(document, options, &selected, dimension) {
+            Ok(preview) => return Ok(preview),
+            Err(StaticExportError::OutputBudget) => {
+                if matches!(options.overflow, PreviewOverflow::Error) { break; }
+            }
+            Err(StaticExportError::Other(error)) => return Err(error),
+        }
+    }
+    Err(Error::Limit(format!(
+        "preview encoded output byte limit exceeded after {} attempt(s) at max_dimension {attempted:?}; select fewer pages, reduce max_dimension, or try format:'jpeg' (JPEG). These may reduce output size but do not guarantee it fits; no partial pages returned",
+        attempted.len()
+    )))
+}
+
+fn preview_attempt(
+    document: &crate::document::Document, options: &PreviewOptions, selected: &[usize], max_dimension: u32,
+) -> std::result::Result<PresentationPreview, StaticExportError> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let deck = &document.deck;
     let montage = matches!(options.layout, PreviewLayout::ContactSheet);
     let columns = if montage { (selected.len() as f64).sqrt().ceil() as u32 } else { 1 };
     let rows = if montage { (selected.len() as u32).div_ceil(columns) } else { 1 };
     let gap = if montage { 12 } else { 0 };
-    let cell_width = (options.max_dimension - gap * (columns + 1)) / columns;
-    let cell_height = (options.max_dimension - gap * (rows + 1)) / rows;
+    let cell_width = (max_dimension - gap * (columns + 1)) / columns;
+    let cell_height = (max_dimension - gap * (rows + 1)) / rows;
     let scale = (f64::from(cell_width) / f64::from(deck.width)).min(f64::from(cell_height) / f64::from(deck.height));
-    let output = export_static(deck, &ExportOptions {
-        page_indices: Some(selected), scale: scale.max(0.01), max_output_bytes: options.max_output_bytes, ..Default::default()
+    let output = export_static_inner(deck, &ExportOptions {
+        format: match options.format { PreviewFormat::Png => ExportFormat::Png, PreviewFormat::Jpeg => ExportFormat::Jpeg },
+        page_indices: Some(selected.to_vec()), scale: scale.max(0.01), max_output_bytes: options.max_output_bytes, ..Default::default()
     })?;
     let mut pages = Vec::new();
     let mut artifacts = output.artifacts;
     let mut remaining = options.max_output_bytes;
     for artifact in &mut artifacts {
         if artifact.width > cell_width || artifact.height > cell_height {
-            let pixels = image::load_from_memory_with_format(&artifact.bytes, image::ImageFormat::Png)
-                .map_err(|error| Error::Invalid(format!("preview PNG: {error}")))?.into_rgba8();
+            let pixels = image::load_from_memory_with_format(&artifact.bytes, options.format.image_format())
+                .map_err(|error| Error::Invalid(format!("preview image: {error}")))?.into_rgba8();
             artifact.width = (f64::from(deck.width) * scale).floor().max(1.0) as u32;
             artifact.height = (f64::from(deck.height) * scale).floor().max(1.0) as u32;
             let resized = image::imageops::resize(&pixels, artifact.width, artifact.height, image::imageops::FilterType::Lanczos3);
-            let mut encoded = BoundedBytes { bytes: Vec::new(), limit: remaining };
-            image::codecs::png::PngEncoder::new(&mut encoded).write_image(resized.as_raw(), artifact.width, artifact.height, ExtendedColorType::Rgba8)
-                .map_err(|error| Error::Limit(format!("preview resize encoding: {error}")))?;
-            artifact.bytes = encoded.bytes;
+            artifact.bytes = encode_preview_image(&resized, options.format, remaining)?;
         }
-        remaining = remaining.checked_sub(artifact.bytes.len()).ok_or_else(|| Error::Limit("preview output exceeds encoded image budget".into()))?;
+        remaining = remaining.checked_sub(artifact.bytes.len()).ok_or(StaticExportError::OutputBudget)?;
     }
     for (index, artifact) in artifacts.iter().enumerate() {
         let page_index = artifact.page_indices[0];
@@ -141,14 +192,12 @@ pub fn preview_presentation(document: &crate::document::Document, options: &Prev
         let height = artifacts[0].height * rows + gap * (rows + 1);
         let mut sheet = image::RgbaImage::from_pixel(width, height, image::Rgba([238, 238, 238, 255]));
         for (artifact, page) in artifacts.iter().zip(&pages) {
-            let pixels = image::load_from_memory_with_format(&artifact.bytes, image::ImageFormat::Png)
-                .map_err(|error| Error::Invalid(format!("preview PNG: {error}")))?.into_rgba8();
+            let pixels = image::load_from_memory_with_format(&artifact.bytes, options.format.image_format())
+                .map_err(|error| Error::Invalid(format!("preview image: {error}")))?.into_rgba8();
             image::imageops::replace(&mut sheet, &pixels, i64::from(page.x), i64::from(page.y));
         }
-        let mut encoded = BoundedBytes { bytes: Vec::new(), limit: options.max_output_bytes };
-        image::codecs::png::PngEncoder::new(&mut encoded).write_image(sheet.as_raw(), width, height, ExtendedColorType::Rgba8)
-            .map_err(|error| Error::Limit(format!("preview image encoding: {error}")))?;
-        artifacts = vec![ExportArtifact { bytes: encoded.bytes, mime_type: "image/png".into(), page_indices: pages.iter().map(|page| page.page_index).collect(), width, height }];
+        let bytes = encode_preview_image(&sheet, options.format, options.max_output_bytes)?;
+        artifacts = vec![ExportArtifact { bytes, mime_type: artifacts[0].mime_type.clone(), page_indices: pages.iter().map(|page| page.page_index).collect(), width, height }];
     }
     let images = artifacts.into_iter().map(|artifact| PreviewImage {
         sha256: format!("{:x}", Sha256::digest(&artifact.bytes)), byte_length: artifact.bytes.len(),
@@ -159,11 +208,35 @@ pub fn preview_presentation(document: &crate::document::Document, options: &Prev
     if document.bindings.iter().any(|binding| binding.stale) {
         warnings.push(RenderWarning { code: "SOURCE_BINDINGS_STALE".into(), page_index: pages[0].page_index, element_id: String::new(), message: "Preview includes stale source bindings; undo or rebind before export".into() });
     }
-    let result = PresentationPreview { revision: document.revision, hash: document.hash.clone(), pages, images, warnings, office_visual_parity: false };
-    if serde_json::to_vec(&result)?.len() > 4 * 1024 * 1024 - 65536 {
-        return Err(Error::Limit("preview response exceeds 4 MiB; select fewer pages or reduce max_dimension".into()));
+    let quality_reduced = max_dimension < options.max_dimension;
+    if quality_reduced {
+        warnings.push(RenderWarning { code: "PREVIEW_DOWNSCALED".into(), page_index: pages[0].page_index, element_id: String::new(),
+            message: format!("Preview max_dimension reduced from requested {} to actual {max_dimension} pixels to fit the encoded image budget; all {} selected pages are preserved in their requested order", options.max_dimension, pages.len()) });
+    }
+    let result = PresentationPreview { revision: document.revision, hash: document.hash.clone(),
+        requested_max_dimension: options.max_dimension, actual_max_dimension: max_dimension, quality_reduced,
+        pages, images, warnings, office_visual_parity: false };
+    if serde_json::to_vec(&result).map_err(Error::from)?.len() > 4 * 1024 * 1024 - 65536 {
+        return Err(Error::Limit("preview response exceeds 4 MiB; select fewer pages, reduce max_dimension, or try format:'jpeg' without a guarantee of fitting".into()).into());
     }
     Ok(result)
+}
+
+fn encode_preview_image(
+    pixels: &image::RgbaImage, format: PreviewFormat, limit: usize,
+) -> std::result::Result<Vec<u8>, StaticExportError> {
+    let mut output = BoundedBytes::new(limit);
+    let encoded = match format {
+        PreviewFormat::Png => image::codecs::png::PngEncoder::new(&mut output)
+            .write_image(pixels.as_raw(), pixels.width(), pixels.height(), ExtendedColorType::Rgba8),
+        PreviewFormat::Jpeg => {
+            let rgb: Vec<u8> = pixels.pixels().flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, ExportOptions::default().jpeg_quality)
+                .write_image(&rgb, pixels.width(), pixels.height(), ExtendedColorType::Rgb8)
+        }
+    };
+    output.check_encoding(encoded, "preview image encoding")?;
+    Ok(output.bytes)
 }
 
 #[derive(
@@ -241,10 +314,41 @@ pub struct StaticExport {
 pub(crate) struct BoundedBytes {
     pub bytes: Vec<u8>,
     pub limit: usize,
+    exceeded: bool,
+}
+
+enum StaticExportError {
+    OutputBudget,
+    Other(Error),
+}
+
+impl From<Error> for StaticExportError {
+    fn from(error: Error) -> Self { Self::Other(error) }
+}
+
+impl StaticExportError {
+    fn into_error(self) -> Error {
+        match self {
+            Self::OutputBudget => Error::Limit("static image encoding: static export output byte limit".into()),
+            Self::Other(error) => error,
+        }
+    }
+}
+
+impl BoundedBytes {
+    fn new(limit: usize) -> Self { Self { bytes: Vec::new(), limit, exceeded: false } }
+
+    fn check_encoding(&self, encoded: image::ImageResult<()>, context: &str) -> std::result::Result<(), StaticExportError> {
+        encoded.map_err(|error| {
+            if self.exceeded { StaticExportError::OutputBudget }
+            else { Error::Limit(format!("{context}: {error}")).into() }
+        })
+    }
 }
 impl Write for BoundedBytes {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
             return Err(std::io::Error::other("static export output byte limit"));
         }
         self.bytes.extend_from_slice(bytes);
@@ -312,9 +416,13 @@ fn preflight(deck: &Deck, options: &ExportOptions) -> Result<(Vec<usize>, u32, u
 /// All-or-error: no partial artifact list escapes on unsupported content,
 /// validation failure, or budget exhaustion. Caller owns publication/printing.
 pub fn export_static(deck: &Deck, options: &ExportOptions) -> Result<StaticExport> {
+    export_static_inner(deck, options).map_err(StaticExportError::into_error)
+}
+
+fn export_static_inner(deck: &Deck, options: &ExportOptions) -> std::result::Result<StaticExport, StaticExportError> {
     let (pages, width, height) = preflight(deck, options)?;
     if options.format == ExportFormat::Pdf {
-        return export_pdf(deck, options, pages, width, height);
+        return export_pdf(deck, options, pages, width, height).map_err(StaticExportError::from);
     }
     let mut result = StaticExport {
         artifacts: Vec::new(),
@@ -328,7 +436,7 @@ pub fn export_static(deck: &Deck, options: &ExportOptions) -> Result<StaticExpor
         if options.deny_warnings && !scene.warnings.is_empty() {
             return Err(Error::Unsupported(
                 "static export has render warnings".into(),
-            ));
+            ).into());
         }
         result.warnings.extend(scene.warnings);
         let tree = resvg::usvg::Tree::from_str(&scene.svg, &resvg::usvg::Options::default())
@@ -351,10 +459,7 @@ pub fn export_static(deck: &Deck, options: &ExportOptions) -> Result<StaticExpor
             ),
             &mut pixmap.as_mut(),
         );
-        let mut output = BoundedBytes {
-            bytes: Vec::new(),
-            limit: remaining,
-        };
+        let mut output = BoundedBytes::new(remaining);
         let encoded = if options.format == ExportFormat::Png {
             let pixels: Vec<u8> = pixmap
                 .pixels()
@@ -379,7 +484,7 @@ pub fn export_static(deck: &Deck, options: &ExportOptions) -> Result<StaticExpor
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, options.jpeg_quality)
                 .write_image(&pixels, width, height, ExtendedColorType::Rgb8)
         };
-        encoded.map_err(|error| Error::Limit(format!("static image encoding: {error}")))?;
+        output.check_encoding(encoded, "static image encoding")?;
         remaining -= output.bytes.len();
         result.artifacts.push(ExportArtifact {
             bytes: output.bytes,
@@ -520,10 +625,7 @@ fn export_pdf(
         Object::Dictionary(dictionary! {"Type"=>"Catalog","Pages"=>pages_id,"StructTreeRoot"=>structure_id,"MarkInfo"=>dictionary! {"Marked"=>true}}),
     );
     document.trailer.set("Root", catalog_id);
-    let mut output = BoundedBytes {
-        bytes: Vec::new(),
-        limit: options.max_output_bytes,
-    };
+    let mut output = BoundedBytes::new(options.max_output_bytes);
     document
         .save_to(&mut output)
         .map_err(|error| Error::Limit(format!("PDF output byte cap: {error}")))?;
@@ -782,7 +884,7 @@ fn pdf_effects(svg: &str) -> Result<(String, usize)> {
             let color = pixel.demultiply();
             [color.red(), color.green(), color.blue(), color.alpha()]
         }).collect();
-        let mut output = BoundedBytes { bytes: Vec::new(), limit: MAX_SVG_BYTES.saturating_sub(encoded_bytes) / 2 };
+        let mut output = BoundedBytes::new(MAX_SVG_BYTES.saturating_sub(encoded_bytes) / 2);
         image::codecs::png::PngEncoder::new(&mut output).write_image(&pixels, width, height, ExtendedColorType::Rgba8)
             .map_err(|error| Error::Limit(format!("PDF effect encoding: {error}")))?;
         let image = format!("<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" xlink:href=\"data:image/png;base64,{}\"/>", bounds.x(), bounds.y(), width as f32 / 2.0, height as f32 / 2.0, STANDARD.encode(output.bytes));

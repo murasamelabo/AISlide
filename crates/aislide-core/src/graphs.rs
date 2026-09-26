@@ -98,6 +98,13 @@ fn badge_font_size() -> f64 { 12.0 }
 #[serde(rename_all = "snake_case")]
 pub enum GraphLabelSide { #[default] Above, Below }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphLabelOverlap { #[default] Warn, Error }
+impl GraphLabelOverlap {
+    fn is_warn(&self) -> bool { *self == Self::Warn }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GraphLabelPlacement {
@@ -105,6 +112,7 @@ pub struct GraphLabelPlacement {
     #[serde(default)] pub side: GraphLabelSide,
     #[serde(default = "label_gap")]
     #[schemars(range(min = 0, max = 128))] pub offset: f64,
+    #[serde(default, skip_serializing_if = "GraphLabelOverlap::is_warn")] pub on_overlap: GraphLabelOverlap,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -503,19 +511,15 @@ fn annotation_bounds(spec: &GraphSpec, center: [f64; 2], width: f64, height: f64
     Ok(rect)
 }
 
-fn relationship_label_bounds(spec: &GraphSpec, elements: &[Element], points: &[[f64; 2]], width: f64, height: f64, placed: &[[f64; 4]]) -> [f64; 4] {
-    let mut obstacles = Vec::new();
-    for node in &spec.nodes {
-        if node.presentation == GraphPresentation::Icon {
-            let suffixes = [format!("-ni-{}", node.id), format!("-nt-{}", node.id), format!("-nd-{}", node.id)];
-            for element in elements {
-                let (id, x, y, width, height) = element.bounds();
-                if suffixes.iter().any(|suffix| id.ends_with(suffix)) { obstacles.push([x, y, width, height]); }
-            }
-        } else { obstacles.push([node.x, node.y, node.width, node.height]); }
-    }
-    obstacles.extend(spec.groups.iter().map(|group| [group.x, group.y, group.width, group.header_height()]));
-    obstacles.extend(placed.iter().copied());
+fn relationship_label_bounds(spec: &GraphSpec, edge: &GraphEdge, points: &[[f64; 2]], width: f64, size: f64, obstacles: &[(String, [f64; 4])], theme: &Theme) -> Result<([f64; 4], f64)> {
+    let source = spec.nodes.iter().find(|node| node.id == edge.source).ok_or_else(|| Error::Invalid("unknown graph source".into()))?;
+    let target = spec.nodes.iter().find(|node| node.id == edge.target).ok_or_else(|| Error::Invalid("unknown graph target".into()))?;
+    let source_groups = group_ancestors(spec, source.group.as_deref())?;
+    let target_groups = group_ancestors(spec, target.group.as_deref())?;
+    let common = source_groups.iter().find(|index| target_groups.contains(index)).map(|index| &spec.groups[*index]);
+    let region = common.map_or([0.0, spec.content_top(), WIDTH, HEIGHT - spec.content_top()], |group| {
+        [group.x + group.padding(), group.y + group.header_height(), group.width - 2.0 * group.padding(), group.height - group.header_height() - group.padding()]
+    });
     let rectangle = |bounds: [f64; 4], padding: f64| geo::Rect::new(
         (bounds[0] - padding, bounds[1] - padding), (bounds[0] + bounds[2] + padding, bounds[1] + bounds[3] + padding));
     let routes: Vec<_> = spec.edges.iter().flat_map(|edge| {
@@ -529,32 +533,98 @@ fn relationship_label_bounds(spec: &GraphSpec, elements: &[Element], points: &[[
         let length = |segment: &[[f64; 2]]| (segment[1][0] - segment[0][0]).hypot(segment[1][1] - segment[0][1]);
         length(right).total_cmp(&length(left))
     });
-    let mut best = [points[0][0].clamp(0.0, WIDTH - width), points[0][1].clamp(spec.content_top(), HEIGHT - height), width, height];
+    let minimum = if size < 12.0 { size } else { 12.0 };
+    let mut best = None;
     let mut best_score = f64::INFINITY;
-    for segment in segments {
-        let horizontal = segment[1][0] - segment[0][0]; let vertical = segment[1][1] - segment[0][1];
-        let length = horizontal.hypot(vertical);
-        let mut normal = if length < 0.01 { [0.0, -1.0] } else { [-vertical / length, horizontal / length] };
-        if normal[1] > 0.0 || normal[1].abs() < 0.000001 && normal[0] < 0.0 { normal = [-normal[0], -normal[1]]; }
-        let clearance = (normal[0].abs() * width + normal[1].abs() * height) / 2.0 + 8.0;
-        for extra in [0.0, 16.0, 32.0, 48.0, 64.0, 96.0] {
-            for side in [1.0, -1.0] {
-                let candidate = [
-                    ((segment[0][0] + segment[1][0]) / 2.0 + normal[0] * (clearance + extra) * side - width / 2.0).clamp(0.0, WIDTH - width),
-                    ((segment[0][1] + segment[1][1]) / 2.0 + normal[1] * (clearance + extra) * side - height / 2.0).clamp(spec.content_top(), HEIGHT - height), width, height];
-                let area = rectangle(candidate, 3.0);
-                let route_crossings = routes.iter().filter(|line| line.intersects(&area)).count();
-                let overlaps = obstacles.iter().filter(|bounds| rectangle(**bounds, 0.0).intersects(&area)).count();
-                let score = route_crossings as f64 * 1000000.0 + overlaps as f64 * 1000.0 + extra + if side < 0.0 { 0.5 } else { 0.0 };
-                if score < best_score { best = candidate; best_score = score; }
+    for candidate_size in [size, (size + minimum) / 2.0, minimum] {
+        for candidate_width in [width, width * 0.75, width * 0.5, candidate_size.max(12.0)] {
+            let candidate_width = candidate_width.min(region[2]);
+            let (metrics, _) = crate::layout::graph_text_metrics(&edge.label, candidate_width, region[3], candidate_size, false, theme)?;
+            let height = (candidate_size * 1.75).max(f64::from(metrics.measured_height) + 4.0);
+            if metrics.overflow || metrics.missing_glyphs > 0 || metrics.lines > 4 || height > region[3] { continue; }
+            for extra in [0.0, 8.0, 16.0] {
+                for segment in &segments {
+                    let horizontal = segment[1][0] - segment[0][0]; let vertical = segment[1][1] - segment[0][1];
+                    let length = horizontal.hypot(vertical);
+                    let mut normal = if length < 0.01 { [0.0, -1.0] } else { [-vertical / length, horizontal / length] };
+                    if normal[1] > 0.0 || normal[1].abs() < 0.000001 && normal[0] < 0.0 { normal = [-normal[0], -normal[1]]; }
+                    let clearance = (normal[0].abs() * candidate_width + normal[1].abs() * height) / 2.0 + 8.0;
+                    for fraction in [0.5, 0.25, 0.75] {
+                        for side in [1.0, -1.0] {
+                            let left = segment[0][0] + horizontal * fraction + normal[0] * (clearance + extra) * side - candidate_width / 2.0;
+                            let top = segment[0][1] + vertical * fraction + normal[1] * (clearance + extra) * side - height / 2.0;
+                            let candidate = [left.clamp(region[0], region[0] + region[2] - candidate_width), top.clamp(region[1], region[1] + region[3] - height), candidate_width, height];
+                            if (candidate[0] - left).hypot(candidate[1] - top) > 16.0 { continue; }
+                            let area = rectangle(candidate, 3.0);
+                            let route_crossings = routes.iter().filter(|line| line.intersects(&area)).count();
+                            let overlaps = obstacles.iter().filter(|(_, bounds)| label_overlap(candidate, *bounds, 3.0)).count();
+                            if route_crossings == 0 && overlaps == 0 { return Ok((candidate, candidate_size)); }
+                            let score = route_crossings as f64 * 1000000.0 + overlaps as f64 * 1000.0 + extra + (candidate[0] - left).hypot(candidate[1] - top);
+                            if score < best_score { best = Some((candidate, candidate_size)); best_score = score; }
+                        }
+                    }
+                }
             }
         }
     }
-    best
+    best.ok_or_else(|| Error::Invalid(format!("graph edge '{}' label has no fitting frame near its route inside {}; shorten or reflow the label, increase node spacing or revise label_placement", edge.id, common.map_or("the graph content area", |group| group.id.as_str()))))
+}
+
+fn label_obstacles(prefix: &str, spec: &GraphSpec, elements: &[Element]) -> Vec<(String, [f64; 4])> {
+    let mut ids = BTreeSet::new();
+    for node in &spec.nodes {
+        let roles: &[&str] = if node.presentation == GraphPresentation::Icon { &["ni", "nt", "nd"] } else { &["n"] };
+        for role in roles { ids.insert(format!("{prefix}-{role}-{}", node.id)); }
+    }
+    for edge in &spec.edges {
+        ids.insert(format!("{prefix}-et-{}", edge.id));
+        ids.insert(format!("{prefix}-eb-{}", edge.id));
+    }
+    let mut obstacles: Vec<_> = elements.iter().filter_map(|element| {
+        let (id, left, top, width, height) = element.bounds();
+        if !ids.contains(id) || matches!(element, Element::Text { text, .. } if text.is_empty()) { return None; }
+        Some((id.to_owned(), [left, top, width, height]))
+    }).collect();
+    for group in &spec.groups {
+        if !group.label.is_empty() || group.icon.is_some() {
+            let role = if group.label.is_empty() { "gi" } else { "gt" };
+            let group_id = format!("{prefix}-g-{}", group.id);
+            if let Some(element) = elements.iter().find(|element| element.bounds().0 == group_id) {
+                let (_, left, top, width, height) = element.bounds();
+                obstacles.push((format!("{prefix}-{role}-{}", group.id), [left, top, width, group.header_height() * height / group.height]));
+            }
+        }
+    }
+    obstacles
+}
+
+fn label_overlap(left: [f64; 4], right: [f64; 4], padding: f64) -> bool {
+    left[2] > 0.0 && left[3] > 0.0 && right[2] > 0.0 && right[3] > 0.0
+        && left[0] < right[0] + right[2] + padding && left[0] + left[2] + padding > right[0]
+        && left[1] < right[1] + right[3] + padding && left[1] + left[3] + padding > right[1]
+}
+
+fn check_label_overlap(edge: &GraphEdge, label_id: &str, bounds: [f64; 4], obstacles: &[(String, [f64; 4])]) -> Result<()> {
+    let conflicts: Vec<_> = obstacles.iter().filter(|(id, obstacle)| id != label_id && label_overlap(bounds, *obstacle, 0.0)).map(|(id, _)| id.as_str()).collect();
+    if conflicts.is_empty() { return Ok(()); }
+    Err(Error::Invalid(format!("graph edge '{}' label overlaps {}; reduce label_font_size, reflow the label, increase offset or revise label_placement", edge.id, conflicts.join(", "))))
 }
 
 fn render_prefix(id: &str, spec: &GraphSpec) -> Result<String> {
     Ok(format!("{id}-{}", &format!("{:x}", Sha256::digest(crate::canonical::bytes(&(RENDER_LAYOUT_VERSION, spec))?))[..10]))
+}
+
+pub(crate) fn validate_label_overlaps(id: &str, spec: &GraphSpec, children: &[Element]) -> Result<()> {
+    let prefix = render_prefix(id, spec)?;
+    let obstacles = label_obstacles(&prefix, spec, children);
+    for edge in spec.edges.iter().filter(|edge| !edge.label.is_empty() && edge.label_placement.as_ref().is_some_and(|placement| placement.on_overlap == GraphLabelOverlap::Error)) {
+        let label_id = format!("{prefix}-et-{}", edge.id);
+        let element = children.iter().find(|element| element.bounds().0 == label_id)
+            .ok_or_else(|| Error::Invalid("graph edge label is missing".into()))?;
+        let (_, left, top, width, height) = element.bounds();
+        check_label_overlap(edge, &label_id, [left, top, width, height], &obstacles)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn small_annotation_ids(id: &str, spec: &GraphSpec) -> Result<BTreeSet<String>> {
@@ -581,6 +651,26 @@ pub(crate) fn cap_detail_fonts(id: &str, spec: &GraphSpec, children: &mut [Eleme
         for element in children.iter_mut() {
             if let Element::Text { id, font_size, .. } = element {
                 if id == &detail_id { *font_size = font_size.min(heading_size); }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn fit_detail_widows(id: &str, spec: &GraphSpec, children: &mut [Element], theme: &Theme) -> Result<()> {
+    let prefix = render_prefix(id, spec)?;
+    for node in spec.nodes.iter().filter(|node| node.detail.is_some()) {
+        let detail_id = format!("{prefix}-nd-{}", node.id);
+        for child in children.iter_mut() {
+            let Element::Text { id, text, width, height, font_size, bold, .. } = child else { continue; };
+            if id != &detail_id { continue; }
+            let (_, orphan) = crate::layout::graph_text_metrics(text, *width, *height, *font_size, *bold, theme)?;
+            if !orphan { continue; }
+            let mut size = *font_size;
+            while size > 12.0 {
+                size = (size - 0.5).max(12.0);
+                let (metrics, orphan) = crate::layout::graph_text_metrics(text, *width, *height, size, *bold, theme)?;
+                if !metrics.overflow && metrics.missing_glyphs == 0 && !orphan { *font_size = size; break; }
             }
         }
     }
@@ -648,6 +738,10 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
         children.push(shape(format!("{prefix}-n-{}", node.id), [node.x, node.y, node.width, node.height], node.kind.preset(), &node.fill, &node.stroke));
         let inset = match node.kind { NodeKind::Diamond => 0.24, NodeKind::Ellipse | NodeKind::Cloud => 0.18, _ => 0.1 };
         let mut content = [node.x + node.width * inset, node.y + node.height * inset, node.width * (1.0 - 2.0 * inset), node.height * (1.0 - 2.0 * inset)];
+        if node.kind == NodeKind::Cylinder {
+            content[1] = node.y + node.height * 0.3 + 2.0;
+            content[3] = node.height * 0.6 - 2.0;
+        }
         if let Some(icon) = &node.icon {
             let mut picture = crate::media::create_picture(&format!("{prefix}-ni-{}", node.id), icon.base64.clone(), &icon.mime_type, &icon.alt)?;
             let size = (content[2] / 4.0).min(content[3]).min(48.0);
@@ -671,7 +765,6 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
             }
         }
     }
-    let mut label_bounds = Vec::new();
     for edge in &spec.edges {
         let Some(badge) = &edge.badge else { continue; };
         let source = spec.nodes.iter().find(|node| node.id == edge.source).ok_or_else(|| Error::Invalid("unknown source node".into()))?;
@@ -683,7 +776,7 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
             *text = badge.number.to_string(); *font_size = badge.font_size; *color = badge.color.clone(); *bold = true;
             *format = TextFormat { alignment: TextAlign::Center, vertical: VerticalAlign::Middle, font_family: Some("@minor".into()), ..Default::default() };
         }
-        children.push(element); label_bounds.push(bounds);
+        children.push(element);
     }
     for edge in &spec.edges {
         if edge.label.is_empty() { continue; }
@@ -692,17 +785,19 @@ pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
         let size = edge.label_font_size.unwrap_or(16.0);
         let width = (edge.label.chars().map(|character| if character.is_ascii() { 9.0 } else { 16.0 }).sum::<f64>() * size / 16.0 + 8.0).clamp(48.0, 280.0);
         let points = edge_points(source, target, edge);
-        let bounds = if let Some(placement) = &edge.label_placement {
+        let obstacles = label_obstacles(&prefix, spec, &children);
+        let (bounds, size) = if let Some(placement) = &edge.label_placement {
             let (center, normal) = route_anchor(&points, placement.position)?;
             let direction = match placement.side { GraphLabelSide::Above => 1.0, GraphLabelSide::Below => -1.0 };
             let distance = (normal[0].abs() * width + normal[1].abs() * size * 1.75) / 2.0 + placement.offset;
-            annotation_bounds(spec, [center[0] + normal[0] * distance * direction, center[1] + normal[1] * distance * direction], width, size * 1.75)?
-        } else { relationship_label_bounds(spec, &children, &points, width, size * 1.75, &label_bounds) };
+            (annotation_bounds(spec, [center[0] + normal[0] * distance * direction, center[1] + normal[1] * distance * direction], width, size * 1.75)?, size)
+        } else { relationship_label_bounds(spec, edge, &points, width, size, &obstacles, theme)? };
         children.push(text(format!("{prefix}-et-{}", edge.id), bounds, &edge.label, size, edge.label_color.as_deref().unwrap_or("@dk1"), TextAlign::Center, false));
-        label_bounds.push(bounds);
     }
     crate::layout::fit_part_text_with_small_annotations(&mut children, theme, &small_annotation_ids(id, spec)?)?;
     cap_detail_fonts(id, spec, &mut children)?;
+    fit_detail_widows(id, spec, &mut children, theme)?;
+    validate_label_overlaps(id, spec, &children)?;
     let result = Element::Group { visual: None, id: id.into(), x: 64.0, y: 144.0, width: WIDTH, height: HEIGHT, view_width: WIDTH, view_height: HEIGHT, children };
     validate_elements(std::slice::from_ref(&result), (1280.0, 720.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
     Ok(result)

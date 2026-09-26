@@ -82,6 +82,12 @@ test('graph authoring MCP preserves manual routes and waypoints', async () => {
     const json = z.toJSONSchema(schema);
     assert.deepEqual(json.properties.spec.properties.edges.items.properties.route.enum, ['straight', 'elbow', 'manual']);
     assert.equal(json.properties.spec.properties.edges.items.properties.waypoints.maxItems, 16);
+    for (const on_overlap of ['warn', 'error']) {
+      const strict = structuredClone(spec); strict.edges[0].label_placement.on_overlap = on_overlap;
+      await call('create_graph', { id: 'collision-policy', spec: strict });
+      assert.equal(calls.at(-1).request.spec.edges[0].label_placement.on_overlap, on_overlap);
+    }
+    assert.equal(schema.safeParse({ id: 'graph', spec: { ...spec, edges: [{ ...edge, label_placement: { position: 0.5, on_overlap: 'ignore' } }] } }).success, false);
     for (const patch of [{ stroke_width: 0.49 }, { stroke_width: 12.1 }, { label_font_size: 41 }, { label_color: 'red' }, { source_offset: -0.51 }, { target_offset: 0.51 }, { waypoints: null }, { waypoints: Array(17).fill([1, 100]) }, { waypoints: [[1153, 100]] }, { waypoints: [[100, -1]] }, { label_placement: { position: 1.1 } }, { label_placement: { position: 0.5, offset: 129 } }, { label_placement: { position: 0.5, side: 'left' } }, { badge: { number: 0 } }, { badge: { number: 100 } }, { badge: { number: 1.5 } }, { badge: { number: 1, size: 65 } }, { badge: { number: 1, font_size: 33 } }, { badge: { number: 1, unknown: true } }]) {
       assert.equal(schema.safeParse({ id: 'graph', spec: { ...spec, edges: [{ ...edge, ...patch }] } }).success, false, JSON.stringify(patch));
     }
@@ -105,6 +111,25 @@ test('graph authoring MCP preserves manual routes and waypoints', async () => {
   });
 });
 
+test('MCP preview accepts bounded JPEG and overflow policy without losing metadata', async () => {
+  await feedbackMcpFixture(async ({ registrations, call, calls, fixture }) => {
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic preview policy' });
+    const tool = registrations.get('preview_presentation');
+    for (const format of ['png', 'jpeg']) {
+      fixture.onRequest = async request => ({ revision: 0, hash: request.document.hash, requested_max_dimension: 1280, actual_max_dimension: 960, quality_reduced: true, pages: [], warnings: [{ code: 'PREVIEW_DOWNSCALED', page_index: 0, element_id: '', message: 'Synthetic reduced preview' }], images: [{ base64: 'aW1hZ2U=', mime_type: `image/${format}`, width: 960, height: 540, byte_length: 5, sha256: 'a'.repeat(64) }], office_visual_parity: false });
+      const input = { deck_id, options: { format, overflow: 'shrink', page_indices: [0] } };
+      const result = await tool.callback(tool.config.inputSchema.parse(input), { signal: new AbortController().signal });
+      assert.ok(!result.isError, JSON.stringify(result));
+      assert.deepEqual(calls.at(-1).request.options, input.options);
+      const metadata = JSON.parse(result.content[0].text);
+      assert.equal(metadata.quality_reduced, true); assert.equal(metadata.actual_max_dimension, 960);
+      assert.equal(result.content[1].mimeType, `image/${format}`);
+      assert.ok(tool.config.inputSchema.safeParse({ ...input, options: { ...input.options, overflow: 'error' } }).success);
+    }
+    for (const options of [{ format: 'pdf' }, { overflow: 'unlimited' }, { format: null }, { overflow: null }, { max_output_bytes: 2097153 }]) assert.equal(tool.config.inputSchema.safeParse({ deck_id, options }).success, false);
+  });
+});
+
 function assertFeedbackWorkflow(prompt, resource) {
   const text = prompt.messages[0].content.text;
   assert.equal(resource.contents[0].text, text);
@@ -122,7 +147,7 @@ function assertFeedbackWorkflow(prompt, resource) {
     /never automatically fall back.*timeout/, /128 metadata entries.*capacity limits/, /Reduce chunk size for progress and cancellation/,
     /batch update_graph has no layout field and preserves the existing PartLayout/, /corner_label.*48 Unicode scalars.*default empty/,
     /Set theme before add_part\/add_graph/, /no automatic theme-driven regeneration/,
-    /set_accessibility after the target exists in a separate revision/, /65 seconds or 120 seconds.*opt-in MCP progress/,
+    /set_accessibility after the target exists in a separate revision/, /at least 65 seconds.*size-aware.*180 seconds.*opt-in MCP progress/,
     /All three venn variants support PartSpec\.layout\.show_title=false/,
     /Keep card text at least 8 slide pixels/, /CONTAINER_CORNER_OVERFLOW and CONTAINER_PADDING.*require preview review/,
     /CONNECTOR_BADGE_OVERLAP is info.*not a visual approval/, /propose guarded edits and inspect before\/after previews/,
@@ -222,6 +247,48 @@ test('accessibility MCP progress stops on cancellation without changing the docu
       assert.ok(notifications.every(notification => notification.params.progressToken === 0 && notification.params.total === undefined));
       fixture.onRequest = undefined;
       assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
+    });
+  } finally { context.mock.timers.reset(); }
+});
+
+test('ordinary writes imports and previews emit requested progress and stop after cancellation', async context => {
+  context.mock.timers.enable({ apis: ['setInterval'] });
+  try {
+    await feedbackMcpFixture(async ({ registrations, call, fixture }) => {
+      const { deck_id } = await call('create_presentation', { title: 'Private document title' });
+      const before = await call('get_session_recovery', { deck_id });
+      const cases = [
+        ['apply_operations', { deck_id, expected_revision: 0, expected_hash: before.document.hash, operations: [{ op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' }] }],
+        ['apply_transaction', { deck_id, expected_revision: 0, operations: [{ op: 'replace', path: '/deck/title', value: 'Private title' }] }],
+        ['update_notes', { deck_id, expected_revision: 0, slide_id: 'slide-1', notes: 'Private notes' }],
+        ['set_frame', { deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'shape', frame: { x: 20, y: 20, width: 100, height: 80 } }],
+        ['add_elements', { deck_id, expected_revision: 0, slide_id: 'slide-1', elements: [{ type: 'rect', id: 'shape', x: 20, y: 20, width: 100, height: 80, fill: 'FFFFFF' }] }],
+        ['open_pptx', { base64: 'UEsDBA==' }],
+        ['preview_presentation', { deck_id, options: { page_indices: [0] } }],
+      ];
+      for (const [name, parameters] of cases) {
+        const controller = new AbortController(), started = Promise.withResolvers(), pending = Promise.withResolvers(), notifications = [];
+        fixture.onRequest = async (_request, { signal }) => {
+          signal.addEventListener('abort', () => pending.reject(new Error('Operation cancelled')), { once: true });
+          started.resolve(); return pending.promise;
+        };
+        const tool = registrations.get(name);
+        const response = tool.callback(tool.config.inputSchema.parse(parameters), { signal: controller.signal, _meta: { progressToken: 0 }, sendNotification: async notification => notifications.push(notification) });
+        await started.promise;
+        await new Promise(resolve => setImmediate(resolve));
+        context.mock.timers.tick(5000);
+        await new Promise(resolve => setImmediate(resolve));
+        const count = notifications.length;
+        controller.abort();
+        assert.equal((await response).isError, true, name);
+        assert.ok(count >= 2, `${name} must report opted-in progress`);
+        assert.ok(notifications.every(notification => notification.params.progressToken === 0 && notification.params.total === undefined && !JSON.stringify(notification).includes('Private')));
+        context.mock.timers.tick(15000);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(notifications.length, count, `${name} must stop progress`);
+        fixture.onRequest = undefined;
+        assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
+      }
     });
   } finally { context.mock.timers.reset(); }
 });

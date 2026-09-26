@@ -1,5 +1,5 @@
 ﻿use aislide_core::{
-    export_static::{export_static, ExportFormat, ExportOptions},
+    export_static::{export_static, preview_presentation, ExportFormat, ExportOptions, PreviewFormat, PreviewLayout, PreviewOptions, PreviewOverflow},
     model::Deck,
     render::render_slide_svg,
     Error,
@@ -48,6 +48,354 @@ fn with_elements(elements: serde_json::Value) -> Deck {
     let mut value = serde_json::to_value(deck()).unwrap();
     value["slides"][0]["elements"] = elements;
     serde_json::from_value(value).unwrap()
+}
+
+fn noisy_preview_document() -> aislide_core::document::Document {
+    let mut state = 0x1234_5678u32;
+    let pixels = image::RgbaImage::from_fn(256, 256, |_column, _row| {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        image::Rgba([state as u8, (state >> 8) as u8, (state >> 16) as u8, 255])
+    });
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    pixels.write_to(&mut encoded, image::ImageFormat::Png).unwrap();
+    let mut source = with_elements(json!([{
+        "type":"picture", "id":"noise", "x":0, "y":0, "width":320, "height":320,
+        "base64":STANDARD.encode(encoded.into_inner()), "mime_type":"image/png", "alt":"Synthetic noise"
+    }, {
+        "type":"shape", "id":"approximation", "preset":"hexagon", "x":10, "y":10,
+        "width":40, "height":40, "fill":"FFFFFF", "stroke":"FFFFFF", "stroke_width":0,
+        "text":"", "font_size":12, "color":"000000", "bold":false
+    }]));
+    source.slides = (0..3).map(|index| {
+        let mut slide = source.slides[0].clone();
+        slide.id = format!("noise-{index}");
+        slide
+    }).collect();
+    aislide_core::document::create("preview-noise".into(), source, vec![], vec![], None).unwrap()
+}
+
+#[test]
+fn preview_default_shrinks_only_output_budget_and_preserves_all_pages() {
+    let document = noisy_preview_document();
+    let before = serde_json::to_vec(&document).unwrap();
+    let selected = vec![2, 0, 1];
+    let encoded_size = |scale| export_static(&document.deck, &ExportOptions {
+        scale, page_indices: Some(selected.clone()), ..Default::default()
+    }).unwrap().artifacts.iter().map(|artifact| artifact.bytes.len()).sum::<usize>();
+    let budget = encoded_size(0.75);
+    assert!(encoded_size(1.0) > budget);
+    let preview = preview_presentation(&document, &PreviewOptions {
+        page_indices: Some(selected.clone()), max_dimension: 320, max_output_bytes: budget,
+        ..Default::default()
+    }).expect("default preview must shrink on encoded output overflow");
+    let metadata = serde_json::to_value(&preview).unwrap();
+    assert_eq!(metadata["requested_max_dimension"], 320);
+    assert_eq!(metadata["actual_max_dimension"], 240);
+    assert_eq!(metadata["quality_reduced"], true);
+    assert_eq!(preview.pages.iter().map(|page| page.page_index).collect::<Vec<_>>(), selected);
+    assert_eq!(preview.images.len(), 3);
+    assert!(preview.images.iter().map(|image| image.byte_length).sum::<usize>() <= budget);
+    for (index, page) in preview.pages.iter().enumerate() {
+        assert_eq!(page.slide_id, document.deck.slides[page.page_index].id);
+        assert_eq!((page.image_index, page.x, page.y, page.width, page.height), (index, 0, 0, 240, 240));
+        let pixels = image::load_from_memory(&STANDARD.decode(&preview.images[index].base64).unwrap()).unwrap();
+        assert_eq!((pixels.width(), pixels.height()), (240, 240));
+    }
+    let warning = preview.warnings.iter().find(|warning| warning.code == "PREVIEW_DOWNSCALED").unwrap();
+    assert!(warning.message.contains("320") && warning.message.contains("240") && warning.message.contains("all"));
+    assert_eq!(preview.warnings.iter().filter(|warning| warning.code == "SHAPE_APPROXIMATION").count(), 3);
+    assert_eq!(preview.hash, document.hash);
+    assert_eq!(serde_json::to_vec(&document).unwrap(), before);
+}
+
+fn noisy_preview_size(document: &aislide_core::document::Document, dimension: u32) -> usize {
+    export_static(&document.deck, &ExportOptions {
+        scale: f64::from(dimension) / 320.0, ..Default::default()
+    }).unwrap().artifacts.iter().map(|artifact| artifact.bytes.len()).sum()
+}
+
+fn assert_preview_image(image: &aislide_core::export_static::PreviewImage, format: image::ImageFormat) {
+    use sha2::{Digest, Sha256};
+    let bytes = STANDARD.decode(&image.base64).unwrap();
+    assert_eq!(image.byte_length, bytes.len());
+    assert_eq!(image.sha256, format!("{:x}", Sha256::digest(&bytes)));
+    assert_eq!(image::guess_format(&bytes).unwrap(), format);
+    let pixels = image::load_from_memory_with_format(&bytes, format).unwrap();
+    assert_eq!((image.width, image.height), (pixels.width(), pixels.height()));
+}
+
+#[test]
+fn preview_png_success_keeps_existing_bytes_and_effective_dimension() {
+    let mut source = deck();
+    source.width = 640;
+    let document = aislide_core::document::create("preview-identity".into(), source, vec![], vec![], None).unwrap();
+    let before = serde_json::to_vec(&document).unwrap();
+    let defaults: PreviewOptions = serde_json::from_value(json!({})).unwrap();
+    assert!(matches!(defaults.format, PreviewFormat::Png));
+    assert!(matches!(defaults.overflow, PreviewOverflow::Shrink));
+    for layout in [PreviewLayout::Pages, PreviewLayout::ContactSheet] {
+        let montage = matches!(layout, PreviewLayout::ContactSheet);
+        let cell = if montage { 1256 } else { 1280 };
+        let reference = export_static(&document.deck, &ExportOptions {
+            scale: f64::from(cell) / 640.0, ..Default::default()
+        }).unwrap();
+        let artifact = &reference.artifacts[0];
+        let expected = if montage {
+            let pixels = image::load_from_memory(&artifact.bytes).unwrap().into_rgba8();
+            let mut sheet = image::RgbaImage::from_pixel(artifact.width + 24, artifact.height + 24, image::Rgba([238, 238, 238, 255]));
+            image::imageops::replace(&mut sheet, &pixels, 12, 12);
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            sheet.write_to(&mut encoded, image::ImageFormat::Png).unwrap();
+            encoded.into_inner()
+        } else { artifact.bytes.clone() };
+        let preview = preview_presentation(&document, &PreviewOptions { layout, ..defaults.clone() }).unwrap();
+        assert_eq!(STANDARD.decode(&preview.images[0].base64).unwrap(), expected);
+        assert_preview_image(&preview.images[0], image::ImageFormat::Png);
+        assert_eq!(preview.images[0].mime_type, "image/png");
+        assert_eq!((preview.requested_max_dimension, preview.actual_max_dimension, preview.quality_reduced), (1280, 1280, false));
+        assert!(!preview.warnings.iter().any(|warning| warning.code == "PREVIEW_DOWNSCALED"));
+        assert_eq!((preview.pages[0].width, preview.pages[0].height), (artifact.width, artifact.height));
+        assert_eq!((preview.pages[0].x, preview.pages[0].y), if montage { (12, 12) } else { (0, 0) });
+        assert_eq!((preview.revision, &preview.hash), (document.revision, &document.hash));
+        assert!(serde_json::to_vec(&preview).unwrap().len() <= 4 * 1024 * 1024 - 65536);
+    }
+    assert_eq!(serde_json::to_vec(&document).unwrap(), before);
+}
+
+#[test]
+fn preview_strict_overflow_stops_at_requested_size_with_actionable_error() {
+    let document = noisy_preview_document();
+    let before = serde_json::to_vec(&document).unwrap();
+    let budget = noisy_preview_size(&document, 240);
+    let options: PreviewOptions = serde_json::from_value(json!({
+        "max_dimension":320, "max_output_bytes":budget, "overflow":"error"
+    })).unwrap();
+    let error = preview_presentation(&document, &options).unwrap_err();
+    assert!(matches!(error, Error::Limit(_)));
+    let message = error.to_string();
+    for expected in ["encoded output byte limit", "1 attempt", "[320]", "fewer pages", "max_dimension", "jpeg", "no partial"] {
+        assert!(message.contains(expected), "{message}");
+    }
+    assert_eq!(serde_json::to_vec(&document).unwrap(), before);
+}
+
+#[test]
+fn preview_third_attempt_uses_floor_of_original_dimension() {
+    let document = noisy_preview_document();
+    let budget = noisy_preview_size(&document, 181);
+    assert!(noisy_preview_size(&document, 241) > budget);
+    let preview = preview_presentation(&document, &PreviewOptions {
+        max_dimension: 322, max_output_bytes: budget, ..Default::default()
+    }).unwrap();
+    assert_eq!((preview.requested_max_dimension, preview.actual_max_dimension, preview.quality_reduced), (322, 181, true));
+    assert_eq!(preview.pages.len(), 3);
+    assert!(preview.images.iter().all(|image| image.width == 181 && image.height == 181));
+}
+
+#[test]
+fn preview_exhausts_three_attempts_even_when_a_fourth_size_would_fit() {
+    let document = noisy_preview_document();
+    let before = serde_json::to_vec(&document).unwrap();
+    let budget = noisy_preview_size(&document, 160);
+    assert!(noisy_preview_size(&document, 181) > budget);
+    let message = preview_presentation(&document, &PreviewOptions {
+        max_dimension: 322, max_output_bytes: budget, ..Default::default()
+    }).unwrap_err().to_string();
+    for expected in ["3 attempt", "[322, 241, 181]", "fewer pages", "max_dimension", "jpeg", "do not guarantee", "no partial"] {
+        assert!(message.contains(expected), "{message}");
+    }
+    assert_eq!(serde_json::to_vec(&document).unwrap(), before);
+}
+
+#[test]
+fn preview_minimum_dimension_is_never_retried_twice() {
+    let document = aislide_core::document::create("preview-minimum".into(), deck(), vec![], vec![], None).unwrap();
+    for (dimension, attempts, sizes) in [(160, "1 attempt", "[160]"), (161, "2 attempt", "[161, 160]")] {
+        let message = preview_presentation(&document, &PreviewOptions {
+            max_dimension: dimension, max_output_bytes: 1, ..Default::default()
+        }).unwrap_err().to_string();
+        assert!(message.contains(attempts) && message.contains(sizes), "{message}");
+    }
+}
+
+#[test]
+fn preview_invalid_options_and_document_integrity_never_fall_back() {
+    let document = aislide_core::document::create("preview-invalid".into(), deck(), vec![], vec![], None).unwrap();
+    for options in [
+        json!({"page_indices":[]}), json!({"page_indices":[1]}), json!({"page_indices":[0,0]}),
+        json!({"page_indices":[0,0,0,0,0,0,0,0,0]}), json!({"max_dimension":159}),
+        json!({"max_dimension":1601}), json!({"max_output_bytes":0}), json!({"max_output_bytes":2097153}),
+    ] {
+        let options: PreviewOptions = serde_json::from_value(options).unwrap();
+        let error = preview_presentation(&document, &options).unwrap_err();
+        assert!(matches!(error, Error::Invalid(_) | Error::Limit(_)));
+        assert!(!error.to_string().contains("attempt"));
+    }
+    for options in [json!({"format":"pdf"}), json!({"format":"webp"}), json!({"overflow":"ignore"}), json!({"path":"outside"})] {
+        assert!(serde_json::from_value::<PreviewOptions>(options).is_err());
+    }
+    let mut corrupted = document.clone();
+    corrupted.hash = "0".repeat(64);
+    assert!(matches!(preview_presentation(&corrupted, &PreviewOptions {
+        max_output_bytes: 1, ..Default::default()
+    }), Err(Error::Conflict(_))));
+}
+
+#[test]
+fn preview_contact_sheet_shrink_preserves_order_padding_and_all_coordinates() {
+    let document = noisy_preview_document();
+    let before = serde_json::to_vec(&document).unwrap();
+    let selected = vec![2, 0, 1];
+    let options = PreviewOptions {
+        page_indices: Some(selected.clone()), max_dimension: 480, layout: PreviewLayout::ContactSheet,
+        overflow: PreviewOverflow::Error, ..Default::default()
+    };
+    let reference = preview_presentation(&document, &options).unwrap();
+    let budget = reference.images[0].byte_length;
+    assert!(preview_presentation(&document, &PreviewOptions {
+        max_dimension: 640, max_output_bytes: budget, ..options.clone()
+    }).is_err());
+    let preview = preview_presentation(&document, &PreviewOptions {
+        max_dimension: 640, max_output_bytes: budget, overflow: PreviewOverflow::Shrink, ..options
+    }).unwrap();
+    assert_eq!((preview.requested_max_dimension, preview.actual_max_dimension, preview.quality_reduced), (640, 480, true));
+    assert_eq!(preview.pages.iter().map(|page| page.page_index).collect::<Vec<_>>(), selected);
+    assert_eq!(serde_json::to_value(&preview.pages).unwrap(), serde_json::to_value(&reference.pages).unwrap());
+    assert_eq!(preview.images[0].base64, reference.images[0].base64);
+    assert_eq!(preview.images.len(), 1);
+    assert!(preview.images[0].byte_length <= budget);
+    assert_preview_image(&preview.images[0], image::ImageFormat::Png);
+    let pixels = image::load_from_memory(&STANDARD.decode(&preview.images[0].base64).unwrap()).unwrap().into_rgba8();
+    for (index, page) in preview.pages.iter().enumerate() {
+        assert_eq!(page.image_index, 0);
+        assert_eq!(page.x, 12 + index as u32 % 2 * (page.width + 12));
+        assert_eq!(page.y, 12 + index as u32 / 2 * (page.height + 12));
+        assert!(page.x + page.width + 12 <= pixels.width());
+        assert!(page.y + page.height + 12 <= pixels.height());
+        assert_eq!(pixels.get_pixel(page.x - 1, page.y - 1).0, [238, 238, 238, 255]);
+    }
+    assert_eq!(serde_json::to_vec(&document).unwrap(), before);
+}
+
+#[test]
+fn preview_jpeg_pages_and_contact_sheet_are_decodable_and_keep_metadata() {
+    let document = noisy_preview_document();
+    let before = serde_json::to_vec(&document).unwrap();
+    let selected = vec![2, 0, 1];
+    for (layout, count) in [("pages", 3), ("contact_sheet", 1)] {
+        let options: PreviewOptions = serde_json::from_value(json!({
+            "page_indices":selected, "max_dimension":320, "layout":layout, "format":"jpeg", "overflow":"error"
+        })).unwrap();
+        let preview = preview_presentation(&document, &options).unwrap();
+        assert_eq!(preview.images.len(), count);
+        assert_eq!(preview.pages.iter().map(|page| page.page_index).collect::<Vec<_>>(), selected);
+        assert_eq!((preview.requested_max_dimension, preview.actual_max_dimension, preview.quality_reduced), (320, 320, false));
+        assert!(preview.images.iter().map(|image| image.byte_length).sum::<usize>() <= options.max_output_bytes);
+        for image in &preview.images {
+            assert_eq!(image.mime_type, "image/jpeg");
+            assert_preview_image(image, image::ImageFormat::Jpeg);
+        }
+        for page in &preview.pages {
+            let image = &preview.images[page.image_index];
+            assert!(page.x + page.width <= image.width && page.y + page.height <= image.height);
+        }
+        if layout == "pages" {
+            let reference = export_static(&document.deck, &ExportOptions {
+                format: ExportFormat::Jpeg, page_indices: Some(selected.clone()), ..Default::default()
+            }).unwrap();
+            for (image, artifact) in preview.images.iter().zip(reference.artifacts) {
+                assert_eq!(STANDARD.decode(&image.base64).unwrap(), artifact.bytes);
+            }
+            let budget = preview.images.iter().map(|image| image.byte_length).sum();
+            let bounded = PreviewOptions { max_output_bytes: budget, ..options.clone() };
+            assert!(preview_presentation(&document, &PreviewOptions { format: PreviewFormat::Png, ..bounded.clone() }).is_err());
+            let jpeg = preview_presentation(&document, &bounded).unwrap();
+            assert!(!jpeg.quality_reduced);
+            assert_eq!(jpeg.actual_max_dimension, 320);
+        }
+        assert_eq!(preview.hash, document.hash);
+        assert!(serde_json::to_vec(&preview).unwrap().len() <= 4 * 1024 * 1024 - 65536);
+    }
+    assert_eq!(serde_json::to_vec(&document).unwrap(), before);
+}
+
+#[test]
+fn preview_jpeg_composites_alpha_onto_slide_background() {
+    let pixels = image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 255, 128]));
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    pixels.write_to(&mut encoded, image::ImageFormat::Png).unwrap();
+    let mut source = with_elements(json!([{
+        "type":"picture", "id":"alpha", "x":80, "y":80, "width":160, "height":160,
+        "base64":STANDARD.encode(encoded.into_inner()), "mime_type":"image/png", "alt":"Synthetic alpha"
+    }]));
+    source.slides[0].background = "00FF00".into();
+    let document = aislide_core::document::create("preview-alpha".into(), source, vec![], vec![], None).unwrap();
+    for layout in [PreviewLayout::Pages, PreviewLayout::ContactSheet] {
+        let preview = preview_presentation(&document, &PreviewOptions {
+            max_dimension: 320, format: PreviewFormat::Jpeg, layout, ..Default::default()
+        }).unwrap();
+        let page = &preview.pages[0];
+        let pixels = image::load_from_memory(&STANDARD.decode(&preview.images[0].base64).unwrap()).unwrap().into_rgb8();
+        assert!(pixels.get_pixel(page.x + 20, page.y + 20)[1] > 250);
+        let mixed = pixels.get_pixel(page.x + page.width / 2, page.y + page.height / 2);
+        assert!(mixed[0] < 5 && (i16::from(mixed[1]) - 127).abs() < 5 && (i16::from(mixed[2]) - 128).abs() < 5);
+    }
+}
+
+#[test]
+fn preview_default_two_mib_budget_returns_all_eight_pages() {
+    let mut source = noisy_preview_document().deck;
+    source.slides = (0..8).map(|index| {
+        let mut slide = source.slides[0].clone();
+        slide.id = format!("page-{index}");
+        slide
+    }).collect();
+    let document = aislide_core::document::create("preview-eight".into(), source, vec![], vec![], None).unwrap();
+    let before = serde_json::to_vec(&document).unwrap();
+    assert!(noisy_preview_size(&document, 320) > 2 * 1024 * 1024);
+    let preview = preview_presentation(&document, &PreviewOptions { max_dimension: 320, ..Default::default() }).unwrap();
+    assert_eq!(preview.pages.iter().map(|page| page.page_index).collect::<Vec<_>>(), (0..8).collect::<Vec<_>>());
+    assert_eq!(preview.images.len(), 8);
+    assert_eq!(preview.actual_max_dimension, 240);
+    assert!(preview.images.iter().map(|image| image.byte_length).sum::<usize>() <= 2 * 1024 * 1024);
+    assert!(serde_json::to_vec(&preview).unwrap().len() <= 4 * 1024 * 1024 - 65536);
+    assert_eq!(serde_json::to_vec(&document).unwrap(), before);
+}
+
+#[test]
+fn preview_minimum_jpeg_contact_sheet_resizes_without_alignment_loss() {
+    let colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255], [255, 255, 255], [0, 0, 0]];
+    let mut source = deck();
+    source.width = 4096;
+    source.height = 4096;
+    source.slides = colors.iter().enumerate().map(|(index, color)| {
+        let mut slide = source.slides[0].clone();
+        slide.id = format!("color-{index}");
+        slide.background = format!("{:02X}{:02X}{:02X}", color[0], color[1], color[2]);
+        slide.elements.clear();
+        slide
+    }).collect();
+    let document = aislide_core::document::create("preview-jpeg-minimum".into(), source, vec![], vec![], None).unwrap();
+    let selected = vec![7, 1, 5, 3, 0, 6, 4, 2];
+    let preview = preview_presentation(&document, &PreviewOptions {
+        page_indices: Some(selected.clone()), max_dimension: 160, format: PreviewFormat::Jpeg,
+        layout: PreviewLayout::ContactSheet, ..Default::default()
+    }).unwrap();
+    assert_eq!((preview.actual_max_dimension, preview.quality_reduced), (160, false));
+    assert_eq!(preview.images.len(), 1);
+    assert_eq!((preview.images[0].width, preview.images[0].height), (159, 159));
+    assert_preview_image(&preview.images[0], image::ImageFormat::Jpeg);
+    let pixels = image::load_from_memory(&STANDARD.decode(&preview.images[0].base64).unwrap()).unwrap().into_rgb8();
+    for (index, page) in preview.pages.iter().enumerate() {
+        assert_eq!(page.page_index, selected[index]);
+        assert_eq!(page.slide_id, document.deck.slides[selected[index]].id);
+        assert_eq!((page.image_index, page.width, page.height), (0, 37, 37));
+        assert_eq!((page.x, page.y), (12 + index as u32 % 3 * 49, 12 + index as u32 / 3 * 49));
+        let color = pixels.get_pixel(page.x + 18, page.y + 18);
+        assert!(color.0.iter().zip(colors[page.page_index]).all(|(actual, expected)| (i16::from(*actual) - expected as i16).abs() < 5));
+    }
 }
 
 #[test]
