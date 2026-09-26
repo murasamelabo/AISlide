@@ -6,6 +6,165 @@ fn column_spec() -> Value {
     json!({"version":1,"preset":"vertical-bar-graph/balanced","title":"Quarterly volume","subtitle":"Synthetic example","data":{"kind":"chart","categories":["Q1","Q2","Q3"],"series":[{"name":"Volume","values":[12,24,18]}],"x_axis":"Quarter","y_axis":"Units"}})
 }
 
+fn open_list_spec(preset: &str) -> Value {
+    json!({"version":1,"preset":preset,"title":"Operating capabilities","subtitle":"Synthetic example","data":{"kind":"items","items":[
+        {"label":"Collection","detail":"Bring the relevant signals together."},
+        {"label":"Coordination","detail":"Connect decisions across teams."},
+        {"label":"Judgment","detail":"Keep priorities and outcomes explicit."},
+        {"label":"Learning","detail":"Use feedback to improve the next response."}
+    ]}})
+}
+
+#[test]
+fn open_list_presets_keep_content_without_decorative_boxes_rails_or_numbers() {
+    for preset in ["list/rows", "list-horizontal/columns", "list-enumeration/grid"] {
+        let spec = open_list_spec(preset);
+        let rendered = execute_request(json!({"op":"create_part","id":"open-list","spec":spec})).unwrap();
+        let children = rendered["children"].as_array().unwrap();
+        assert!(children.iter().all(|element| element["type"] == "text"), "{preset}: decorative geometry");
+        assert!(children.iter().all(|element| [json!("@dk1"), json!("@dk2")].contains(&element["color"])), "{preset}: automatic category color");
+        let mut expected = vec![spec["title"].clone(), spec["subtitle"].clone()];
+        for item in spec["data"]["items"].as_array().unwrap() { expected.extend([item["label"].clone(), item["detail"].clone()]); }
+        assert_eq!(children.iter().map(|element| element["text"].clone()).collect::<Vec<_>>(), expected, "{preset}: content or automatic numbering");
+        let labels: Vec<_> = children.iter().skip(2).step_by(2).collect();
+        if preset == "list/rows" {
+            assert!(labels.iter().all(|label| label["x"] == labels[0]["x"]));
+            assert!(labels.windows(2).all(|pair| pair[0]["y"].as_f64().unwrap() < pair[1]["y"].as_f64().unwrap()));
+        } else if preset == "list-horizontal/columns" {
+            assert!(labels.iter().all(|label| label["y"] == labels[0]["y"]));
+            assert!(labels.windows(2).all(|pair| pair[0]["x"].as_f64().unwrap() < pair[1]["x"].as_f64().unwrap()));
+        } else {
+            assert_eq!(labels[0]["y"], labels[1]["y"]);
+            assert_eq!(labels[0]["x"], labels[2]["x"]);
+            assert!(labels[0]["y"].as_f64().unwrap() < labels[2]["y"].as_f64().unwrap());
+        }
+    }
+}
+
+#[test]
+fn open_list_catalog_recommends_new_compositions_and_retains_legacy_ids() {
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let presets = catalog["presets"].as_array().unwrap();
+    assert_eq!(presets.len(), 111);
+    for (category, variant) in [("list", "rows"), ("list-horizontal", "columns"), ("list-enumeration", "grid")] {
+        let id = format!("{category}/{variant}");
+        let entry = presets.iter().find(|entry| entry["id"] == id).unwrap_or_else(|| panic!("missing {id}"));
+        assert_eq!(entry["recommended"], true);
+        assert!(!entry["use_when"].as_str().unwrap().is_empty());
+        assert!(!entry["avoid_when"].as_str().unwrap().is_empty());
+        assert_eq!(entry["example"]["preset"], id);
+        for legacy in ["balanced", "focus", "labeled"] {
+            assert!(presets.iter().any(|entry| entry["id"] == format!("{category}/{legacy}")));
+        }
+    }
+}
+
+#[test]
+fn open_list_additions_preserve_all_nine_legacy_native_exports() {
+    use sha2::{Digest, Sha256};
+    for (preset, expected) in [
+        ("list/balanced", "e38ff079fe057ceda156936d1e069bb34cdafad379d1a568573d7985e9bb47f0"),
+        ("list/focus", "58d7ab7756459714054fff9e982c17d0802a4f66c4fb0f671055b44681e82c41"),
+        ("list/labeled", "00a8b100ed2bab08451eb8963a10c7f3b0405aff1f218694e46b6d7bc2b0b84b"),
+        ("list-horizontal/balanced", "a7d172e038d7d7e27c721418e9d0e427086a4f31a12e9b9cdf9eaeb590489ac8"),
+        ("list-horizontal/focus", "7fd322fdde880490b5463b90f312baa7a37d789ebf5097df1aaa27cc8865824f"),
+        ("list-horizontal/labeled", "6aadeea6cda76e61facec77eacd2eff2e804af42cc7bf976835dc71963f4634e"),
+        ("list-enumeration/balanced", "0b92562809471a59b9b9669604744613f74acc4d8ff0990b455f8028c3a4655a"),
+        ("list-enumeration/focus", "db82082f14462d5a685fd08737722daa4f5a6b50f231942c5d20f0bdb715f478"),
+        ("list-enumeration/labeled", "f0309f4c451c887f7918fd04c73401a60e36eb4e5e6bc0847a2de65f9337888d"),
+    ] {
+        let rendered = execute_request(json!({"op":"create_part","id":"legacy-list","spec":open_list_spec(preset)})).unwrap();
+        let saved = execute_request(json!({"op":"export","deck":deck(rendered)})).unwrap();
+        let bytes = STANDARD.decode(saved["base64"].as_str().unwrap()).unwrap();
+        assert_eq!(format!("{:x}", Sha256::digest(bytes)), expected, "{preset}");
+    }
+}
+
+#[test]
+fn open_list_native_layout_update_reopen_and_undo_preserve_editability() {
+    for preset in ["list/rows", "list-horizontal/columns", "list-enumeration/grid"] {
+        let mut spec = open_list_spec(preset);
+        spec["layout"] = json!({"x":24,"y":36,"width":1152,"height":424,"show_title":false});
+        let mut scene = deck(json!({})); scene["slides"][0]["elements"] = json!([]);
+        let document = execute_request(json!({"op":"new_document","id":"open-list-native","deck":scene})).unwrap();
+        let inserted = execute_request(json!({"op":"apply_operations","document":document,"expected_revision":0,"expected_hash":document["hash"],"operations":[
+            {"op":"add_part","slide_id":"slide","id":"open-list","spec":spec}
+        ]})).unwrap();
+        let group = &inserted["document"]["deck"]["slides"][0]["elements"][0];
+        assert_eq!(group["x"], 24.0); assert_eq!(group["y"], 36.0);
+        let children = group["children"].as_array().unwrap();
+        assert_eq!(children.len(), 8);
+        assert!(children.iter().all(|child| child["type"] == "text"));
+        let saved = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+        let opened = execute_request(json!({"op":"open_presentation","id":"open-list-reopened","base64":saved["base64"]})).unwrap();
+        assert_eq!(opened["document"]["parts"][0]["stale"], false);
+        assert_eq!(opened["document"]["parts"][0]["spec"], inserted["document"]["parts"][0]["spec"]);
+        assert!(opened["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap().iter().all(|child| child["type"] == "text"));
+        let unchanged = execute_request(json!({"op":"update_part","document":opened["document"],"expected_revision":0,"slide_id":"slide","id":"open-list","spec":spec})).unwrap();
+        assert!(unchanged["receipt"].is_null(), "{preset}");
+        assert_eq!(execute_request(json!({"op":"export_presentation","document":unchanged["document"]})).unwrap()["base64"], saved["base64"]);
+        spec["data"]["items"][0]["detail"] = json!("Updated synthetic explanation.");
+        let updated = execute_request(json!({"op":"update_part","document":opened["document"],"expected_revision":0,"slide_id":"slide","id":"open-list","spec":spec})).unwrap();
+        assert_eq!(updated["document"]["parts"][0]["stale"], false);
+        let undone = execute_request(json!({"op":"undo_transaction","document":updated["document"],"expected_revision":1,"receipt":updated["receipt"]})).unwrap();
+        assert_eq!(execute_request(json!({"op":"export_presentation","document":undone["document"]})).unwrap()["base64"], saved["base64"]);
+        spec["layout"]["width"] = json!(1080);
+        let fractional = execute_request(json!({"op":"create_part","id":"fractional-list","spec":spec})).unwrap();
+        let exported = execute_request(json!({"op":"export","deck":deck(fractional.clone())})).unwrap();
+        let reopened = execute_request(json!({"op":"open_presentation","id":"fractional-list","base64":exported["base64"]})).unwrap();
+        let restored = &reopened["document"]["deck"]["slides"][0]["elements"][0];
+        for (source, target) in fractional["children"].as_array().unwrap().iter().zip(restored["children"].as_array().unwrap()) {
+            assert_eq!(source["text"], target["text"]);
+            for field in ["x", "y", "width", "height"] { assert!((source[field].as_f64().unwrap() - target[field].as_f64().unwrap()).abs() <= 1.0 / 9525.0, "{preset}: {field}"); }
+        }
+    }
+}
+
+#[test]
+fn open_list_japanese_text_and_titleless_frames_remain_measurable() {
+    for preset in ["list/rows", "list-horizontal/columns", "list-enumeration/grid"] {
+        for titleless in [false, true] {
+            let mut spec = open_list_spec(preset);
+            for item in spec["data"]["items"].as_array_mut().unwrap() {
+                item["label"] = json!("人とAIの役割分担");
+                item["detail"] = json!("人が優先度と成果を定義し、AIエージェントが調査と調整を担う。判断の根拠を共有し、継続的に改善する。");
+            }
+            if titleless { spec["layout"] = json!({"x":24,"y":36,"width":1152,"height":424,"show_title":false}); }
+            let rendered = execute_request(json!({"op":"create_part","id":"open-japanese","spec":spec})).unwrap();
+            let measured = execute_request(json!({"op":"measure_layout","deck":deck(rendered)})).unwrap();
+            assert!(measured["measurements"].as_array().unwrap().iter().all(|entry| entry["overflow"] == false && entry["missing_glyphs"] == 0), "{preset}: {measured}");
+        }
+    }
+}
+
+#[test]
+fn open_list_limits_reject_wrong_categories_and_excess_items() {
+    for preset in ["list/columns", "list-horizontal/rows", "list-enumeration/rows", "flow/rows", "pie-chart/grid"] {
+        let error = execute_request(json!({"op":"create_part","id":"invalid-open-list","spec":open_list_spec(preset)})).unwrap_err().to_string();
+        assert!(error.contains("unknown part variant"), "{error}");
+    }
+    for (preset, maximum) in [("list/rows",8), ("list-horizontal/columns",4), ("list-enumeration/grid",8)] {
+        for length in [2, maximum, maximum + 1] {
+            let mut spec = open_list_spec(preset);
+            spec["data"]["items"] = json!((0..length).map(|index| json!({"label":format!("Topic {}",index+1),"detail":"Short explanation."})).collect::<Vec<_>>());
+            let result = execute_request(json!({"op":"create_part","id":"open-list-limit","spec":spec}));
+            if length <= maximum { assert!(result.is_ok(), "{preset}: {result:?}"); }
+            else { assert!(result.unwrap_err().to_string().contains(&format!("2-{maximum} items"))); }
+        }
+    }
+}
+
+#[test]
+fn open_list_selection_policy_is_in_every_core_authoring_guide() {
+    for profile_id in ["consulting-decision", "technical-explainer", "event-talk", "status-report"] {
+        let guide = execute_request(json!({"op":"best_practice_guide","profile_id":profile_id})).unwrap();
+        let markdown = guide["markdown"].as_str().unwrap();
+        for phrase in ["Choose the information relationship before the layout", "list/rows", "list-horizontal/columns", "list-enumeration/grid", "use_when", "avoid_when", "do not randomize layouts", "Existing preset IDs retain their rendering"] {
+            assert!(markdown.contains(phrase), "{profile_id}: missing {phrase}");
+        }
+    }
+}
+
 fn deck(element: Value) -> Value {
     json!({"version":1,"title":"Parts test","width":1280,"height":720,"slides":[{"id":"slide","title":"Parts","background":"FFFFFF","notes":"Synthetic examples","elements":[element]}]})
 }
@@ -587,7 +746,7 @@ fn editable_polygons_and_transparent_shapes_round_trip_as_native_geometry() {
 #[test]
 fn every_category_has_three_distinct_bounded_native_presets() {
     let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
-    let presets = catalog["presets"].as_array().unwrap();
+    let presets: Vec<_> = catalog["presets"].as_array().unwrap().iter().filter(|preset| preset["recommended"] != true).collect();
     assert_eq!(presets.len(), 108);
     let mut categories = std::collections::BTreeMap::<String, Vec<Value>>::new();
     let mut failures = Vec::new();

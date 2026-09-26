@@ -98,7 +98,7 @@ The complete ledger and source/assumption declarations are stored in notes and n
 
 ## Metadata Parts
 
-The catalog contains 108 original layouts across 36 categories, each with a typed synthetic example. Given an existing session and a slide with room for a part:
+The catalog contains 111 original layouts across 36 categories, each with a typed synthetic example. The original 108 recipes are retained. New `list/rows`, `list-horizontal/columns` and `list-enumeration/grid` entries include optional `recommended`, `use_when` and `avoid_when` metadata for selecting frameless peer lists by purpose. Do not assume exactly three entries per category. Given an existing session and a slide with room for a part:
 
 ```js
 const catalog = await client.partCatalog();

@@ -195,7 +195,7 @@ export type PartData =
   | { kind: 'diagram'; graph: GraphSpec }
 export type PartLayout = Frame & { show_title?: boolean }
 export type PartSpec = { version: 1; preset: string; title: string; subtitle?: string; data: PartData; layout?: PartLayout | null }
-export type PartPreset = { id: string; category: string; category_name: string; name: string; family: 'Charts' | 'Diagrams'; example: PartSpec }
+export type PartPreset = { id: string; category: string; category_name: string; name: string; family: 'Charts' | 'Diagrams'; example: PartSpec; recommended?: boolean; use_when?: string; avoid_when?: string }
 export type PartCatalog = { version: 1; presets: PartPreset[]; schema: unknown; style: string; default_bounds: Omit<Bounds, 'id'> }
 export type PartInstance = { slide_id: string; element_id: string; spec: PartSpec; render_sha256: string; native_sha256?: string | null; stale: boolean }
 

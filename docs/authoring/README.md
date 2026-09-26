@@ -39,6 +39,31 @@ For reusable direct content, prefer managed variants in `apply_operations`;
 `addPart` remains compatible. Use complete typed elements for an explicitly
 unmanaged composition, not as a substitute for reusable part metadata.
 
+## Choose A List Composition
+
+Use the information relationship, not item count alone, to select a part.
+For equal-status topics, the catalog recommends `list/rows` for 2-8 aligned
+heading/detail rows, `list-horizontal/columns` for 2-4 open columns, and
+`list-enumeration/grid` for 2-8 unordered peers. These three new presets use
+native text and whitespace without automatic boxes, accent rails, numbers,
+icon discs or per-item colors. Use a flow for stages and a comparison for
+shared evaluation criteria instead of styling both as lists.
+
+The 111-entry catalog retains the original 108 IDs and examples. Optional
+`recommended`, `use_when` and `avoid_when` fields describe the new alternatives.
+Studio presents them first on initial category selection; explicit choices,
+saved drafts and existing part instances are not replaced. The MCP prompt,
+workflow resource and all four core best-practice guides carry the same
+selection policy. They guide the calling author, not an automatic deck-wide
+redesign service. Keep meaningful repeated structures consistent and change
+composition only when the information calls for it; do not randomize layouts.
+
+Text limits and installed-font fitting still apply. Long labels, many items
+or a small explicit region can be rejected at the existing font floor. Keep
+source wording and citations, and review the actual output before claiming
+visual quality. The new native layouts are independently implemented; no
+reference-site slide images, branding or proprietary artwork are bundled.
+
 ## MCP Workflow
 
 1. `best_practice_profiles` lists the four profiles.

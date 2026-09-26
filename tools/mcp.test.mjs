@@ -151,6 +151,9 @@ function assertFeedbackWorkflow(prompt, resource) {
     /All three venn variants support PartSpec\.layout\.show_title=false/,
     /Keep card text at least 8 slide pixels/, /CONTAINER_CORNER_OVERFLOW and CONTAINER_PADDING.*require preview review/,
     /CONNECTOR_BADGE_OVERLAP is info.*not a visual approval/, /propose guarded edits and inspect before\/after previews/,
+    /Choose the information relationship before the layout/, /list\/rows.*list-horizontal\/columns.*list-enumeration\/grid/,
+    /recommended.*use_when.*avoid_when/, /Do not assign a different accent color to every item/,
+    /do not randomize layouts/, /Legacy preset IDs keep their existing rendering/,
   ]) assert.match(text, pattern);
 }
 
@@ -1347,6 +1350,42 @@ test('P1 MCP finalization publishes a traceable new bundle without changing the 
     assert.equal((await readdir(directory)).length, 7);
     assert.equal((await client.listTools()).tools.find(tool => tool.name === 'finalize_presentation').annotations.readOnlyHint, false);
   } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('MCP open list recommendations render native text and keep failed edits atomic', async () => {
+  const client = new Client({ name: 'open-list-integration-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const catalog = await call('part_catalog');
+    assert.equal(catalog.presets.length, 111);
+    for (const id of ['list/rows', 'list-horizontal/columns', 'list-enumeration/grid']) {
+      const preset = catalog.presets.find(entry => entry.id === id);
+      assert.equal(preset.recommended, true);
+      assert.ok(preset.use_when.length > 0); assert.ok(preset.avoid_when.length > 0);
+      const element = await call('create_part', { id: 'open-list', spec: preset.example });
+      assert.ok(element.children.every(child => child.type === 'text'));
+      assert.ok(element.children.every(child => ['@dk1', '@dk2'].includes(child.color)));
+    }
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic open lists' });
+    const original = await call('get_document', { deck_id });
+    const spec = catalog.presets.find(entry => entry.id === 'list/rows').example;
+    await call('add_part', { deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'open-list', spec });
+    const before = await call('get_document', { deck_id });
+    assert.equal(before.parts[0].spec.preset, 'list/rows');
+    const invalid = structuredClone(spec); invalid.preset = 'list-horizontal/columns'; invalid.data.items.push({ label: 'Excess topic', detail: 'Synthetic' });
+    const rejected = await client.callTool({ name: 'update_part', arguments: { deck_id, expected_revision: before.revision, slide_id: 'slide-1', id: 'open-list', spec: invalid } });
+    assert.equal(rejected.isError, true);
+    assert.match(JSON.stringify(rejected.content), /2-4 items/);
+    assert.deepEqual(await call('get_document', { deck_id }), before);
+    await call('undo', { deck_id });
+    assert.equal((await call('get_document', { deck_id })).hash, original.hash);
+  } finally { await client.close(); }
 });
 
 test('MCP bounded graph annotations honor small fonts and report actionable group bounds', async () => {

@@ -45,6 +45,30 @@ Record population, unit, time period, aggregation, and exclusions. Do not mix co
 - Keep figure titles immediately above their figures. A source citation and an assumption note have different roles.
 - Use semantic fills and borders, not decorative icons, gradients, 3D, signatures, oversized colored bands, or abundant rounded corners.
 
+## Lists And Repeated Content
+
+Choose the information relationship before the layout. Equal-status topics can
+use `list/rows` (2-8 heading/detail rows), `list-horizontal/columns` (2-4 open
+columns), or `list-enumeration/grid` (2-8 unordered peers). Consult `recommended`,
+`use_when` and `avoid_when` in `part_catalog`. A sequence needs a flow or steps;
+a ranking needs an explicit ordering; a comparison needs shared criteria.
+Do not infer those relationships solely from the number of items.
+
+Start with aligned headings, explanations and whitespace. Do not assign a
+different accent color to every item by position. Use color for a declared
+category, state or selected emphasis. Add a background, border, rail, number
+or icon only when it has a distinct communicative role; do not stack them by
+default. A definition or source-attributed quotation need not look like a
+repeated card. Keep citations and source wording intact when changing layout.
+
+Keep a consistent visual language across the deck. Change composition when
+the information relationship changes; do not randomize layouts or rotate
+decorations merely for variety. Repeated structures can be appropriate for
+repeated comparisons. Existing preset IDs retain their rendering; new
+recommendations do not migrate existing slides or override an explicit choice.
+The calling author chooses the pattern: these guidelines are not an automatic
+deck-wide layout optimizer or a visual-quality certification.
+
 ## Coordinates And Color
 
 The supplied consulting reference uses 1920 x 1080. AISlide's native canvas is 1280 x 720; scale coordinates by 2/3, not the presentation's aspect ratio. Reference margins 86/62 become approximately 57/41 core units. A reference 48px headline becomes 32 core units; 44px becomes 29.3; minimum 18px becomes 12. These are document units, not CSS viewport pixels.

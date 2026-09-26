@@ -4,6 +4,40 @@ import AxeBuilder from '@axe-core/playwright';
 import sharp from 'sharp';
 import type { PartCatalog } from '../../apps/studio/src/types';
 
+for (const width of [1440, 390]) {
+  test(`open list recommendations preserve legacy choices at ${width}px`, async ({ page }) => {
+    test.setTimeout(120_000);
+    await page.setViewportSize({ width, height: 1000 });
+    await openSample(page);
+    await page.getByRole('button', { name: 'Parts library', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Parts library', exact: true });
+    for (const [category, name] of [['list', 'Open text rows'], ['list-horizontal', 'Open editorial columns'], ['list-enumeration', 'Open text grid']]) {
+      await dialog.getByLabel('Part category', { exact: true }).selectOption(category);
+      await expect(dialog.locator('.part-preset').first()).toHaveAttribute('aria-label', name);
+      await expect(dialog.getByRole('button', { name, exact: true })).toHaveAttribute('aria-pressed', 'true');
+      await expect(dialog.getByRole('button', { name: 'Insert part', exact: true })).toBeEnabled();
+      await page.evaluate(() => document.fonts.ready);
+      await expect(dialog.locator('.part-preview .slide-text')).toHaveCount(10);
+      const overflow = await dialog.locator('.part-preview .slide-text').evaluateAll(nodes => nodes.filter(node => node.scrollHeight > node.clientHeight + 2 || node.scrollWidth > node.clientWidth + 2).map(node => node.textContent));
+      expect(overflow, category).toEqual([]);
+      const pixels = await dialog.locator('.part-preview').screenshot({ path: `.artifacts/open-list-design-20260926/studio-${category}-${width}.png` });
+      expect((await sharp(pixels).removeAlpha().stats()).channels.some(channel => channel.stdev > 8)).toBe(true);
+    }
+    await dialog.getByLabel('Part category', { exact: true }).selectOption('list');
+    await dialog.getByRole('button', { name: 'Accent rail', exact: true }).click();
+    await dialog.getByLabel('Part title', { exact: true }).fill('Retained legacy list');
+    await dialog.getByLabel('Part category', { exact: true }).selectOption('list-horizontal');
+    await dialog.getByLabel('Part category', { exact: true }).selectOption('list');
+    await expect(dialog.getByRole('button', { name: 'Accent rail', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(dialog.getByLabel('Part title', { exact: true })).toHaveValue('Retained legacy list');
+    await dialog.getByRole('button', { name: 'Insert part', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await page.getByRole('button', { name: 'Edit part data', exact: true }).click();
+    await expect(dialog.getByRole('button', { name: 'Accent rail', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(dialog.getByLabel('Part title', { exact: true })).toHaveValue('Retained legacy list');
+  });
+}
+
 test('parts library inserts, updates and reopens editable metadata from one PPTX', async ({ page }) => {
   await openSample(page);
   await page.getByRole('button', { name: 'Parts library', exact: true }).click();
@@ -48,7 +82,7 @@ for (const width of [1440,390]) {
   });
 }
 
-test('all 108 part previews render with visible content and fitted labels', async ({ page }) => {
+test('all catalog part previews render with visible content and fitted labels', async ({ page }) => {
   test.setTimeout(240_000);
   await page.setViewportSize({ width: 1500, height: 1000 });
   await openSample(page);

@@ -40,14 +40,29 @@ pub(super) const CATEGORIES: &[(&str, &str, [&str; 3])] = &[
     ("ranking","Ranking",["Ranked bars","Podium","Rank ledger"]),
 ];
 
+pub(super) const OPEN_LISTS: &[(&str, &str, &str, &str, &str)] = &[
+    ("list", "rows", "Open text rows", "2-8 equal-status topics with a heading and explanation; read down a shared heading/detail alignment.", "Ordered stages, rankings or measured comparisons; use a flow, ranking or comparison instead."),
+    ("list-horizontal", "columns", "Open editorial columns", "2-4 parallel concepts with comparable detail; read across aligned headings without enclosing cards.", "A sequence, unequal priorities or more than four topics; do not imply chronology from left-to-right placement."),
+    ("list-enumeration", "grid", "Open text grid", "2-8 unordered peers with short labels and descriptions; group by whitespace, not item colors.", "Steps, ranks or categories that need an explicit relationship; choose the matching diagram instead."),
+];
+
 pub fn catalog() -> Value {
-    let presets: Vec<_> = CATEGORIES.iter().enumerate().flat_map(|(index,(category,name,names))| {
+    let mut presets: Vec<_> = CATEGORIES.iter().enumerate().flat_map(|(index,(category,name,names))| {
         ["balanced","focus","labeled"].into_iter().enumerate().map(move |(variant,suffix)| {
             let id = format!("{category}/{suffix}");
             let example = PartSpec { version:1,preset:id.clone(),title:(*name).into(),subtitle:"Synthetic example".into(),data:example(category,variant),layout:None };
             json!({"id":id,"category":category,"category_name":name,"name":names[variant],"family":if index<10 {"Charts"} else {"Diagrams"},"example":example})
         })
     }).collect();
+    presets.extend(OPEN_LISTS.iter().map(|(category, variant, name, use_when, avoid_when)| {
+        let id = format!("{category}/{variant}");
+        let category_name = CATEGORIES.iter().find(|entry| entry.0 == *category).expect("built-in list category").1;
+        let example = PartSpec { version:1,preset:id.clone(),title:(*name).into(),subtitle:"Synthetic example".into(),data:PartData::Items {
+            center:String::new(), items:[("Collection","Bring relevant signals together."),("Coordination","Connect decisions across teams."),("Judgment","Keep priorities and outcomes explicit."),("Learning","Use feedback to improve the next response.")]
+                .into_iter().map(|(label,detail)| super::PartItem { label:label.into(),detail:detail.into(),value:None }).collect(),
+        },layout:None };
+        json!({"id":id,"category":category,"category_name":category_name,"name":name,"family":"Diagrams","recommended":true,"use_when":use_when,"avoid_when":avoid_when,"example":example})
+    }));
     json!({"version":1,"presets":presets,"schema":schemars::schema_for!(PartSpec),"style":"Theme-linked minimal modern","default_bounds":{"x":64,"y":144,"width":1152,"height":512}})
 }
 

@@ -40,6 +40,7 @@ fn block(drawing: &mut Drawing, item: &PartItem, bounds: [f64;4], index: usize, 
 }
 
 fn list(drawing: &mut Drawing, items: &[PartItem], category: &str, variant: usize) -> Result<()> {
+    if variant == 3 { return open_list(drawing, items, category); }
     let columns=if category=="list-horizontal" { count(items.len(),2,5)?; items.len() } else if category=="list-enumeration" { if variant==2 {2} else {3} } else if variant==2 {2} else {1};
     let rows=items.len().div_ceil(columns); let cell_width=1104.0/columns as f64; let cell_height=400.0/rows as f64;
     for (index,item) in items.iter().enumerate() {
@@ -53,6 +54,29 @@ fn list(drawing: &mut Drawing, items: &[PartItem], category: &str, variant: usiz
             if variant==1 { drawing.text(&format!("{:02}",index+1),[left+12.0,top,cell_width-40.0,40.0],28.0,&accent(index),true,TextAlign::Left); }
             let offset=if variant==1 {44.0} else {0.0};
             block(drawing,item,[left,top+offset,cell_width-20.0,cell_height-18.0-offset],index,variant==2);
+        }
+    }
+    Ok(())
+}
+
+fn open_list(drawing: &mut Drawing, items: &[PartItem], category: &str) -> Result<()> {
+    count(items.len(), 2, if category == "list-horizontal" { 4 } else { 8 })?;
+    let columns = if category == "list" { 1 } else if category == "list-horizontal" { items.len() } else if items.len() <= 4 { 2 } else { 3 };
+    let rows = items.len().div_ceil(columns);
+    let gap = if category == "list" { 16.0 } else { 32.0 };
+    let cell_width = (1104.0 - 48.0 * (columns - 1) as f64) / columns as f64;
+    let cell_height = (400.0 - gap * (rows - 1) as f64) / rows as f64;
+    for (index, item) in items.iter().enumerate() {
+        let left = 24.0 + (index % columns) as f64 * (cell_width + 48.0);
+        let top = 88.0 + (index / columns) as f64 * (cell_height + gap);
+        if category == "list" {
+            drawing.text(&item.label, [left, top, 320.0, cell_height], 22.0, "@dk1", true, TextAlign::Left);
+            drawing.text(&item.detail, [left + 368.0, top, cell_width - 368.0, cell_height], 18.0, "@dk2", false, TextAlign::Left);
+        } else {
+            let heading_height = if category == "list-horizontal" { 112.0 } else { cell_height.min(144.0) / 3.0 };
+            let detail_top = top + heading_height + 16.0;
+            drawing.text(&item.label, [left, top, cell_width, heading_height], if category == "list-horizontal" { 26.0 } else { 22.0 }, "@dk1", true, TextAlign::Left);
+            drawing.text(&item.detail, [left, detail_top, cell_width, cell_height - heading_height - 16.0], 18.0, "@dk2", false, TextAlign::Left);
         }
     }
     Ok(())

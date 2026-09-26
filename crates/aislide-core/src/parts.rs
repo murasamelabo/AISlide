@@ -149,7 +149,9 @@ pub(super) fn validate_spec(spec: &PartSpec) -> Result<(&str, usize)> {
         return Ok(("diagram", 0));
     }
     let (category, variant) = spec.preset.split_once('/').ok_or_else(|| Error::Invalid("part preset must include category/variant".into()))?;
-    let variant = ["balanced", "focus", "labeled"].iter().position(|candidate| *candidate == variant).ok_or_else(|| Error::Unsupported("unknown part variant".into()))?;
+    let variant = ["balanced", "focus", "labeled"].iter().position(|candidate| *candidate == variant)
+        .or_else(|| catalog::OPEN_LISTS.iter().any(|entry| entry.0 == category && entry.1 == variant).then_some(3))
+        .ok_or_else(|| Error::Unsupported("unknown part variant".into()))?;
     if !catalog::CATEGORIES.iter().any(|entry| entry.0 == category) { return Err(Error::Unsupported("unknown part category".into())); }
     validate_data(&spec.data)?;
     Ok((category, variant))

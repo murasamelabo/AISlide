@@ -1428,7 +1428,7 @@ fn graph_contract_rejects_ambiguous_ids_missing_endpoints_and_excessive_counts()
     let catalog = execute_request(json!({"op":"graph_catalog"})).unwrap();
     assert_eq!(catalog["limits"]["nodes"], 48);
     assert!(catalog["examples"].as_array().is_some_and(|examples| examples.len() >= 3));
-    assert_eq!(execute_request(json!({"op":"part_catalog"})).unwrap()["presets"].as_array().unwrap().len(), 108);
+    assert_eq!(execute_request(json!({"op":"part_catalog"})).unwrap()["presets"].as_array().unwrap().len(), 111);
 }
 
 #[test]

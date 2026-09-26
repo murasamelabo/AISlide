@@ -6,9 +6,11 @@ import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
+const coreEnvironment = process.env.AISLIDE_CORE_BINARY ? { AISLIDE_CORE_BINARY: process.env.AISLIDE_CORE_BINARY } : undefined;
+
 test('MCP expanded authoring exposes strict APIs, revisions and create-new templates', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-expanded-mcp-'));
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'expanded-api-proof', version: '1.0.0' });
   const call = async (name, args = {}) => { const response = await client.callTool({ name, arguments: args }); assert.ok(!response.isError, `${name}: ${JSON.stringify(response.content)}`); return JSON.parse(response.content[0].text); };
   try {
@@ -108,7 +110,7 @@ test('MCP expanded authoring exposes strict APIs, revisions and create-new templ
 
 test('MCP guided authoring retrieves profiles and creates only evidence-linked decks', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-guided-mcp-'));
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'guided-proof', version: '1.0.0' });
   const call = async (name, args = {}) => { const response = await client.callTool({ name, arguments: args }); assert.ok(!response.isError, JSON.stringify(response.content)); return JSON.parse(response.content[0].text); };
   const headline = 'We should validate each boundary before we deploy the service.';
@@ -146,7 +148,7 @@ test('MCP guided authoring retrieves profiles and creates only evidence-linked d
 });
 
 test('MCP design presets share the native catalog and guarded application', async () => {
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'preset-proof', version: '1.0.0' });
   const call = async (name, args = {}) => { const response = await client.callTool({ name, arguments: args }); assert.ok(!response.isError, JSON.stringify(response.content)); return JSON.parse(response.content[0].text); };
   try {
@@ -164,7 +166,7 @@ test('MCP design presets share the native catalog and guarded application', asyn
 
 test('MCP workspace commands create blank files, import icons and edit native slides', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-mcp-workspace-'));
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'workspace-proof', version: '1.0.0' });
   const call = async (name, args = {}) => { const response = await client.callTool({ name, arguments: args }); assert.ok(!response.isError, `${name}: ${JSON.stringify(response.content)}`); return JSON.parse(response.content[0].text); };
   try {
@@ -195,7 +197,7 @@ test('MCP workspace commands create blank files, import icons and edit native sl
 
 test('MCP graph tools share native editing, revision guards and standalone PPTX', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-mcp-graph-'));
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'graph-proof', version: '1.0.0' });
   const call = async (name, args = {}) => { const response = await client.callTool({ name, arguments: args }); assert.ok(!response.isError, JSON.stringify(response.content)); return JSON.parse(response.content[0].text); };
   try {
@@ -233,7 +235,7 @@ test('MCP graph tools share native editing, revision guards and standalone PPTX'
 });
 
 test('MCP authoring tools insert objects and edit master theme with transactional undo', async () => {
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'authoring-proof', version: '1.0.0' });
   const call = async (name, args = {}) => {
     const response = await client.callTool({ name, arguments: args });
@@ -259,7 +261,7 @@ test('MCP authoring tools insert objects and edit master theme with transactiona
     assert.equal(deck.design.theme.colors.accent1, design.theme.colors.accent1);
     const stale = await client.callTool({ name: 'assign_layout', arguments: { deck_id, expected_revision: 0, slide_id: 'slide-1', layout_id: 'blank' } });
     assert.equal(stale.isError, true);
-    const parts = await call('part_catalog'); assert.equal(parts.presets.length, 108);
+    const parts = await call('part_catalog'); assert.equal(parts.presets.length, 111);
     const spec = parts.presets.find((preset) => preset.id === 'flow/balanced').example;
     await call('add_part', { deck_id, expected_revision: 6, slide_id: 'slide-1', id: 'mcp-part', spec });
     await call('update_part', { deck_id, expected_revision: 7, slide_id: 'slide-1', id: 'mcp-part', spec: { ...spec, title: 'MCP part update' } });
@@ -271,7 +273,7 @@ test('MCP authoring tools insert objects and edit master theme with transactiona
 
 test('MCP saves and reopens one source-bound PPTX with native graphics and transactions', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-mcp-poc-'));
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'poc-proof', version: '1.0.0' });
   const call = async (name, args = {}) => {
     const response = await client.callTool({ name, arguments: args });
@@ -317,7 +319,7 @@ test('MCP saves and reopens one source-bound PPTX with native graphics and trans
 });
 
 test('phase6 MCP modern threads and masked manual candidates use strict typed operations', async () => {
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'phase6-review', version: '1.0.0' });
   const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`); return result.structuredContent; };
   try {
@@ -341,7 +343,7 @@ test('phase6 MCP modern threads and masked manual candidates use strict typed op
 
 test('MCP review schema and local lifecycle preserve native visuals and explicitly confirmed clean copies', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-review-mcp-'));
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'review-proof', version: '1.0.0' });
   const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`); return result.structuredContent; };
   const rejected = async (name, args) => assert.equal((await client.callTool({ name, arguments: args })).isError, true, `${name} must reject`);

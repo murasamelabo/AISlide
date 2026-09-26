@@ -153,7 +153,7 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
   const filename = fileURLToPath(new URL('../packages/client/feedback-types.mts', import.meta.url)).replaceAll('\\', '/');
   const preamble = `
     import type { DocumentSession, AislideDocument, AuthoringOptions, AuthoringOperation, Frame, Crop,
-      Connection, ConnectorRouting, ConnectorSettings, VisualStyle, GraphEdge, GraphGroup, PictureInput, SlideImportInput, GraphSpec, PartSpec, GuidedAuthoring, PreflightFinding, PreviewOptions, PreviewImage, PresentationPreview } from './index.mjs';
+      Connection, ConnectorRouting, ConnectorSettings, VisualStyle, GraphEdge, GraphGroup, PictureInput, SlideImportInput, GraphSpec, PartSpec, PartPreset, GuidedAuthoring, PreflightFinding, PreviewOptions, PreviewImage, PresentationPreview } from './index.mjs';
     declare const session: DocumentSession;
     declare const source: AislideDocument;
     const options: AuthoringOptions = { expectedRevision: 0, expectedHash: 'hash', signal: new AbortController().signal };
@@ -217,10 +217,14 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
     declare const preview: PresentationPreview;
     const quality: [number, number, boolean] = [preview.requested_max_dimension, preview.actual_max_dimension, preview.quality_reduced];
     edge.label_placement = { position: 0.5, on_overlap: 'error' };
-    void [results, part, authoring, diagnosticLevels, previewOptions, strictOptions, jpeg, quality];
+    const recommendation: Pick<PartPreset, 'recommended' | 'use_when' | 'avoid_when'> = { recommended: true, use_when: 'Parallel concepts', avoid_when: 'Ordered stages' };
+    const legacyRecommendation: typeof recommendation = {};
+    void [results, part, authoring, diagnosticLevels, previewOptions, strictOptions, jpeg, quality, recommendation, legacyRecommendation];
   `);
   assert.deepEqual(diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')), []);
   for (const invalid of [
+    "const invalid: PartPreset['recommended'] = 'yes';",
+    "const invalid: PartPreset['use_when'] = 7;",
     "const invalid: PreviewOptions = { format: 'pdf' };",
     "const invalid: PreviewOptions = { overflow: 'unlimited' };",
     "const invalid: GraphEdge = { id: 'edge', source: 'a', target: 'b', label_placement: { position: 0.5, on_overlap: 'ignore' } };",
@@ -977,7 +981,7 @@ test('graph authoring SDK retains routes annotations sites and group layout thro
 test('metadata parts share catalog, revisioned updates, undo and single PPTX persistence', async () => {
   const client = new AislideClient(requestCore);
   const catalog = await client.partCatalog();
-  assert.equal(catalog.presets.length, 108);
+  assert.equal(catalog.presets.length, 111);
   const spec = catalog.presets.find((preset) => preset.id === 'vertical-bar-graph/balanced').example;
   const deck = { version: 1, title: 'Parts', width: 1280, height: 720, slides: [{ id: 'slide', title: 'Parts', background: 'FFFFFF', notes: 'Synthetic fixture', elements: [] }] };
   const session = await client.createDocument({ id: 'parts-sdk', deck });

@@ -400,12 +400,29 @@ MCP exposes the same four operation names. It allocates an opaque new `deck_id` 
 
 | Operation | Request fields besides op | Result |
 | --- | --- | --- |
-| `part_catalog` | None | Version, 108 presets, Rust-derived `PartSpec` schema, style and default bounds |
+| `part_catalog` | None | Version, 111 presets, Rust-derived `PartSpec` schema, style and default bounds |
 | `create_part` | `id`, `spec`, optional `theme` | Validated ordinary `Element::Group`; does not create persistent metadata |
 | `insert_part` | `document`, `expected_revision`, `slide_id`, `id`, `spec` | Atomic `TransactionResult`, including part metadata and undo receipt |
 | `update_part` | Same as insert | Regenerates a current metadata part; retains placement unless an explicit layout changes it |
 
-`PartSpec` is `{version:1, preset, title, subtitle?, data, layout?}`. Preset IDs are `<category>/balanced`, `<category>/focus` or `<category>/labeled`. Root IDs are nonempty and at most 40 characters; title/subtitle limits are 80/120. The catalog provides a valid synthetic example for every preset. Unknown fields and unsupported preset/data combinations fail.
+`PartSpec` is `{version:1, preset, title, subtitle?, data, layout?}`. The 108 existing preset IDs are `<category>/balanced`, `<category>/focus` or `<category>/labeled`. Three additive open-list IDs are described below. Root IDs are nonempty and at most 40 characters; title/subtitle limits are 80/120. The catalog provides a valid synthetic example for every preset. Unknown fields and unsupported preset/data combinations fail.
+
+| New preset | Structure | Items |
+| --- | --- | --- |
+| `list/rows` | Aligned heading/detail rows, without automatic numbering | 2-8 |
+| `list-horizontal/columns` | Open columns for equal-status concepts | 2-4 |
+| `list-enumeration/grid` | Unordered text grid: two columns through four items, otherwise three | 2-8 |
+
+These use native text with `@dk1` headings and `@dk2` detail, without enclosing
+rectangles, accent rails, icons or position-based colors. They accept the same
+`items` data and layout overrides; label/detail limits remain 48/120 Unicode
+scalars and measured fitting can still reject dense text at the 12px floor.
+Their catalog entries add optional `recommended`, `use_when` and `avoid_when`
+metadata. Consumers must not assume every category has exactly three presets.
+Studio sorts recommendations first and selects them on the first visit to a
+category, while retaining explicit legacy selections, drafts and existing
+instances. Catalog entry order and the original 108 recipes remain unchanged;
+there is no automatic migration or deck-wide rearrangement.
 
 `data.kind` selects a strict union: `chart` (categories, series, x_axis/y_axis), `items` (label/detail/value, center), `tree` (id/label/parent nodes), `network` (nodes and indexed edges), `matrix` (rows, columns, rectangular cells), `groups` (named item groups), `timeline` (periods and indexed tasks), `waterfall` (steps, totals, unit), or `map` (named longitude/latitude/value points). See [parts limits and categories](testing/parts-library.md).
 
@@ -454,7 +471,7 @@ and reopen retain supported part metadata, but not the in-memory Undo history.
 
 ## Architecture Graphs
 
-Graphs have a separate catalog, not an additional preset counted among the 108 parts.
+Graphs have a separate catalog, not an additional preset counted among the 111 parts.
 
 | Core operation | Fields besides op | Result |
 | --- | --- | --- |
