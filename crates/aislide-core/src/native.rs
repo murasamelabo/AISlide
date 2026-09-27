@@ -80,6 +80,17 @@ fn text_format(package: &Package, part: &str, body: Node<'_, '_>, template: Opti
         if child(node, A, "buAutoNum").is_some() { format.bullet = Bullet::Numbered; }
     }
     if let Some(anchor) = child(body, A, "bodyPr").and_then(|node| node.attribute("anchor")) { format.vertical = match anchor { "ctr" => VerticalAlign::Middle, "b" => VerticalAlign::Bottom, _ => VerticalAlign::Top }; }
+    if let Some(properties) = child(body, A, "bodyPr") {
+        let mut padding = format.padding.clone().unwrap_or_default();
+        let mut explicit = false;
+        for (name, target) in [("lIns", &mut padding.left), ("rIns", &mut padding.right), ("tIns", &mut padding.top), ("bIns", &mut padding.bottom)] {
+            if let Some(value) = properties.attribute(name) {
+                *target = value.parse::<i64>().map_err(|_| Error::Unsupported("native text padding is not a coordinate".into()))? as f64 / 9525.0;
+                explicit = true;
+            }
+        }
+        if explicit { format.padding = Some(padding); }
+    }
     let run = body.descendants().find(|node| node.has_tag_name((A, "rPr")));
     for node in [list.and_then(|node| child(node, A, "defRPr")), paragraph.and_then(|node| child(node, A, "defRPr")), run].into_iter().flatten() {
         size = number(node, "sz", size * 75.0) / 75.0;
@@ -376,6 +387,9 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
         let text = body_text(body);
         let (font_size, shade, bold, mut format) = text_format(package, part, body, template)?;
         format.placeholder = ph;
+        if (tx_box || format.placeholder.is_some() || (!filled && preset == "rect" && connection_geometry.is_none())) && format.padding.as_ref() == Some(&crate::model::TextPadding::default()) {
+            format.padding = None;
+        }
         if template.is_some() && xfrm.is_none() {
             let mut inherited = template.unwrap().clone();
             let matches = if let Element::Text { font_size: template_size, color, bold: template_bold, format: template_format, .. } = &inherited { *template_size == font_size && color == &shade && *template_bold == bold && crate::fields::same_inherited_format(template_format, &format) } else { false };

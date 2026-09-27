@@ -35,6 +35,7 @@ pub mod recovery;
 pub mod editing;
 pub mod authoring_ops;
 pub mod authoring_batch;
+pub mod composition;
 pub mod selection;
 mod canonical;
 pub mod layout;

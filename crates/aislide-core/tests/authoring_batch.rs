@@ -47,7 +47,7 @@ fn reject_atomic(before: &Value, operation: Value, message: &str) {
     let parsed: Vec<aislide_core::authoring_batch::Operation> = serde_json::from_value(operations.clone()).expect("negative case must parse as real operations");
     let document: aislide_core::document::Document = serde_json::from_value(before.clone()).unwrap();
     let snapshot = serde_json::to_value(&document).unwrap();
-    let error = aislide_core::authoring_batch::apply_operations(&document, document.revision, &document.hash, &parsed).err().expect("invalid batch must fail").to_string();
+    let error = aislide_core::authoring_batch::apply_operations(&document, document.revision, &document.hash, &parsed).err().unwrap_or_else(|| panic!("invalid batch must fail: {message}")).to_string();
     assert!(error.contains(message), "expected {message:?}, got {error}");
     assert_eq!(serde_json::to_value(&document).unwrap(), snapshot);
     let error = execute_request(request(before, operations)).unwrap_err().to_string();
@@ -60,6 +60,44 @@ fn original() -> Value { serde_json::to_value(editing::create("batch".into(), "S
 
 fn request(document: &Value, operations: Value) -> Value {
     json!({"op":"apply_operations","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"operations":operations})
+}
+
+#[test]
+fn rich_text_batch_projects_single_source_and_preserves_canonical_validation() {
+    let before = populated();
+    let paragraphs = json!([{"runs":[{"text":"Synthetic ","style":{"bold":true}},{"text":"\u{65e5}\u{672c}\u{8a9e}","style":{"color":"@accent1"}}]}, {"runs":[{"text":"Second paragraph"}]}]);
+    let changed = execute_request(request(&before, json!([{"op":"set_rich_text","slide_id":"slide-1","id":"shape","paragraphs":paragraphs}]))).unwrap();
+    let shape = element(&changed["document"], "shape");
+    assert_eq!(shape["text"], "Synthetic \u{65e5}\u{672c}\u{8a9e}\nSecond paragraph");
+    assert_eq!(shape["format"]["paragraphs"][0]["runs"][0]["style"]["bold"], true);
+    assert_eq!(shape["font_size"], element(&before, "shape")["font_size"]);
+    assert_managed_history(&before, &changed);
+    let cleared = execute_request(request(&before, json!([{"op":"set_rich_text","slide_id":"slide-1","id":"shape","paragraphs":[]}]))).unwrap();
+    assert_eq!(element(&cleared["document"], "shape")["text"], "");
+    reject_atomic(&before, json!({"op":"set_rich_text","slide_id":"slide-1","id":"shape","paragraphs":[{"runs":[{"text":"1","field":{"id":"11111111-1111-4111-8111-111111111111","kind":"slidenum"}}]}]}), "dedicated field operations");
+    reject_atomic(&before, json!({"op":"set_rich_text","slide_id":"slide-1","id":"rect","paragraphs":paragraphs}), "requires a text box or shape");
+    reject_atomic(&before, json!({"op":"set_rich_text","slide_id":"slide-1","id":"shape","paragraphs":[{"runs":[{"text":"bad\nrun"}]}]}), "paragraph separators");
+    let mut invalid = shape.clone(); invalid["id"] = json!("invalid-rich"); invalid["text"] = json!("Mismatched projection");
+    assert!(execute_request(request(&before, json!([{"op":"add_elements","slide_id":"slide-1","elements":[invalid]}]))).is_err());
+}
+
+#[test]
+fn text_padding_batch_is_atomic_and_preserves_font_size() {
+    let before = populated();
+    let padding = json!({"left":16.0,"right":16.0,"top":12.0,"bottom":12.0});
+    let changed = execute_request(request(&before, json!([{"op":"set_text_padding","slide_id":"slide-1","ids":["text","shape"],"padding":padding}]))).unwrap();
+    for id in ["text", "shape"] {
+        assert_eq!(element(&changed["document"], id)["format"]["padding"], padding);
+        assert_eq!(element(&changed["document"], id)["font_size"], element(&before, id)["font_size"]);
+    }
+    assert_managed_history(&before, &changed);
+    reject_atomic(&before, json!({"op":"set_text_padding","slide_id":"slide-1","ids":["text","rect"],"padding":padding}), "requires text or shape");
+    reject_atomic(&before, json!({"op":"set_text_padding","slide_id":"slide-1","ids":["text","text"],"padding":padding}), "distinct");
+    reject_atomic(&before, json!({"op":"set_text_padding","slide_id":"slide-1","ids":["text"],"padding":{"left":600}}), "padding");
+    let mut table = all_elements().into_iter().find(|element| element["id"] == "table").unwrap();
+    table["id"] = json!("invalid-table-padding");
+    table["format"]["cells"][0]["style"]["text_format"]["padding"] = padding;
+    reject_atomic(&before, json!({"op":"add_elements","slide_id":"slide-1","elements":[table]}), "cell style.padding");
 }
 
 fn managed_fixture(count: usize) -> Value {
@@ -87,6 +125,64 @@ fn managed_graph() -> Value {
 
 fn managed_layout() -> Value {
     json!({"x":40,"y":100,"width":1152,"height":424,"show_title":false})
+}
+
+#[test]
+fn composition_part_is_coordinate_free_managed_and_one_undo() {
+    let before = original();
+    let operation = json!({"op":"compose_slide","slide_id":"slide-1","id":"composition","spec":{
+        "title":"Synthetic composition","footer":"Synthetic example",
+        "blocks":[{"kind":"part","spec":managed_part()}]
+    }});
+    let changed = execute_request(request(&before, json!([operation]))).expect("compose_slide must accept coordinate-free managed content");
+    assert_eq!(changed["document"]["revision"], 1);
+    assert_eq!(changed["document"]["deck"]["slides"][0]["title"], "Synthetic composition");
+    let parts = changed["document"]["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0]["stale"], false);
+    let expected = serde_json::to_value(serde_json::from_value::<aislide_core::parts::PartSpec>(managed_part()).unwrap()).unwrap();
+    assert_eq!(parts[0]["spec"]["data"], expected["data"]);
+    assert!(parts[0]["spec"]["layout"]["y"].as_f64().unwrap() >= 120.0);
+    assert_managed_history(&before, &changed);
+    let exported = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+    let reopened = execute_request(json!({"op":"open_presentation","id":"composition-reopened","base64":exported["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["parts"].as_array().unwrap().len(), 1);
+    assert_eq!(reopened["document"]["parts"][0]["stale"], false);
+    assert_eq!(reopened["document"]["parts"][0]["spec"]["data"], parts[0]["spec"]["data"]);
+}
+
+#[test]
+fn composition_blocks_keep_padding_fonts_and_content_and_reject_overflow() {
+    let before = original();
+    for block in [
+        json!({"kind":"cards","items":[{"label":"First","detail":"Synthetic detail"},{"label":"Second","detail":"Another detail"}]}),
+        json!({"kind":"callout","text":"Synthetic note"}),
+        json!({"kind":"text","paragraphs":[{"runs":[{"text":"Single source","style":{"bold":true}}]}]}),
+        json!({"kind":"steps","items":[{"label":"Check"},{"label":"Act"}]}),
+        json!({"kind":"graph","input":{"version":1,"title":"","show_title":false,"columns":2,"nodes":[{"id":"source","label":"Source"},{"id":"target","label":"Target"}],"edges":[{"id":"flow","source":"source","target":"target"}]}}),
+        json!({"kind":"comparison","rows":["Cost","Time"],"columns":["First","Second"],"cells":[["Unknown","Unknown"],["Unmeasured","Unmeasured"]]}),
+    ] {
+        let changed = execute_request(request(&before, json!([{"op":"compose_slide","slide_id":"slide-1","id":"blocks","spec":{"title":"Synthetic blocks","subtitle":"Fixture, not factual data","footer":"Synthetic","blocks":[block]}}]))).unwrap();
+        if block["kind"] == "graph" { assert!(changed["diagnostics"]["findings"].is_array()); }
+        let elements = changed["document"]["deck"]["slides"][0]["elements"].as_array().unwrap();
+        assert_eq!(elements[0]["font_size"], 40.0);
+        for shape in elements.iter().filter(|element| element["type"] == "shape") {
+            assert_eq!(shape["font_size"], 24.0);
+            assert_eq!(shape["format"]["padding"], json!({"left":24.0,"right":24.0,"top":24.0,"bottom":24.0}));
+        }
+        assert_managed_history(&before, &changed);
+        let exported = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+        execute_request(json!({"op":"open_presentation","id":"blocks-reopened","base64":exported["base64"]})).unwrap();
+    }
+    let operation = json!({"op":"compose_slide","slide_id":"slide-1","id":"blocked","spec":{"title":"Synthetic","blocks":[{"kind":"callout","text":"Note"}]}});
+    reject_atomic(&populated(), operation.clone(), "new empty slide");
+    let exported = execute_request(json!({"op":"export_presentation","document":before})).unwrap();
+    let native = execute_request(json!({"op":"open_presentation","id":"native-blank","base64":exported["base64"]})).unwrap()["document"].clone();
+    reject_atomic(&native, operation.clone(), "new empty slide");
+    let mut overflow = operation.clone(); overflow["spec"]["title"] = json!("W".repeat(120));
+    reject_atomic(&before, overflow, "overflows");
+    let mut invalid = operation; invalid["spec"]["style"] = json!({"padding":500});
+    reject_atomic(&before, invalid, "padding");
 }
 
 fn sequential_managed(document: &Value, operation: &Value) -> Value {
@@ -523,7 +619,7 @@ fn typed_authoring_and_slide_import_are_discoverable_without_claiming_office_par
     assert_eq!(capabilities["typed_authoring"]["scale_fonts"], false);
     assert_eq!(capabilities["typed_authoring"]["one_undo"], true);
     let operations = capabilities["typed_authoring"]["operations"].as_array().unwrap();
-    assert_eq!(operations.len(), 16);
+    assert_eq!(operations.len(), 19);
     for operation in ["add_elements", "set_frame", "set_text_style", "set_slide_background", "set_connector", "set_picture_crop", "set_hyperlink", "set_shape_adjustment", "add_picture", "add_part", "update_part", "add_graph", "update_graph", "update_notes", "set_table_headers", "set_accessibility"] {
         assert!(operations.contains(&json!(operation)), "missing {operation}");
     }

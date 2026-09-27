@@ -61,6 +61,7 @@ struct Object<'a> {
 	container: Option<RoundedRect>,
 	container_item: bool,
 	numbered_badge: bool,
+	own_text_padding: Option<f64>,
 }
 
 fn minimum_font(format: &TextFormat, base: f64) -> f64 {
@@ -114,6 +115,12 @@ fn collect<'a>(elements: &'a [Element], parent: Affine, scope: &str, ancestor_so
 			Element::Table { .. } => true,
 			_ => false,
 		};
+		let own_text_padding = match element {
+			Element::Shape { preset, text, fill, stroke_width, format, .. } if matches!(preset.as_str(), "rect" | "roundRect") && !text.trim().is_empty()
+				&& width >= 100.0 && height >= 60.0 && visual.path.is_none() && (fill != "none" && painted_fill || *stroke_width > 0.0) =>
+				Some(format.padding.as_ref().map_or(0.0, |padding| padding.left.min(padding.right).min(padding.top).min(padding.bottom)) * scale),
+			_ => None,
+		};
 		let numbered_badge = matches!(element, Element::Shape { preset, text, fill, .. }
 			if preset == "ellipse" && fill != "none" && !text.trim().is_empty() && text.trim().len() <= 3 && text.trim().bytes().all(|byte| byte.is_ascii_digit()))
 			&& visual.path.is_none() && !soft_edge && visual.opacity.unwrap_or(1.0) == 1.0
@@ -125,7 +132,7 @@ fn collect<'a>(elements: &'a [Element], parent: Affine, scope: &str, ancestor_so
 			(points.into_iter().map(|point| transform * Point::new(point[0] * width, point[1] * height)).collect(),
 				start.iter().chain(end.iter()).map(|connection| connection.element_id.as_str()).collect())
 		} else { (Vec::new(), Vec::new()) };
-		objects.push(Object { id, scope: scope.into(), bounds, frame, transform, text, font_size, characters, route, connections, container, container_item, numbered_badge });
+		objects.push(Object { id, scope: scope.into(), bounds, frame, transform, text, font_size, characters, route, connections, container, container_item, numbered_badge, own_text_padding });
 		if let Element::Group { view_width, view_height, children, .. } = element {
 			collect(children, transform * Affine::scale_non_uniform(width / view_width, height / view_height), scope, soft_edge, objects)?;
 		}
@@ -198,6 +205,11 @@ fn push_finding(report: &mut PreflightReport, page: usize, slide: &str, objects:
 }
 
 fn container_findings(report: &mut PreflightReport, page: usize, slide: &str, objects: &[Object<'_>]) -> Result<()> {
+	for object in objects.iter().filter(|object| object.own_text_padding.is_some_and(|padding| padding < 8.0)) {
+		push_finding(report, page, slide, &[object], "CONTAINER_PADDING", "warning", "heuristic",
+			"A text-bearing card declares less than 8 slide pixels of inner padding; inspect actual content and intended alignment",
+			&["Set format.padding or use set_text_padding without reducing font size", "Use at least 16px for normal cards and preview the resulting text fit"])?;
+	}
 	for (index, object) in objects.iter().enumerate().filter(|(_, object)| object.container_item) {
 		let nearest = objects[..index].iter().filter(|container| container.container.is_some() && container.scope == object.scope).filter_map(|container| {
 			let transform = container.transform.inverse() * object.transform;

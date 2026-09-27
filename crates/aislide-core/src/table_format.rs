@@ -106,6 +106,7 @@ impl TableFormat {
             }
             if let Some(run) = &style.text_style { run.validate()?; }
             if let Some(format) = &style.text_format {
+                if format.padding.is_some() { return Err(Error::Unsupported("table text padding uses cell style.padding, not text_format.padding".into())); }
                 if format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.field.is_some()) { return Err(Error::Unsupported("dynamic fields in table cells are not supported".into())); }
                 if format.hyperlink.is_some() || format.placeholder.is_some() || format.inherit_layout || format.vertical != VerticalAlign::Top { return Err(Error::Unsupported("table text does not support links, placeholders, inheritance or body vertical alignment; use cell vertical".into())); }
                 RunStyle { font_family: format.font_family.clone(), ..Default::default() }.validate()?;

@@ -113,8 +113,8 @@ fn visit(fonts: &mut FontSystem, slide: &str, elements: &[Element], measurements
                 crate::rich_text::validate_element(element)?;
                 *characters += text.chars().count();
                 if *characters > 200_000 { return Err(Error::Limit("layout measurement > 200000 characters".into())); }
-                let (width, height) = if matches!(element, Element::Shape { .. }) { ((width - 12.0).max(1.0), (height - 8.0).max(1.0)) } else { (width, height) };
-                measurements.push(measure(fonts, slide, id, text, width, height, *font_size, *bold, format, theme));
+                let bounds = format.content_frame(width, height, matches!(element, Element::Shape { .. }));
+                measurements.push(measure(fonts, slide, id, text, bounds[2], bounds[3], *font_size, *bold, format, theme));
             }
             Element::Table { rows, font_size, format, .. } => {
                 let columns = crate::table_format::tracks(format.column_widths.as_ref(), rows[0].len(), width)?;
@@ -217,8 +217,9 @@ pub(crate) fn fit_part_text_with_small_annotations(elements: &mut [Element], the
                 Element::Text {id,text,width,height,font_size,bold,format,..} | Element::Shape {id,text,width,height,font_size,bold,format,..} => {
                     let mut size=*font_size;
                     let minimum=if small_annotations.contains(id) {8.0} else {12.0};
+                    let bounds = if format.padding.is_some() { format.content_frame(*width, *height, false) } else { [0.0, 0.0, *width, *height] };
                     loop {
-                        let result=measure(fonts,"part",id,text,*width,*height,size,*bold,format,theme);
+                        let result=measure(fonts,"part",id,text,bounds[2],bounds[3],size,*bold,format,theme);
                         if result.missing_glyphs>0 {return Err(Error::Invalid(format!("part text {id} contains unavailable glyphs")));}
                         if !result.overflow {*font_size=size;break;}
                         size-=1.0;
@@ -237,6 +238,19 @@ pub(crate) fn fit_part_text_with_small_annotations(elements: &mut [Element], the
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn part_fitting_respects_explicit_text_padding() {
+        let element: Element = serde_json::from_value(serde_json::json!({"type":"text","id":"padded-part","x":0,"y":0,"width":240,"height":80,"text":"Synthetic content with several words","font_size":28,"color":"@dk1","bold":false,"format":{"padding":{"left":48,"right":48,"top":12,"bottom":12}}})).unwrap();
+        let mut padded = vec![element];
+        fit_part_text(&mut padded, &Theme::default()).unwrap();
+        let mut fonts = FontSystem::new();
+        let mut measurements = Vec::new();
+        visit(&mut fonts, "slide", &padded, &mut measurements, &mut 0, &Theme::default(), false).unwrap();
+        assert!(!measurements[0].overflow);
+        assert_eq!(measurements[0].width, 144.0);
+        assert_eq!(measurements[0].height, 56.0);
+    }
 
     #[test]
     fn review_cjk_metrics_only_accumulate_soft_tails_at_hard_paragraph_ends() {

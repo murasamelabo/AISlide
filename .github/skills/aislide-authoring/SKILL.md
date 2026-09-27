@@ -1,34 +1,86 @@
 ﻿---
 name: aislide-authoring
-description: 'Create, edit, review and export editable PowerPoint presentations with AISlide MCP or its SDK. Use for AISlide reports, source-image placement, notes, accessibility metadata, typed batch edits and recovery from validation, busy or revision errors.'
+description: 'AISlide MCP / SDK で編集可能な PowerPoint / PPTX を作成・編集・検証・書き出しするときに使う。画像、ノート、アクセシビリティ、型付きバッチ、検証・busy・revision エラーの回復を担当する。日本語技術資料の構成は tech-deck-ja に任せ、このスキルが実行を引き継ぐ。'
 ---
 
 # AISlide Authoring
 
+## Scope
+
+Use AISlide MCP/SDK and its shared native core for editable PPTX. Do not switch
+to another PPTX engine. For Japanese technical storytelling, use the installed
+`tech-deck-ja` once, then execute its evidence and slide ledger without repeating
+planning. Simple PPTX edits need no storytelling pass. Honor the requested
+language; Japanese technical content uses Japanese report prose. Separate facts,
+assumptions and synthetic examples. Skill installation does not connect MCP.
+
 ## Short Workflow
 
-1. Establish audience, purpose, outline, sources, required images and notes. Separate sourced facts, assumptions and missing information. Do not replace a required source image with a reconstruction without disclosing that substitution.
-2. Use `list_decks` and `get_deck_summary` to resume existing work. Use `discover_tools` and `get_tool_schema` only for needed advanced operations. The initial batch schema covers common shapes and metadata; fetch `get_tool_schema({name:"apply_operations"})` before composing tables, charts, groups or managed parts/graphs. Do not retrieve full documents or entire catalogs just to find a handle or revision.
-3. Choose the creation path: `compile_report` for fixed layouts; guided creation for evidence-linked outlines; `create_presentation` and `apply_operations` for freeform content; managed `add_part`/`add_graph` for diagrams that must remain regenerable. Establish the theme before managed diagrams.
-4. Register approved local images once with `register_asset`. PNG/JPEG responses include verified pixel `width`/`height`. Pass `asset_id` to `add_picture` or graph icons. Use `fit:"contain"` to preserve the whole cropped image inside a frame, or `fit:"cover"` to fill the frame with additional cropping. Omission retains legacy stretching; inspect `IMAGE_ASPECT_DISTORTED`. Never echo or regenerate base64 through the model. Preserve image attribution and usage conditions; requests cannot widen startup-approved roots or fetch imported relationships.
-5. Assemble final content and metadata into `apply_operations` batches of 1-128 operations across slides. Use `update_notes`, `set_table_headers` and `set_accessibility` after their targets exist, including after insertion in the same batch. Use `element_id` for metadata targets. Supply the revision/hash of the state used to plan the edit. One changed batch creates one Undo; an invalid operation rejects the entire batch. Plain notes do not silently replace incompatible rich notes.
-6. Serialize core-backed AISlide calls, including reads and previews. Independent external research may run in parallel. Do not use parallel AISlide calls to accelerate editing. There is no automatic core queue or retry. An SDK executor can await a bounded planned batch without returning to the model for every element.
-7. Review all required pages initially, in selected groups of at most eight; after corrections, review affected pages. Compact previews cover the first eight by default and disclose coverage in `page_scope`. Check expected picture IDs and image counts, not just successful tool responses. Run the required layout/accessibility checks; structural validation is not Office parity or factual verification.
-8. Export a new file or delivery, then verify the actual path, hash, page count, required images/notes and check scope. Report unmet requirements and substitutions explicitly. Never overwrite the source or imply partial-page checks covered the whole presentation.
+1. Confirm audience, purpose, required pages, evidence, original images and notes.
+	Never invent data or replace a required source image with a redraw.
+2. Resume with `list_decks` / `get_deck_summary`. Discover advanced tools and fetch
+	`get_tool_schema({name:"apply_operations"})` before advanced elements, rich text,
+	composition, parts or graphs. Do not fetch whole decks just to recover IDs.
+3. Choose `compile_report` for its fixed layouts, guided authoring for evidence-led
+	outlines, or `create_presentation` for content-oriented/freeform work. Set
+	`setup:{design_preset,font_family,theme?}` before inserting diagrams: preset,
+	explicit theme, then font override, at revision zero. Confirm installed Japanese
+	glyph coverage; naming a font does not install/embed it. Older connections need
+	supported theme operations before content, or an explicit update prerequisite.
+4. Establish reusable title/header/footer/body regions and styles. On generated
+	empty slides, `compose_slide` accepts 1-3 blocks: cards, callout, text, steps,
+	comparison, part or graph. Reuse `style`; default card padding is 24px. Existing
+	native/nonempty slides reject. Use explicit editing to preserve templates.
+5. Prefer managed parts/graphs. A composition graph block takes coordinate-free
+	`input` and inserts managed metadata in one operation. `layout_graph` separately
+	returns GraphSpec using the existing grid: 1-48 nodes, 64 edges, 1-8 columns
+	(default 3), no groups or node resizing. This is not hierarchical layout.
+6. Register approved local images with `register_asset` or atomic `register_assets`
+	(1-32). Use returned `asset_id` and dimensions; never regenerate/output base64
+	through the model. Optional `prepare_assets` batches explicit resize/format
+	changes and preserves originals. Use `fit:"contain"` for the whole image or
+	intentional `fit:"cover"`; omission is legacy stretch. Retain attribution.
+7. Batch final content and metadata into 1-128 `apply_operations`. After target
+	insertion, include `update_notes`, `set_table_headers`, `set_accessibility`
+	(metadata uses `element_id`). Supply the planned revision/hash; a changed batch
+	is one Undo and invalid input rejects atomically. Do not refresh guards merely
+	to force a stale plan through.
+8. `set_text_padding` takes text/shape IDs and slide-pixel edges, leaving positive
+	content space. It preserves frame/font sizes and detaches inheritance when
+	changed; null restores legacy defaults. `set_rich_text` takes only paragraphs:
+	core derives plain text. Empty input clears it. Use dedicated field operations
+	for dynamic content. Do not weaken canonical plain/rich validation.
+9. Serialize core-backed AISlide calls, including reads/previews. Await each batch;
+	do not assume automatic queues/retries or parallel edit capacity per handle.
+10. Review all required pages in groups of at most 8, then recheck affected pages.
+	 Compact preview defaults to the first 8; inspect `page_scope`. Verify images,
+	 notes, headers, alt text, Japanese glyphs/fallbacks, inner padding, overflow and
+	 graph collisions. Ordinary composition text rejects overflow; managed parts
+	 retain their bounded fitting rules. Structure is not Office visual parity.
+11. Export under a new approved filename. Verify actual path, hash, page count and
+	 review scope. Report unmet requirements, substitutions and unverified items.
+	 Never overwrite originals, publish, deploy or install without authorization.
 
-## Constraints And Recovery
+## Limits And Recovery
 
-- `compile_report` body has at most four entries. `process` requires 2-4 step labels of at most 80 Unicode scalars each; other body entries allow 240. Fix the named `report.sections[index].body[index]`, not the whole deck. Preserve the requested slide count and content unless a change is agreed.
-- Notes allow 8000 Unicode scalars. Table policies are `unknown`, `none`, `first_row`, `first_column`, or `both`. Accessibility uses a typed `metadata` object or explicit `null`, never an invented JSON Patch location.
-- A graph title is hidden when either `spec.show_title` or `layout.show_title` is false; layout defaults cannot re-enable it. Font fallback warnings aggregate the requested/used families per element. Delivery layout checks exclude unused design definitions; explicit `measure_layout` still inspects them.
-- Validation: fix the exact input path and limit. Capacity: reduce the relevant bounded batch or asset while retaining requirements. Busy: stop concurrent dispatch and wait for the already-running call to finish, without polling.
-- Timeout/cancellation: inspect `list_decks`/`get_deck_summary` and any published manifest before retrying; do not assume nothing happened. Conflict: inspect the changed state and replan; never replace the expected revision/hash merely to force an old edit through.
-- Keep guarded writes and stop the executor on an unexpected failure. Do not silently fall back from managed diagrams to unmanaged groups, remove safety checks, or skip required validation to save calls.
-- Record MCP `_meta.aislide_timing` when available. `handler_elapsed_ms` and `core_roundtrip_ms` exclude model/service wait; `core_calls` counts attempted core requests. Pure model inference time cannot be inferred from these fields or from all non-tool time. Compare model turns, tool failures, image use and output quality separately.
+- Asset roots come only from startup `--asset-dir`; no request widens permission
+  or fetches external relationships. Registry: 32 handles / 64MiB raw. PNG/JPEG:
+  1MiB; SVG: 256KiB; archives: 16MiB; fonts: 12MiB; evidence: 2MiB. `usage` is
+  registry-only; per-image `raster_cost` is not document capacity approval.
+  Preparation can retain both original and result. Closing handles does not
+  release images already stored in documents. Registration/preparation is atomic.
+- Report bodies: at most 4 items. Process: 2-4 labels, each 80 Unicode scalars;
+  other bodies: 240. Notes: 8000. Fix the reported field path; do not silently
+  reduce agreed pages/content. Cards: 1-6 items, at most 3 columns.
+- Fix validation/capacity inputs without bypassing guards or flattening managed
+  objects. On busy, stop parallel calls and await the existing operation, no polls.
+  After timeout/cancellation inspect summaries and output manifests; do not assume
+  nothing happened. Save work before reconnecting: handles are process-local.
+- `_meta.aislide_timing` separates handler time, core round trips and attempted
+  core calls, not model latency or pure CPU time. Do not claim unmeasured speedups.
 
 ## Further Detail
 
-- [Typed APIs, asset bounds and timing semantics](../../../docs/api.md)
-- [Creation paths, batches, visual review and delivery](../../../docs/authoring/README.md)
-
-Load the relevant section only when needed. Do not install another presentation engine or change global agent configuration for this workflow.
+This workflow is portable after copying. When a source checkout is available,
+consult `<repo>/docs/api.md` and `<repo>/docs/authoring/README.md` as needed;
+never assume a fixed relative path from a user-level installation to the repo.

@@ -91,13 +91,33 @@ pub enum PlaceholderKind { Title, Body, Subtitle, Footer, Date, SlideNumber }
 pub struct Placeholder { pub kind: PlaceholderKind, pub index: u32 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+pub struct TextPadding { pub left: f64, pub right: f64, pub top: f64, pub bottom: f64 }
+impl TextPadding {
+    pub fn validate(&self, width: f64, height: f64) -> Result<()> {
+        if [self.left, self.right, self.top, self.bottom].iter().any(|value| !value.is_finite() || !(0.0..=4096.0).contains(value))
+            || self.left + self.right >= width || self.top + self.bottom >= height {
+            return Err(Error::Invalid("text padding must be finite and nonnegative and leave a positive content area".into()));
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TextFormat {
     pub italic: bool, pub underline: bool, pub alignment: TextAlign, pub vertical: VerticalAlign, pub bullet: Bullet,
     pub font_family: Option<String>, pub hyperlink: Option<String>, pub placeholder: Option<Placeholder>, pub inherit_layout: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub padding: Option<TextPadding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::rich_text::deserialize_paragraphs")]
     pub paragraphs: Vec<crate::rich_text::RichParagraph>,
 }
-impl TextFormat { pub fn is_default(&self) -> bool { self == &Self::default() } }
+impl TextFormat {
+    pub fn is_default(&self) -> bool { self == &Self::default() }
+    pub(crate) fn content_frame(&self, width: f64, height: f64, shape: bool) -> [f64; 4] {
+        if let Some(padding) = &self.padding { return [padding.left, padding.top, width - padding.left - padding.right, height - padding.top - padding.bottom]; }
+        if shape { [6.0, 4.0, (width - 12.0).max(1.0), (height - 8.0).max(1.0)] } else { [0.0, 0.0, width, height] }
+    }
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -282,6 +302,7 @@ pub(crate) fn validate_elements(elements: &[Element], canvas: (f64, f64), depth:
             match element {
                 Element::Text { text, font_size, color, format, .. } | Element::Shape { text, font_size, color, format, .. } => {
                     valid_text(text, 4000)?;
+                    if let Some(padding) = &format.padding { padding.validate(width, height)?; }
                     crate::rich_text::validate_element(element)?;
                     valid_color(color)?;
                     font_size_check(*font_size)?;

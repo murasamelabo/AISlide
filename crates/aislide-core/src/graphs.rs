@@ -28,6 +28,61 @@ impl GraphSpec {
     fn content_top(&self) -> f64 { if self.show_title { CONTENT_TOP } else { 0.0 } }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GraphLayoutInput {
+    pub version: u32,
+    pub title: String,
+    #[serde(default)] pub subtitle: String,
+    #[serde(default = "enabled")] pub show_title: bool,
+    #[serde(default = "grid_columns")]
+    #[schemars(range(min = 1, max = 8))] pub columns: usize,
+    #[schemars(length(min = 1, max = 48))] pub nodes: Vec<GraphLayoutNode>,
+    #[serde(default)]
+    #[schemars(length(max = 64))] pub edges: Vec<GraphEdge>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GraphLayoutNode {
+    pub id: String, pub label: String,
+    #[serde(default)] pub detail: Option<String>,
+    #[serde(default)] pub detail_font_size: Option<f64>,
+    #[serde(default)] pub text_align: Option<GraphTextAlign>,
+    #[serde(default = "enabled")] pub heading_bold: bool,
+    #[serde(default)] pub label_fit: GraphLabelFit,
+    #[serde(default)] pub kind: NodeKind,
+    #[serde(default)] pub presentation: GraphPresentation,
+    #[serde(default = "node_width")] pub width: f64,
+    #[serde(default = "node_height")] pub height: f64,
+    #[serde(default = "paper")] pub fill: String,
+    #[serde(default = "accent")] pub stroke: String,
+    #[serde(default = "ink")] pub color: String,
+    #[serde(default = "font_size")] pub font_size: f64,
+    #[serde(default)] pub icon: Option<GraphIcon>,
+}
+
+fn grid_columns() -> usize { 3 }
+
+pub fn layout_graph(input: &GraphLayoutInput) -> Result<GraphSpec> {
+    if input.nodes.is_empty() || input.nodes.len() > 48 || input.edges.len() > 64 {
+        return Err(Error::Limit("graph requires 1-48 nodes and at most 64 edges".into()));
+    }
+    if !(1..=8).contains(&input.columns) { return Err(Error::Invalid("grid layout requires 1-8 columns".into())); }
+    let spec = GraphSpec {
+        version: input.version, title: input.title.clone(), subtitle: input.subtitle.clone(), show_title: input.show_title,
+        nodes: input.nodes.iter().map(|node| GraphNode {
+            id: node.id.clone(), label: node.label.clone(), detail: node.detail.clone(), detail_font_size: node.detail_font_size,
+            text_align: node.text_align, heading_bold: node.heading_bold, label_fit: node.label_fit, kind: node.kind, presentation: node.presentation,
+            x: 0.0, y: if input.show_title { CONTENT_TOP } else { 0.0 }, width: node.width, height: node.height,
+            fill: node.fill.clone(), stroke: node.stroke.clone(), color: node.color.clone(), font_size: node.font_size,
+            group: None, icon: node.icon.clone(),
+        }).collect(),
+        edges: input.edges.clone(), groups: Vec::new(),
+    };
+    transform(&spec, &[GraphOperation::Layout { columns: input.columns }])
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphTextAlign { Left, Center, Right }

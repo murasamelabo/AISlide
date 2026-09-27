@@ -145,6 +145,12 @@ Workspace MCP tools are `create_presentation`, `edit_slides`, `edit_elements`, `
 
 `node tools/workspace-demo.mjs` creates a synthetic five-slide qualification in a new `.artifacts/` directory, including SVG icons, independent copied chart workbooks, native slide insertion/deletion/reordering and standalone reopen checks.
 
+### 日本語技術資料と再利用スキル
+
+日本語の構成・根拠整理を `tech-deck-ja`、編集可能な PPTX の実行を `aislide-authoring` に分けた [スキル例と導入手順](.github/skills/README.md) を用意しています。両方をユーザースコープまたはリポジトリスコープの一方へ配置し、同名スキルの重複起動を避けます。AISlide MCP の接続は別の前提条件です。このリポジトリで使う場合は追加コピー不要です。
+
+「`tech-deck-ja` で日本語技術資料を構成し、`aislide-authoring` で AISlide MCP の編集可能な PPTX を新規作成」と明示してください。資料本文は日本語の報告調、例は明示的な架空データです。作成時に日本語フォントと共通レイアウトを決め、管理対象 graphs / parts と承認済み原図を使います。詳細は [日本語技術資料の実行手順](docs/authoring/README.md#japanese-technical-decks) を参照してください。スキル導入によるインストール、既存資料の上書き、公開、デプロイは行いません。
+
 ## Reusable Client
 
 [packages/client/index.mjs](packages/client/index.mjs) accepts a transport function, so Node, Studio and Tauri use the same session behavior. The client supplies immutable snapshots, revision-checked edits, inverse receipts, Undo/Redo, intake and project APIs. Hashes and receipts are integrity/concurrency metadata, not authentication credentials. See [the client guide](packages/client/README.md) for a complete example.

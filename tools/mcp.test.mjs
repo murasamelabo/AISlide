@@ -1,6 +1,6 @@
 ﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile, readdir, symlink, truncate } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, readdir, symlink, truncate, mkdir, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -86,6 +86,133 @@ async function feedbackMcpFixture(run, args = ['--tool-profile', 'full']) {
     await run({ registrations, resources, prompts, calls, call, fixture });
   } finally { hooks.deregister(); delete globalThis[key]; }
 }
+
+test('layout_graph MCP uses strict coordinate-free input and one pure core request', async () => {
+  await feedbackMcpFixture(async ({ registrations, calls, call, fixture }) => {
+    const tool = registrations.get('layout_graph');
+    assert.ok(tool, 'Missing layout_graph tool');
+    assert.equal(tool.config.annotations.readOnlyHint, true);
+    assert.equal(tool.config.annotations.openWorldHint, false);
+    assert.match(tool.config.description, /grid.*not.*hierarchical/i);
+    assert.match(tool.config.description, /add_graph/);
+    const input = { version: 1, title: 'Synthetic grid', columns: 2, nodes: [{ id: 'first', label: 'First', width: 200, height: 96, fill: '@accent2', detail: 'Detail', text_align: 'left', heading_bold: false }, { id: 'second', label: 'Second' }], edges: [{ id: 'link', source: 'first', target: 'second', label: 'Relationship', route: 'elbow', dashed: true }] };
+    const schema = tool.config.inputSchema;
+    assert.deepEqual(schema.parse({ input }), { input });
+    for (const change of [
+      { columns: 0 }, { columns: 9 }, { columns: 1.5 }, { columns: null },
+      { version: 2 }, { groups: [] }, { layout: 'hierarchical' },
+      { nodes: [] }, { nodes: Array(49).fill(input.nodes[0]) }, { edges: Array(65).fill(input.edges[0]) },
+      ...['x', 'y', 'group', 'parent', 'children', 'unknown'].map(field => ({ nodes: [{ ...input.nodes[0], [field]: 0 }] })),
+      { nodes: [{ id: 'bad/id', label: 'Invalid' }] }, { nodes: [{ id: 'node', label: 'x'.repeat(161) }] },
+      { nodes: [{ id: 'node', label: 'Invalid', width: 63 }] }, { nodes: [{ id: 'node', label: 'Invalid', height: 39 }] },
+      { edges: [{ ...input.edges[0], unknown: true }] },
+    ]) assert.equal(schema.safeParse({ input: { ...input, ...change } }).success, false, JSON.stringify(change).slice(0, 100));
+    assert.equal(schema.safeParse({ input, unknown: true }).success, false);
+    const minimal = { version: 1, title: 'Defaults', nodes: [{ id: 'only', label: 'Only' }] };
+    assert.equal(schema.safeParse({ input: minimal }).success, true);
+    assert.equal(registrations.get('create_graph').config.inputSchema.safeParse({ id: 'graph', spec: minimal }).success, false);
+    const canonical = { version: 1, title: input.title, nodes: input.nodes.map((node, index) => ({ ...node, x: 180 + index * 576, y: 220 })), edges: input.edges, groups: [] };
+    fixture.onRequest = async request => { assert.deepEqual(request, { op: 'layout_graph', input }); return canonical; };
+    const controller = new AbortController();
+    assert.deepEqual(await call('layout_graph', { input }, controller.signal), canonical);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].signal, controller.signal);
+    assert.equal((await call('list_decks')).decks.length, 0);
+  });
+});
+
+test('layout_graph MCP transport discovers an advanced strict schema and forwards canonical output', async () => {
+  await feedbackMcpFixture(async ({ fixture, calls }) => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'layout-graph-regression', version: '1.0.0' });
+    try {
+      await McpServer.prototype.connect.call(fixture.instance, serverTransport);
+      await client.connect(clientTransport);
+      const invoke = (name, input) => client.callTool({ name, arguments: input });
+      assert.equal((await client.listTools()).tools.some(tool => tool.name === 'layout_graph'), false);
+      const discovered = JSON.parse((await invoke('discover_tools', { query: 'layout_graph' })).content[0].text);
+      assert.deepEqual(discovered.tools.map(tool => [tool.name, tool.loaded, tool.read_only]), [['layout_graph', false, true]]);
+      const detailed = JSON.parse((await invoke('get_tool_schema', { name: 'layout_graph' })).content[0].text);
+      const listed = (await client.listTools()).tools.find(tool => tool.name === 'layout_graph');
+      assert.deepEqual(listed.inputSchema, detailed.inputSchema);
+      const root = detailed.inputSchema;
+      const inputSchema = resolveSchemaRef(root, root.properties.input);
+      const nodeSchema = resolveSchemaRef(root, resolveSchemaRef(root, inputSchema.properties.nodes).items);
+      assert.equal(root.additionalProperties, false);
+      assert.equal(inputSchema.additionalProperties, false);
+      assert.equal(nodeSchema.additionalProperties, false);
+      assert.deepEqual(nodeSchema.required, ['id', 'label']);
+      for (const field of ['x', 'y', 'group']) assert.equal(Object.hasOwn(nodeSchema.properties, field), false);
+      assert.equal(Object.hasOwn(inputSchema.properties, 'groups'), false);
+      assert.equal(resolveSchemaRef(root, inputSchema.properties.nodes).maxItems, 48);
+      assert.equal(resolveSchemaRef(root, inputSchema.properties.edges).maxItems, 64);
+      assert.equal(resolveSchemaRef(root, inputSchema.properties.columns).maximum, 8);
+      const input = { version: 1, title: 'Transport grid', nodes: [{ id: 'only', label: 'Only' }] };
+      for (const argumentsValue of [{ input, extra: true }, { input: { ...input, groups: [] } }, { input: { ...input, nodes: [{ ...input.nodes[0], x: 0 }] } }, { input: { ...input, columns: 9 } }]) {
+        const response = await invoke('layout_graph', argumentsValue);
+        assert.equal(response.isError, true);
+      }
+      assert.equal(calls.length, 0);
+      const canonical = { version: 1, title: input.title, subtitle: '', nodes: [{ ...input.nodes[0], x: 488, y: 260, width: 176, height: 80 }], edges: [], groups: [] };
+      fixture.onRequest = async request => { assert.deepEqual(request, { op: 'layout_graph', input }); return canonical; };
+      const response = await invoke('layout_graph', { input });
+      assert.equal(response.isError, undefined);
+      assert.deepEqual(JSON.parse(response.content[0].text), canonical);
+      assert.equal(response._meta.aislide_timing.core_calls, 1);
+      assert.equal(calls.length, 1);
+      fixture.onRequest = async () => { throw new Error('grid does not fit existing node sizes'); };
+      const failed = await invoke('layout_graph', { input });
+      assert.equal(failed.isError, true);
+      assert.match(failed.content[0].text, /grid does not fit existing node sizes/);
+      assert.equal(calls.length, 2);
+      assert.deepEqual(JSON.parse((await invoke('list_decks', {})).content[0].text).decks, []);
+    } finally { await client.close(); }
+  }, []);
+});
+
+test('semantic authoring MCP forwards composition and single-source text with strict schemas', async () => {
+  await feedbackMcpFixture(async ({ call, calls, registrations }) => {
+    const created = await call('create_presentation', { title: 'Synthetic semantic input' });
+    const spec = { title: 'Synthetic', footer: 'Example', blocks: [{ kind: 'cards', items: [{ label: 'First', detail: 'Detail' }, { label: 'Second' }] }] };
+    await call('compose_slide', { deck_id: created.deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'content', spec });
+    assert.deepEqual(calls.at(-1).request.operations, [{ op: 'compose_slide', slide_id: 'slide-1', id: 'content', spec }]);
+    const paragraphs = [{ runs: [{ text: 'Single source', style: { bold: true } }] }];
+    await call('set_rich_text', { deck_id: created.deck_id, expected_revision: 1, slide_id: 'slide-1', id: 'content-b0-c0', paragraphs });
+    assert.deepEqual(calls.at(-1).request.operations, [{ op: 'set_rich_text', slide_id: 'slide-1', id: 'content-b0-c0', paragraphs }]);
+    const schema = registrations.get('compose_slide').config.inputSchema;
+    const input = { deck_id: created.deck_id, expected_revision: 2, slide_id: 'slide-1', id: 'content', spec };
+    for (const invalid of [{ ...spec, unknown: true }, { ...spec, blocks: [] }, { ...spec, style: { padding: 0 } }, { ...spec, blocks: [{ kind: 'cards', items: [{ label: 'First' }], x: 10 }] }]) assert.equal(schema.safeParse({ ...input, spec: invalid }).success, false);
+    assert.equal(registrations.get('set_rich_text').config.inputSchema.safeParse({ deck_id: created.deck_id, expected_revision: 2, slide_id: 'slide-1', id: 'text', text: 'Duplicate source', paragraphs }).success, false);
+  });
+});
+
+test('semantic authoring MCP forwards initial setup in one core request', async () => {
+  await feedbackMcpFixture(async ({ call, calls, registrations }) => {
+    const setup = { design_preset: 'minimal', font_family: 'Noto Sans CJK JP' };
+    const created = await call('create_presentation', { title: 'Synthetic initial setup', setup });
+    assert.equal(created.revision, 0);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].request.setup, setup);
+    const schema = registrations.get('create_presentation').config.inputSchema;
+    for (const invalid of [{ unknown: true }, { font_family: ' ' }, { font_family: 'bad\nfont' }, { design_preset: 'missing' }]) assert.equal(schema.safeParse({ title: 'Synthetic', setup: invalid }).success, false);
+  });
+});
+
+test('semantic authoring MCP exposes strict text padding in elements and batches', async () => {
+  await feedbackMcpFixture(async ({ call, calls, registrations }) => {
+    const created = await call('create_presentation', { title: 'Synthetic padding' });
+    const padding = { left: 24, right: 24, top: 16, bottom: 16 };
+    const input = { deck_id: created.deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), slide_id: 'slide-1', ids: ['card'], padding };
+    await call('set_text_padding', input);
+    assert.deepEqual(calls.at(-1).request.operations, [{ op: 'set_text_padding', slide_id: 'slide-1', ids: ['card'], padding }]);
+    const schema = registrations.get('set_text_padding').config.inputSchema;
+    assert.equal(schema.safeParse({ ...input, padding: null }).success, true);
+    assert.equal(schema.safeParse({ ...input, padding: { left: -1 } }).success, false);
+    assert.equal(schema.safeParse({ ...input, padding: { left: 16, unknown: true } }).success, false);
+    const element = { type: 'text', id: 'text', x: 0, y: 0, width: 300, height: 200, text: 'Synthetic', font_size: 24, color: '@dk1', bold: false, format: { padding } };
+    assert.equal(registrations.get('add_elements').config.inputSchema.safeParse({ deck_id: created.deck_id, expected_revision: 1, slide_id: 'slide-1', elements: [element] }).success, true);
+  });
+});
 
 test('roundtrip feedback MCP rejects process constraints at exact input paths before core execution', async () => {
   await feedbackMcpFixture(async ({ registrations, calls }) => {
@@ -491,6 +618,382 @@ test('lightweight MCP reuses bounded approved local assets without round-trippin
     await rm(directory, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
   }
+});
+
+test('scoped asset preparation is atomic cancellable and reports per-image cost without raw bytes', async () => {
+  const { McpAssets } = await import('./mcp-assets.mjs');
+  const assets = await McpAssets.create([]);
+  const source = assets.retain(Buffer.from('Synthetic source'), 'png', 'source.png', { width: 200, height: 100 });
+  const input = { asset_id: source.asset_id, params: { resize_longest_side: 100 } };
+  const prepared = { base64: Buffer.from('Synthetic prepared').toString('base64'), mime_type: 'image/png', width: 100, height: 50 };
+  const before = assets.list();
+  let count = 0;
+  await assert.rejects(() => assets.prepareRasters([input, input], undefined, async () => { if (++count === 2) throw new Error('Preparation failure'); return prepared; }), /Preparation failure/);
+  assert.deepEqual(assets.list(), before);
+  const controller = new AbortController();
+  await assert.rejects(() => assets.prepareRasters([input], controller.signal, async () => { controller.abort(); return prepared; }), /abort/i);
+  assert.deepEqual(assets.list(), before);
+  const result = await assets.prepareRasters([input, input], undefined, async request => { assert.deepEqual(request.params, input.params); return prepared; });
+  assert.equal(result.assets[0].asset_id, result.assets[1].asset_id);
+  assert.equal(result.assets[0].source_asset_id, source.asset_id);
+  assert.equal(result.usage.asset_count, 2);
+  assert.equal(result.assets[0].raster_cost.rgba_byte_length, 20000);
+  assert.equal(result.assets[0].raster_cost.encoded_byte_length, prepared.base64.length);
+  assert.equal(result.assets[0].raster_cost.document_total_included, false);
+  assert.equal(assets.get(source.asset_id).width, 200);
+  assert.doesNotMatch(JSON.stringify(result), /base64|Synthetic prepared/);
+  for (const invalid of [[], Array(33).fill(input), [{ ...input, path: 'unapproved.png' }], [{ asset_id: 'unknown', params: {} }]]) await assert.rejects(() => assets.prepareRasters(invalid, undefined, async () => prepared));
+  const filled = await McpAssets.create([]);
+  const originals = filled.retainMany(Array.from({ length: 32 }, (_, index) => ({ bytes: Buffer.from(`Synthetic ${index}`), format: 'png', name: `${index}.png` })));
+  const full = filled.list();
+  await assert.rejects(() => filled.prepareRasters([{ asset_id: originals[0].asset_id, params: {} }], undefined, async () => prepared), /limit reached/);
+  assert.deepEqual(filled.list(), full);
+});
+
+test('scoped asset preparation MCP forwards explicit core edits and returns only handles', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-prepare-assets-'));
+  try {
+    await writeFile(join(directory, 'source.png'), 'Synthetic source');
+    await feedbackMcpFixture(async ({ call, fixture, registrations }) => {
+      const source = await call('register_asset', { path: 'source.png' });
+      fixture.onRequest = async request => { assert.equal(request.op, 'edit_image'); assert.deepEqual(request.params, { resize_longest_side: 100 }); return { base64: Buffer.from('Prepared fixture').toString('base64'), mime_type: 'image/png', width: 100, height: 50 }; };
+      const result = await call('prepare_assets', { assets: [{ asset_id: source.asset_id, params: { resize_longest_side: 100 } }] });
+      assert.equal(result.assets[0].width, 100);
+      assert.equal(result.assets[0].source_asset_id, source.asset_id);
+      assert.doesNotMatch(JSON.stringify(result), /base64/);
+      assert.equal(registrations.get('prepare_assets').config.inputSchema.safeParse({ assets: [{ asset_id: source.asset_id, params: { resize_longest_side: 5000 } }] }).success, false);
+    }, ['--tool-profile', 'full', '--asset-dir', directory]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('scoped asset batch rolls back failed reads and reports deduplicated registry usage', async () => {
+  const { McpAssets } = await import('./mcp-assets.mjs');
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-asset-batch-'));
+  try {
+    await writeFile(join(directory, 'first.txt'), 'First');
+    await writeFile(join(directory, 'second.txt'), 'Second');
+    const assets = await McpAssets.create([directory]);
+    const before = assets.list();
+    await assert.rejects(() => assets.registerFiles([{ path: 'first.txt' }, { path: 'missing.txt' }]), /ENOENT/);
+    assert.deepEqual(assets.list(), before);
+    const result = await assets.registerFiles([{ path: 'first.txt' }, { path: 'second.txt' }, { path: 'first.txt' }]);
+    assert.equal(result.assets.length, 3);
+    assert.equal(result.assets[0].asset_id, result.assets[2].asset_id);
+    assert.deepEqual(result.assets.map(asset => asset.name), ['first.txt', 'second.txt', 'first.txt']);
+    assert.deepEqual(result.usage, {
+      scope: 'process_asset_registry', asset_count: 2, asset_limit: 32, remaining_assets: 30,
+      raw_byte_length: 11, raw_byte_limit: 67108864, remaining_raw_bytes: 67108853, document_budgets_included: false,
+    });
+    assert.deepEqual(assets.list().usage, result.usage);
+    assert.equal(assets.list().byte_length, result.usage.raw_byte_length);
+    assert.doesNotMatch(JSON.stringify(result), /base64|First|Second/);
+    const single = await assets.registerFile({ path: 'first.txt' });
+    assert.equal(single.asset_id, result.assets[0].asset_id);
+    assert.deepEqual(single.usage, result.usage);
+    const closed = assets.close(single.asset_id);
+    assert.equal(closed.closed, single.asset_id);
+    assert.equal(closed.usage.asset_count, 1);
+    assert.equal(closed.usage.raw_byte_length, 6);
+    assert.equal(closed.usage.remaining_assets, 31);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('scoped asset batch MCP stays advanced with strict shape and ordered cross-root raster metadata', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-batch-mcp-'));
+  const other = await mkdtemp(join(tmpdir(), 'aislide-batch-root-'));
+  try {
+    await writeFile(join(directory, 'first.txt'), 'First');
+    await writeFile(join(other, 'image.png'), 'Synthetic raster');
+    await writeFile(join(other, 'image.jpg'), 'Synthetic JPEG');
+    await feedbackMcpFixture(async ({ fixture, registrations, calls }) => {
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: 'scoped-asset-batch', version: '1.0.0' });
+      const call = async (name, arguments_ = {}) => {
+        const result = await client.callTool({ name, arguments: arguments_ });
+        assert.equal(result.isError, undefined, JSON.stringify(result.content));
+        return JSON.parse(result.content[0].text);
+      };
+      try {
+        await McpServer.prototype.connect.call(fixture.instance, serverTransport);
+        await client.connect(clientTransport);
+        const initial = await client.listTools();
+        assert.equal(initial.tools.length, 10);
+        assert.equal(initial.tools.some(tool => tool.name === 'register_assets'), false);
+        const found = await call('discover_tools', { query: 'register_assets' });
+        const advanced = found.tools.find(tool => tool.name === 'register_assets');
+        assert.equal(advanced.loaded, false);
+        assert.equal(advanced.read_only, false);
+        const definition = await call('get_tool_schema', { name: 'register_assets' });
+        assert.equal(definition.inputSchema.additionalProperties, false);
+        const array = resolveSchemaRef(definition.inputSchema, definition.inputSchema.properties.assets);
+        assert.equal(array.minItems, 1);
+        assert.equal(array.maxItems, 32);
+        const item = resolveSchemaRef(definition.inputSchema, array.items);
+        assert.equal(item.additionalProperties, false);
+        assert.deepEqual(item.required, ['path']);
+        assert.equal(item.properties.path.maxLength, 512);
+        assert.equal(item.properties.root.maximum, 7);
+        assert.ok((await client.listTools()).tools.some(tool => tool.name === 'register_assets'));
+        const schema = registrations.get('register_assets').config.inputSchema;
+        for (const invalid of [
+          {}, { assets: [] }, { assets: null }, { assets: Array(33).fill({ path: 'first.txt' }) },
+          { assets: [{ path: '' }] }, { assets: [{ path: 'x'.repeat(513) }] }, { assets: [{ path: 'first.txt', root: -1 }] },
+          { assets: [{ path: 'first.txt', root: 8 }] }, { assets: [{ path: 'first.txt', root: 0.5 }] },
+          { assets: [{ path: 'first.txt', root: null }] }, { assets: [{ path: 'first.txt', directory }] },
+          { assets: [{ path: 'first.txt' }], root: directory },
+        ]) assert.equal(schema.safeParse(invalid).success, false, JSON.stringify(invalid));
+        const invalid = await client.callTool({ name: 'register_assets', arguments: { assets: [{ path: 'first.txt', base64: 'ignored' }] } });
+        assert.equal(invalid.isError, true);
+        assert.equal(calls.length, 0);
+        const result = await call('register_assets', { assets: [{ path: 'first.txt' }, { path: 'image.png', root: 1 }, { path: 'image.jpg', root: 1 }, { path: 'image.png', root: 1 }] });
+        assert.deepEqual(Object.keys(result).sort(), ['assets', 'usage']);
+        assert.equal(result.assets.length, 4);
+        assert.equal(result.assets[1].asset_id, result.assets[3].asset_id);
+        assert.equal(result.usage.asset_count, 3);
+        assert.equal(result.usage.raw_byte_length, 35);
+        assert.equal(result.usage.document_budgets_included, false);
+        assert.deepEqual(result.assets.map(asset => asset.format), ['text', 'png', 'jpeg', 'png']);
+        assert.equal(result.assets[1].width, 1);
+        assert.equal(result.assets[2].height, 1);
+        assert.deepEqual(calls.map(call => call.request.op), ['inspect_raster', 'inspect_raster']);
+        assert.equal(result.assets.some(asset => 'base64' in asset || 'path' in asset || 'root' in asset || 'usage' in asset), false);
+        assert.equal((await call('list_assets')).root_count, 2);
+        assert.deepEqual((await call('list_assets')).usage, result.usage);
+        assert.deepEqual((await call('register_asset', { path: 'first.txt' })).usage, result.usage);
+        for (const name of ['register_asset', 'register_assets', 'list_assets', 'close_asset']) assert.match(registrations.get(name).config.description, /document.*encoded\/raster/i);
+        assert.equal((await call('close_asset', { asset_id: result.assets[0].asset_id })).usage.raw_byte_length, 30);
+        for (const name of ['list_assets', 'close_asset', 'get_document', 'undo']) await call('get_tool_schema', { name });
+        assert.equal((await client.listTools()).tools.some(tool => tool.name === 'register_assets'), false);
+      } finally { await client.close(); }
+    }, ['--asset-dir', directory, '--asset-dir', other]);
+  } finally { await rm(directory, { recursive: true, force: true }); await rm(other, { recursive: true, force: true }); }
+});
+
+test('scoped asset batch MCP cancellation leaves no partial usage and releases the mutation guard', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-batch-cancel-'));
+  const bytes = Buffer.from('Synthetic raster');
+  try {
+    await writeFile(join(directory, 'first.txt'), 'First');
+    await writeFile(join(directory, 'image.png'), bytes);
+    await feedbackMcpFixture(async ({ call, fixture, registrations }) => {
+      const before = await call('list_assets');
+      const controller = new AbortController();
+      const started = Promise.withResolvers();
+      const pending = Promise.withResolvers();
+      fixture.onRequest = async (request, options) => {
+        assert.equal(request.op, 'inspect_raster');
+        assert.equal(options.signal, controller.signal);
+        started.resolve();
+        return pending.promise;
+      };
+      const tool = registrations.get('register_assets');
+      const input = { assets: [{ path: 'first.txt' }, { path: 'image.png' }] };
+      const operation = tool.callback(tool.config.inputSchema.parse(input), { signal: controller.signal });
+      try {
+        await started.promise;
+        assert.deepEqual(await call('list_assets'), before);
+        const single = registrations.get('register_asset');
+        const blocked = await single.callback(single.config.inputSchema.parse({ path: 'first.txt' }), { signal: new AbortController().signal });
+        assert.equal(blocked.isError, true);
+        assert.match(blocked.content[0].text, /Another mutation/);
+      } finally {
+        controller.abort();
+        pending.resolve({ width: 1, height: 1, mime_type: 'image/png', byte_length: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') });
+        await operation;
+      }
+      const cancelled = await operation;
+      assert.equal(cancelled.isError, true);
+      assert.match(cancelled.content[0].text, /abort|cancel/i);
+      assert.deepEqual(await call('list_assets'), before);
+      fixture.onRequest = undefined;
+      const accepted = await call('register_assets', input);
+      assert.equal(accepted.usage.asset_count, 2);
+      assert.equal(accepted.usage.raw_byte_length, 21);
+    }, ['--asset-dir', directory]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('scoped asset batch rejects unauthorized paths and invalid files without retaining earlier items', async () => {
+  const { McpAssets } = await import('./mcp-assets.mjs');
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-batch-paths-'));
+  const outside = await mkdtemp(join(tmpdir(), 'aislide-batch-outside-'));
+  try {
+    await writeFile(join(directory, 'valid.txt'), 'Valid');
+    await writeFile(join(directory, 'empty.txt'), '');
+    await writeFile(join(directory, 'unsupported.bin'), 'Unsupported');
+    await writeFile(join(directory, 'large.png'), '');
+    await truncate(join(directory, 'large.png'), 1048577);
+    await mkdir(join(directory, 'folder.txt'));
+    await writeFile(join(outside, 'outside.txt'), 'Outside');
+    await symlink(outside, join(directory, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+    const assets = await McpAssets.create([directory]);
+    assets.retain(Buffer.from('Existing'), 'text', 'existing.txt');
+    const before = assets.list();
+    for (const input of [
+      { path: '../outside.txt' }, { path: '..\\outside.txt' }, { path: join(outside, 'outside.txt') },
+      { path: 'https://example.com/file.txt' }, { path: 'valid.txt:stream' }, { path: 'C:valid.txt' },
+      { path: '\\\\?\\C:\\valid.txt' }, { path: 'CON.txt' }, { path: 'nul.txt' }, { path: 'COM1.txt' }, { path: 'lpt9.txt' },
+      { path: 'valid.txt.' }, { path: 'valid.txt ' }, { path: 'folder/../valid.txt' }, { path: './valid.txt' },
+      { path: 'folder//valid.txt' }, { path: 'bad\u0000.txt' }, { path: 'linked/outside.txt' }, { path: 'folder.txt' },
+      { path: 'empty.txt' }, { path: 'unsupported.bin' }, { path: 'large.png' }, { path: 'valid.txt', root: 1 },
+    ]) {
+      await assert.rejects(() => assets.registerFiles([{ path: 'valid.txt' }, input]));
+      assert.deepEqual(assets.list(), before, JSON.stringify(input));
+    }
+    for (const input of [[], Array(33).fill({ path: 'valid.txt' }), null, [{ path: 'valid.txt', root: 0.1 }], [{ path: 'valid.txt', extra: true }]]) {
+      await assert.rejects(() => assets.registerFiles(input), /1-32|Invalid asset registration/);
+      assert.deepEqual(assets.list(), before);
+    }
+    const unscoped = await McpAssets.create([]);
+    await assert.rejects(() => unscoped.registerFiles([{ path: 'valid.txt' }]), /asset-dir/);
+    assert.equal(unscoped.list().usage.asset_count, 0);
+  } finally { await rm(directory, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+});
+
+test('scoped asset batch rolls back inspection errors cancellation and staged metadata upgrades', async () => {
+  const { McpAssets } = await import('./mcp-assets.mjs');
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-batch-inspect-'));
+  const bytes = Buffer.from('Synthetic raster');
+  const info = { width: 200, height: 100, mime_type: 'image/png', byte_length: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+  try {
+    await writeFile(join(directory, 'first.png'), bytes);
+    await writeFile(join(directory, 'second.png'), 'Second raster');
+    const assets = await McpAssets.create([directory]);
+    const cached = assets.retain(bytes, 'png', 'cached.png');
+    const before = assets.list();
+    for (const failure of ['throw', 'invalid', 'cancel']) {
+      const controller = new AbortController();
+      let inspections = 0;
+      await assert.rejects(() => assets.registerFiles([{ path: 'first.png' }, { path: 'second.png' }], controller.signal, async () => {
+        inspections += 1;
+        assert.deepEqual(assets.list(), before, 'No intermediate handles or dimension upgrades');
+        if (inspections === 1) return info;
+        if (failure === 'throw') throw new Error('Synthetic decoder failure');
+        if (failure === 'cancel') controller.abort();
+        return { ...info, width: 0 };
+      }), /decoder failure|inspection|abort/i);
+      assert.equal(inspections, 2);
+      assert.deepEqual(assets.list(), before);
+      assert.equal(assets.get(cached.asset_id).width, undefined);
+    }
+    const cancelled = new AbortController();
+    cancelled.abort();
+    await assert.rejects(() => assets.registerFiles([{ path: 'first.png' }], cancelled.signal, async () => assert.fail('No inspection after cancellation')), /abort/i);
+    await assert.rejects(() => assets.registerFiles([{ path: 'first.png' }]), /inspection is required/);
+    assert.deepEqual(assets.list(), before);
+    const accepted = await assets.registerFiles([{ path: 'first.png' }], undefined, async () => info);
+    assert.equal(accepted.assets[0].asset_id, cached.asset_id);
+    assert.equal(accepted.assets[0].width, 200);
+    assert.deepEqual(accepted.usage, before.usage);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('scoped asset batch detects file root and intermediate-link changes before commit', async () => {
+  const { McpAssets } = await import('./mcp-assets.mjs');
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-batch-races-'));
+  const bytes = Buffer.from('Synthetic raster');
+  const info = { width: 1, height: 1, mime_type: 'image/png', byte_length: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+  try {
+    for (const mutation of ['first-file', 'raster-file', 'root', 'link']) {
+      const root = join(directory, mutation);
+      const rasterRoot = join(directory, `${mutation}-raster`);
+      await mkdir(join(root, 'sub'), { recursive: true });
+      await mkdir(rasterRoot);
+      await writeFile(join(root, 'sub', 'first.txt'), 'First');
+      await writeFile(join(rasterRoot, 'image.png'), bytes);
+      const assets = await McpAssets.create([root, rasterRoot]);
+      const before = assets.list();
+      await assert.rejects(() => assets.registerFiles([{ path: 'sub/first.txt' }, { path: 'image.png', root: 1 }], undefined, async () => {
+        if (mutation === 'first-file') await writeFile(join(root, 'sub', 'first.txt'), 'Changed');
+        if (mutation === 'raster-file') await writeFile(join(rasterRoot, 'image.png'), 'Changed');
+        if (mutation === 'root') {
+          await rename(root, `${root}-moved`);
+          await mkdir(root);
+        }
+        if (mutation === 'link') {
+          await rename(join(root, 'sub'), join(root, 'moved'));
+          await symlink(join(root, 'moved'), join(root, 'sub'), process.platform === 'win32' ? 'junction' : 'dir');
+        }
+        return info;
+      }), /changed|links/i);
+      assert.deepEqual(assets.list(), before, mutation);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('scoped asset batch verifies unchanged bytes after a metadata-only ctime update', async () => {
+  const { chmod, stat } = await import('node:fs/promises');
+  const { McpAssets } = await import('./mcp-assets.mjs');
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-ctime-snapshot-'));
+  const path = join(directory, 'first.txt');
+  try {
+    const content = Buffer.from('Unchanged content');
+    const raster = Buffer.from('Synthetic raster fixture');
+    await writeFile(path, content); await writeFile(join(directory, 'second.png'), raster);
+    const assets = await McpAssets.create([directory]);
+    const before = await stat(path, { bigint: true });
+    const result = await assets.registerFiles([{ path: 'first.txt' }, { path: 'second.png' }], undefined, async () => {
+      await chmod(path, 0o444);
+      const current = await stat(path, { bigint: true });
+      assert.equal(current.mtimeNs, before.mtimeNs); assert.equal(current.ino, before.ino);
+      assert.notEqual(current.ctimeNs, before.ctimeNs);
+      return { width: 1, height: 1, mime_type: 'image/png', sha256: createHash('sha256').update(raster).digest('hex'), byte_length: raster.length };
+    });
+    assert.equal(result.assets[0].sha256, createHash('sha256').update(content).digest('hex'));
+    assert.equal(result.usage.asset_count, 2);
+    assert.deepEqual(await readFile(path), content);
+  } finally { await chmod(path, 0o600); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('scoped asset batch preserves handle and raw byte budgets at atomic boundaries', async () => {
+  const { McpAssets } = await import('./mcp-assets.mjs');
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-batch-budget-'));
+  try {
+    await writeFile(join(directory, 'one.txt'), '1');
+    await writeFile(join(directory, 'two.txt'), '22');
+    const handles = await McpAssets.create([directory]);
+    handles.retainMany(Array.from({ length: 31 }, (_, index) => ({ bytes: Buffer.from(`Existing ${index}`), format: 'text', name: `existing-${index}.txt` })));
+    const beforeHandles = handles.list();
+    await assert.rejects(() => handles.registerFiles([{ path: 'one.txt' }, { path: 'two.txt' }]), /limit/);
+    assert.deepEqual(handles.list(), beforeHandles);
+    const full = await handles.registerFiles([{ path: 'one.txt' }]);
+    assert.equal(full.usage.remaining_assets, 0);
+    const duplicates = await handles.registerFiles(Array(32).fill({ path: 'one.txt' }));
+    assert.equal(duplicates.assets.length, 32);
+    assert.ok(duplicates.assets.every(asset => asset.asset_id === full.assets[0].asset_id));
+    assert.deepEqual(duplicates.usage, full.usage);
+    const bytes = await McpAssets.create([directory]);
+    for (let index = 0; index < 4; index += 1) bytes.retain(Buffer.alloc(16 * 1048576 - (index === 3 ? 2 : 0), index), 'pptx', `synthetic-${index}.pptx`);
+    const beforeBytes = bytes.list();
+    assert.equal(beforeBytes.usage.remaining_raw_bytes, 2);
+    await assert.rejects(() => bytes.registerFiles([{ path: 'one.txt' }, { path: 'two.txt' }]), /limit/);
+    assert.deepEqual(bytes.list(), beforeBytes);
+    const filled = await bytes.registerFiles([{ path: 'two.txt' }]);
+    assert.equal(filled.usage.raw_byte_length, 67108864);
+    assert.equal(filled.usage.remaining_raw_bytes, 0);
+    assert.equal(filled.usage.remaining_assets, 27);
+    assert.deepEqual((await bytes.registerFiles([{ path: 'two.txt' }])).usage, filled.usage);
+    assert.equal(bytes.close(filled.assets[0].asset_id).usage.remaining_raw_bytes, 2);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('scoped asset batch rejects concurrent registry changes without losing independent retained assets', async () => {
+  const { McpAssets } = await import('./mcp-assets.mjs');
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-batch-concurrent-'));
+  const bytes = Buffer.from('Synthetic raster');
+  try {
+    await writeFile(join(directory, 'first.txt'), 'First');
+    await writeFile(join(directory, 'image.png'), bytes);
+    const assets = await McpAssets.create([directory]);
+    let concurrent;
+    await assert.rejects(() => assets.registerFiles([{ path: 'first.txt' }, { path: 'image.png' }], undefined, async () => {
+      assert.equal(assets.list().usage.asset_count, 0);
+      assets.retain(Buffer.from('Independent'), 'text', 'independent.txt');
+      concurrent = assets.list();
+      return { width: 1, height: 1, mime_type: 'image/png', byte_length: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+    }), /registry changed/);
+    assert.deepEqual(assets.list(), concurrent);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test('lightweight asset cache retains batches atomically at its capacity boundary', async () => {
@@ -1124,7 +1627,7 @@ test('managed batch MCP stub accepts strict parts and graphs with one guarded re
     const schema = registrations.get('apply_operations').config.inputSchema;
     assert.deepEqual(schema.parse(guarded), guarded);
     const published = z.toJSONSchema(schema, { io: 'input' });
-    assert.equal(published.properties.operations.items.oneOf.length, 16);
+    assert.equal(published.properties.operations.items.oneOf.length, 19);
     for (const operation of operations) {
       assert.equal(schema.safeParse({ ...guarded, operations: [operation] }).success, true);
       assert.equal(schema.safeParse({ ...guarded, operations: [{ ...operation, unknown: true }] }).success, false);
@@ -1384,7 +1887,7 @@ test('managed batch MCP live 39 slides and 21 managed roots retain metadata thro
     const items = resolveSchemaRef(batchSchema, resolveSchemaRef(batchSchema, batchSchema.properties.operations).items);
     const variants = items.oneOf ?? items.anyOf;
     const operations = variants.map(variant => resolveSchemaRef(batchSchema, resolveSchemaRef(batchSchema, variant).properties.op).const).sort();
-    assert.equal(operations.length, 16);
+    assert.equal(operations.length, 19);
     const capabilities = await call('authoring_capabilities');
     assert.deepEqual([...capabilities.typed_authoring.operations].sort(), operations);
     assert.equal(capabilities.typed_authoring.batch_limit, 128);

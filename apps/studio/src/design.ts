@@ -19,7 +19,8 @@ export function fontFamily(family?: string | null, theme?: Theme): string {
 }
 
 export function textStyle(element: Extract<Element, { type: 'text' | 'shape' }>, theme?: Theme): CSSProperties {
-  return { fontSize: element.font_size, fontFamily: fontFamily(element.format?.font_family, theme), color: cssColor(element.color, theme), fontWeight: element.bold ? 700 : 400, fontStyle: element.format?.italic ? 'italic' : 'normal', textDecoration: element.format?.underline ? 'underline' : 'none', textAlign: element.format?.alignment ?? 'left' }
+  const padding = element.format?.padding
+  return { fontSize: element.font_size, fontFamily: fontFamily(element.format?.font_family, theme), color: cssColor(element.color, theme), fontWeight: element.bold ? 700 : 400, fontStyle: element.format?.italic ? 'italic' : 'normal', textDecoration: element.format?.underline ? 'underline' : 'none', textAlign: element.format?.alignment ?? 'left', ...(padding ? { paddingLeft: padding.left ?? 0, paddingRight: padding.right ?? 0, paddingTop: padding.top ?? 0, paddingBottom: padding.bottom ?? 0 } : {}) }
 }
 
 export function runStyle(style: RunStyle | null | undefined, theme?: Theme, size = 24): CSSProperties {

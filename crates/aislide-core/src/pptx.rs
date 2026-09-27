@@ -61,7 +61,7 @@ fn emu(value: f64) -> String { (value * 9525.0).round().to_string() }
 
 fn formatted_text_body(writer: &mut XmlWriter, name: &str, text: &str, size: f64, shade: &str, bold: bool, format: &TextFormat, link_id: Option<&str>, theme: &Theme) {
     writer.start_element(name);
-    if format.inherit_layout && format.placeholder.is_some() && format.paragraphs.is_empty() {
+    if format.inherit_layout && format.placeholder.is_some() && format.paragraphs.is_empty() && format.padding.is_none() {
         empty(writer, "a:bodyPr", &[]); empty(writer, "a:lstStyle", &[]);
         for line in text.split('\n') {
             writer.start_element("a:p"); writer.start_element("a:r"); writer.start_element("a:rPr"); writer.write_attribute("lang", "ja-JP");
@@ -71,7 +71,8 @@ fn formatted_text_body(writer: &mut XmlWriter, name: &str, text: &str, size: f64
         writer.end_element(); return;
     }
     writer.start_element("a:bodyPr");
-    for key in ["lIns", "tIns", "rIns", "bIns"] { writer.write_attribute(key, "0"); }
+    let padding = format.padding.clone().unwrap_or_default();
+    for (key, value) in [("lIns", padding.left), ("tIns", padding.top), ("rIns", padding.right), ("bIns", padding.bottom)] { writer.write_attribute(key, &emu(value)); }
     writer.write_attribute("wrap", "square");
     writer.write_attribute("anchor", match format.vertical { VerticalAlign::Top => "t", VerticalAlign::Middle => "ctr", VerticalAlign::Bottom => "b" });
     empty(writer, "a:noAutofit", &[]);

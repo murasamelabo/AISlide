@@ -107,11 +107,12 @@ export class AislideClient {
   createGraphIcon(input, options) { return this.request({ ...input, op: 'create_graph_icon' }, options); }
   createGraph(input, options) { return this.request({ ...input, op: 'create_graph' }, options); }
   transformGraph(spec, operations, options) { return this.request({ op: 'transform_graph', spec, operations }, options); }
+  layoutGraph(input, options) { return this.request({ op: 'layout_graph', input }, options); }
   createPart(input, options) { return this.request({ ...input, op: 'create_part' }, options); }
   createObject(input, options) { return this.request({ ...input, op: 'create_object' }, options); }
   createAsset(input, options) { return this.request({ ...input, op: 'create_asset' }, options); }
   async createPresentation(id, title = 'Untitled presentation', options) {
-    const document = await this.request({ op: 'create_presentation', id, title }, options);
+    const document = await this.request({ op: 'create_presentation', id, title, ...(options?.setup ? { setup: options.setup } : {}) }, options);
     return new DocumentSession(this.#transport, document, this.#options(options));
   }
   async openPresentation(id, base64, options) {
@@ -228,6 +229,9 @@ export class DocumentSession {
   addElements(slideId, elements, options) { return this.applyOperations([{ op: 'add_elements', slide_id: slideId, elements }], options); }
   setFrames(slideId, frames, options) { return this.applyOperations(frames.map(({ id, frame }) => ({ op: 'set_frame', slide_id: slideId, id, frame })), options); }
   setTextStyle(slideId, input, options) { return this.applyOperations([{ ...input, op: 'set_text_style', slide_id: slideId }], options); }
+  setTextPadding(slideId, input, options) { return this.applyOperations([{ ...input, op: 'set_text_padding', slide_id: slideId }], options); }
+  setRichText(slideId, input, options) { return this.applyOperations([{ ...input, op: 'set_rich_text', slide_id: slideId }], options); }
+  composeSlide(slideId, input, options) { return this.applyOperations([{ ...input, op: 'compose_slide', slide_id: slideId }], options); }
   setSlideBackground(slideId, color, options) { return this.applyOperations([{ op: 'set_slide_background', slide_id: slideId, color }], options); }
   setConnector(slideId, input, options) { return this.applyOperations([{ ...input, op: 'set_connector', slide_id: slideId }], options); }
   setPictureCrop(slideId, input, options) { return this.applyOperations([{ ...input, op: 'set_picture_crop', slide_id: slideId }], options); }

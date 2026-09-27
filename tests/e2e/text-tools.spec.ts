@@ -2,7 +2,7 @@
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
-async function mountEditor(page: Page, mode: 'inline' | 'panel' | 'inspector' = 'inline') {
+async function mountEditor(page: Page, mode: 'inline' | 'panel' | 'inspector' | 'padding' = 'inline') {
   page.on('pageerror', (error) => console.error(error.message));
   page.on('requestfailed', (request) => console.error(request.url(), request.failure()));
   const clientUrl = `/@fs/${resolve('packages/client/index.mjs').replaceAll('\\', '/')}`;
@@ -21,7 +21,8 @@ async function mountEditor(page: Page, mode: 'inline' | 'panel' | 'inspector' = 
     const { InlineEditor } = await import('/src/InlineEditor.tsx');
     const mode = ${JSON.stringify(mode)};
     const { TextToolsPanel } = mode === 'panel' ? await import('/src/TextToolsPanel.tsx') : {};
-    const { TextControls } = mode === 'inspector' ? await import('/src/TextControls.tsx') : {};
+    const { TextControls } = mode === 'inspector' || mode === 'padding' ? await import('/src/TextControls.tsx') : {};
+    const { SlideSurface } = mode === 'padding' ? await import('/src/SlideSurface.tsx') : {};
     const { AislideClient } = await import(${JSON.stringify(clientUrl)});
     const client = new AislideClient(async (request) => {
       const response = await fetch('/api/core', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) });
@@ -61,6 +62,10 @@ async function mountEditor(page: Page, mode: 'inline' | 'panel' | 'inspector' = 
       const [inspected, setInspected] = React.useState(initial);
       const [navigation, setNavigation] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
+      if (mode === 'padding') return React.createElement('main', { style: { maxWidth: '600px', margin: '16px' } },
+        React.createElement(SlideSurface, { slide: { ...source.document.deck.slides[0], layout_id: null, hide_master_graphics: true, elements: [inspected] }, width: 720, height: 380, selected: 'body', onSelect: () => {}, onEdit: async element => { await sessionFor(element); setInspected(element); } }),
+        React.createElement(TextControls, { element: inspected, onChange: setInspected, ...adapters }),
+        React.createElement('output', { 'data-testid': 'inspected', hidden: true }, JSON.stringify(inspected)));
       if (mode === 'panel') return React.createElement('main', { style: { maxWidth: '380px' } },
         React.createElement(TextToolsPanel, { session: liveSession, onDocument: setDocumentSnapshot, onNavigate: (...args) => setNavigation(args), onBusy: setBusy, disabled: busy }),
         React.createElement('button', { onClick: () => { setLiveSession(source); setDocumentSnapshot(source.document); } }, 'Switch document'),
@@ -84,9 +89,46 @@ async function mountEditor(page: Page, mode: 'inline' | 'panel' | 'inspector' = 
     }
     ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(Tooltip.Provider, {}, React.createElement(Harness)));
   </script></body></html>` }));
+  const initialized = page.waitForResponse(response => response.url().endsWith('/api/core') && response.request().postDataJSON()?.op === 'new_document');
   await page.goto('/__text-tools-test');
-  await expect(page.getByRole('textbox', { name: mode === 'panel' ? 'Find text' : mode === 'inspector' ? 'Text content' : 'Slide text editor', exact: true })).toBeVisible();
+  expect((await initialized).ok()).toBe(true);
+  await expect(page.getByRole('textbox', { name: mode === 'panel' ? 'Find text' : mode === 'inspector' || mode === 'padding' ? 'Text content' : 'Slide text editor', exact: true })).toBeVisible();
 }
+
+test('text padding controls agree with slide display and inline editing at desktop and mobile widths', async ({ page }) => {
+  await mountEditor(page, 'padding');
+  for (const [side, value] of Object.entries({ left: 24, right: 32, top: 16, bottom: 20 })) await page.getByRole('spinbutton', { name: `Text padding ${side}`, exact: true }).fill(String(value));
+  const inspected = () => page.getByTestId('inspected').textContent().then(value => JSON.parse(value ?? '{}'));
+  await expect.poll(async () => (await inspected()).format.padding).toEqual({ left: 24, right: 32, top: 16, bottom: 20 });
+  const leftPadding = page.getByRole('spinbutton', { name: 'Text padding left', exact: true });
+  await leftPadding.fill('');
+  await expect(leftPadding).toHaveValue('');
+  expect((await inspected()).format.padding.left).toBe(24);
+  await leftPadding.fill('24');
+  await leftPadding.blur();
+  const display = page.locator('[data-element-id="body"] .slide-text');
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 960 });
+    await page.evaluate(() => document.fonts.ready);
+    await expect(display).toHaveCSS('padding-left', '24px');
+    await expect(display).toHaveCSS('padding-right', '32px');
+    await expect(display).toHaveCSS('padding-top', '16px');
+    await expect(display).toHaveCSS('padding-bottom', '20px');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: `.artifacts/semantic-authoring-20260927/padding-studio-${width}.png`, fullPage: true });
+  }
+  await page.getByRole('button', { name: 'Edit body', exact: true }).dblclick();
+  const editor = page.getByRole('textbox', { name: 'Slide text editor', exact: true });
+  await expect(editor).toHaveCSS('padding-left', '24px');
+  await expect(editor).toHaveCSS('padding-top', '16px');
+  await editor.fill('A😀日本B changed');
+  await page.getByRole('button', { name: 'Apply on-slide edit', exact: true }).click();
+  await expect.poll(async () => (await inspected()).text).toBe('A😀日本B changed');
+  expect((await inspected()).font_size).toBe(24);
+  expect((await inspected()).format.padding).toEqual({ left: 24, right: 32, top: 16, bottom: 20 });
+  await page.getByRole('button', { name: 'Use default text padding', exact: true }).click();
+  await expect.poll(async () => (await inspected()).format.padding).toBeNull();
+});
 
 for (const task of ['proofread', 'translate'] as const) test(`G04 local AI ${task} bounded-fixture review apply cancel and Undo`, async ({ page }) => {
   await mountEditor(page, 'panel');

@@ -1,12 +1,70 @@
 ﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const coreEnvironment = process.env.AISLIDE_CORE_BINARY ? { AISLIDE_CORE_BINARY: process.env.AISLIDE_CORE_BINARY } : undefined;
+
+test('semantic authoring real MCP composes prepares assets preserves rich text and roundtrips in one batch', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-semantic-proof-'));
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory, '--asset-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const client = new Client({ name: 'semantic-authoring-proof', version: '1.0.0' });
+  const call = async (name, input = {}) => { const response = await client.callTool({ name, arguments: input }); assert.ok(!response.isError, `${name}: ${JSON.stringify(response.content)}`); return JSON.parse(response.content[0].text); };
+  try {
+    const sharp = (await import('sharp')).default;
+    const source = await sharp({ create: { width: 480, height: 240, channels: 3, background: '#087f73' } }).png().toBuffer();
+    await writeFile(join(directory, 'source.png'), source);
+    await client.connect(transport);
+    const originalStat = await stat(join(directory, 'source.png'), { bigint: true });
+    let registered;
+    try { registered = await call('register_assets', { assets: [{ path: 'source.png' }, { path: 'source.png' }] }); }
+    catch (error) {
+      const currentStat = await stat(join(directory, 'source.png'), { bigint: true });
+      throw new Error(`Asset registration failed; identity ${['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'].map(key => `${key}:${originalStat[key]}=>${currentStat[key]}`).join(', ')}`, { cause: error });
+    }
+    assert.equal(registered.usage.asset_count, 1);
+    const prepared = await call('prepare_assets', { assets: [{ asset_id: registered.assets[0].asset_id, params: { resize_longest_side: 120 } }] });
+    assert.equal(prepared.assets[0].width, 120); assert.equal(prepared.assets[0].height, 60);
+    assert.equal(prepared.assets[0].raster_cost.rgba_byte_length, 28800);
+    assert.deepEqual(await readFile(join(directory, 'source.png')), source);
+    const created = await call('create_presentation', { title: 'Synthetic semantic proof', setup: { design_preset: 'minimal', font_family: 'Arial' } });
+    const deck_id = created.deck_id;
+    const initial = await call('get_document', { deck_id });
+    assert.equal(initial.revision, 0); assert.equal(initial.deck.design.theme.fonts.east_asian, 'Arial');
+    await call('edit_slides', { deck_id, expected_revision: 0, operations: [{ op: 'insert', id: 'diagram', after: 'slide-1', title: 'Diagram' }, { op: 'insert', id: 'image', after: 'diagram', title: 'Image' }] });
+    const before = await call('get_document', { deck_id });
+    const paragraphs = [{ runs: [{ text: 'One source ', style: { bold: true } }, { text: 'for rich content' }] }];
+    const operations = [
+      { op: 'compose_slide', slide_id: 'slide-1', id: 'cards', spec: { title: 'Synthetic cards', footer: 'Synthetic fixture', blocks: [{ kind: 'cards', items: [{ label: 'First', detail: 'Bounded detail' }, { label: 'Second', detail: 'Another detail' }] }] } },
+      { op: 'compose_slide', slide_id: 'diagram', id: 'diagram', spec: { title: 'Synthetic flow', blocks: [{ kind: 'graph', input: { version: 1, title: '', show_title: false, columns: 2, nodes: [{ id: 'source', label: 'Source' }, { id: 'target', label: 'Target' }], edges: [{ id: 'flow', source: 'source', target: 'target' }] } }] } },
+      { op: 'set_rich_text', slide_id: 'slide-1', id: 'cards-b0-c0', paragraphs },
+      { op: 'add_picture', slide_id: 'image', id: 'prepared', asset_id: prepared.assets[0].asset_id, alt: 'Synthetic solid rectangle', frame: { x: 40, y: 120, width: 400, height: 400 }, fit: 'contain' },
+      { op: 'update_notes', slide_id: 'slide-1', notes: 'Synthetic notes, not factual evidence' },
+    ];
+    const changed = await call('apply_operations', { deck_id, expected_revision: before.revision, expected_hash: before.hash, operations });
+    assert.equal(changed.revision, before.revision + 1);
+    const document = await call('get_document', { deck_id });
+    const card = document.deck.slides[0].elements.find(element => element.id === 'cards-b0-c0');
+    assert.equal(card.text, 'One source for rich content'); assert.equal(card.format.paragraphs[0].runs[0].style.bold, true);
+    assert.equal(card.format.padding.left, 24); assert.equal(card.font_size, 24);
+    assert.equal(document.parts.length, 1); assert.equal(document.parts[0].stale, false);
+    assert.equal(document.deck.slides[2].elements[0].width / document.deck.slides[2].elements[0].height, 2);
+    await call('undo', { deck_id }); assert.equal((await call('get_document', { deck_id })).hash, before.hash);
+    await call('redo', { deck_id }); assert.equal((await call('get_document', { deck_id })).hash, document.hash);
+    await call('export_pptx', { deck_id, filename: 'synthetic-semantic.pptx' });
+    const bytes = await readFile(join(directory, 'synthetic-semantic.pptx'));
+    assert.equal(bytes.subarray(0, 2).toString(), 'PK');
+    const opened = await call('open_pptx', { base64: bytes.toString('base64') });
+    const reopened = await call('get_document', { deck_id: opened.deck_id });
+    assert.equal(reopened.deck.slides.length, 3); assert.equal(reopened.parts[0].stale, false);
+    const restored = reopened.deck.slides[0].elements.find(element => element.id === 'cards-b0-c0');
+    assert.equal(restored.text, card.text); assert.deepEqual(restored.format.padding, card.format.padding);
+    assert.equal(reopened.deck.slides[0].notes, document.deck.slides[0].notes);
+  } finally { await client.close(); await transport.close(); await rm(directory, { recursive: true, force: true }); }
+});
 
 test('MCP expanded authoring exposes strict APIs, revisions and create-new templates', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-expanded-mcp-'));

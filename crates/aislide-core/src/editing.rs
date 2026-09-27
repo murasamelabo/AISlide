@@ -76,11 +76,33 @@ fn blank(id: String, title: String, layout_id: Option<String>) -> Slide {
     Slide { id, title, background: "@lt1".into(), elements: Vec::new(), notes: String::new(), notes_paragraphs: Vec::new(), layout_id, inherit_background: false, hide_master_graphics: false, native_source_id: None, review: None }
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PresentationSetup {
+    pub design_preset: Option<String>,
+    pub theme: Option<crate::design::Theme>,
+    pub font_family: Option<String>,
+}
+
 pub fn create(id: String, title: String) -> Result<Document> {
+    create_with_setup(id, title, &PresentationSetup::default())
+}
+
+pub fn create_with_setup(id: String, title: String, setup: &PresentationSetup) -> Result<Document> {
     valid_text(&title, 200)?;
     let design = crate::design::Design::default();
     let layout = design.layouts.iter().find(|layout| layout.elements.is_empty()).map(|layout| layout.id.clone());
-    let deck = Deck { version: 1, title, width: 1280, height: 720, slides: vec![blank("slide-1".into(), "Slide 1".into(), layout)], design: Some(design), embedded_fonts: Vec::new(), auxiliary_design: None };
+    let mut deck = Deck { version: 1, title, width: 1280, height: 720, slides: vec![blank("slide-1".into(), "Slide 1".into(), layout)], design: Some(design), embedded_fonts: Vec::new(), auxiliary_design: None };
+    if let Some(preset) = &setup.design_preset { deck = crate::design_presets::apply(deck, preset)?; }
+    if setup.theme.is_some() || setup.font_family.is_some() {
+        let mut theme = setup.theme.clone().unwrap_or_else(|| deck.design.as_ref().map(|design| design.theme.clone()).unwrap_or_default());
+        if let Some(font) = &setup.font_family {
+            valid_text(font, 100)?;
+            if font.trim().is_empty() || font.chars().any(char::is_control) { return Err(Error::Invalid("initial font family must be a nonempty font name".into())); }
+            theme.fonts = crate::design::ThemeFonts { major: font.clone(), minor: font.clone(), east_asian: font.clone(), complex_script: font.clone() };
+        }
+        deck = crate::design::apply_theme(deck, theme)?;
+    }
     crate::document::create(id, deck, Vec::new(), Vec::new(), None)
 }
 

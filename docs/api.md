@@ -48,6 +48,63 @@ The historical static gates passed 31 `export_static` and 4 `static_api` tests, 
 
 ## Document Operations
 
+### Initial Setup And Semantic Composition
+
+Core `create_presentation` accepts optional `setup:{design_preset?,theme?,font_family?}`.
+The preset is applied first, an explicit theme second, and `font_family` last
+to all four theme font roles. Creation stays at revision zero with no Undo;
+omission preserves the existing default. SDK callers pass `setup` in the
+third `createPresentation` options argument. MCP uses the same `setup` field.
+Names must refer to available fonts; this does not install or embed fonts.
+
+`compose_slide` is a typed batch operation with `slide_id`, a 1-24 character
+ASCII identifier `id`, and `spec:{title,subtitle?,footer?,style?,blocks}`.
+It accepts 1-3 vertically arranged content blocks on a new empty slide in a
+generated document. Imported native documents and nonempty slides reject;
+notes are retained. It replaces inherited page graphics with its own title,
+optional subtitle and footer, using the current theme. Use explicit editing
+or master/layout operations when an existing template must be retained.
+
+Blocks are `cards:{items:[{label,detail?}],columns?}` (1-6 cards, 1-3 columns),
+`callout:{text}`, `text:{paragraphs}`, `steps:{items}`,
+`comparison:{rows,columns,cells,corner_label?}`, `part:{spec}`, or
+`graph:{input}`. Each includes its `kind` discriminator. Parts omit explicit
+`layout`; core supplies it. Steps, comparisons, parts and graphs keep managed
+metadata and normal regeneration guards. Cards/callouts remain native editable
+shapes; plain/rich text stays editable. The same `style` object can be reused
+across slides: `title_size` 24-64 (default 40), `body_size` 16-40 (24),
+`footer_size` 10-24 (14), `padding` 8-64 (24), `card_fill` (`@lt2`), and
+`accent` (`@accent1`). All distances and sizes are slide pixels.
+Headers, cards and callouts reject measured text overflow instead of shrinking;
+managed parts retain their existing bounded fitting rules. Missing fonts,
+glyphs and visual collisions still require preview/preflight review.
+
+`layout_graph({input})` is a pure core/MCP operation; SDK `client.layoutGraph(input)`
+returns a canonical `GraphSpec`. `input` has `version:1`, `title`, optional
+`subtitle`, `show_title`, `columns` (1-8, default 3), 1-48 nodes and up to 64
+edges. Nodes use ordinary `GraphNode` properties except `x`, `y`, and `group`.
+Groups and unknown fields reject. It reuses the existing grid, retains node
+dimensions, and validates edges after placement. It is not a hierarchical
+layout engine. A `compose_slide` graph block performs this step internally
+and inserts a managed graph in the same transaction, returning graph diagnostics.
+
+Text/shape `TextFormat.padding:{left?,right?,top?,bottom?}` declares inner
+padding; omitted edges are zero and the content area must remain positive.
+`set_text_padding` changes 1-128 distinct targets without moving their frames
+or changing font sizes; individual edits detach layout inheritance. `null`
+restores legacy defaults. Explicit all-zero shape padding survives PPTX
+reopening; zero text-box padding may normalize to omission because they are
+equivalent. Legacy shape preview defaults remain 6px horizontal / 4px vertical;
+legacy export defaults remain zero. New composition cards use explicit padding.
+Studio exposes four numeric controls and a default-reset control. Table cells
+use their existing `CellStyle.padding`, not `text_format.padding`.
+
+`set_rich_text` accepts only `slide_id`, `id` and `paragraphs`; core derives
+the canonical plain text. Empty paragraphs clear the body. Frame, padding and
+base style are retained; editing detaches inheritance. Dynamic fields require
+the dedicated field APIs. Existing raw `Element` inputs still require exact
+agreement between plain text and rich runs; validation is not weakened.
+
 ### Typed Authoring Batches
 
 `apply_operations({document,expected_revision,expected_hash,operations})` accepts
@@ -82,6 +139,9 @@ Every operation has `op` and `slide_id`, plus the following fields:
 | `update_graph` | `id`, `spec: GraphSpec` | Regenerate a current managed graph, preserving its existing `PartLayout`; a `layout` field is not accepted |
 | `set_frame` | `id`, `frame` | Set geometry without changing font or stroke sizes |
 | `set_text_style` | `ids`, `style` | Overlay a nonempty partial `RunStyle` on 1-128 distinct text/shape targets, their defaults and existing runs; retain unspecified run and paragraph attributes |
+| `set_text_padding` | `ids`, required `padding` | Set explicit inner padding, or `null` for legacy defaults; retains frames/font sizes and detaches inheritance when changed |
+| `set_rich_text` | `id`, `paragraphs` | Replace ordinary text from one rich source; derive canonical text without accepting a second body |
+| `compose_slide` | `id`, `spec: CompositionSpec` | Populate a new empty generated slide with shared page styling and coordinate-free content; retains managed parts/graphs |
 | `set_slide_background` | `color` | Set RGB/theme color and disable background inheritance |
 | `set_connector` | `id`, `connector`, optional `frame` | Replace all connector settings, optionally changing its frame |
 | `set_picture_crop` | `id`, `crop` | Replace a picture's crop |
@@ -672,6 +732,30 @@ Compact successful mutation replies include current revision/hash and Undo/Redo 
 Compact `part_catalog` returns 12 entries without examples/schema by default; `preset_id` returns one example. `architecture_icons` defaults to 20 metadata entries and supports a provider filter. Both accept `query`, `offset`, `limit`, and `detail:"full"`. Full detail without filters returns the legacy complete catalog. Generated `create_asset`, `create_graph_icon`, and `architecture_icon_assets` results use reusable asset IDs by default; `detail:"full"` preserves the original byte-bearing results. Core and SDK contracts are unchanged.
 
 ### Local Asset Handles
+
+`register_assets({assets:[{path,root?}]})` registers 1-32 files atomically under
+the same approved startup roots. Results preserve input order; duplicate
+content/type reuses a handle. Failures and cancellation retain no new batch
+assets. A ctime-only filesystem change triggers one bounded content-hash
+revalidation with the same path/identity checks; changes to identity, size,
+mtime or content reject. No mutation is retried and no root is widened.
+
+`prepare_assets({assets:[{asset_id,params}]})` prepares 1-32 registered PNG/JPEG
+images using the existing core `ImageEditParams` (explicit resize, format,
+color adjustments). All prepared results are retained atomically, with
+`source_asset_id` and new/reused IDs. Original files/handles and documents are
+unchanged. Both operations are advanced discoverable MCP tools.
+
+Registration, preparation, listing and closing return `usage` with
+`scope:"process_asset_registry"`, `asset_count`, `asset_limit`,
+`remaining_assets`, `raw_byte_length`, `raw_byte_limit`,
+`remaining_raw_bytes`, and `document_budgets_included:false`.
+Raster metadata additionally reports `raster_cost.encoded_byte_length`
+(base64 payload bytes), `rgba_byte_length` (width * height * 4), and
+`document_total_included:false`. These help plan insertion, but are not a
+document capacity approval: repeated placements count toward encoded payload
+limits, unique rasters toward decode budgets, and other document content also
+consumes capacity. All previous per-file, registry and document limits remain.
 
 The operator can add up to eight repeatable `--asset-dir path` startup options. No roots are enabled implicitly by `--output-dir`, and requests cannot add or widen them. `register_asset({path:"image.png",root:0})` snapshots a relative regular file and returns `asset_id`, name, type, size and SHA-256, never bytes or absolute source paths. PNG/JPEG also return core-decoded pixel `width`/`height`; decoder identity and dimensions are checked before registration and reused by immutable hash. Invalid rasters, metadata or cancellation leave the registry unchanged. Parent traversal, absolute paths, symbolic links/junctions, alternate streams and device names reject. Root, path and handle identity, size and timestamps are checked around bounded reads. Roots must be trusted against hostile concurrent local filesystem modification; this is not an OS sandbox or a protection-removal API.
 

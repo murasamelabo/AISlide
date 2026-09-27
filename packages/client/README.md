@@ -44,8 +44,12 @@ The transport is `(request, { signal }?) => Promise<JSON>`. The Node bridge runs
 
 ## Workspace Commands
 
+作成時にテーマとフォントを決める例です。`Noto Sans JP` は日本語対応のインストール済みファミリーと確認できた場合に限り使い、なければ作成前に利用可能な名前へ置き換えます。`setup` はプリセット、明示テーマ（指定時）、フォントの順に revision 0 の初期状態へ適用され、フォントをインストールしません。タイトル位置・マスター・ヘッダー・フッターは最初に決めて再利用し、parts / graphs の後から一括再スタイルしません。
+
 ```js
-const session = await client.createPresentation('workspace', 'Design review');
+const session = await client.createPresentation('workspace', '技術レビュー（架空例）', {
+  setup: { design_preset: 'minimal', font_family: 'Noto Sans JP' },
+});
 await session.editSlides([
   { op: 'insert', id: 'icons', after: 'slide-1', title: 'Service icons' },
 ], { expectedRevision: session.revision });
@@ -68,6 +72,35 @@ await reopened.session.editSlides([
 `client.createAsset()` is stateless; `session.addAsset()` inserts under revision, cancellation and Undo guards. Accepted inert SVG is retained as a native SVG picture with an inspected transparent PNG fallback, not converted into editable shape paths. Arbitrary SVG, active content and external references are rejected. Native slide copies retain original XML and independently copy chart/workbook resources. Unsupported custom shows/sections or unsafe native copies fail without changing the session. Default `large` permits 256 slides / 32 MiB complete document; explicit `standard` retains 128 / 8 MiB and `legacy` 32 / 2 MiB. Constructor and create/open options accept `capacityProfile`; session operations preserve it. `setCapacityProfile()` verifies before changing the selection. `recoveryEnvelope` and `client.recoverSession()` preserve verified bounded Undo/Redo; legacy document-only recovery starts empty history. See [Phase 5 contracts](../../docs/testing/phase5-recovery-capacity.md).
 
 ## Master Presets
+
+For content-oriented authoring on a generated empty slide, reuse one style
+object and let the core place the title, body and footer. Imported/nonempty
+slides reject this operation; use existing explicit editing for those.
+
+```js
+const commonStyle = { title_size: 40, body_size: 24, padding: 24 };
+await session.composeSlide('slide-1', {
+  id: 'overview',
+  spec: {
+    title: 'Synthetic overview', footer: 'Synthetic, not measured', style: commonStyle,
+    blocks: [{ kind: 'cards', items: [{ label: 'First', detail: 'Assumption' }, { label: 'Second', detail: 'Unverified' }] }],
+  },
+}, { expectedRevision: session.revision, expectedHash: session.getSummary({ limit: 0 }).hash });
+await session.setRichText('slide-1', {
+  id: 'overview-b0-c0', paragraphs: [{ runs: [{ text: 'One content source', style: { bold: true } }] }],
+});
+const graph = await client.layoutGraph({ version: 1, title: 'Synthetic flow', columns: 2,
+  nodes: [{ id: 'first', label: 'First' }, { id: 'second', label: 'Second' }],
+  edges: [{ id: 'flow', source: 'first', target: 'second' }],
+});
+```
+
+Use a `composeSlide` block `{kind:'graph',input:...}` to lay out and insert
+the graph in one mutation without sending the resulting coordinates back.
+Grid layout is not hierarchical; groups are unsupported. Parts keep their
+existing fitting rules; ordinary composition text rejects overflow without
+shrinking. `setRichText` derives plain text and retains strict canonical
+validation. See [semantic contracts](../../docs/api.md#initial-setup-and-semantic-composition).
 
 ```js
 const presets = await client.designPresets();

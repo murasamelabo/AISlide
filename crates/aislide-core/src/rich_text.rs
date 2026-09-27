@@ -173,6 +173,22 @@ pub fn apply_range(mut element: Element, start: usize, end: usize, style: RunSty
     Ok(element)
 }
 
+pub fn replace_paragraphs(mut element: Element, paragraphs: Vec<RichParagraph>) -> Result<Element> {
+    validate_element(&element)?;
+    validate_paragraphs(&paragraphs)?;
+    let had_fields = crate::fields::has_fields(&element);
+    let (text, format) = editable(&mut element)?;
+    if format.paragraphs == paragraphs && *text == plain_text(&paragraphs) { return Ok(element); }
+    if had_fields || paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.field.is_some()) {
+        return Err(Error::Unsupported("use dedicated field operations to change dynamic field content".into()));
+    }
+    *text = plain_text(&paragraphs);
+    format.paragraphs = paragraphs;
+    format.inherit_layout = false;
+    validate_element(&element)?;
+    Ok(element)
+}
+
 pub fn replace_text_content(mut element: Element, replacement: String) -> Result<Element> {
     validate_element(&element)?; valid_text(&replacement, 4000)?;
     if crate::fields::has_fields(&element) { return crate::fields::replace_body(element, replacement); }

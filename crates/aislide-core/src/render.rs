@@ -516,7 +516,7 @@ impl Scene<'_> {
                 self.shaped_text(
                     id,
                     text,
-                    [6.0, 4.0, (width - 12.0).max(1.0), (height - 8.0).max(1.0)],
+                    format.content_frame(width, height, true),
                     *font_size,
                     color,
                     *bold,
@@ -534,7 +534,7 @@ impl Scene<'_> {
             } => self.shaped_text(
                 id,
                 text,
-                [0.0, 0.0, width, height],
+                format.content_frame(width, height, false),
                 *font_size,
                 color,
                 *bold,

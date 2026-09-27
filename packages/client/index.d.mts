@@ -81,10 +81,11 @@ export class AislideClient {
   createGraph(input: { id: string; spec: GraphSpec; theme?: Theme; include_diagnostics?: false }, options?: RequestOptions): Promise<Element>
   createGraph(input: { id: string; spec: GraphSpec; theme?: Theme; include_diagnostics?: boolean }, options?: RequestOptions): Promise<Element | GraphCreation>
   transformGraph(spec: GraphSpec, operations: GraphOperation[], options?: RequestOptions): Promise<GraphSpec>
+  layoutGraph(input: import('./types').GraphLayoutInput, options?: RequestOptions): Promise<GraphSpec>
   createPart(input: { id: string; spec: PartSpec; theme?: Theme }, options?: RequestOptions): Promise<Element>
   createObject(input: ObjectInput, options?: RequestOptions): Promise<Element>
   createAsset(input: AssetInput, options?: RequestOptions): Promise<Element>
-  createPresentation(id: string, title?: string, options?: RequestOptions): Promise<DocumentSession>
+  createPresentation(id: string, title?: string, options?: RequestOptions & { setup?: import('./types').PresentationSetup }): Promise<DocumentSession>
   openPresentation(id: string, base64: string, options?: RequestOptions): Promise<{ session: DocumentSession; warnings: string[]; objects: ImportedObject[]; format: 'open_xml_pptx' }>
   importPresentation(id: string, base64: string, options?: RequestOptions): Promise<{ session: DocumentSession; warnings: string[]; objects: ImportedObject[] }>
   createDocument(input: { id: string; deck: Deck; sources?: SourceDocument[]; bindings?: SourceBinding[]; report?: Report | null }, options?: RequestOptions): Promise<DocumentSession>
@@ -113,6 +114,9 @@ export class DocumentSession {
   setFrames(slideId: string, frames: { id: string; frame: Frame }[], options?: AuthoringOptions): Promise<AislideDocument>
   /** Partial overlay; retains unspecified run and paragraph styles, unlike applyFormat's format-painter semantics. */
   setTextStyle(slideId: string, input: { ids: string[]; style: RunStyle }, options?: AuthoringOptions): Promise<AislideDocument>
+  setTextPadding(slideId: string, input: { ids: string[]; padding: import('./types').TextPadding | null }, options?: AuthoringOptions): Promise<AislideDocument>
+  setRichText(slideId: string, input: { id: string; paragraphs: import('./types').RichParagraph[] }, options?: AuthoringOptions): Promise<AislideDocument>
+  composeSlide(slideId: string, input: { id: string; spec: import('./types').CompositionSpec }, options?: AuthoringOptions): Promise<AislideDocument>
   setSlideBackground(slideId: string, color: string, options?: AuthoringOptions): Promise<AislideDocument>
   /** Replaces connector settings; omitted start/end/routing clear them. Visual properties remain unchanged. */
   setConnector(slideId: string, input: { id: string; connector: ConnectorSettings; frame?: Frame | null }, options?: AuthoringOptions): Promise<AislideDocument>

@@ -5,6 +5,19 @@ import { AislideClient, DocumentSession } from '../packages/client/index.mjs';
 import { requestCore } from './core-client.mjs';
 import { guidedExamples } from './guided-demo.mjs';
 
+test('semantic authoring SDK forwards initial setup and retains request controls', async () => {
+  const calls = [];
+  const client = new AislideClient(async (request, options) => { calls.push({ request, options }); return { id: request.id, revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } }; });
+  const signal = new AbortController().signal;
+  const setup = { design_preset: 'minimal', font_family: 'Noto Sans CJK JP' };
+  const session = await client.createPresentation('setup-sdk', 'Synthetic', { setup, signal, capacityProfile: 'standard' });
+  assert.equal(session.revision, 0);
+  assert.deepEqual(calls[0].request.setup, setup);
+  assert.equal(calls[0].options.signal, signal);
+  await client.createPresentation('legacy-sdk');
+  assert.equal(Object.hasOwn(calls[1].request, 'setup'), false);
+});
+
 test('lightweight SDK summary is paginated, detached and excludes source and image payloads', () => {
   const slides = Array.from({ length: 40 }, (_, index) => ({ id: `slide-${index}`, title: `Synthetic ${index}`, background: 'FFFFFF', notes: 'Private notes', elements: [
     { type: 'group', id: `group-${index}`, x: 10, y: 20, width: 600, height: 400, children: [
@@ -343,6 +356,9 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
       session.addElements('slide-1', [{ type: 'text', id: 'text', ...frame, text: 'Synthetic', font_size: 24, color: '@dk1', bold: false }], options),
       session.setFrames('slide-1', [{ id: 'text', frame }], options),
       session.setTextStyle('slide-1', { ids: ['text'], style: { bold: false } }, options),
+      session.setTextPadding('slide-1', { ids: ['text'], padding: { left: 24, right: 24, top: 16, bottom: 16 } }, options),
+      session.setRichText('slide-1', { id: 'text', paragraphs: [{ runs: [{ text: 'Single source' }] }] }, options),
+      session.composeSlide('slide-1', { id: 'content', spec: { title: 'Synthetic', style: { padding: 24 }, blocks: [{ kind: 'callout', text: 'Note' }, { kind: 'graph', input: { version: 1, title: '', nodes: [{ id: 'node', label: 'Node' }] } }] } }, options),
       session.setSlideBackground('slide-1', 'FFFFFF', options),
       session.setConnector('slide-1', { id: 'edge', connector, frame }, options),
       session.setPictureCrop('slide-1', { id: 'image', crop }, options),
@@ -351,6 +367,15 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
       session.addPicture('slide-1', picture, options), session.importSlides(source, imported, options),
     ];
     const graph: GraphSpec = { version: 1, title: 'Synthetic', show_title: false, nodes: [{ id: 'node', label: 'Heading', detail: 'Detail', detail_font_size: 12, text_align: 'right', heading_bold: false, x: 0, y: 0, height: 512 }] };
+    const initial: Promise<DocumentSession> = client.createPresentation('setup', 'Synthetic', { setup: { design_preset: 'minimal', font_family: 'Noto Sans JP' } });
+    const positioned: Promise<GraphSpec> = client.layoutGraph({ version: 1, title: 'Synthetic', nodes: [{ id: 'node', label: 'Node' }], columns: 2 });
+    void [initial, positioned];
+    // @ts-expect-error coordinate-free input must not accept explicit coordinates
+    client.layoutGraph({ version: 1, title: 'Synthetic', nodes: [{ id: 'node', label: 'Node', x: 0, y: 0 }] });
+    // @ts-expect-error rich content has only one source
+    session.setRichText('slide-1', { id: 'text', text: 'Duplicate', paragraphs: [] });
+    // @ts-expect-error block variants are explicit
+    session.composeSlide('slide-1', { id: 'content', spec: { title: 'Synthetic', blocks: [{ kind: 'unknown' }] } });
     graph.nodes[0].label_fit = 'shrink';
     graph.nodes.push({ ...graph.nodes[0], label_fit: 'wrap' });
     const creation: Promise<GraphCreation> = client.createGraph({ id: 'graph', spec: graph, include_diagnostics: true });
@@ -370,6 +395,7 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
     const part: PartSpec = { version: 1, preset: 'synthetic', title: 'Synthetic', data: { kind: 'diagram', graph }, layout: { ...frame, show_title: false } };
     const matrix: PartSpec = { ...part, data: { kind: 'matrix', corner_label: 'Criterion', rows: ['A', 'B'], columns: ['C', 'D'], cells: [['a', 'b'], ['c', 'd']] } };
     const managed: AuthoringOperation[] = [
+      { op: 'set_text_padding', slide_id: 'slide-1', ids: ['text'], padding: null },
       { op: 'update_notes', slide_id: 'slide-1', notes: 'Synthetic notes' },
       { op: 'set_table_headers', slide_id: 'slide-1', element_id: 'table', policy: 'first_row' },
       { op: 'set_accessibility', slide_id: 'slide-1', element_id: 'picture', metadata: { description: 'Synthetic image', decorative: false } },

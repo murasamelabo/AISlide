@@ -7,6 +7,23 @@ fn document() -> Value {
 }
 
 #[test]
+fn text_bearing_card_padding_is_reported_without_flagging_small_badges() {
+    for padded in [false, true] {
+        let mut deck = document()["deck"].clone();
+        deck["slides"][0]["elements"] = json!([
+            {"type":"shape","id":"card","x":40,"y":100,"width":400,"height":240,"preset":"roundRect","fill":"EEF1FB","stroke":"000000","stroke_width":1,"text":"Synthetic card","font_size":24,"color":"000000","bold":false},
+            {"type":"shape","id":"badge","x":500,"y":100,"width":40,"height":30,"preset":"roundRect","fill":"EEF1FB","stroke":"000000","stroke_width":1,"text":"1","font_size":14,"color":"000000","bold":true}
+        ]);
+        if padded { deck["slides"][0]["elements"][0]["format"] = json!({"padding":{"left":24,"right":24,"top":16,"bottom":16}}); }
+        let document = execute_request(json!({"op":"new_document","id":"card-padding-check","deck":deck})).unwrap();
+        let checked = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
+        let padding: Vec<_> = checked["findings"].as_array().unwrap().iter().filter(|finding| finding["code"] == "CONTAINER_PADDING").collect();
+        assert_eq!(padding.len(), usize::from(!padded), "{padding:?}");
+        assert!(padding.iter().all(|finding| finding["element_ids"] == json!(["card"])));
+    }
+}
+
+#[test]
 fn retest_fallback_warnings_merge_per_element_without_losing_requested_families() {
     let mut deck = document()["deck"].clone();
     deck["design"] = Value::Null;

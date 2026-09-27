@@ -9,6 +9,96 @@ fn graph() -> Value {
     ],"edges":[{"id":"request","source":"client","target":"api","label":"HTTPS","source_port":"right","target_port":"left","route":"straight"}],"groups":[]})
 }
 
+#[test]
+fn layout_graph_matches_existing_grid_and_preserves_node_edge_properties() {
+    let icon = execute_request(json!({"op":"create_graph_icon","base64":STANDARD.encode(r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#008080"/></svg>"##),"mime_type":"image/svg+xml","alt":"Synthetic icon"})).unwrap();
+    let mut input = json!({"version":1,"title":"Synthetic grid","subtitle":"Existing grid, not hierarchical","nodes":[
+        {"id":"client","label":"Client","detail":"Detail","detail_font_size":14,"text_align":"left","heading_bold":false,"label_fit":"shrink","kind":"rounded_rectangle","width":200,"height":96,"fill":"@accent2","stroke":"123456","color":"@dk2","font_size":20,"icon":icon},
+        {"id":"api","label":"API","kind":"ellipse"},
+        {"id":"worker","label":"Worker","width":160,"height":72},
+        {"id":"store","label":"Store","kind":"cylinder"}
+    ],"edges":[{"id":"request","source":"client","target":"api","label":"HTTPS","source_port":"right","target_port":"left","route":"manual","waypoints":[[500,200]],"source_offset":0.2,"target_offset":-0.2,"color":"@accent3","stroke_width":2,"label_color":"@dk2","label_font_size":14,"label_placement":{"position":0.3,"side":"below","offset":8},"badge":{"number":1},"arrow":false,"start_arrow":true,"dashed":true}]});
+    for show_title in [true, false] {
+        for columns in [None, Some(2)] {
+            input["show_title"] = json!(show_title);
+            input.as_object_mut().unwrap().remove("columns");
+            if let Some(columns) = columns { input["columns"] = json!(columns); }
+            let before = input.clone();
+            let positioned = execute_request(json!({"op":"layout_graph","input":input})).unwrap();
+            let mut seed = input.clone();
+            seed.as_object_mut().unwrap().remove("columns");
+            for node in seed["nodes"].as_array_mut().unwrap() {
+                node["x"] = json!(0); node["y"] = json!(if show_title { 88 } else { 0 });
+            }
+            let expected = execute_request(json!({"op":"transform_graph","spec":seed,"operations":[{"op":"layout","columns":columns.unwrap_or(3)}]})).unwrap();
+            assert_eq!(positioned, expected);
+            assert_eq!(input, before);
+            assert_eq!(positioned["groups"], json!([]));
+            assert!(positioned.get("columns").is_none());
+            assert_eq!(positioned["nodes"][0]["width"], 200.0);
+            assert_eq!(positioned["nodes"][0]["icon"], icon);
+            assert_eq!(positioned["nodes"][1]["width"], 176.0);
+            assert_eq!(positioned["nodes"][1]["height"], 80.0);
+            assert_eq!(positioned["nodes"][1]["font_size"], 18.0);
+            let canonical = serde_json::from_value::<aislide_core::graphs::GraphSpec>(positioned).unwrap();
+            aislide_core::graphs::validate(&canonical).unwrap();
+        }
+    }
+    let single = execute_request(json!({"op":"layout_graph","input":{"version":1,"title":"Defaults","nodes":[{"id":"only","label":"Only"}]}})).unwrap();
+    assert_eq!(single["nodes"][0]["x"], 488.0);
+    assert_eq!(single["nodes"][0]["y"], 260.0);
+}
+
+#[test]
+fn layout_graph_rejects_unsupported_fields_and_invalid_graphs() {
+    let input = json!({"version":1,"title":"Strict input","nodes":[{"id":"first","label":"First"},{"id":"second","label":"Second"}],"edges":[{"id":"edge","source":"first","target":"second"}]});
+    for (field, value) in [("groups", json!([])), ("groups", Value::Null), ("layout", json!("hierarchical")), ("columns", json!(0)), ("columns", json!(9)), ("columns", json!(1.5)), ("columns", Value::Null), ("version", json!(2)), ("nodes", json!([])), ("title", json!("x".repeat(81)))] {
+        let mut invalid = input.clone(); invalid[field] = value;
+        assert!(execute_request(json!({"op":"layout_graph","input":invalid})).is_err(), "accepted {field}");
+    }
+    for (field, value) in [("x", json!(0)), ("y", json!(88)), ("group", Value::Null), ("parent", json!("other")), ("children", json!([])), ("style", json!({})), ("id", json!("second")), ("id", json!("bad/id")), ("label", json!("x".repeat(161))), ("detail", json!(" ")), ("width", json!(63)), ("height", json!(39)), ("width", Value::Null), ("font_size", json!(41)), ("fill", json!("red")), ("icon", json!({"url":"https://example.invalid/icon.png"}))] {
+        let mut invalid = input.clone(); invalid["nodes"][0][field] = value;
+        assert!(execute_request(json!({"op":"layout_graph","input":invalid})).is_err(), "accepted node {field}");
+    }
+    for (field, value) in [("source", json!("missing")), ("target", json!("first")), ("id", json!("first")), ("unknown", json!(true)), ("label", json!("x".repeat(65))), ("stroke_width", json!(0)), ("route", json!("hierarchical"))] {
+        let mut invalid = input.clone(); invalid["edges"][0][field] = value;
+        assert!(execute_request(json!({"op":"layout_graph","input":invalid})).is_err(), "accepted edge {field}");
+    }
+    assert!(execute_request(json!({"op":"layout_graph","input":input,"unknown":true})).is_err());
+    assert!(execute_request(json!({"op":"create_graph","id":"canonical","spec":input})).is_err());
+    assert!(execute_request(json!({"op":"transform_graph","spec":input,"operations":[{"op":"layout","columns":2}]})).is_err());
+}
+
+#[test]
+fn layout_graph_retains_entity_limits_and_never_resizes_to_fit() {
+    let nodes: Vec<_> = (0..48).map(|index| json!({"id":format!("node-{index}"),"label":"Node","width":64,"height":40})).collect();
+    let edges: Vec<_> = (0..64).map(|index| json!({"id":format!("edge-{index}"),"source":"node-0","target":"node-1"})).collect();
+    let input = json!({"version":1,"title":"Capacity","columns":8,"nodes":nodes,"edges":edges});
+    let positioned = execute_request(json!({"op":"layout_graph","input":input})).unwrap();
+    assert_eq!(positioned["nodes"].as_array().unwrap().len(), 48);
+    assert_eq!(positioned["edges"].as_array().unwrap().len(), 64);
+    for node in positioned["nodes"].as_array().unwrap() {
+        assert_eq!(node["width"], 64.0); assert_eq!(node["height"], 40.0);
+        assert!(node["y"].as_f64().unwrap() >= 88.0);
+    }
+    for field in ["nodes", "edges"] {
+        let mut invalid = input.clone();
+        let mut extra = invalid[field][0].clone(); extra["id"] = json!("extra");
+        invalid[field].as_array_mut().unwrap().push(extra);
+        assert!(execute_request(json!({"op":"layout_graph","input":invalid})).is_err());
+    }
+    let oversized = json!({"version":1,"title":"No resize","columns":2,"nodes":[{"id":"wide","label":"Wide","width":600},{"id":"other","label":"Other"}]});
+    let error = execute_request(json!({"op":"layout_graph","input":oversized})).unwrap_err().to_string();
+    assert!(error.contains("grid does not fit existing node sizes"), "{error}");
+}
+
+#[test]
+fn layout_graph_validates_manual_routes_after_placement() {
+    let input = json!({"version":1,"title":"Final validation","show_title":false,"columns":2,"nodes":[{"id":"first","label":"First"},{"id":"second","label":"Second"}],"edges":[{"id":"edge","source":"first","target":"second","source_port":"right","target_port":"left","route":"manual","waypoints":[[376,256]]}]});
+    let error = execute_request(json!({"op":"layout_graph","input":input})).unwrap_err().to_string();
+    assert!(error.contains("collapsed consecutive segments"), "{error}");
+}
+
 fn feedback_graph() -> Value {
     json!({"version":1,"title":"ISOC とデータの流れ（グラフ機能の検証）","subtitle":"","show_title":false,
         "groups":[

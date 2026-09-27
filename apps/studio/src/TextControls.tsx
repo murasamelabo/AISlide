@@ -1,6 +1,6 @@
 ﻿import { useEffect, useId, useImperativeHandle, useRef, useState } from 'react'
 import type { Ref } from 'react'
-import { AlignCenter, AlignJustify, AlignLeft, AlignRight, Bold, Italic, List, ListOrdered, Underline, Subscript, Superscript, Highlighter, Plus, X } from 'lucide-react'
+import { AlignCenter, AlignJustify, AlignLeft, AlignRight, Bold, Italic, List, ListOrdered, Underline, Subscript, Superscript, Highlighter, Plus, RotateCcw, X } from 'lucide-react'
 import { cssColor } from './design'
 import { Tool } from './Tool'
 import type { Element, TextFormat, Theme, RichParagraph, RichSpacing, RunStyle } from './types'
@@ -98,6 +98,7 @@ function TextControlsDraft({ element, theme, onChange, textLabel = 'Text content
   const [textDraft, setTextDraft] = useState<string | null>(null)
   const [selection, setSelection] = useState({ start: 0, end: 0 })
   const [paragraphIndex, setParagraphIndex] = useState(0)
+  const [paddingDrafts, setPaddingDrafts] = useState<Partial<Record<'left' | 'right' | 'top' | 'bottom', { value: string; padding: TextFormat['padding'] }>>>({})
   const [working, setWorking] = useState(false)
   const [error, setError] = useState('')
   const pending = useRef(false)
@@ -157,6 +158,15 @@ function TextControlsDraft({ element, theme, onChange, textLabel = 'Text content
     <div className="text-format-bar" role="group" aria-label="Text alignment">{([['left', AlignLeft], ['center', AlignCenter], ['right', AlignRight], ['justify', AlignJustify]] as const).map(([alignment, Icon]) => <Tool key={alignment} label={`Align ${alignment}`} pressed={(format.alignment ?? 'left') === alignment} onClick={() => changeFormat({ alignment })}><Icon size={20} /></Tool>)}</div>
     </>}
     <label className="field">Vertical alignment<select aria-label="Vertical alignment" value={format.vertical ?? 'top'} onChange={(event) => changeFormat({ vertical: event.target.value as TextFormat['vertical'] })}><option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option></select></label>
+    <fieldset><legend>Text padding (px)</legend><div className="text-tools-grid">
+      {(['left', 'right', 'top', 'bottom'] as const).map(side => {
+        const horizontal = side === 'left' || side === 'right'
+        const opposite = { left: 'right', right: 'left', top: 'bottom', bottom: 'top' } as const
+        const padding = format.padding ?? (element.type === 'shape' ? { left: 6, right: 6, top: 4, bottom: 4 } : { left: 0, right: 0, top: 0, bottom: 0 })
+        const draft = paddingDrafts[side]
+        return <label className="field" key={side}>{side[0].toUpperCase() + side.slice(1)}<input aria-label={`Text padding ${side}`} type="number" min={0} max={Math.max(0, (horizontal ? element.width : element.height) - (padding[opposite[side]] ?? 0) - 1)} step={1} value={(draft?.padding === format.padding ? draft?.value : undefined) ?? format.padding?.[side] ?? ''} placeholder="Default" onBlur={() => setPaddingDrafts(drafts => ({ ...drafts, [side]: undefined }))} onChange={event => { const value = event.currentTarget.value; setPaddingDrafts(drafts => ({ ...drafts, [side]: { value, padding: format.padding } })); if (value && event.currentTarget.validity.valid) changeFormat({ inherit_layout: false, padding: { ...padding, [side]: event.currentTarget.valueAsNumber } }) }} /></label>
+      })}
+    </div><Tool label="Use default text padding" disabled={format.padding == null} onClick={() => changeFormat({ inherit_layout: false, padding: null })}><RotateCcw size={20} /></Tool></fieldset>
     <label className="field">Hyperlink<input aria-label="Hyperlink" type="text" placeholder="https://" maxLength={2048} value={format.hyperlink ?? ''} onChange={(event) => changeFormat({ hyperlink: event.target.value || null })} /></label>
     </fieldset>
     <ParagraphControls paragraph={paragraphs[selectedParagraph]} paragraphIndex={selectedParagraph} paragraphCount={paragraphs.length} onSelectParagraph={setParagraphIndex} disabled={busy || textDraft !== null} onChange={(patch) => changeFormat({ inherit_layout: false, paragraphs: paragraphs.map((paragraph, index) => index === selectedParagraph ? { ...paragraph, ...patch } : paragraph) })} />

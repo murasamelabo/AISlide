@@ -8,6 +8,24 @@ fn sample() -> Value {
 }
 
 #[test]
+fn presentation_setup_applies_design_and_fonts_before_first_revision() {
+    let defaults = execute_request(json!({"op":"design_defaults"})).unwrap();
+    let mut theme = defaults["theme"].clone(); theme["colors"]["accent1"] = json!("126C72");
+    let document = execute_request(json!({"op":"create_presentation","id":"setup-test","title":"Synthetic technical deck","setup":{"design_preset":"minimal","theme":theme,"font_family":"Noto Sans CJK JP"}})).unwrap();
+    assert_eq!(document["revision"], 0);
+    assert_eq!(document["deck"]["slides"].as_array().unwrap().len(), 1);
+    assert!(document["deck"]["slides"][0]["elements"].as_array().unwrap().is_empty());
+    for field in ["major", "minor", "east_asian", "complex_script"] { assert_eq!(document["deck"]["design"]["theme"]["fonts"][field], "Noto Sans CJK JP"); }
+    assert_eq!(document["deck"]["design"]["theme"]["colors"]["accent1"], "126C72");
+    assert_eq!(document["deck"]["slides"][0]["layout_id"], "preset-blank");
+    let before = execute_request(json!({"op":"create_presentation","id":"legacy-setup","title":"Legacy"})).unwrap();
+    assert_eq!(before, execute_request(json!({"op":"create_presentation","id":"legacy-setup","title":"Legacy","setup":{}})).unwrap());
+    for setup in [json!({"design_preset":"missing"}), json!({"font_family":""}), json!({"font_family":"bad\nfont"}), json!({"unknown":true})] {
+        assert!(execute_request(json!({"op":"create_presentation","id":"bad-setup","title":"Synthetic","setup":setup})).is_err());
+    }
+}
+
+#[test]
 fn design_presets_define_native_layouts_typography_and_spacing() {
     let presets = execute_request(json!({"op":"design_presets"})).unwrap();
     let presets = presets.as_array().unwrap();

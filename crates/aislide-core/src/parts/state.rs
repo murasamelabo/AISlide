@@ -126,6 +126,14 @@ pub fn change(document:&Document,expected_revision:u64,slide_id:&str,id:&str,spe
     Ok(crate::graphs::annotate_transaction(result,&targets))
 }
 
+fn explicit_native_padding(element: &mut Element) {
+    match element {
+        Element::Shape { format, .. } => { format.padding.get_or_insert_with(Default::default); }
+        Element::Group { children, .. } => { for child in children { explicit_native_padding(child); } }
+        _ => {}
+    }
+}
+
 pub(crate) fn change_in_deck(deck:&mut Deck,parts:&mut Vec<PartInstance>,slide_id:&str,id:&str,spec:&PartSpec,update:bool,native_guard:&mut NativeRegenerationGuard<'_>)->Result<()> {
     if !update && parts.len()>=128 {return Err(Error::Limit("more than 128 metadata parts".into()));}
     let slide=deck.slides.iter_mut().find(|slide|slide.id==slide_id).ok_or_else(||Error::Invalid("unknown part slide".into()))?;
@@ -160,6 +168,7 @@ pub(crate) fn change_in_deck(deck:&mut Deck,parts:&mut Vec<PartInstance>,slide_i
         }
     }
     let native_sha256=existing.and_then(|index|parts[index].native_sha256.clone());
+    if native_sha256.is_some() { explicit_native_padding(&mut element); }
     if update {
         let index=existing.ok_or_else(||Error::Invalid("part metadata missing".into()))?;
         if parts[index].stale {return Err(Error::Conflict("part metadata is stale; retain manual edits or insert a new part".into()));}

@@ -43,8 +43,20 @@ export type RichRun = { text: string; style?: RunStyle; field?: RichField | null
 export type RichSpacing = { kind: 'percent' | 'points'; value: number }
 export type RichTab = { position: number; alignment?: 'left' | 'center' | 'right' | 'decimal' }
 export type RichParagraph = { runs: RichRun[]; alignment?: 'left' | 'center' | 'right' | 'justify' | null; bullet?: 'none' | 'bullet' | 'numbered' | null; bullet_character?: string | null; numbering?: 'arabicPeriod' | 'arabicParenR' | 'arabicParenBoth' | 'arabicPlain' | 'alphaLcPeriod' | 'alphaUcPeriod' | 'alphaLcParenR' | 'alphaUcParenR' | 'romanLcPeriod' | 'romanUcPeriod' | null; number_start?: number | null; level?: number | null; margin_left?: number | null; indent?: number | null; line_spacing?: RichSpacing | null; space_before?: RichSpacing | null; space_after?: RichSpacing | null; tabs?: RichTab[] }
-export type TextFormat = { italic?: boolean; underline?: boolean; alignment?: 'left' | 'center' | 'right' | 'justify'; vertical?: 'top' | 'middle' | 'bottom'; bullet?: 'none' | 'bullet' | 'numbered'; font_family?: string | null; hyperlink?: string | null; placeholder?: Placeholder | null; inherit_layout?: boolean; paragraphs?: RichParagraph[] }
+export type TextPadding = { left?: number; right?: number; top?: number; bottom?: number }
+export type TextFormat = { italic?: boolean; underline?: boolean; alignment?: 'left' | 'center' | 'right' | 'justify'; vertical?: 'top' | 'middle' | 'bottom'; bullet?: 'none' | 'bullet' | 'numbered'; font_family?: string | null; hyperlink?: string | null; placeholder?: Placeholder | null; inherit_layout?: boolean; paragraphs?: RichParagraph[]; padding?: TextPadding | null }
 export type Theme = { name: string; colors: Record<string, string>; fonts: { major: string; minor: string; east_asian: string; complex_script: string } }
+export type PresentationSetup = { design_preset?: 'public' | 'minimal' | 'stylish' | 'pop' | 'dynamic' | 'trust' | 'luxury'; theme?: Theme; font_family?: string }
+export type CompositionStyle = { title_size?: number; body_size?: number; footer_size?: number; padding?: number; card_fill?: string; accent?: string }
+export type CompositionBlock =
+  | { kind: 'cards'; items: { label: string; detail?: string }[]; columns?: number }
+  | { kind: 'callout'; text: string }
+  | { kind: 'text'; paragraphs: RichParagraph[] }
+  | { kind: 'steps'; items: PartItem[] }
+  | { kind: 'comparison'; rows: string[]; columns: string[]; cells: string[][]; corner_label?: string }
+  | { kind: 'graph'; input: GraphLayoutInput }
+  | { kind: 'part'; spec: Omit<PartSpec, 'layout'> }
+export type CompositionSpec = { title: string; subtitle?: string; footer?: string; style?: CompositionStyle; blocks: CompositionBlock[] }
 export type Master = { id: string; name: string; background: string; elements: Element[]; theme?: Theme | null }
 export type AuxiliaryMaster = { name: string; background: string; theme: Theme; elements: Element[] }
 export type AuxiliaryDesign = { width: number; height: number; notes_master?: AuxiliaryMaster | null; handout_master?: AuxiliaryMaster | null }
@@ -170,6 +182,9 @@ export type AuthoringOperation =
   | { op: 'add_elements'; slide_id: string; elements: Element[] }
   | { op: 'set_frame'; slide_id: string; id: string; frame: Frame }
   | { op: 'set_text_style'; slide_id: string; ids: string[]; style: RunStyle }
+  | { op: 'set_text_padding'; slide_id: string; ids: string[]; padding: TextPadding | null }
+  | { op: 'set_rich_text'; slide_id: string; id: string; paragraphs: RichParagraph[] }
+  | { op: 'compose_slide'; slide_id: string; id: string; spec: CompositionSpec }
   | { op: 'set_slide_background'; slide_id: string; color: string }
   | { op: 'update_notes'; slide_id: string; notes: string }
   | { op: 'set_table_headers'; slide_id: string; element_id: string; policy: TableHeaders }
@@ -228,6 +243,8 @@ export type GraphBadge = { number: number; position?: number; size?: number; fon
 export type GraphEdge = { id: string; source: string; target: string; source_port?: GraphPort; target_port?: GraphPort; label?: string; route?: GraphRoute; color?: string; arrow?: boolean; start_arrow?: boolean; dashed?: boolean; stroke_width?: number | null; label_color?: string | null; label_font_size?: number | null; source_offset?: number | null; target_offset?: number | null; waypoints?: [number, number][]; label_placement?: GraphLabelPlacement | null; badge?: GraphBadge | null }
 export type GraphGroup = { id: string; label: string; x: number; y: number; width: number; height: number; fill?: string; stroke?: string; parent?: string | null; icon?: GraphIcon | null; padding?: number | null; header_height?: number | null; header_font_size?: number | null; header_color?: string | null }
 export type GraphSpec = { version: 1; title: string; subtitle?: string; show_title?: boolean; nodes: GraphNode[]; edges?: GraphEdge[]; groups?: GraphGroup[] }
+export type GraphLayoutNode = Omit<GraphNode, 'x' | 'y' | 'group'>
+export type GraphLayoutInput = Omit<GraphSpec, 'nodes' | 'groups'> & { nodes: GraphLayoutNode[]; columns?: number }
 export type GraphFinding = { code: string; severity: 'warning' | 'info'; graph_id: string; entity_id: string; element_ids: string[]; bounds: [number, number, number, number]; message: string; slide_id?: string; lines?: number; font_size?: number }
 export type GraphDiagnostics = { status: 'complete' | 'partial' | 'unavailable'; findings: GraphFinding[] }
 export type GraphDiagnosticsSnapshot = GraphDiagnostics & { revision: number; hash: string }

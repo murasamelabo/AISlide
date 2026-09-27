@@ -12,6 +12,110 @@ fn text_element() -> Value {
 }
 
 #[test]
+fn explicit_text_padding_is_native_and_survives_reopening() {
+    let padding = json!({"left":24.0,"right":24.0,"top":16.0,"bottom":16.0});
+    for shape in [false, true] {
+        let mut input = text_element();
+        if shape {
+            input["type"] = json!("shape"); input["preset"] = json!("roundRect");
+            input["fill"] = json!("EEF1FB"); input["stroke"] = json!("087F73"); input["stroke_width"] = json!(1);
+        }
+        input["format"] = json!({"padding":padding});
+        let bytes = export_deck(deck(input));
+        let package = Package::open(bytes.clone()).unwrap();
+        let xml = package.text("ppt/slides/slide1.xml").unwrap();
+        for attribute in ["lIns=\"228600\"", "rIns=\"228600\"", "tIns=\"152400\"", "bIns=\"152400\""] { assert!(xml.contains(attribute), "{attribute}"); }
+        let document = open(&bytes);
+        assert_eq!(document["deck"]["slides"][0]["elements"][0]["format"]["padding"], padding);
+        assert_eq!(export_document(&document), bytes);
+    }
+}
+
+#[test]
+fn zero_padding_and_combined_native_text_edits_preserve_insets_and_unknown_properties() {
+    let mut shape = text_element();
+    shape["type"] = json!("shape"); shape["preset"] = json!("rect"); shape["fill"] = json!("EEEEEE"); shape["stroke"] = json!("000000"); shape["stroke_width"] = json!(1);
+    let zero = json!({"left":0.0,"right":0.0,"top":0.0,"bottom":0.0});
+    shape["format"] = json!({"padding":zero});
+    let bytes = export_deck(deck(shape));
+    assert_eq!(open(&bytes)["deck"]["slides"][0]["elements"][0]["format"]["padding"], zero);
+    let bytes = body_fixture("<p:txBody><a:bodyPr lIns='152400' rIns='152400' tIns='95250' bIns='95250' rot='0'/><a:lstStyle/><a:p><a:r><a:t>Before</a:t></a:r></a:p></p:txBody>");
+    let document = open(&bytes);
+    let mut next = document["deck"]["slides"][0]["elements"][0].clone();
+    next["text"] = json!("After");
+    next["format"]["padding"] = json!({"left":24.0,"right":24.0,"top":12.0,"bottom":12.0});
+    let changed = transact(&document, next.clone()).unwrap();
+    let saved = export_document(&changed["document"]);
+    let reopened = open(&saved);
+    assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["text"], "After");
+    assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["format"]["padding"], next["format"]["padding"]);
+    assert!(Package::open(saved).unwrap().text("ppt/slides/slide1.xml").unwrap().contains("rot='0'"));
+}
+
+#[test]
+fn inherited_native_text_and_padding_are_saved_together() {
+    let original = execute_request(json!({"op":"create_presentation","id":"inherited-padding","title":"Synthetic inheritance"})).unwrap();
+    let layout = original["deck"]["design"]["layouts"].as_array().unwrap().iter().find(|layout| !layout["elements"].as_array().unwrap().is_empty()).unwrap();
+    let assigned = execute_request(json!({"op":"assign_layout","deck":original["deck"],"slide_id":"slide-1","layout_id":layout["id"]})).unwrap();
+    let document = open(&export_deck(assigned));
+    let mut next = document["deck"]["slides"][0]["elements"][0].clone();
+    assert_eq!(next["format"]["inherit_layout"], true);
+    next["text"] = json!("Synthetic changed title");
+    next["format"]["padding"] = json!({"left":12.0,"right":12.0,"top":4.0,"bottom":4.0});
+    let changed = execute_request(json!({"op":"apply_operations","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"operations":[
+        {"op":"set_text_padding","slide_id":"slide-1","ids":[next["id"]],"padding":next["format"]["padding"]},
+        {"op":"set_rich_text","slide_id":"slide-1","id":next["id"],"paragraphs":[{"runs":[{"text":next["text"]}]}]}
+    ]})).unwrap();
+    assert_eq!(changed["document"]["deck"]["slides"][0]["elements"][0]["format"]["inherit_layout"], false);
+    let reopened = open(&export_document(&changed["document"]));
+    assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["text"], next["text"]);
+    assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["format"]["padding"], next["format"]["padding"]);
+}
+
+#[test]
+fn text_padding_controls_measurement_and_preview_content_frame() {
+    for shape in [false, true] {
+        let mut input = text_element();
+        input["text"] = json!("Padding"); input["width"] = json!(300); input["height"] = json!(100);
+        if shape {
+            input["type"] = json!("shape"); input["preset"] = json!("roundRect");
+            input["fill"] = json!("EEF1FB"); input["stroke"] = json!("087F73"); input["stroke_width"] = json!(1);
+        }
+        input["format"] = json!({"padding":{"left":24,"right":24,"top":16,"bottom":16}});
+        let measured = execute_request(json!({"op":"measure_layout","deck":deck(input.clone())})).unwrap();
+        assert_eq!(measured["measurements"][0]["width"].as_f64(), Some(252.0));
+        assert_eq!(measured["measurements"][0]["height"].as_f64(), Some(68.0));
+        let preview = execute_request(json!({"op":"render_element_preview","element":input})).unwrap();
+        assert!(preview["svg"].as_str().unwrap().contains("translate(24 16)"));
+    }
+    for padding in [json!({"left":-1}), json!({"left":1000}), json!({"top":500,"bottom":100}), json!({"left":1,"unknown":true})] {
+        let mut input = text_element(); input["format"] = json!({"padding":padding});
+        assert!(execute_request(json!({"op":"export","deck":deck(input)})).is_err());
+    }
+}
+
+#[test]
+fn native_padding_only_edits_preserve_rich_runs_and_undo_exactly() {
+    for rich in [false, true] {
+        let mut input = text_element();
+        input["format"] = json!({"padding":{"left":24,"right":24,"top":16,"bottom":16}});
+        if rich { input["format"]["paragraphs"] = json!([{"runs":[{"text":"日本😀 ","style":{"bold":true}},{"text":"English","style":{"italic":true}}]}]); }
+        let bytes = export_deck(deck(input));
+        let document = open(&bytes);
+        let mut next = document["deck"]["slides"][0]["elements"][0].clone();
+        next["format"]["padding"] = json!({"left":32.0,"right":32.0,"top":20.0,"bottom":20.0});
+        let changed = transact(&document, next.clone()).unwrap();
+        let saved = export_document(&changed["document"]);
+        let reopened = open(&saved);
+        assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["format"]["padding"], next["format"]["padding"]);
+        assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["format"]["paragraphs"], document["deck"]["slides"][0]["elements"][0]["format"]["paragraphs"]);
+        let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":changed["document"]["revision"],"receipt":changed["receipt"]})).unwrap();
+        assert_eq!(undone["document"]["hash"], document["hash"]);
+        assert_eq!(export_document(&undone["document"]), bytes);
+    }
+}
+
+#[test]
 fn mixed_runs_are_native_and_reopen_with_styles() {
     let mut element = text_element();
     element["format"] = json!({"paragraphs":[{"runs":[{"text":"日本😀 ","style":{"bold":true,"highlight":"FFFF00"}},{"text":"English","style":{"italic":true,"baseline":30000,"language":"en-US"}}]}]});

@@ -66,7 +66,7 @@ reference-site slide images, branding or proprietary artwork are bundled.
 
 ## MCP Workflow
 
-The short project-owned [AISlide authoring SKILL](../../.github/skills/aislide-authoring/SKILL.md) provides the normal path and failure rules; load detailed sections below only as needed. MCP initialization also advertises the short serialization, batching, asset and completion rules without requiring a separate guide call.
+The short project-owned [AISlide authoring SKILL](../../.github/skills/aislide-authoring/SKILL.md) provides the normal path and failure rules; load detailed sections below only as needed. For Japanese technical storytelling and paired installation, see the [portable skill examples](../../.github/skills/README.md). MCP initialization also advertises the short serialization, batching, asset and completion rules without requiring a separate guide call.
 
 The default connection is lightweight: ten common tools are initially exposed. `discover_tools({query})` searches advanced operations without their full schemas; `get_tool_schema({name})` returns the needed schema and publishes that tool. The four most recently requested advanced tools remain in the additional list. Existing direct calls are still valid; `--tool-profile full` restores full discovery and legacy response defaults.
 
@@ -110,6 +110,96 @@ user processes. Build and reconnect are operator actions, not authoring tool
 calls; preserve live handles' work before reconnecting.
 
 The SDK equivalents are `client.bestPracticeProfiles()`, `client.bestPracticeGuide(profileId)`, `client.validateGuidedPresentation(input)` and `client.createGuidedPresentation(id,input)`. Creation returns `{session,validation,profile_id,model_inference:false}` and rejects a late success after cancellation. Normal subsequent session edits remain revision-checked and undoable. The initial compiled document has no undo entry for its creation; read the returned revision instead of assuming zero.
+
+## Japanese Technical Decks
+
+日本語の技術ストーリーと根拠は `tech-deck-ja`、PPTX 実行は `aislide-authoring` に分担します。[配置先と架空の依頼例](../../.github/skills/README.md) は顧客・業界に依存しません。本文は日本語の報告調を基本とし、出典、仮定、未確認、合成データを区別します。以下は接続先の公開スキーマを確認してから使う例で、フォント・画像の導入や既存レポートの変更を行うものではありません。
+
+### 作成時にフォントと共通領域を確定
+
+まず日本語グリフを持つインストール済みファミリーを確認します。以下は **Noto Sans JP が実行環境で利用可能と確認できた場合だけ** の `create_presentation` 引数例です。異なるフォントを使う場合は、作成前に実際のファミリー名へ置き換えます。
+
+```json
+{
+  "title": "処理方式の比較（架空例）",
+  "setup": {
+    "design_preset": "minimal",
+    "font_family": "Noto Sans JP"
+  }
+}
+```
+
+`setup` は任意で、`design_preset` は `minimal`、`public` 等の公開された列挙値、`theme` は明示的なテーマ、`font_family` はファミリー名です。プリセット、明示テーマ、フォントの順に初期状態へ適用され、空の 1 枚を revision 0 で作成します。フォントのインストール、モデル推論、ファイル出力はしません。これは直接作成の契約であり、guided 作成の revision に一般化しません。後続バッチに必要な hash やスライド ID は `get_deck_summary` から取得します。
+
+タイトル位置、マスター、ヘッダー、フッター、出典欄、本文領域と余白を先に決め、対応するマスター・レイアウト操作で再利用します。新規資料の代表ページで日本語の改行・図表を確認してから展開します。完成後の全面的なフォント変更を既定手順にしません。作成時のテーマ設定は自由配置済みの要素の自動再配置ではなく、フォントの埋め込みや他環境での同一表示も保証しません。
+
+### 余白と単一入力の本文
+
+新規の空スライドには、次の `compose_slide` バッチ操作も使えます。生成文書に限定され、既存の原本・要素は置き換えません。`style` を全ページで再利用でき、図形の座標や書式を繰り返し指定する必要を減らします。
+
+```json
+{
+  "op": "compose_slide",
+  "slide_id": "slide-1",
+  "id": "comparison",
+  "spec": {
+    "title": "処理方式の比較（架空例）",
+    "footer": "仮定に基づく説明・性能は未測定",
+    "style": { "body_size": 24, "padding": 24 },
+    "blocks": [{
+      "kind": "cards",
+      "items": [
+        { "label": "同期処理", "detail": "処理完了後に応答する仮定" },
+        { "label": "非同期処理", "detail": "受付と処理完了を区別する仮定" }
+      ]
+    }]
+  }
+}
+```
+
+1-3 ブロックの本文・カード・注記・手順・比較・管理対象パーツ・グラフを使えます。カードは 1-6 件、最大 3 列。タイトル・本文・フッター領域は core が配置します。通常本文のあふれは縮小せず拒否し、パーツは既存のフィット規則を使います。既存マスターの見た目を保つ場合はこの操作ではなく、マスター・レイアウトと明示配置を使います。`graph` ブロックの `input` にはノード座標を含めず、グリッド配置から管理メタデータ保持までを同じ操作で実行できます。
+
+`get_tool_schema({name:"apply_operations"})` で完全スキーマを確認します。以下は既存の text / shape に対する `operations` 配列の **1 要素だけ** の例です。ID は実際の対象へ置き換え、外側のリクエストには現在の `deck_id`、`expected_revision`、`expected_hash` を指定します。
+
+```json
+{
+  "op": "set_text_padding",
+  "slide_id": "slide-1",
+  "ids": ["body"],
+  "padding": { "left": 16, "right": 16, "top": 12, "bottom": 12 }
+}
+```
+
+単位はスライド px、`padding:null` は従来の既定値へ戻す指定です。外枠・文字サイズ・rich runs を保ったまま内側を設定し、正の本文領域が必要です。16 / 12 は架空例の値であり、全フォント・全レイアウトに適した推奨値ではありません。適用後に本文のはみ出し、代替フォント、欠落グリフ、改行、タイトルやフッターとの干渉を `measure_layout`、preflight、プレビューで確認します。内側余白と別要素との間隔は別々に確認してください。
+
+`set_rich_text` が現在の完全スキーマで公開されている場合だけ、`slide_id`、`id`、`paragraphs` を持つ操作で段落・runs を入力します。core がそこから正規テキストを導出するため、平文と rich text を独立に手書きして不一致を作りません。動的な日付・ページ番号等は専用のフィールド操作で編集し、通常本文へ平坦化しません。未公開ならその操作を推測して呼ばず、対応済みの編集経路と制限を説明します。
+
+### 原図の一括登録
+
+`discover_tools({query:"register_assets"})`、続いて `get_tool_schema({name:"register_assets"})` で接続先の仕様を確認します。以下の画像は同梱していません。利用者が用意した使用許諾のある素材を、起動時に承認したルートへ置いた場合の引数例です。
+
+```json
+{
+  "assets": [
+    { "path": "evidence/overview.png", "root": 0 },
+    { "path": "evidence/detail.jpg", "root": 0 }
+  ]
+}
+```
+
+`register_assets` は 1-32 件を原子的に登録し、入力順の `assets[]` と `usage` を返します。各 `root` は省略時 0。同内容・同型はハンドルを再利用し、失敗・キャンセル時はそのバッチの新規登録を残しません。`usage.scope:"process_asset_registry"` の使用量はプロセス内の最大 32 ハンドル / raw 64 MiB の枠で、文書側の符号化画像・展開ラスター予算ではありません。ファイル単位の制限も残り、登録成功だけで文書への挿入成功は保証されません。権限は起動時の `--asset-dir` のみで、要求からの拡張や外部 URL の取得はできません。
+
+返された `asset_id` と検証済み寸法を使い、`add_picture` の `fit:"contain"` で全体を保持するか、意図した切り抜きだけ `fit:"cover"` を使います。省略は stretch なので明示します。base64 を会話へ出力せず、原図の出典・利用条件を保持します。図そのものの再編集が必要なら、画像を編集可能と称さず、意味を管理する graphs / parts と原図を区別します。
+
+### 管理対象の図と納品
+
+`prepare_assets({assets:[{asset_id,params:{resize_longest_side:1280}}]})` は登録済み PNG/JPEG を原子的に前処理し、新しい ID と `source_asset_id`、寸法、`raster_cost`、`usage` を返します。1-32 件で、元画像を上書きしません。1280 は指定例であり、細部の可読性を確認して選びます。`raster_cost` の符号化バイト数・RGBAバイト数は画像単位です。文書の合計符号化容量や重複排除後のラスター予算とは別なので、登録成功を文書への挿入保証と扱いません。
+
+単独の `layout_graph({input})` も使えます。1-48 ノード、最大 64 辺、1-8 列（既定 3）のグリッド配置で、ノード寸法は変えません。グループや階層配置には対応せず、それらが必要な場合は従来の座標付き `GraphSpec` を使用します。
+
+管理対象の `add_graph` / `add_part` に最終配置と意味を渡し、ノード座標・境界・ラベルを現在のスキーマ内で設計します。自動階層レイアウト、任意の入れ子境界、自動経路探索で解決できると約束せず、収まらない場合は図の分割案を提示します。手描き SVG によるアーキテクチャ図を既定にせず、未確認の合成 API の呼び出し例も作りません。
+
+AISlide の core-backed 呼び出しは逐次実行し、必須ページを最大 8 ページずつ検査します。compact の先頭ページだけのプレビューを全件確認と扱いません。新しい出力名で保存してパス、ハッシュ、ページ数、画像・ノート、診断範囲を確認し、未検証事項を報告します。原本や既存レポートを上書きせず、公開・デプロイは別の明示許可が必要です。構造検証の成功は事実確認や Office の見た目の一致を保証しません。
 
 ## Positioned Parts And Typed Edits
 

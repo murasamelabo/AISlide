@@ -35,6 +35,7 @@ pub struct ConnectorSettings {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    ComposeSlide { slide_id: String, id: String, spec: crate::composition::CompositionSpec },
     AddElements { slide_id: String, elements: Vec<Element> },
     AddPart { slide_id: String, id: String, spec: crate::parts::PartSpec },
     UpdatePart { slide_id: String, id: String, spec: crate::parts::PartSpec },
@@ -42,6 +43,8 @@ pub enum Operation {
     UpdateGraph { slide_id: String, id: String, spec: crate::graphs::GraphSpec },
     SetFrame { slide_id: String, id: String, frame: Frame },
     SetTextStyle { slide_id: String, ids: Vec<String>, style: RunStyle },
+    SetRichText { slide_id: String, id: String, paragraphs: Vec<RichParagraph> },
+    SetTextPadding { slide_id: String, ids: Vec<String>, #[serde(deserialize_with = "Option::deserialize")] padding: Option<crate::model::TextPadding> },
     SetSlideBackground { slide_id: String, color: String },
     UpdateNotes { slide_id: String, notes: String },
     SetTableHeaders { slide_id: String, element_id: String, policy: crate::review::TableHeaders },
@@ -159,7 +162,7 @@ fn text_style(element: &mut Element, style: &RunStyle) -> Result<()> {
 
 fn apply(deck: &mut Deck, parts: &mut Vec<crate::parts::state::PartInstance>, operation: &Operation, native_guard: &mut crate::parts::state::NativeRegenerationGuard<'_>) -> Result<usize> {
     let slide_id = match operation {
-        Operation::AddElements { slide_id, .. } | Operation::SetFrame { slide_id, .. } | Operation::SetTextStyle { slide_id, .. }
+        Operation::ComposeSlide { slide_id, .. } | Operation::AddElements { slide_id, .. } | Operation::SetFrame { slide_id, .. } | Operation::SetTextStyle { slide_id, .. } | Operation::SetRichText { slide_id, .. } | Operation::SetTextPadding { slide_id, .. }
         | Operation::AddPart { slide_id, .. } | Operation::UpdatePart { slide_id, .. } | Operation::AddGraph { slide_id, .. } | Operation::UpdateGraph { slide_id, .. }
         | Operation::UpdateNotes { slide_id, .. } | Operation::SetTableHeaders { slide_id, .. } | Operation::SetAccessibility { slide_id, .. }
         | Operation::SetSlideBackground { slide_id, .. } | Operation::SetConnector { slide_id, .. } | Operation::SetPictureCrop { slide_id, .. }
@@ -168,6 +171,7 @@ fn apply(deck: &mut Deck, parts: &mut Vec<crate::parts::state::PartInstance>, op
     let index = deck.slides.iter().position(|slide| slide.id == *slide_id).ok_or_else(|| Error::Invalid(format!("slide not found: {slide_id}")))?;
     let slide = &mut deck.slides[index];
     match operation {
+        Operation::ComposeSlide { id, spec, .. } => crate::composition::compose(deck, parts, slide_id, id, spec, native_guard)?,
         Operation::AddElements { elements, .. } => {
             if elements.is_empty() || elements.len() > 128 { return Err(Error::Limit("add_elements requires 1-128 roots".into())); }
             slide.elements.extend(elements.iter().cloned());
@@ -190,6 +194,24 @@ fn apply(deck: &mut Deck, parts: &mut Vec<crate::parts::state::PartInstance>, op
             if ids.is_empty() || ids.len() > 128 || ids.iter().collect::<BTreeSet<_>>().len() != ids.len() { return Err(Error::Limit("set_text_style requires 1-128 distinct IDs".into())); }
             if *style == RunStyle::default() { return Err(Error::Invalid("set_text_style requires at least one supplied property".into())); }
             for id in ids { text_style(target(&mut slide.elements, id)?, style)?; }
+        }
+        Operation::SetRichText { id, paragraphs, .. } => {
+            let element = target(&mut slide.elements, id)?;
+            *element = crate::rich_text::replace_paragraphs(element.clone(), paragraphs.clone())?;
+        }
+        Operation::SetTextPadding { ids, padding, .. } => {
+            if ids.is_empty() || ids.len() > 128 || ids.iter().collect::<BTreeSet<_>>().len() != ids.len() { return Err(Error::Limit("set_text_padding requires 1-128 distinct IDs".into())); }
+            for id in ids {
+                let element = target(&mut slide.elements, id)?;
+                let (_, _, _, width, height) = element.bounds();
+                if let Some(padding) = padding { padding.validate(width, height)?; }
+                match element {
+                    Element::Text { format, .. } | Element::Shape { format, .. } => {
+                        if format.padding != *padding { format.padding = padding.clone(); format.inherit_layout = false; }
+                    }
+                    _ => return Err(Error::Unsupported("set_text_padding requires text or shape".into())),
+                }
+            }
         }
         Operation::SetSlideBackground { color, .. } => {
             crate::model::valid_color(color)?;
@@ -244,9 +266,12 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
     let mut deck = document.deck.clone();
     let mut parts = document.parts.clone();
     let mut native_guard = crate::parts::state::NativeRegenerationGuard::new(document);
-    let metadata_changed = operations.iter().any(|operation| matches!(operation, Operation::AddPart { .. } | Operation::UpdatePart { .. } | Operation::AddGraph { .. } | Operation::UpdateGraph { .. }));
+    let metadata_changed = operations.iter().any(|operation| matches!(operation, Operation::ComposeSlide { .. } | Operation::AddPart { .. } | Operation::UpdatePart { .. } | Operation::AddGraph { .. } | Operation::UpdateGraph { .. }));
     let mut changed = BTreeSet::new();
     for (index, operation) in operations.iter().enumerate() {
+        if matches!(operation, Operation::ComposeSlide { .. }) && document.origin.as_ref().is_some_and(|origin| origin.native) {
+            return Err(Error::Unsupported("compose_slide requires a new empty slide in a generated document; use explicit edits for imported presentations".into()));
+        }
         changed.insert(apply(&mut deck, &mut parts, operation, &mut native_guard).map_err(|error| Error::Invalid(format!("operation {}: {error}", index + 1)))?);
         crate::preflight::deck(&deck, document.capacity_profile.limits())?;
     }
@@ -255,10 +280,19 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
     } else { changed.into_iter().map(|index| json!({"op":"replace","path":format!("/deck/slides/{index}"),"value":deck.slides[index]})).collect() };
     if metadata_changed { patches.push(json!({"op":"add","path":"/parts","value":parts})); }
     let result = document::transact(document, Transaction { expected_revision, expected_hash: expected_hash.into(), operations: serde_json::from_value(json!(patches))? })?;
-    let targets = operations.iter().filter_map(|operation| match operation {
+    let mut targets: BTreeSet<_> = operations.iter().filter_map(|operation| match operation {
         Operation::AddGraph { slide_id, id, .. } | Operation::UpdateGraph { slide_id, id, .. } => Some((slide_id.clone(), id.clone())),
         Operation::AddPart { slide_id, id, spec } | Operation::UpdatePart { slide_id, id, spec } if matches!(spec.data, crate::parts::PartData::Diagram { .. }) => Some((slide_id.clone(), id.clone())),
         _ => None,
     }).collect();
+    for operation in operations {
+        if let Operation::ComposeSlide { slide_id, id, spec } = operation {
+            for (index, block) in spec.blocks.iter().enumerate() {
+                if matches!(block, crate::composition::CompositionBlock::Graph { .. }) || matches!(block, crate::composition::CompositionBlock::Part { spec } if matches!(spec.data, crate::parts::PartData::Diagram { .. })) {
+                    targets.insert((slide_id.clone(), format!("{id}-b{index}")));
+                }
+            }
+        }
+    }
     Ok(crate::graphs::annotate_transaction(result, &targets))
 }
