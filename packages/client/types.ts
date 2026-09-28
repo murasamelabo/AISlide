@@ -201,7 +201,21 @@ export type AuthoringOperation =
 export type SlideImportInput = { source_slide_ids: string[]; prefix: string; after?: string | null }
 
 export type PartItem = { label: string; detail?: string; value?: number | null }
+export type ComparisonPanelItem = { text: string; icon?: GraphIcon | null }
+export type ComparisonPanel = { label: string; items: ComparisonPanelItem[]; fill?: string | null; heading_fill?: string | null; heading_color?: string | null; accent?: string | null; icon_fill?: string | null; body_size?: number | null }
+export type PartMessage = { text: string; detail?: string; fill?: string | null; color?: string | null }
+export type IconCard = { label: string; caption?: string; detail?: string; points?: string[]; tag?: string; icon?: GraphIcon | null; accent?: string | null }
+export type IconRow = { label: string; detail?: string; icon?: GraphIcon | null; accent?: string | null }
+export type ShiftRow = { from: string; to: string; caption?: string; detail?: string }
+export type StepCard = { label: string; detail?: string; points?: string[]; outcome?: string; image?: GraphIcon | null; icon?: GraphIcon | null }
+export type AgendaItem = { label: string; detail?: string; meta?: string }
 export type PartData =
+  | { kind: 'comparison_panels'; panels: ComparisonPanel[]; transition?: boolean }
+  | { kind: 'icon_cards'; cards: IconCard[]; columns?: number | null; numbered?: boolean; body_size?: number | null; message?: PartMessage | null }
+  | { kind: 'icon_rows'; rows: IconRow[]; boxed?: boolean; body_size?: number | null; message?: PartMessage | null }
+  | { kind: 'shift_rows'; from_label?: string; to_label?: string; rows: ShiftRow[]; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
+  | { kind: 'step_cards'; steps: StepCard[]; step_label?: string; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
+  | { kind: 'agenda'; items: AgendaItem[]; accent?: string | null }
   | { kind: 'chart'; categories: string[]; series: { name: string; values: number[] }[]; x_axis?: string; y_axis?: string }
   | { kind: 'items'; items: PartItem[]; center?: string }
   | { kind: 'tree'; nodes: { id: string; label: string; parent?: string | null }[] }

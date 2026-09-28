@@ -394,6 +394,17 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
     results.push(session.addElements('slide-1', [{ type: 'connector', id: 'edge', ...frame, ...connector, visual }]));
     const part: PartSpec = { version: 1, preset: 'synthetic', title: 'Synthetic', data: { kind: 'diagram', graph }, layout: { ...frame, show_title: false } };
     const matrix: PartSpec = { ...part, data: { kind: 'matrix', corner_label: 'Criterion', rows: ['A', 'B'], columns: ['C', 'D'], cells: [['a', 'b'], ['c', 'd']] } };
+    const panels: PartSpec = { version: 1, preset: 'contrast/panels', title: 'Synthetic', data: { kind: 'comparison_panels', transition: true, panels: [{ label: 'Before', body_size: 18, items: [{ text: 'Separate', icon: { base64: 'synthetic', mime_type: 'image/png' } }] }, { label: 'After', items: [{ text: 'Shared' }] }] } };
+    results.push(session.addPart('slide-1', { id: 'panels', spec: panels }));
+    const icon = { base64: 'synthetic', mime_type: 'image/png' as const, alt: 'Synthetic' };
+    const briefing: PartSpec[] = [
+      { version: 1, preset: 'list-horizontal/icon-cards', title: '', data: { kind: 'icon_cards', columns: 2, numbered: true, body_size: 16, message: { text: 'Synthetic', detail: 'Detail', fill: '@dk1', color: 'D9F0A3' }, cards: [{ label: 'A', caption: 'a', detail: 'Detail', points: ['One'], tag: 'Tag', icon, accent: '@accent2' }, { label: 'B' }] } },
+      { version: 1, preset: 'list/icon-rows', title: '', data: { kind: 'icon_rows', boxed: true, rows: [{ label: 'A', detail: 'Detail', icon, accent: null }, { label: 'B' }], message: null } },
+      { version: 1, preset: 'before-after/shift', title: '', data: { kind: 'shift_rows', from_label: 'Today', to_label: 'Next', accent: '@accent1', rows: [{ from: 'A', to: 'B', caption: 'b', detail: 'Detail' }, { from: 'C', to: 'D' }] } },
+      { version: 1, preset: 'flow/cards', title: '', data: { kind: 'step_cards', step_label: 'STEP', steps: [{ label: 'A', detail: 'Detail', points: ['One'], outcome: 'Outcome', image: icon, icon }, { label: 'B', image: null }] } },
+      { version: 1, preset: 'list/agenda', title: '', data: { kind: 'agenda', accent: '@dk1', items: [{ label: 'A', detail: 'Detail', meta: '10 min' }, { label: 'B' }] } },
+    ];
+    for (const spec of briefing) results.push(session.addPart('slide-1', { id: spec.preset, spec }));
     const managed: AuthoringOperation[] = [
       { op: 'set_text_padding', slide_id: 'slide-1', ids: ['text'], padding: null },
       { op: 'update_notes', slide_id: 'slide-1', notes: 'Synthetic notes' },
@@ -1196,7 +1207,7 @@ test('graph authoring SDK retains routes annotations sites and group layout thro
 test('metadata parts share catalog, revisioned updates, undo and single PPTX persistence', async () => {
   const client = new AislideClient(requestCore);
   const catalog = await client.partCatalog();
-  assert.equal(catalog.presets.length, 111);
+  assert.equal(catalog.presets.length, 117);
   const spec = catalog.presets.find((preset) => preset.id === 'vertical-bar-graph/balanced').example;
   const deck = { version: 1, title: 'Parts', width: 1280, height: 720, slides: [{ id: 'slide', title: 'Parts', background: 'FFFFFF', notes: 'Synthetic fixture', elements: [] }] };
   const session = await client.createDocument({ id: 'parts-sdk', deck });

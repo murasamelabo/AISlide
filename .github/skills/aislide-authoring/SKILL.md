@@ -20,20 +20,22 @@ assumptions and synthetic examples. Skill installation does not connect MCP.
 	Never invent data or replace a required source image with a redraw.
 2. Resume with `list_decks` / `get_deck_summary`. Discover advanced tools and fetch
 	`get_tool_schema({name:"apply_operations"})` before advanced elements, rich text,
-	composition, parts or graphs. Do not fetch whole decks just to recover IDs.
+	composition, parts or graphs. Avoid full-deck reads for IDs.
 3. Choose `compile_report` for its fixed layouts, guided authoring for evidence-led
 	outlines, or `create_presentation` for content-oriented/freeform work. Set
 	`setup:{design_preset,font_family,theme?}` before inserting diagrams: preset,
 	explicit theme, then font override, at revision zero. Confirm installed Japanese
-	glyph coverage; naming a font does not install/embed it. Older connections need
-	supported theme operations before content, or an explicit update prerequisite.
+	glyph coverage; naming a font does not install/embed it. On older servers,
+	set the theme before content.
 4. Establish reusable title/header/footer/body regions and styles. On generated
 	empty slides, `compose_slide` accepts 1-3 blocks: cards, callout, text, steps,
 	comparison, part or graph. Reuse `style`; default card padding is 24px. Existing
 	native/nonempty slides reject. Use explicit editing to preserve templates.
-5. Prefer managed parts/graphs. A composition graph block takes coordinate-free
-	`input` and inserts managed metadata in one operation. `layout_graph` separately
-	returns GraphSpec using the existing grid: 1-48 nodes, 64 edges, 1-8 columns
+5. For an icon-led briefing style read `references/technical-panels.md`
+	(panels, icon cards/rows, shifts, steps, agenda, Lucide icons) only on request.
+	Prefer managed parts/graphs. A composition graph block takes coordinate-free
+	`input` and inserts managed metadata in one operation. `layout_graph` returns
+	GraphSpec on the existing grid: 1-48 nodes, 64 edges, 1-8 columns
 	(default 3), no groups or node resizing. This is not hierarchical layout.
 6. Register approved local images with `register_asset` or atomic `register_assets`
 	(1-32). Use returned `asset_id` and dimensions; never regenerate/output base64

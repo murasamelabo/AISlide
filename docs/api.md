@@ -107,6 +107,44 @@ agreement between plain text and rich runs; validation is not weakened.
 
 ### Typed Authoring Batches
 
+The optional `contrast/panels` part is distinct from a matrix. Its data is
+`{kind:"comparison_panels",panels:[left,right],transition?:boolean}`; each
+panel has `label`, 1-5 `items:{text,icon?}`, and optional `fill`, `heading_fill`,
+`heading_color`, `accent`, `icon_fill`, `body_size` (16-28, default 18). Two
+panels and matching row counts are required; label/text limits are 64/240
+Unicode scalars. Icons use the existing PNG/JPEG `GraphIcon` contract and
+MCP asset handles. Supplied symbols preserve aspect ratio in explicit layouts.
+Typography does not silently shrink. All 111 earlier presets are retained.
+See the portable
+[technical briefing style contract](../.github/skills/aislide-authoring/references/technical-panels.md).
+In `compose_slide`, request it through `kind:"part"`; the existing `comparison`
+block deliberately remains `matrix/balanced` for backward compatibility.
+
+Five further recommended briefing presets bind to dedicated data kinds:
+`list-horizontal/icon-cards` (`icon_cards`, 2-6 cards in 2-4 columns and at
+most two rows), `list/icon-rows` (`icon_rows`, 2-6 rows), `before-after/shift`
+(`shift_rows`, 2-5 from-to rows), `flow/cards` (`step_cards`, 2-4 steps with
+optional cover-cropped `image` and `icon`) and `list/agenda` (`agenda`, 2-7
+items). The catalog now has 117 entries in the same 36 categories. These parts
+render at the `PartSpec.layout` frame size instead of scaling a 1152x512 canvas;
+fonts are fixed (headings 18px, `body_size` 14-22, default 16; captions, tags
+and pills 12-13px). Card and step heights shrink to measured content, row
+pitch is capped at 112px, and overflow rejects with the failing text. An
+optional `message:{text,detail?,fill?,color?}` adds a takeaway band below the
+content, except on agendas. Legacy presets and data kinds keep their rendering;
+a briefing kind with another preset, or a briefing preset with another kind,
+rejects.
+
+MCP `lucide_icons({query?,category?,offset?,limit?})` searches the installed
+Lucide React library (ISC) and `lucide_icon_assets({icons:[{name,color?,
+stroke_width?,alt?}]})` renders 1-32 icons through the existing SVG icon
+preparation to 256px PNG handles. Each result carries
+`icon:{asset_id,mime_type,alt}` for part or graph icon fields. No downloads
+occur; the tools fail clearly when the host lacks `lucide-react`, `react` and
+`react-dom`. `tools/briefing-demo.mjs` builds a seven-page synthetic example
+through the official MCP SDK and verifies preflight, preview, native reopen
+and update/Undo byte identity.
+
 `apply_operations({document,expected_revision,expected_hash,operations})` accepts
 1-128 strict typed operations across existing slides, including mixed managed
 parts, graphs and ordinary element edits. Managed variants use the same

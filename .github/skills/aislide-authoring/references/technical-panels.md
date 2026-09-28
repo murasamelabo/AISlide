@@ -1,0 +1,177 @@
+﻿# Technical Briefing Style
+
+Use this reference when the user requests a technical briefing with keyword
+headings, restrained color, meaningful icons, tinted panels, icon cards, role
+shifts and step cards. It is an explicit visual choice, not the default for
+every presentation.
+
+## Fixed Visual Contract
+
+- Select one installed Japanese-capable font at presentation creation. Keep the
+  same family across headings/body/notes and inspect fallback warnings. Font names
+  do not install or license fonts.
+- Use a white 1280x720 canvas, a small blue section label, a keyword heading and
+  a thin header rule. Avoid a second long summary line repeating the heading.
+- Reference chrome: section at (108,20), 12px; heading at (108,44), 32px;
+  header icon at (56,42), 32x32, within a 48px pale circle; rule at y=98;
+  source/footer at (48,680), 11px. Keep necessary caveats visible.
+- Use left-aligned body text, nominally 18px, in a fixed content region. Do not
+  shrink text to make an overfull panel fit. Shorten with approval, enlarge the
+  region, or split the explanation while preserving required content.
+- Fix semantic color roles. The comparison defaults use a neutral pale left
+  panel/lavender heading and pale green right panel/teal heading. Color is not
+  evidence that an alternative is better. Override colors explicitly when needed.
+- Icons must represent the row's meaning, not fill empty space. Reuse an installed
+  icon library or approved image assets. Do not redraw source screenshots as icons.
+
+## Choose By Relationship
+
+| Information | Representation |
+| --- | --- |
+| Two states or approaches explained through paired statements | `contrast/panels` |
+| 2-6 equal-status concepts, each with icon, heading, explanation | `list-horizontal/icon-cards` |
+| 2-6 stacked statements, risks or capabilities with detail | `list/icon-rows` |
+| 2-5 explicit from-to changes (roles, metrics, operating model) | `before-after/shift` |
+| 2-4 ordered steps with outcomes, optional supplied images | `flow/cards` |
+| Agenda or chapter list with durations | `list/agenda` |
+| Numeric scores, common criteria, or three or more alternatives | Matrix/table |
+| Architecture, boundaries and handoffs between systems | Managed graph |
+| Equal-status topics without icons | Open rows/columns/grid |
+| Required product screenshot | Original image plus focused annotation |
+
+Plan the page mix before building: a briefing usually alternates cards, rows,
+shifts, steps, graphs and required tables. Do not convert every page to cards.
+In `compose_slide`, the `comparison` block remains a matrix. To request these
+visuals, use a `part` block with the preset, or insert it with managed `add_part`.
+
+## Icons
+
+1. `lucide_icons({query})` searches the installed Lucide library (ISC) by name,
+   tag or category. Choose icons for meaning; one icon per concept.
+2. `lucide_icon_assets({icons:[{name,color}]})` renders up to 32 icons and
+   returns `icon:{asset_id,mime_type,alt}`. Pass that object unchanged to part
+   or graph `icon` fields; never generate SVG/base64 through the model.
+3. Use the accent color of the card/row as the icon color. Identical renders
+   reuse one handle; `close_asset` unused handles because the registry holds 32.
+
+Without supplied icons no decorative stand-ins are generated. Use approved
+images for step cards through `register_asset`/`prepare_assets`.
+
+## Briefing Part Contracts
+
+Fetch `part_catalog({preset_id})` and the complete `apply_operations` schema.
+A typical body frame below the reference chrome is
+`"layout":{"x":48,"y":120,"width":1184,"height":540,"show_title":false}`.
+
+- These parts render at the layout frame size; they are not scaled. Fonts are
+  fixed: headings 18px, body `body_size` 14-22 (default 16), captions, tags and
+  pills 12-13px. Overflow rejects with the failing text; shorten it with
+  approval, enlarge the frame or split the slide. Run preflight with
+  `min_font_size:12` for this style or omit captions/tags.
+- Cards and steps shrink to their measured content height and rows use at
+  most 112px pitch, top-aligned. Remaining frame space stays empty; size the
+  frame or add a separate element instead of stretching content. Step
+  chevrons align with supplied images, otherwise with the step pills.
+- Optional `message:{text,detail?,fill?,color?}` adds a takeaway band directly
+  below the content (default dark `@dk1` with `@lt1`, e.g. `color:"D9F0A3"`;
+  a pale `fill` with a matching dark `color` for cautions). Not on agenda.
+- Labels allow at most three LF lines. Colors are hex or theme keys.
+
+| Preset | `data.kind` and fields |
+| --- | --- |
+| `list-horizontal/icon-cards` | `icon_cards`: `cards` 2-6 `{label<=48, caption<=64, detail<=240, points<=4x80, tag<=40, icon, accent}`, `columns` 2-4 (max two rows), `numbered`, `body_size`, `message` |
+| `list/icon-rows` | `icon_rows`: `rows` 2-6 `{label<=60, detail<=200, icon, accent}`, `boxed`, `body_size`, `message` |
+| `before-after/shift` | `shift_rows`: `rows` 2-5 `{from<=48, to<=48, caption<=64, detail<=200}`, `from_label`/`to_label` <=24, `accent`, `body_size`, `message` |
+| `flow/cards` | `step_cards`: `steps` 2-4 `{label<=48, detail<=240, points<=4x80, outcome<=64, image, icon}`, `step_label` <=12 (default STEP), `accent`, `body_size`, `message` |
+| `list/agenda` | `agenda`: `items` 2-7 `{label<=60, detail<=120, meta<=16}`, `accent` (number badge, default `@dk1`) |
+
+Step images are cover-cropped without distortion; badges and icons stay square.
+
+## Section Divider
+
+No part is needed. On a new slide add: a `@dk1` rect over (0,0,1280,720) or its
+left half, a 48x3 accent rule at (96,300), a 44px number at (96,316), a 36px
+`@lt1` heading at (96,372), a 16px subtitle at (96,440) and optionally an approved
+image on the right half with `fit:"cover"`. Keep the same geometry for every section.
+
+## Panel Contract
+
+Use `part_catalog({preset_id:"contrast/panels"})` and fetch the complete
+`apply_operations` schema. A minimal synthetic PartSpec is:
+
+```json
+{
+  "version": 1,
+  "preset": "contrast/panels",
+  "title": "",
+  "data": {
+    "kind": "comparison_panels",
+    "transition": false,
+    "panels": [
+      { "label": "Separate", "items": [{ "text": "Context is rebuilt at each handoff." }] },
+      { "label": "Shared", "items": [{ "text": "Context follows the investigation." }] }
+    ]
+  },
+  "layout": { "x": 32, "y": 120, "width": 1216, "height": 528, "show_title": false }
+}
+```
+
+Exactly two panels, each with 1-5 rows and matching row counts. Labels are at
+most 64 Unicode scalars; row text at most 240. Both must be nonblank. Row icons
+are optional `icon` objects; MCP accepts `{asset_id,alt?}` without model base64.
+Without supplied icons, no decorative stand-ins are generated. PNG/JPEG bytes
+must pass the existing media limits. Images and circular badges retain their
+aspect ratio in nonuniform part frames.
+
+Optional panel fields: `fill`, `heading_fill`, `heading_color`, `accent`,
+`icon_fill`, `body_size` (16-28px, default 18). Headings, spacing and typography
+are fixed; overflow rejects, including in a small explicit layout. The arrow
+appears only with `transition:true`; use it only for an actual transition.
+
+For a `compose_slide` part block, omit `layout`: the composition supplies its
+body region. Use direct `add_part` and reusable chrome when the reference's
+header/body/footer positions must match. Retain managed metadata so later
+changes can use `update_part`, native export/reopen and Undo.
+
+## Verification And Reuse
+
+1. Generate a representative page before expanding the deck. Review PNG output,
+   not only JSON/structural validation. Compare hierarchy, color, icon meaning,
+   line breaks and whitespace against the reference.
+2. Require no overflow, missing glyphs, unexpected font fallback, distorted images
+   or insufficient container clearance. Review remaining approximation notices;
+   core preview success is not Office visual parity.
+3. Keep the accepted font, style, part IDs and layout policy fixed. Change content,
+   not the visual vocabulary, on subsequent pages. Do not silently fall back to
+   a matrix after a panel validation error.
+4. Confirm actual PPTX output, editability and native update/Undo. Preserve source
+   documents and disclose any unverified reference pages or factual claims.
+
+The repository's `tools/comparison-panels-demo.mjs` creates an editable example,
+PNG preview and proof through the official MCP SDK. It accepts a new output
+directory, optional `--input` JSON and `--font-family`. Input fields are `title`,
+`section`, `footer`, `notes`, `transition`, and two `panels` with `label/items`.
+Rows contain `text` and an optional icon name from `network`, `search`, `clock`,
+`bot`, `grid`, `target`, `refresh`. These map to local Lucide assets. This is
+deterministic template execution, not a hidden AI image or layout generator.
+
+`tools/briefing-demo.mjs [new-output-directory] [--font-family installed-font]`
+builds a seven-page synthetic briefing (agenda, section divider, icon cards,
+icon rows, role shifts, step cards, checklist cards) with `lucide_icon_assets`.
+It writes PPTX, page PNGs and `proof.json`, and verifies preflight, native
+reopen and update/Undo. Use it as a geometry reference, not as factual content.
+
+Suggested request after installing compatible core/MCP and this skill:
+
+```text
+Use the technical briefing visual contract in
+aislide-authoring/references/technical-panels.md.
+Use keyword headings, consistent chrome, left-aligned body text and meaningful
+Lucide icons. Choose per page: contrast/panels for paired explanations,
+list-horizontal/icon-cards for 2-6 concepts, list/icon-rows for stacked
+statements, before-after/shift for from-to changes, flow/cards for ordered
+steps, list/agenda for agendas, graphs for architecture and tables only for
+grid data. Preserve the supplied evidence and notes. Produce and review
+representative pages before applying the accepted style to the remaining
+pages, then review every page image. Do not overwrite the source PPTX.
+```
