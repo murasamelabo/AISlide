@@ -69,7 +69,7 @@ await reopened.session.editSlides([
 ]);
 ```
 
-`client.createAsset()` is stateless; `session.addAsset()` inserts under revision, cancellation and Undo guards. Accepted inert SVG is retained as a native SVG picture with an inspected transparent PNG fallback, not converted into editable shape paths. Arbitrary SVG, active content and external references are rejected. Native slide copies retain original XML and independently copy chart/workbook resources. Unsupported custom shows/sections or unsafe native copies fail without changing the session. Default `large` permits 256 slides / 32 MiB complete document; explicit `standard` retains 128 / 8 MiB and `legacy` 32 / 2 MiB. Constructor and create/open options accept `capacityProfile`; session operations preserve it. `setCapacityProfile()` verifies before changing the selection. `recoveryEnvelope` and `client.recoverSession()` preserve verified bounded Undo/Redo; legacy document-only recovery starts empty history. See [Phase 5 contracts](../../docs/testing/phase5-recovery-capacity.md).
+`client.createAsset()` is stateless; `session.addAsset()` inserts under revision, cancellation and Undo guards. Accepted inert SVG is retained as a native SVG picture with an inspected transparent PNG fallback, not converted into editable shape paths. Arbitrary SVG, active content and external references are rejected. Native slide copies retain original XML and independently copy chart/workbook resources. Unsupported custom shows/sections or unsafe native copies fail without changing the session. Default `large` permits 256 slides / 32 MiB complete document; explicit `standard` retains 128 / 8 MiB and `legacy` 32 / 2 MiB. Constructor and create/open options accept `capacityProfile`; session operations preserve it. `setCapacityProfile()` verifies before changing the selection. `recoveryEnvelope` and `client.recoverSession()` preserve verified bounded Undo/Redo; legacy document-only recovery starts empty history.
 
 ## Master Presets
 
@@ -110,7 +110,7 @@ await session.assignLayout('slide-1', 'preset-two-columns');
 const exported = await session.exportPresentation();
 ```
 
-The seven presets define native masters/layouts, palette and font roles, side margins, gutters and content regions. Application retains existing slide content and original masters; custom or edited template conflicts fail before commit. The normal session revision, cancellation and Undo guards apply. New blank slides inherit the selected preset master. New parts on `preset-visual-content` are fitted to the layout's visual region without moving existing content. Reopened documents can add a supported preset structure within native preservation and capacity limits; an existing dedicated preset structure must pass its compatibility checks before replacement. See [preset limits and definitions](../../docs/testing/master-presets.md).
+The seven presets define native masters/layouts, palette and font roles, side margins, gutters and content regions. Application retains existing slide content and original masters; custom or edited template conflicts fail before commit. The normal session revision, cancellation and Undo guards apply. New blank slides inherit the selected preset master. New parts on `preset-visual-content` are fitted to the layout's visual region without moving existing content. Reopened documents can add a supported preset structure within native preservation and capacity limits; an existing dedicated preset structure must pass its compatibility checks before replacement.
 
 ## Guided Authoring
 
@@ -150,7 +150,7 @@ const reopened = await client.openPresentation('reopened', exported.base64);
 console.log(reopened.session.document.parts[0].stale);
 ```
 
-`client.createPart({id,spec,theme?})` returns a native group for preview without attaching semantic metadata. Use session `addPart`/`updatePart` for persistent metadata, revision guards and history. Root placement is retained on update. Native XML and embedded workbook changes make mismatching metadata stale; update then fails instead of replacing manual content. Deleting a part removes its metadata in the same undoable transaction. Data, source content and metadata remain document-private even though only one PPTX file is required. See the [parts guide](../../docs/testing/parts-library.md) for supported inputs and limits.
+`client.createPart({id,spec,theme?})` returns a native group for preview without attaching semantic metadata. Use session `addPart`/`updatePart` for persistent metadata, revision guards and history. Root placement is retained on update. Native XML and embedded workbook changes make mismatching metadata stale; update then fails instead of replacing manual content. Deleting a part removes its metadata in the same undoable transaction. Data, source content and metadata remain document-private even though only one PPTX file is required. See the [API contracts](../../docs/api.md) for supported inputs and limits.
 
 ## Architecture Graphs
 

@@ -2,21 +2,21 @@
 
 A local-first slide editor with an independently implemented Rust PresentationML core, a Tauri desktop application, and headless CLI/MCP access.
 
-**Blank startup, icon categories and master presets.** Studio starts with one empty slide; **New report** explicitly opens the synthetic sample. The full Lucide catalog can be filtered by its 42 official categories together with keywords. **Edit masters and layouts > Browse presets** offers seven original styles with native editable layouts, theme colors, fonts, margins, gutters and content/part regions. See the [preset guide and samples](docs/testing/master-presets.md).
+**Blank startup, icon categories and master presets.** Studio starts with one empty slide; **New report** explicitly opens the synthetic sample. The full Lucide catalog can be filtered by its 42 official categories together with keywords. **Edit masters and layouts > Browse presets** offers seven original styles with native editable layouts, theme colors, fonts, margins, gutters and content/part regions.
 
-**Status: experimental research prototype.** It covers native editable generation, package-preserving import, source-bound transactions and headless automation. It is not a full PowerPoint replacement or a production release, and its APIs and behavior may change. See the [support matrix](docs/support-matrix.md) and the [acceptance report](docs/testing/poc.md).
+**Status: experimental research prototype.** It covers native editable generation, package-preserving import, source-bound transactions and headless automation. It is not a full PowerPoint replacement or a production release, and its APIs and behavior may change. See the [support matrix](docs/support-matrix.md).
 
-**Current file workflow: one standard, unencrypted Open XML PPTX.** Use **Open PPTX** and **Save PPTX**. External `.aislide.json` and scene JSON files are no longer required by Studio. The current slide XML is authoritative; optional source/binding and part information is retained in a standard Custom XML part inside the PPTX. See [single-file operation](docs/testing/single-file.md).
+**Current file workflow: one standard, unencrypted Open XML PPTX.** Use **Open PPTX** and **Save PPTX**. External `.aislide.json` and scene JSON files are no longer required by Studio. The current slide XML is authoritative; optional source/binding and part information is retained in a standard Custom XML part inside the PPTX.
 
 **Native charts.** The catalog has 24 native chart kinds with embedded workbooks and basic PNG/PDF output for all 24. Histogram Office fixtures retain a deliberate `val`-bin encoding exception: **two known SDK 3.5.1 schema errors per histogram chartEx resource**. These are fixture-specific checks, not full Office parity. See [chart qualification](docs/authoring/chart-ex.md).
 
-**Parts library: 117 editable presets across 36 categories.** Enter labels, axes, values, relationships or schedules to create theme-linked native graphics. Frameless list compositions and technical briefing parts (icon cards, icon rows, shifts, step cards and agendas) use aligned text and whitespace. See [list selection guidance](docs/authoring/README.md#choose-a-list-composition), the [sample generator](tools/parts-demo.mjs) and the [parts guide](docs/testing/parts-library.md). These are deterministic design presets, not AI-generated artwork.
+**Parts library: 117 editable presets across 36 categories.** Enter labels, axes, values, relationships or schedules to create theme-linked native graphics. Frameless list compositions and technical briefing parts (icon cards, icon rows, shifts, step cards and agendas) use aligned text and whitespace. See [list selection guidance](docs/authoring/README.md#choose-a-list-composition) and the [sample generator](tools/parts-demo.mjs). These are deterministic design presets, not AI-generated artwork.
 
 **Filled process diagrams and evidence-led MCP authoring.** Horizontal/vertical flows, trees and cycles now use stage panels, hierarchy blocks and segmented arrows with safe label areas. Four English best-practice profiles support consulting decisions, technical explanations, event talks and reports. MCP can retrieve guides, validate an evidence-linked outline and create a new editable presentation without inventing values or calling a model. The consulting guide retains 48 patterns with honest implementation status; dedicated summary/closing templates supplement the existing parts. See [guided authoring and complete input examples](docs/authoring/README.md).
 
-**Architecture diagrams through Studio, SDK and MCP.** The **Architecture diagram** command opens a six-shape editor with boundaries, movement, resizing, alignment, grid, straight/right-angle routes and arrowheads. Graphs are native PPTX objects with internal metadata and Undo/Redo. See the [five-slide sample generator](tools/graphs-demo.mjs) and [graph/UI verification](docs/testing/graphs-and-dads.md).
+**Architecture diagrams through Studio, SDK and MCP.** The **Architecture diagram** command opens a six-shape editor with boundaries, movement, resizing, alignment, grid, straight/right-angle routes and arrowheads. Graphs are native PPTX objects with internal metadata and Undo/Redo. See the [five-slide sample generator](tools/graphs-demo.mjs) and the [graph API](docs/api.md#architecture-graphs).
 
-**Icons inside architecture nodes.** Select a node and use **Choose icon** to add a library icon or supplied SVG/PNG/JPEG beside its label. Change/remove, movement, Undo and single-PPTX reopen share the graph workflow. Graph-specific image preparation caps the longest side at 256px; SVG becomes PNG. Use `node tools/graphs-demo.mjs --icons` for a reproducible synthetic example. See [node-icon behavior and verification](docs/testing/graphs-and-dads.md#node-icons).
+**Icons inside architecture nodes.** Select a node and use **Choose icon** to add a library icon or supplied SVG/PNG/JPEG beside its label. Change/remove, movement, Undo and single-PPTX reopen share the graph workflow. Graph-specific image preparation caps the longest side at 256px; SVG becomes PNG. Use `node tools/graphs-demo.mjs --icons` for a reproducible synthetic example.
 
 **Studio design is inspired by the Digital Agency Design System (DADS).** Local Noto fonts, blue actions, neutral surfaces, larger controls and keyboard focus are adapted for the editor. Existing slide themes are unchanged. This is not a full DADS compliance or government endorsement claim.
 
@@ -61,7 +61,7 @@ The default is a release build. Output is under `apps/studio/src-tauri/target/<R
 
 Setup builds into a separate directory so the currently running development executable is not overwritten. `CARGO_BUILD_TARGET` and `CARGO_TARGET_DIR` overrides are rejected to avoid bundling a different output. A fresh build needs Rust/platform prerequisites; Tauri downloads and hash-checks NSIS tooling when absent. Setup uses the system WebView2 runtime and can download Microsoft's bootstrapper when needed. This does not enable login-time startup, pin to the taskbar, register PPTX associations, sign the app or publish a release.
 
-`npm run test:setup` checks configuration and build routing without installing. The opt-in `npm run test:setup:installed` installs a randomly named test application, launches its Start Menu link and uninstalls it, using temporary files and its own shortcuts. See [Windows setup verification](docs/testing/windows-setup.md) for observed results and remaining release/signing qualifications.
+`npm run test:setup` checks configuration and build routing without installing. The opt-in `npm run test:setup:installed` installs a randomly named test application, launches its Start Menu link and uninstalls it, using temporary files and its own shortcuts.
 
 ### Optional Local Model
 
@@ -98,7 +98,7 @@ The final command prints a free loopback Studio URL and owns both servers. Ctrl+
 
 Use **Sources** for data mapping and source review, **Open PPTX** to open one presentation, and **Validate layout** for font diagnostics. **Save PPTX** creates a new PPTX with optional internal source metadata and does not overwrite existing files. **Inspect PPTX** remains the independent simple-text inspector. **Report data** accepts structured report JSON, never arbitrary HTML/CSS or executable model output.
 
-Double-click text, a table or a group to edit on the canvas. Ctrl/Cmd+Enter or the check icon commits; Escape cancels outside IME composition. **Insert objects**, **Edit theme**, and **Edit masters and layouts** expose the authoring controls. Reopened PPTX files support bounded native edits while preserving the original package; unsupported changes fail before committing. See [single-file operation](docs/testing/single-file.md) and [authoring verification](docs/testing/authoring.md).
+Double-click text, a table or a group to edit on the canvas. Ctrl/Cmd+Enter or the check icon commits; Escape cancels outside IME composition. **Insert objects**, **Edit theme**, and **Edit masters and layouts** expose the authoring controls. Reopened PPTX files support bounded native edits while preserving the original package; unsupported changes fail before committing.
 
 Open **Parts library**, choose a category/layout, enter data and select **Insert part**. Select the resulting group and use **Edit part data** to update it. **Save PPTX** retains the metadata internally. Manual or external edits that no longer match it disable semantic replacement without discarding the native objects. Insertion does not rearrange existing slide content; choose space on the slide before inserting.
 
@@ -117,7 +117,7 @@ aislide request
 
 `request` reads one JSON document from stdin and writes one JSON result to stdout. Errors go to stderr with a nonzero exit status. `generate` uses atomic, create-new publication and never overwrites the input or an existing destination.
 
-The shared JSON API includes `sample`, `compile`, `provider_status`, `generate`, `ingest`, `data_report`, `create_picture`, `create_diagram`, `object_catalog`, `create_object`, `part_catalog`, `create_part`, `insert_part`, `update_part`, `design_defaults`, `update_design`, `apply_theme`, `assign_layout`, `new_document`, `transaction`, `undo_transaction`, `open_presentation`, `export_presentation`, `export_project`, `open_project`, `import_document`, `import_pptx`, `save_import`, `measure_layout`, `ocr_status`, `export`, `validate`, `inspect`, `roundtrip`, `package_manifest` and `patch_text`. The default `large` profile permits 256 slides, 8192 elements, 32 MiB complete document including immutable origin, 96 MiB JSON wire and 16 MiB archive. Explicit `standard` and `legacy` preserve their prior numeric budgets. Image, source, static-output and recovery budgets remain independent. See [API contracts](docs/api.md) and [practical capacity](docs/testing/phase5-recovery-capacity.md).
+The shared JSON API includes `sample`, `compile`, `provider_status`, `generate`, `ingest`, `data_report`, `create_picture`, `create_diagram`, `object_catalog`, `create_object`, `part_catalog`, `create_part`, `insert_part`, `update_part`, `design_defaults`, `update_design`, `apply_theme`, `assign_layout`, `new_document`, `transaction`, `undo_transaction`, `open_presentation`, `export_presentation`, `export_project`, `open_project`, `import_document`, `import_pptx`, `save_import`, `measure_layout`, `ocr_status`, `export`, `validate`, `inspect`, `roundtrip`, `package_manifest` and `patch_text`. The default `large` profile permits 256 slides, 8192 elements, 32 MiB complete document including immutable origin, 96 MiB JSON wire and 16 MiB archive. Explicit `standard` and `legacy` preserve their prior numeric budgets. Image, source, static-output and recovery budgets remain independent. See [API contracts](docs/api.md).
 
 The CLI `generate` subcommand and low-level JSON `export` perform deterministic structural export. Use document/project operations for source-integrity and measured-layout gates. Model inference uses the JSON `generate` operation, not the similarly named CLI subcommand.
 
@@ -182,7 +182,7 @@ Studio leaves the existing deck unchanged until **Apply draft**. Cancellation, m
 
 `max_repairs` is `0` by default. Setting it to `1` authorizes one extra model call for a report schema/layout validation error, within the same overall time budget. HTTP errors, refusals and connection failures are not automatically retried. Optional `outline` entries fix the exact titles and layout order. Returned provenance includes the attempt count. Generated content and supplied source text are retained locally in the document/checkpoint when applied or attached; remote consent only controls transmission to the provider.
 
-The `provider_status` operation reports configuration only, not connectivity or credential validity. For MCP generation, configure the client request timeout longer than the provider budget; the CLI bridge permits up to 310 seconds. A real local Qwen2.5-1.5B run was qualified through MCP; arbitrary cloud providers and broad model quality have not been qualified. Historical fixture evidence is in [generation verification](docs/testing/generation.md); current evidence is in the [PoC report](docs/testing/poc.md).
+The `provider_status` operation reports configuration only, not connectivity or credential validity. For MCP generation, configure the client request timeout longer than the provider budget; the CLI bridge permits up to 310 seconds. A real local Qwen2.5-1.5B run was qualified through MCP; arbitrary cloud providers and broad model quality have not been qualified.
 
 ## Testing
 
@@ -213,7 +213,7 @@ Optional network/desktop qualifications are deliberately separate: `npm run test
 
 The Open XML validator downloads pinned official NuGet packages from Microsoft's public .NET mirror into `.tools/openxml`. It performs schema validation only. The PowerPoint check confirms the generated sample opens, contains native objects and notes, and exports two preview images. It does not establish universal Office compatibility, interactive edit parity, or freedom from every repair/dialog condition.
 
-See [docs/testing/first-slice.md](docs/testing/first-slice.md) for observed results and [docs/implementation.md](docs/implementation.md) for boundaries.
+See [docs/implementation.md](docs/implementation.md) for implementation boundaries.
 
 ## Limitations
 
@@ -223,8 +223,10 @@ Synthetic data must not be treated as factual, template compilation must not be 
 
 ## Design Reference
 
-Source: [Digital Agency Design System website](https://design.digital.go.jp/dads/), adapted for AISlide. デジタル庁デザインシステムウェブサイトを参考に、AISlide向けに編集・加工。Noto Sans JP and Noto Sans Mono retain SIL Open Font License 1.1. Details and deviations are in the [graph/UI report](docs/testing/graphs-and-dads.md#design-reference).
+Source: [Digital Agency Design System website](https://design.digital.go.jp/dads/), adapted for AISlide. デジタル庁デザインシステムウェブサイトを参考に、AISlide向けに編集・加工。Noto Sans JP and Noto Sans Mono retain SIL Open Font License 1.1.
+
+AISlide adapts the website's typography, color, spacing, buttons, input accessibility and modal guidance (v2.18.0, with its [usage notices](https://design.digital.go.jp/dads/introduction/notices/)): locally served Noto Sans JP/Noto Sans Mono supplied by Fontsource, 16px principal text, 8/16/24/32 spacing, neutral surfaces, `#0017c1` actions and black/yellow focus. Document fonts, chart colors and themes remain independent. This is an adaptation, not full DADS conformity, and no Digital Agency logo or endorsement is implied.
 
 ## License
 
-The project license has **not** been selected. Public source visibility does not establish a general redistribution license for the project. Third-party dependencies retain their own licenses. No Office fonts, external slide engine source, or third-party presentations are bundled. The geographic parts include public-domain Natural Earth land outlines; origin, terms and the exact asset hash are recorded in the [parts guide](docs/testing/parts-library.md#asset-provenance).
+The project license has **not** been selected. Public source visibility does not establish a general redistribution license for the project. Third-party dependencies retain their own licenses. No Office fonts, external slide engine source, or third-party presentations are bundled. The geographic parts include Natural Earth 1:110m land polygons in [world-land.geojson](crates/aislide-core/src/parts/world-land.geojson), from [natural-earth-vector](https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_land.geojson) (SHA-256 `9e0729ee253ca7d7a5c4ae9395fb1902264c5377c52e224d13dd85010e2835d9`). The [Natural Earth terms](https://www.naturalearthdata.com/about/terms-of-use/) place the data in the public domain and allow modification and redistribution. No runtime network fetch is used.

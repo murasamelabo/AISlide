@@ -14,7 +14,7 @@ Reopening a PPTX retains supported font data but resets loading consent. Inspect
 
 ## Bounds And Rights
 
-- At most **8 faces, 12 MiB per file and 24 MiB combined decoded font bytes**. The default large profile still requires the entire document, including base64 fonts and immutable native origin, to fit 32 MiB; archive output is limited to 16 MiB. Legacy/standard limits remain selectable and smaller. A valid 12 MiB face is not a guarantee that its reopened document fits. See [Phase 5 capacity and actual CJK evidence](../testing/phase5-recovery-capacity.md).
+- At most **8 faces, 12 MiB per file and 24 MiB combined decoded font bytes**. The default large profile still requires the entire document, including base64 fonts and immutable native origin, to fit 32 MiB; archive output is limited to 16 MiB. Legacy/standard limits remain selectable and smaller. A valid 12 MiB face is not a guarantee that its reopened document fits.
 - Only standalone static outline SFNT TTF/OTF. WOFF/WOFF2, TTC/OTC collections, variable fonts, CFF2-only, SVG/color fonts and metadata-only fixtures are not loadable through this workflow.
 - Installable (`fsType` usage bits zero) and Editable (`0x0008`) can be embedded after acknowledgement. Restricted, Preview/Print, bitmap-only, absent/malformed OS/2, unknown bits or ambiguous permission combinations fail closed for new embedding/loading. The conservative policy also rejects ambiguous legacy flags instead of assuming the least restrictive interpretation.
 - Preview/Print fonts are inspectable but not loaded into an editable document. There is no preview/print-only document mode or override switch.
@@ -53,7 +53,7 @@ Layout and static rendering clone the installed-font database only when consente
 
 ## Phase 5 CJK Evidence
 
-The opt-in fixture helper uses official pinned OFL Noto Sans JP and isolated FontTools 4.59.2 full static instancing at weight 400. All 17,936 glyphs remain; no subsetting is performed. The 5,766,884-byte static TTF passed actual SDK/MCP embedding, Japanese measurement, native reopen/edit/Undo, and Studio desktop/mobile loading and assignment. Reopened document size is 12,153,815 bytes, demonstrating why standard's 8 MiB is insufficient. No font/model binary is committed or installed globally. `tools/cjk-font-fixture.mjs --accept-ofl` records exact source, license and output hashes in the ignored fixture directory. FontTools is test preparation only, not a runtime dependency. See [full reproduction, timing and remaining gates](../testing/phase5-recovery-capacity.md#4-actual-cjk-qualification).
+The opt-in fixture helper uses official pinned OFL Noto Sans JP and isolated FontTools 4.59.2 full static instancing at weight 400. All 17,936 glyphs remain; no subsetting is performed. The 5,766,884-byte static TTF passed actual SDK/MCP embedding, Japanese measurement, native reopen/edit/Undo, and Studio desktop/mobile loading and assignment. Reopened document size is 12,153,815 bytes, demonstrating why standard's 8 MiB is insufficient. No font/model binary is committed or installed globally. `tools/cjk-font-fixture.mjs --accept-ofl` records exact source, license and output hashes in the ignored fixture directory. FontTools is test preparation only, not a runtime dependency.
 
 PowerPoint recognition and visual parity, arbitrary CJK files and representative CFF OTF remain unverified. Variable fonts and TTC remain rejected by the product; the external fixture-instancing step is not native variable-font support.
 

@@ -64,7 +64,7 @@ The Object Tools selector exposes all eight presets and the TypeScript check pas
 
 The actual native UI applied `arch_down`, linear chart regression and standard-deviation error bars with explicit multiplier 1, then decoded both core-generated SVG images. Real native IPC also computed statistics while a synthetic loopback provider held the foreground generation operation. Cancellation awaited the provider's actual disconnect event. A foreground transaction completed while a 1,871,688-byte SVG preview remained pending; a native save dialog was cancelled while preview IPC was also admitted. The save test wrote no file. These checks use the compiled native transport, not a web helper or mocked request gate.
 
-See [bounded native recovery evidence](../testing/phase5-recovery-capacity.md#7-bounded-native-integration-evidence). Native Print/Cancel was verified separately, with no job submitted; see the [print contract](../api.md#static-export-and-recovery).
+Native Print/Cancel was verified separately, with no job submitted; see the [print contract](../api.md#static-export-and-recovery).
 
 Stateless previews still have only the installed-font context described above; no document-local font resources, network font fetches or persistent preview artifacts were added. Regular desktop installation and Office validation remain pending final gates.
 

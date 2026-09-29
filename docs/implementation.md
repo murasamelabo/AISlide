@@ -2,7 +2,7 @@
 
 ## Research PoC
 
-The initial slice has been extended across the three research proofs. See the [support matrix](support-matrix.md), [API contracts](api.md) and [acceptance evidence](testing/poc.md). Arbitrary PowerPoint feature parity and production readiness are not established.
+The initial slice has been extended across the three research proofs. See the [support matrix](support-matrix.md) and [API contracts](api.md). Arbitrary PowerPoint feature parity and production readiness are not established.
 
 - Independently implement PresentationML with generic ZIP/XML libraries. Do not copy an existing PPTX engine.
 - Use a Rust core shared by a headless command line, MCP, and the Tauri editor.
