@@ -521,6 +521,28 @@ fn combo_controls_labels_and_series_statistics_roundtrip_and_edit() {
 }
 
 #[test]
+fn secondary_value_axis_crosses_at_the_far_side_and_tick_label_position_roundtrips() {
+    let mut input = scene("combo");
+    let element = &mut input["slides"][0]["elements"][0];
+    element["series"][0]["kind"] = json!("column");
+    element["series"][1]["kind"] = json!("line");
+    element["series"][1]["axis"] = json!("secondary");
+    element["options"] = json!({"category_axis":{"label_position":"low"},"primary_axis":{"label_position":"hidden"}});
+    let package = package(input);
+    let chart = roxmltree::Document::parse(package.text("ppt/charts/chart1.xml").unwrap()).unwrap();
+    let axis = |id: &str| chart.descendants().find(|node| ["catAx", "valAx"].contains(&node.tag_name().name())
+        && node.children().any(|child| child.tag_name().name() == "axId" && child.attribute("val") == Some(id))).unwrap();
+    let value = |node: roxmltree::Node, tag: &str| node.children().find(|child| child.tag_name().name() == tag).and_then(|child| child.attribute("val")).map(str::to_owned);
+    assert_eq!([value(axis("4"), "axPos"), value(axis("4"), "crosses")], [Some("r".into()), Some("max".into())]);
+    for id in ["1", "2", "3"] { assert_eq!(value(axis(id), "crosses").as_deref(), Some("autoZero"), "axis {id}"); }
+    assert_eq!(["1", "2", "4"].map(|id| value(axis(id), "tickLblPos")), [Some("low".into()), Some("none".into()), Some("nextTo".into())]);
+    let document = open(&package);
+    let options = &document["deck"]["slides"][0]["elements"][0]["options"];
+    assert_eq!([&options["category_axis"]["label_position"], &options["primary_axis"]["label_position"]], [&json!("low"), &json!("hidden")]);
+    assert!(options["secondary_axis"].get("label_position").is_none());
+}
+
+#[test]
 fn invalid_controls_are_rejected_not_silently_dropped() {
     for patch in [json!({"options":{"primary_axis":{"min":5,"max":4}}}), json!({"options":{"primary_axis":{"major_unit":0}}}), json!({"options":{"primary_axis":{"log_base":1}}}), json!({"options":{"primary_axis":{"log_base":10,"min":0}}}), json!({"options":{"category_axis":{"min":1}}}), json!({"options":{"secondary_axis":{"max":10}}}), json!({"kind":"bubble"}), json!({"kind":"combo"}), json!({"kind":"box_whisker"}), json!({"series":[{"name":"Invalid","color":"087F73","values":[2,4,6],"bubble_sizes":[1,2,3]}]}), json!({"series":[{"name":"Invalid","color":"087F73","values":[2,4,6],"trendline":{"kind":"polynomial","order":7}}]}), json!({"series":[{"name":"Invalid","color":"087F73","values":[2,4,6],"error_bars":{"kind":"custom","plus":[1],"minus":[1,2,3]}}]})] {
         let mut input = scene("column");

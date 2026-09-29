@@ -15,6 +15,14 @@ fn export(deck: Value) -> Vec<u8> {
     STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()
 }
 
+fn route_node<'a, 'input>(parsed: &'a roxmltree::Document<'input>) -> roxmltree::Node<'a, 'input> {
+    parsed.descendants().find(|node| node.tag_name().name() == "sp" && node.descendants().any(|child| child.tag_name().name() == "cNvPr" && child.attribute("name") == Some("route"))).unwrap()
+}
+
+fn route_marker<'a, 'input>(route: roxmltree::Node<'a, 'input>) -> roxmltree::Node<'a, 'input> {
+    route.descendants().find(|node| node.has_tag_name(("urn:aislide:connector:v1", "route"))).unwrap()
+}
+
 #[test]
 fn visual_transform_fill_effects_are_native_and_reopen() {
     let mut element = shape();
@@ -76,14 +84,16 @@ fn custom_polyline_retains_native_route_references_and_styles() {
     let source = export(scene);
     let package = Package::open(source.clone()).unwrap();
     let parsed = roxmltree::Document::parse(package.text("ppt/slides/slide1.xml").unwrap()).unwrap();
-    let route = parsed.descendants().find(|node| node.tag_name().name() == "cxnSp").unwrap();
+    assert!(!parsed.descendants().any(|node| node.tag_name().name() == "cxnSp"), "PowerPoint rejects custom geometry inside p:cxnSp");
+    let route = route_node(&parsed);
     let native_id = |name| parsed.descendants().find(|node| node.tag_name().name() == "cNvPr" && node.attribute("name") == Some(name)).unwrap().attribute("id").unwrap();
-    for (tag, name, site) in [("stCxn", "shape", "3"), ("endCxn", "target", "1")] {
-        let connection = route.descendants().find(|node| node.tag_name().name() == tag).unwrap();
-        assert_eq!(connection.attribute("id"), Some(native_id(name)));
-        assert_eq!(connection.attribute("idx"), Some(site));
+    let marker = route_marker(route);
+    for (prefix, name, site) in [("start", "shape", "3"), ("end", "target", "1")] {
+        assert_eq!(marker.attribute(prefix), Some(native_id(name)));
+        assert_eq!(marker.attribute(format!("{prefix}Site").as_str()), Some(site));
     }
     assert!(route.descendants().any(|node| node.tag_name().name() == "custGeom"));
+    assert!(route.descendants().any(|node| node.tag_name().name() == "noFill"));
     assert!(!route.descendants().any(|node| node.tag_name().name() == "prstGeom"));
     assert_eq!(route.descendants().filter(|node| node.tag_name().name() == "lnTo").count(), 5);
     for (tag, attribute, value) in [("headEnd", "type", "triangle"), ("tailEnd", "type", "triangle"), ("prstDash", "val", "dash")] {
@@ -114,13 +124,12 @@ fn custom_connection_sites_retain_semantic_shapes_and_native_indices() {
         let geometry = native_shape.descendants().find(|node| node.tag_name().name() == "custGeom").unwrap();
         assert_eq!(geometry.descendants().filter(|node| node.tag_name().name() == "cxn").count(), 5, "{preset}");
         let native_id = native_shape.descendants().find(|node| node.tag_name().name() == "cNvPr").unwrap().attribute("id").unwrap();
-        let connection = parsed.descendants().find(|node| node.tag_name().name() == "stCxn").unwrap();
-        assert_eq!(connection.attribute("id"), Some(native_id));
-        assert_eq!(connection.attribute("idx"), Some("4"));
+        let marker = route_marker(route_node(&parsed));
+        assert_eq!(marker.attribute("start"), Some(native_id));
+        assert_eq!(marker.attribute("startSite"), Some("4"));
         let target_id = parsed.descendants().find(|node| node.tag_name().name() == "cNvPr" && node.attribute("name") == Some("target")).unwrap().attribute("id").unwrap();
-        let end = parsed.descendants().find(|node| node.tag_name().name() == "endCxn").unwrap();
-        assert_eq!(end.attribute("id"), Some(target_id));
-        assert_eq!(end.attribute("idx"), Some("4"));
+        assert_eq!(marker.attribute("end"), Some(target_id));
+        assert_eq!(marker.attribute("endSite"), Some("4"));
         let document = open(&source);
         let reopened = &document["deck"]["slides"][0]["elements"][0];
         assert_eq!(reopened["type"], "shape", "{preset}");
@@ -173,6 +182,30 @@ fn custom_polyline_native_edit_is_guarded_and_undoable() {
     let source = package.save().unwrap(); let document = open(&source);
     assert!(transact(&document, operations).is_err());
     assert_eq!(saved(&document), source);
+}
+
+#[test]
+fn legacy_custom_route_in_a_connector_shape_is_rewritten_when_edited() {
+    let route = json!({"type":"connector","id":"route","x":100,"y":100,"width":400,"height":240,"color":"123456","stroke_width":2,"arrow":true,"routing":{"custom":true,"points":[[0.1,0.2],[0.5,0.8],[0.9,0.7]],"start_arrow":false,"dashed":false}});
+    let mut package = Package::open(export(deck(route))).unwrap();
+    let path = "ppt/slides/slide1.xml";
+    let mut xml = package.text(path).unwrap().to_owned();
+    let parsed = roxmltree::Document::parse(&xml).unwrap();
+    let node = route_node(&parsed);
+    let part = |name: &str| { let child = node.descendants().find(|child| child.tag_name().name() == name).unwrap(); xml[child.range()].to_owned() };
+    let id = node.descendants().find(|child| child.tag_name().name() == "cNvPr").unwrap().attribute("id").unwrap();
+    let legacy = format!("<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"{id}\" name=\"route\"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr><p:spPr>{}{}{}</p:spPr></p:cxnSp>", part("xfrm"), part("custGeom"), part("ln"));
+    let range = node.range();
+    xml.replace_range(range, &legacy);
+    package.replace_part(path, xml.into_bytes()).unwrap();
+    let source = package.save().unwrap(); let document = open(&source);
+    assert_eq!(document["deck"]["slides"][0]["elements"][0]["routing"]["custom"], true);
+    let changed = transact(&document, json!([{"op":"replace","path":"/deck/slides/0/elements/0/routing/points/1","value":[0.4,0.9]}])).unwrap();
+    let rewritten = saved(&changed["document"]);
+    let text = Package::open(rewritten.clone()).unwrap().text(path).unwrap().to_owned();
+    assert!(!text.contains("<p:cxnSp>") && text.contains("urn:aislide:connector:v1"), "{text}");
+    assert_eq!(open(&rewritten)["deck"]["slides"][0]["elements"][0]["routing"]["points"][1], json!([0.4,0.9]));
+    assert_undo(&document, &changed, &source);
 }
 
 #[test]
@@ -279,7 +312,7 @@ fn custom_polyline_zero_axis_native_bounds_do_not_introduce_diagonals() {
         let path = "ppt/slides/slide1.xml";
         let mut xml = package.text(path).unwrap().to_owned();
         let parsed = roxmltree::Document::parse(&xml).unwrap();
-        let extent = parsed.descendants().find(|node| node.tag_name().name() == "cxnSp").unwrap().descendants().find(|node| node.tag_name().name() == "ext").unwrap();
+        let extent = route_node(&parsed).descendants().find(|node| node.tag_name().name() == "xfrm").unwrap().children().find(|node| node.tag_name().name() == "ext").unwrap();
         let range = extent.attributes().find(|candidate| candidate.name() == attribute).unwrap().range_value();
         xml.replace_range(range, "0");
         package.replace_part(path, xml.into_bytes()).unwrap();
@@ -303,7 +336,7 @@ fn review_flipped_custom_connector_frame_edits_preserve_route() {
         let path = "ppt/slides/slide1.xml";
         let mut xml = package.text(path).unwrap().to_owned();
         let parsed = roxmltree::Document::parse(&xml).unwrap();
-        let transform = parsed.descendants().find(|node| node.tag_name().name() == "cxnSp").unwrap().descendants().find(|node| node.tag_name().name() == "xfrm").unwrap();
+        let transform = route_node(&parsed).descendants().find(|node| node.tag_name().name() == "xfrm").unwrap();
         xml.insert_str(transform.range().start + "<a:xfrm".len(), &format!(" {flips}"));
         package.replace_part(path, xml.into_bytes()).unwrap();
         let source = package.save().unwrap(); let document = open(&source);

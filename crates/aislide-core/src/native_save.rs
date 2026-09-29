@@ -474,6 +474,11 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
     if std::mem::discriminant(old) != std::mem::discriminant(new) { return Err(Error::Unsupported("native shape type replacement".into())); }
     if crate::fields::patch_cache_only(xml, node, old, new, edits)? { return Ok(()); }
     let generated = remap_resources(scaled_element(new, ids, theme, scale)?, resources)?;
+    // Earlier exports kept custom routes in p:cxnSp, which PowerPoint cannot open; an edited route is rewritten as the marked freeform.
+    if matches!(new, Element::Connector { routing: Some(route), .. } if route.custom) && node.has_tag_name((P, "cxnSp")) {
+        edits.push((node.range(), generated));
+        return Ok(());
+    }
     let parsed = parse(&generated)?; let next = parsed.root_element();
     let previous = scaled_element(old, ids, theme, scale)?;
     let previous = parse(&previous)?; let previous = previous.root_element();
@@ -587,7 +592,16 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
             let parent = child(node, P, "spPr").unwrap(); let next_parent = child(next, P, "spPr").unwrap();
             if !custom_edit && (color != next_color || stroke_width != next_width || arrow != next_arrow) { merge_child(xml, parent, &generated, next_parent, A, "ln", &["xfrm", "prstGeom", "ln", "extLst"], edits)?; }
             if flip_v != next_flip && old_bounds == new_bounds { geometry(xml, node, &generated, next, old, new, scale, edits)?; }
-            if !equal(&(start, end), &(next_start, next_end))? { let parent = child(node, P, "nvCxnSpPr").and_then(|node| child(node, P, "cNvCxnSpPr")).unwrap(); let next_parent = child(next, P, "nvCxnSpPr").and_then(|node| child(node, P, "cNvCxnSpPr")).unwrap(); for tag in ["stCxn", "endCxn"] { merge_child(xml, parent, &generated, next_parent, A, tag, &["cxnSpLocks", "stCxn", "endCxn", "extLst"], edits)?; } }
+            if !equal(&(start, end), &(next_start, next_end))? {
+                if node.has_tag_name((P, "cxnSp")) {
+                    let parent = child(node, P, "nvCxnSpPr").and_then(|node| child(node, P, "cNvCxnSpPr")).unwrap(); let next_parent = child(next, P, "nvCxnSpPr").and_then(|node| child(node, P, "cNvCxnSpPr")).unwrap();
+                    for tag in ["stCxn", "endCxn"] { merge_child(xml, parent, &generated, next_parent, A, tag, &["cxnSpLocks", "stCxn", "endCxn", "extLst"], edits)?; }
+                } else {
+                    let parent = child(node, P, "nvSpPr").and_then(|node| child(node, P, "nvPr")).ok_or_else(|| Error::Unsupported("custom connector properties missing".into()))?;
+                    let next_parent = child(next, P, "nvSpPr").and_then(|node| child(node, P, "nvPr")).ok_or_else(|| Error::Invalid("generated connector properties".into()))?;
+                    merge_child(xml, parent, &generated, next_parent, P, "extLst", &["ph", "audioCd", "wavAudioFile", "audioFile", "videoFile", "quickTimeFile", "custDataLst", "extLst"], edits)?;
+                }
+            }
         }
         _ => {}
     }
