@@ -88,7 +88,7 @@ Native worker compilation/unit tests and disposable file-store reopening are not
 2. SDK/bridge/MCP: `packages/client/{index.mjs,index.d.mts,README.md}`; `tools/{core-client.mjs,core-client.d.mts,core-client.test.mjs,mcp.mjs,mcp-poc.test.mjs,client.test.mjs,capacity.test.mjs,fonts.test.mjs,cjk-font-fixture.mjs}`. No manifest/runtime dependency addition; FontTools is isolated test tooling only.
 3. Studio/native: `apps/studio/src/{Studio.tsx,api.ts,DocumentSetupPanel.tsx,FontPanel.tsx,RecoveryPanel.tsx,SessionRecoveryPanel.tsx,recovery-v2.ts}`, `apps/studio/vite.config.ts`, `apps/studio/src-tauri/src/{main,requests}.rs`. Legacy `recovery.ts` remains unchanged.
 4. Browser tests: `tests/e2e/{phase5-recovery,fonts,output-recovery-workflow}.spec.ts`. The unchanged v1 `recovery.spec.ts` also passed.
-5. Documentation: this guide, `docs/testing/capacity.md`, `docs/authoring/{fonts.md,README.md}`, `docs/api.md`, `docs/support-matrix.md`, phase 5 row only in `docs/planning/editing-completion.md`, root README and SDK README. Existing dirty changes outside this list were preserved.
+5. Documentation: this guide, `docs/testing/capacity.md`, `docs/authoring/{fonts.md,README.md}`, `docs/api.md`, `docs/support-matrix.md`, root README and SDK README.
 
 The generated handoff manifest records exact source hashes and UTF-8/BOM checks after the final gates. No source freeze implies permission to commit, push, update user applications or run Office; those actions remain with the parent.
 

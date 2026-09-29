@@ -45,5 +45,5 @@ original XML comparisons.
 - Empty-layout and readable-theme-link requirements still apply to appendices.
 - This work does not scrub existing notes or source metadata.
 - No new Office rendering comparison, coverage percentage or CodeScene score
-  was measured. Source-review agents lacked file access; the security review
-  used supplied implementation details, not an independent source audit.
+  was measured. The security review used supplied implementation details, not
+  an independent source audit.

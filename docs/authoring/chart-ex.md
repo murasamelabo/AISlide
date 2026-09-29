@@ -12,9 +12,8 @@ resource**. It is an explicit compatibility exception, not a schema-clean result
 The 24-kind synthetic editing deck also passed Office opening, all 24 workbook
 edit/restore checks and captures. The final Sunburst boundary change then passed
 fresh and native-edited product-output checks, including zero schema errors,
-Office workbook editing and visible sector boundaries. See the
-[verification ledger](../planning/editing-expansion.md) for hashes and separate
-run scopes. Neither run establishes general pixel/typography parity.
+Office workbook editing and visible sector boundaries. Neither run establishes
+general pixel/typography parity.
 
 The existing `histogram(samples, bin_edges)` helper remains a separate derived
 standard-column workflow. Native `kind: "histogram"` preserves raw samples;
@@ -175,8 +174,7 @@ output.
 
 Focused static gates: 31 `export_static` tests and 4 `static_api`
 tests passed, including all-24 PNG/PDF rendering, the histogram last-interval
-overflow label, and pie/doughnut legends. Final integrated Node, browser,
-native and follow-up results are recorded in the [editing verification](../planning/editing-expansion.md).
+overflow label, and pie/doughnut legends.
 
 ### Validation Commands
 

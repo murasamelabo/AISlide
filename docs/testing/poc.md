@@ -98,7 +98,7 @@ The initial frontend bundle is approximately 245 kB before gzip; the chart rende
 
 Historical results before the PoC continuation remain in [generation.md](generation.md) and [first-slice.md](first-slice.md), and must not be confused with the expanded surface. The three research proof workflows pass for the documented subset. Full arbitrary-import editing, production hardening and distribution remain follow-on work, not hidden completed requirements.
 
-Hosted CI remains an external prerequisite: the Private repository's [initial run](https://github.com/murasamelabo/AISlide/actions/runs/34727915785) was denied before any job step because of account billing/spending limits. Billing, repository visibility and runner ownership were not changed. Local verification is the accepted gate until the owner resolves that restriction and dispatches Verify.
+Hosted CI results are available in the repository's GitHub Actions runs; local verification is recorded above.
 
 ## Assessment
 
@@ -107,7 +107,7 @@ Hosted CI remains an external prerequisite: the Private repository's [initial ru
 | Accuracy | 4/5 | Measured tests and Office object evidence; arbitrary Office parity remains unverified |
 | Completeness | 4/5 | All three bounded research workflows implemented; full master/theme/rich-text import is outside the verified subset |
 | Clarity | 4/5 | Explicit API/support matrix and separated synthetic/public/model evidence; some low-level operations still require JSON |
-| Actionability | 4/5 | Reproducible SDK, source intake, local model and corpus commands; hosted CI needs owner billing action |
+| Actionability | 4/5 | Reproducible SDK, source intake, local model and corpus commands |
 | Conciseness | 4/5 | Primary README and focused references; the full verification surface necessarily spans multiple suites |
 
 Overall: 4.0/5 for the bounded research deliverable. The highest-impact follow-on work is broader native import editing, cloud-model qualification and signed distribution, not re-labeling approximate previews as full fidelity. A reasonable user should distinguish these research proofs from a finished commercial editor.

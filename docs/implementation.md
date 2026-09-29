@@ -2,7 +2,7 @@
 
 ## Research PoC
 
-The initial slice has been extended across the three research proofs. See the [PoC tracker](poc-status.md), [support matrix](support-matrix.md), [API contracts](api.md) and [acceptance evidence](testing/poc.md). Arbitrary PowerPoint feature parity and production readiness are not established.
+The initial slice has been extended across the three research proofs. See the [support matrix](support-matrix.md), [API contracts](api.md) and [acceptance evidence](testing/poc.md). Arbitrary PowerPoint feature parity and production readiness are not established.
 
 - Independently implement PresentationML with generic ZIP/XML libraries. Do not copy an existing PPTX engine.
 - Use a Rust core shared by a headless command line, MCP, and the Tauri editor.
@@ -42,4 +42,4 @@ Native style CSP currently permits inline styles because geometry is rendered as
 
 Full arbitrary import/master/theme editing, SmartArt editing, exact Office text/rendering parity, broad cloud-model quality, OS-backed credential storage, persistent history/autosave, automatic scanned-PDF rendering, signed installers and platform expansion remain outside this research checkpoint. Native blocking extractors are bounded but not process-isolated. No installed Office fonts, model binaries or third-party presentations are redistributed with source.
 
-Development uses [murasamelabo/AISlide](https://github.com/murasamelabo/AISlide). On 2026-09-15 its owner confirmed changing it to Public and authorized the source push. The project license has not been selected. Generated deliverables, task-specific examples and input materials, local toolchains, environment files and test artifacts remain excluded from source publication. See [current verification and publication scope](testing/workspace-ux.md).
+The project license has not been selected. Generated deliverables, task-specific examples and input materials, local toolchains, environment files and test artifacts are not included in this repository.

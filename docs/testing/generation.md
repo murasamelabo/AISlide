@@ -57,7 +57,3 @@ The native WebView test also passed on Windows 11 ARM64 using the x64 GNU develo
 | Source/config encoding | 69 files checked, zero mismatches |
 
 These are 54 local tests across distinct suites. No real provider credential or paid model endpoint was used. Coverage percentage and real-model content quality remain unmeasured.
-
-## Hosted CI Prerequisite
-
-The Private repository's first [Verify run](https://github.com/murasamelabo/AISlide/actions/runs/34727915785) stopped before any job step ran. GitHub's annotation reported an account payment/spending-limit restriction. This is neither a test result nor proof that the hosted runner configuration works. Billing and visibility were left unchanged. The owner must resolve that restriction, then dispatch the existing Verify workflow on `main`; local evidence above is the accepted checkpoint while that external prerequisite remains open.

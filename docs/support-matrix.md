@@ -6,7 +6,7 @@ The independently implemented exporter follows public OPC/OOXML specifications u
 
 ## Current Single-File Path
 
-2026-09-19 limited-feature checkpoint, following work begun on 2026-09-18. The documented bounded implementations are complete; [final product verification and publication](planning/editing-completion.md) remain in progress. The 444 Rust / 66 Node / 175 Edge results describe the [prior expansion checkpoint](planning/editing-expansion.md), not the current revision. Fixture-specific Office results, static-render tests and schema validation remain separate evidence.
+The documented bounded implementations are complete. Fixture-specific Office results, static-render tests and schema validation remain separate evidence.
 
 | Surface | Current supported behavior | Remaining limits |
 | --- | --- | --- |
@@ -73,7 +73,7 @@ Static export selects 1-32 unique pages from a document within its selected capa
 
 Local recovery v2 is off by default and requires new consent to plaintext document/source/origin/history storage. At most five entries, 48 MiB each and 100 MiB total; each Undo/Redo direction is strictly 30 receipts and 4 MiB UTF-8. Core verification and the unsaved-change guard precede restoration with both histories. Windows uses fixed private AppData with a separate bounded worker; pinned directory/ancestor handles prevent rename races, and open-file validation precedes creation. Non-Windows native storage fails closed. Web storage uses IndexedDB v2; generations/CAS and cancellation prevent stale writes/deletes. Expiry runs seven days after successful checkpoint only when the enabled store opens. Disabling and v2 deletion preserve legacy v1 copies. No encrypted storage or source-PPTX overwrite is provided. See [Phase 5](testing/phase5-recovery-capacity.md).
 
-Two distinct native WebView profiles exercised persist/restart/restore with Undo/Redo, with five native E2E entries passing before the latest storage-security repair. The repair passed seven storage unit tests; final post-repair native/install verification is pending. The bounded static security rereview found no remaining High/Medium findings, not a full security audit. Current final core/Node/UI/native/Office/install results are pending in the [completion plan](planning/editing-completion.md).
+Two distinct native WebView profiles exercised persist/restart/restore with Undo/Redo. The storage-security repair passed seven storage unit tests. The bounded static security review found no remaining High/Medium findings, not a full security audit.
 
 Prior Office fixtures opened and edited all 24 native chart kinds; later Sunburst fresh/edited output was separately checked. Histogram retains deliberate `val` bins and **two known SDK 3.5.1 schema errors per histogram chartEx resource**. See [chart qualification history](authoring/chart-ex.md); prior evidence is not a current all-schema/all-Office qualification.
 

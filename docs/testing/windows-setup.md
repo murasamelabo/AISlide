@@ -49,8 +49,7 @@ PPTX, and exits normally. This is not Office visual-parity qualification.
 Test automation selects the exact document window by process ownership and
 class instead of relying on `Process.MainWindowHandle` / `CloseMainWindow`,
 which can select an internal helper. Never broadcast close messages to all
-windows of a process. Private evidence is under
-`.artifacts/publish-managed-20260924/save-dispatch-*.log`.
+windows of a process.
 
 ## Earlier September 23 Update
 
@@ -99,7 +98,7 @@ full viewport visibility at 1440px and 390px, while retaining page, header
 and dialog overflow assertions. Notes retain the full-editor axe check and
 now have a named, keyboard-focusable region.
 
-Private evidence: `.artifacts/mcp-publish-20260923/desktop-final.json`,
+Local evidence: `.artifacts/mcp-publish-20260923/desktop-final.json`,
 `build.json`, `candidate-native.log`, `installed-native.log`, and
 `affected-browser.stdout.log`. The earlier feature baseline is recorded in
 `.artifacts/p1-delivery-verify-xIXDIE/verification.json`. At the post-install
@@ -238,14 +237,7 @@ An earlier lifecycle reached the 180-second deadline while test-only packaging t
 
 Selected settings and recovery-store content hashes remained unchanged across installation and isolated tests, **before normal launch**. The WebView inventory was also unchanged. Model weights are not bundled or modified; existing model preservation was checked by size, timestamp and first/last 64KiB samples, not full-file hashes. Normal startup can legitimately update its own profile, so the pre-launch preservation proof is not a claim that all user-data bytes remain frozen afterward. No automatic downgrade or executable-only rollback was performed.
 
-Local evidence names below are not public download links:
-
-- `.artifacts/bounded-native-20260919-8Cwlpf/setup-build/execution.json`: successful build and installer/bundle hashes.
-- `.artifacts/completion-native-20260919-6d914e/unit/command.log` and `.artifacts/bounded-native-20260919-8Cwlpf/native-full/execution.json`: 14 unit and six current native passes.
-- `.artifacts/installer-teardown-tkidbE/final-gates.json` and its `command.log`: final isolated 5/5, duration, frozen artifact hashes and owned cleanup.
-- `.artifacts/regular-desktop-update-20260919-1556-9e283c/final-proof.json`: regular update, three-byte payload comparison, preservation, installed 4/4 and normal Start Menu launch.
-
-This remains an unsigned **debug x64** build tested on Windows 11 ARM64. Release/signing, native ARM64/MSVC, broad upgrade compatibility and missing-WebView2 setup remain unqualified. Model weights and generated verification artifacts are not publication payloads. The completion ledger separately records the limited Office qualification; installation tests do not establish Office visual parity.
+This remains an unsigned **debug x64** build tested on Windows 11 ARM64. Release/signing, native ARM64/MSVC, broad upgrade compatibility and missing-WebView2 setup remain unqualified. Model weights and generated verification artifacts are not publication payloads. Installation tests do not establish Office visual parity.
 
 The checkpoint sections from Editing Expansion through Lucide Catalog Refresh below are **HISTORICAL**. Their package sizes, test counts, authorization and statements about not updating the regular installation apply only to those earlier runs, not to the completed update above.
 
@@ -255,7 +247,7 @@ The checkpoint sections from Editing Expansion through Lucide Catalog Refresh be
 
 It used the standard local setup output path described below, which now holds the current package rather than these historical bytes.
 
-`npm run setup:build -- --debug --no-sign` completed with the [28-item editing expansion](../planning/editing-expansion.md). Native unit tests passed 5/5, the embedded WebView workflow passed, and the isolated installed lifecycle passed all 5 cases in 158 seconds. The test used a random product name, temporary directory and WebView profile; it did not install or update the regular AISlide application. The actual Start Menu launch, icon/part/preset editing, Undo, 0.000px pending move/resize preview displacement, running-app install/uninstall guards, shortcut/registration removal and unrelated-file retention passed.
+`npm run setup:build -- --debug --no-sign` completed with the editing expansion. Native unit tests passed 5/5, the embedded WebView workflow passed, and the isolated installed lifecycle passed all 5 cases in 158 seconds. The test used a random product name, temporary directory and WebView profile; it did not install or update the regular AISlide application. The actual Start Menu launch, icon/part/preset editing, Undo, 0.000px pending move/resize preview displacement, running-app install/uninstall guards, shortcut/registration removal and unrelated-file retention passed.
 
 The isolated installed test used the preceding 95,149,633-byte package (`e6ed887168026ddd61a7e3b803dc5a2725c0b1d9ba2984faa44b6ae51937afab`). The final package above was rebuilt after the Sunburst-only native boundary/legacy-encoding fix, with no packaging or UI code changes. The final core passed 444 tests, Node passed 66, and the rebuilt ordinary desktop passed the complete WebView workflow again in 50 seconds. The installed lifecycle was not repeated for this final XML-only change; its fresh generated/edited Sunburst files passed Office and schema checks separately.
 

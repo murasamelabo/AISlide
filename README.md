@@ -4,13 +4,13 @@ A local-first slide editor with an independently implemented Rust PresentationML
 
 **Blank startup, icon categories and master presets.** Studio starts with one empty slide; **New report** explicitly opens the synthetic sample. The full Lucide catalog can be filtered by its 42 official categories together with keywords. **Edit masters and layouts > Browse presets** offers seven original styles with native editable layouts, theme colors, fonts, margins, gutters and content/part regions. See the [preset guide and samples](docs/testing/master-presets.md).
 
-**Status: research PoC covering native editable generation, package-preserving import, source-bound transactions and headless automation.** A real local model, a public-data bilingual deck, and a 24-file public PPTX corpus have been exercised. This is not a full PowerPoint replacement or a production release. See the [acceptance report](docs/testing/poc.md) and [support matrix](docs/support-matrix.md).
+**Status: experimental research prototype.** It covers native editable generation, package-preserving import, source-bound transactions and headless automation. It is not a full PowerPoint replacement or a production release, and its APIs and behavior may change. See the [support matrix](docs/support-matrix.md) and the [acceptance report](docs/testing/poc.md).
 
 **Current file workflow: one standard, unencrypted Open XML PPTX.** Use **Open PPTX** and **Save PPTX**. External `.aislide.json` and scene JSON files are no longer required by Studio. The current slide XML is authoritative; optional source/binding and part information is retained in a standard Custom XML part inside the PPTX. See [single-file operation](docs/testing/single-file.md).
 
-**Limited-feature completion, 2026-09-19: implementation complete within the documented bounds; final product verification in progress.** Work began on 2026-09-18. The [completion plan](docs/planning/editing-completion.md) records the implemented features, remaining limits and final verification gates. The earlier 444 Rust / 66 Node / 175 Edge results belong to the [prior expansion checkpoint](docs/planning/editing-expansion.md), not this revision. The catalog has 24 native chart kinds and basic PNG/PDF coverage for all 24. Histogram Office fixtures retain the deliberate `val`-bin encoding exception: **two known SDK 3.5.1 schema errors per histogram chartEx resource**. These are fixture-specific checks, not full Office parity or a production-release qualification. See [chart qualification and history](docs/authoring/chart-ex.md).
+**Native charts.** The catalog has 24 native chart kinds with embedded workbooks and basic PNG/PDF output for all 24. Histogram Office fixtures retain a deliberate `val`-bin encoding exception: **two known SDK 3.5.1 schema errors per histogram chartEx resource**. These are fixture-specific checks, not full Office parity. See [chart qualification](docs/authoring/chart-ex.md).
 
-**Parts library: 111 editable presets across 36 categories.** Enter labels, axes, values, relationships or schedules to create theme-linked native graphics. Three new frameless list compositions use aligned text and whitespace; the original 108 recipes remain available and unchanged. See [list selection guidance](docs/authoring/README.md#choose-a-list-composition), the [sample generator](tools/parts-demo.mjs) and the [parts guide](docs/testing/parts-library.md). These are deterministic design presets, not AI-generated artwork.
+**Parts library: 117 editable presets across 36 categories.** Enter labels, axes, values, relationships or schedules to create theme-linked native graphics. Frameless list compositions and technical briefing parts (icon cards, icon rows, shifts, step cards and agendas) use aligned text and whitespace. See [list selection guidance](docs/authoring/README.md#choose-a-list-composition), the [sample generator](tools/parts-demo.mjs) and the [parts guide](docs/testing/parts-library.md). These are deterministic design presets, not AI-generated artwork.
 
 **Filled process diagrams and evidence-led MCP authoring.** Horizontal/vertical flows, trees and cycles now use stage panels, hierarchy blocks and segmented arrows with safe label areas. Four English best-practice profiles support consulting decisions, technical explanations, event talks and reports. MCP can retrieve guides, validate an evidence-linked outline and create a new editable presentation without inventing values or calling a model. The consulting guide retains 48 patterns with honest implementation status; dedicated summary/closing templates supplement the existing parts. See [guided authoring and complete input examples](docs/authoring/README.md).
 
@@ -24,7 +24,7 @@ A local-first slide editor with an independently implemented Rust PresentationML
 
 The built-in example remains deterministic and explicitly synthetic. Model generation is a separate operation. Existing PPTX engine code is not used.
 
-Development repository: [murasamelabo/AISlide](https://github.com/murasamelabo/AISlide), **Public**, as changed and confirmed by its owner on 2026-09-15. The project license has not been selected. Local input materials, task-specific examples and generated deliverables are not included in the source publication.
+Local input materials, task-specific examples and generated deliverables are not included in this repository. Reproducible synthetic examples live in `tools/*-demo.mjs`.
 
 ## Run
 
@@ -47,7 +47,7 @@ npm run tauri:build
 
 On Windows, run `apps/studio/src-tauri/target/debug/aislide-studio.exe`. This embeds the frontend and requires no Vite server. It is an unsigned development executable, not an installer. `npm run tauri:dev` runs the native development shell while Vite is running separately.
 
-This session also verified an isolated x64 GNU Rust/LLVM-MinGW toolchain under ignored `.tools/` on Windows ARM64. `tools/cargo.mjs` uses that local installation when present and otherwise calls Cargo from PATH. Native ARM64/MSVC builds have not been verified. The local toolchain is not part of the application distribution and is not downloaded automatically on a new checkout.
+On Windows ARM64, `tools/cargo.mjs` uses an isolated x64 GNU Rust/LLVM-MinGW toolchain under the ignored `.tools/` directory when present, and otherwise calls Cargo from PATH. Native ARM64/MSVC builds have not been verified. The local toolchain is not part of the application distribution and is not downloaded automatically.
 
 ### Windows Setup
 
@@ -76,7 +76,7 @@ npm run dev:local-model
 
 The final command prints a free loopback Studio URL and owns both servers. Ctrl+C closes them. Do not extract over an existing runtime without checking its version. To run a bounded, GUI-free real-model qualification instead, use `npm run model:qualify`; it generates twelve slides through MCP, checks known synthetic chart values, edits, undoes, exports, and stops its model server.
 
-## Available Now
+## Features
 
 - Twelve-slide synthetic example plus a source-bound report compiler, with cover, metrics, table, columns, statement, chart and process recipes.
 - Editable rich text/paragraphs and speaker notes, 40 preset shapes, bounded adaptive-curve Boolean operations including fragment, formatted/merged table cells, 24 native chart kinds with embedded XLSX, PNG/JPEG and inert SVG pictures, groups and connectors. Static rendering includes eight default WordArt warps, six SVD-fitted trendline types, forecasts, error bars and bounded axis options; no full 3D, all Excel formats or arbitrary warp adjustments. Histogram retains the documented schema exception.
@@ -91,7 +91,7 @@ The final command prints a free loopback Studio URL and owns both servers. Ctrl+
 - Single-file PPTX opening and saving, with native text/style, theme, master/layout contents, table, picture, chart, group and connector reading. Sources and bindings travel inside the PPTX without a scene snapshot or external JSON. Legacy checkpoint APIs remain for compatibility only.
 - Part-preserving edits of reopened PPTX files, with explicit rejection of unsupported complex formatting. Supported presentations allow slide and master/layout structural edits within capacity/preservation guards. Native sections/custom slide shows block slide structural editing, and deleting referenced content fails rather than breaking links.
 - Static PNG/JPEG and outlined PDF with searchable/selectable English/Japanese Unicode text, real structure tags, alt text and declared table headers. Visible PDF text remains outlines, not editable text; no font programs are redistributed. Direct print uses a PNG-only same-document portal and the user-confirmed system dialog; native Print/Cancel was verified with Cancel only, without submitting a job. Opt-in v2 recovery remains off by default, with both Undo/Redo stacks capped at 30 receipts/4 MiB each and five entries/48 MiB each/100 MiB total. Seven-day expiry runs when the enabled store opens; originals and legacy copies remain untouched. See [static output and recovery](docs/support-matrix.md#static-output-and-recovery).
-- Separate local modern GUID-author threads with three states, rich bodies/replies and guarded native edits, alongside legacy comments. Masked PII candidates are manual-review hints, not selectable redaction categories. Explicit table headers, effective-theme/alt checks and selective clean copies do not establish PDF/UA, WCAG, authenticated mentions or a blanket PII-removal guarantee. See [Phase 6 review](docs/authoring/review-phase6.md).
+- Separate local modern GUID-author threads with three states, rich bodies/replies and guarded native edits, alongside legacy comments. Masked PII candidates are manual-review hints, not selectable redaction categories. Explicit table headers, effective-theme/alt checks and selective clean copies do not establish PDF/UA, WCAG, authenticated mentions or a blanket PII-removal guarantee. See [review and comments](docs/authoring/review-phase6.md).
 - Exact original bytes on a no-op round trip. A supported patch changes its slide part while preserving untouched entry payloads; edited ZIP containers are not claimed byte-identical.
 - Installed-font measurement, overflow/missing-glyph reports and opt-in document-local static TTF/OTF full EOT v1 embedding with fsType checks (eight faces, 12 MiB/face, 24 MiB total, also constrained by the complete document). A real 5.77 MB static Japanese font is qualified in SDK/MCP/Studio; no OS installation, subsetting or Office typography certification. See [font limits](docs/authoring/fonts.md).
 - Strict schemas, bounded archives/rasters/PDF streams, unsafe-name/duplicate-entry rejection, and no fetching or execution of imported content.
@@ -117,7 +117,7 @@ aislide request
 
 `request` reads one JSON document from stdin and writes one JSON result to stdout. Errors go to stderr with a nonzero exit status. `generate` uses atomic, create-new publication and never overwrites the input or an existing destination.
 
-The shared JSON API includes `sample`, `compile`, `provider_status`, `generate`, `ingest`, `data_report`, `create_picture`, `create_diagram`, `object_catalog`, `create_object`, `part_catalog`, `create_part`, `insert_part`, `update_part`, `design_defaults`, `update_design`, `apply_theme`, `assign_layout`, `new_document`, `transaction`, `undo_transaction`, `open_presentation`, `export_presentation`, `export_project`, `open_project`, `import_document`, `import_pptx`, `save_import`, `measure_layout`, `ocr_status`, `export`, `validate`, `inspect`, `roundtrip`, `package_manifest` and `patch_text`. The default `large` profile permits 256 slides, 8192 elements, 32 MiB complete document including immutable origin, 96 MiB JSON wire and 16 MiB archive. Explicit `standard` and `legacy` preserve their prior numeric budgets. Image, source, static-output and recovery budgets remain independent. See [API contracts](docs/api.md) and [Phase 5 practical capacity](docs/testing/phase5-recovery-capacity.md).
+The shared JSON API includes `sample`, `compile`, `provider_status`, `generate`, `ingest`, `data_report`, `create_picture`, `create_diagram`, `object_catalog`, `create_object`, `part_catalog`, `create_part`, `insert_part`, `update_part`, `design_defaults`, `update_design`, `apply_theme`, `assign_layout`, `new_document`, `transaction`, `undo_transaction`, `open_presentation`, `export_presentation`, `export_project`, `open_project`, `import_document`, `import_pptx`, `save_import`, `measure_layout`, `ocr_status`, `export`, `validate`, `inspect`, `roundtrip`, `package_manifest` and `patch_text`. The default `large` profile permits 256 slides, 8192 elements, 32 MiB complete document including immutable origin, 96 MiB JSON wire and 16 MiB archive. Explicit `standard` and `legacy` preserve their prior numeric budgets. Image, source, static-output and recovery budgets remain independent. See [API contracts](docs/api.md) and [practical capacity](docs/testing/phase5-recovery-capacity.md).
 
 The CLI `generate` subcommand and low-level JSON `export` perform deterministic structural export. Use document/project operations for source-integrity and measured-layout gates. Model inference uses the JSON `generate` operation, not the similarly named CLI subcommand.
 
@@ -184,9 +184,7 @@ Studio leaves the existing deck unchanged until **Apply draft**. Cancellation, m
 
 The `provider_status` operation reports configuration only, not connectivity or credential validity. For MCP generation, configure the client request timeout longer than the provider budget; the CLI bridge permits up to 310 seconds. A real local Qwen2.5-1.5B run was qualified through MCP; arbitrary cloud providers and broad model quality have not been qualified. Historical fixture evidence is in [generation verification](docs/testing/generation.md); current evidence is in the [PoC report](docs/testing/poc.md).
 
-## Verification
-
-**2026-09-19 final gates are pending.** Focused feature checks are recorded in the linked contracts; they do not replace the final frozen-product core, Node, UI, native, Office and Windows-install checks. Final counts, artifact hashes, the regular desktop update and the normal commit/push to the existing Public repository will be recorded in the [completion plan](docs/planning/editing-completion.md) after verification. No current all-green result or published revision is asserted here.
+## Testing
 
 ```sh
 node tools/cargo.mjs test --workspace
@@ -203,7 +201,7 @@ npm run test:native
 npm run encoding:check
 ```
 
-Browser E2E uses installed Microsoft Edge through Playwright. Generation tests use an explicitly synthetic loopback provider fixture, not a real model or paid API. The Windows GitHub Actions workflow defines the core, bridge, MCP, browser and native gates without model credentials. Its first hosted run could not start because of an account billing/spending-limit restriction; hosted CI is not yet verified. The optional Windows PowerPoint checks operate on disposable copies outside OneDrive:
+Browser E2E uses installed Microsoft Edge through Playwright. Generation tests use an explicitly synthetic loopback provider fixture, not a real model or paid API. The Windows GitHub Actions workflow runs the core, bridge, MCP, browser and native gates without model credentials. The optional Windows PowerPoint checks operate on disposable copies outside cloud-synchronized folders:
 
 ```powershell
 ./tools/verify-demo.ps1
@@ -217,23 +215,9 @@ The Open XML validator downloads pinned official NuGet packages from Microsoft's
 
 See [docs/testing/first-slice.md](docs/testing/first-slice.md) for observed results and [docs/implementation.md](docs/implementation.md) for boundaries.
 
-### GitHub Development
+## Limitations
 
-The owner authorized publishing the verified source to the existing Public repository on 2026-09-15. This checkpoint includes the dependent authoring, single-PPTX, parts, graph and workspace improvements. Source publication excludes local `deliverables/`, task-specific `examples/`, inputs, credentials, downloaded toolchains and build outputs. Reproducible synthetic examples live in `tools/*-demo.mjs`.
-
-The original PoC baseline was pushed to `main` at `33243bf87381226285b99c8897ee67af9e406df1` while the repository was Private. The [initial Actions run](https://github.com/murasamelabo/AISlide/actions/runs/34727915785) was blocked before any step ran: GitHub reported failed recent account payments or a spending limit requiring attention. That historical failure is not a result for the current revision. No billing settings, spending limits or repository visibility are changed by this publication. See the latest [workspace verification](docs/testing/workspace-ux.md) and the actual Actions run for the pushed commit.
-
-After the repository owner resolves the restriction in [GitHub billing settings](https://github.com/settings/billing), open **Actions > Verify > Run workflow** on `main`, or run:
-
-```sh
-gh workflow run verify.yml --repo murasamelabo/AISlide --ref main
-```
-
-Review that run before treating a clean hosted Windows build as established. Do not make the repository public or add a self-hosted runner merely to work around the restriction.
-
-## Beyond This PoC
-
-Full arbitrary-PPTX editing, unrestricted imported master/theme rewriting, exact Office typography, presentation/animation/video playback, encryption and cloud coauthoring remain outside this expansion. The 24-kind chart catalog does not cover every Office chart family or formatting combination; histogram retains the explicit schema exception. Automatic scanned-PDF rendering/OCR, in-place source AutoSave, credential-vault UI, broad cloud-model qualification, signed installers and cross-platform distribution remain unqualified or unsupported. Recovery persist/restart/restore with both histories passed in two distinct native WebView profiles before the latest storage-security repair; the final post-repair native/install gate remains pending. Imported SmartArt/OLE/media and unknown extensions are preserved, not executed or fully rendered. ZIP64, encrypted presentations, legacy `.ppt`, non-UTF-8 edited XML and signed-package edits are rejected; protected originals remain untouched. Parts have bounded data sizes; maps have generalized coastlines rather than country borders/geocoding, and nominal Venn layouts do not calculate area-accurate intersections. See the [current remaining limits and verification scope](docs/planning/editing-completion.md).
+Full arbitrary-PPTX editing, unrestricted imported master/theme rewriting, exact Office typography, presentation/animation/video playback, encryption and cloud coauthoring are outside the current scope. The 24-kind chart catalog does not cover every Office chart family or formatting combination; histogram retains the explicit schema exception. Automatic scanned-PDF rendering/OCR, in-place source AutoSave, credential-vault UI, broad cloud-model qualification, signed installers and cross-platform distribution remain unqualified or unsupported. Imported SmartArt/OLE/media and unknown extensions are preserved, not executed or fully rendered. ZIP64, encrypted presentations, legacy `.ppt`, non-UTF-8 edited XML and signed-package edits are rejected; protected originals remain untouched. Parts have bounded data sizes; maps have generalized coastlines rather than country borders/geocoding, and nominal Venn layouts do not calculate area-accurate intersections. See the [support matrix](docs/support-matrix.md) for the supported subset.
 
 Synthetic data must not be treated as factual, template compilation must not be described as AI generation, and structural validation must not be described as Office visual parity.
 

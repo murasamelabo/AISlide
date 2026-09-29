@@ -74,7 +74,7 @@ An initial 18-icon deck exposed repeated full decoding of identical 1024px asset
 
 After that correction, retaining 1024px icons still caused a document-size rejection on reopen. The graph-specific 256px preparation fixed this without raising the 2 MiB document or 4 MiB protocol limits; ordinary `create_asset` still uses its original resolution. Final production MCP icon replacement completed in 1.860 seconds under the existing limits. This is a measured bounded sample, not a worst-case latency guarantee for arbitrary raw image payloads.
 
-Review-agent feedback was excerpt-limited. The successful-insert test explicitly checks applying the node draft together with its icon; the cancel test checks retaining it without applying. No full independent security audit, measured coverage percentage or complete accessibility conformance is claimed.
+The successful-insert test explicitly checks applying the node draft together with its icon; the cancel test checks retaining it without applying. No full independent security audit, measured coverage percentage or complete accessibility conformance is claimed.
 
 ## Authoring
 
@@ -120,7 +120,7 @@ Screenshot inspection then caught an application-level `Core is busy` error desp
 
 Reproduce with `node tools/graphs-demo.mjs` into a new artifact directory and `tools/verify-powerpoint.ps1 -VerifyConnections` on a disposable copy. Required gates include workspace Rust tests, Studio/generation E2E, native unit/WebView tests, build, lint and encoding checks.
 
-Coverage percentage is not measured. Hosted GitHub CI remains externally billing-blocked. Review-agent calls lacked direct filesystem access; subsequent code/React/TypeScript/Rust/security/PowerShell reviews used supplied excerpts and cannot be presented as independent full-source audits. The React save-state concern was resolved by checking that Studio unmounts GraphEditor on successful application. PowerShell review prompted the precise begin-target movement and post-restoration-capture qualifications above. Local source review and executable checks supply the primary evidence.
+Coverage percentage is not measured. Code reviews used supplied excerpts and are not independent full-source audits. The React save-state concern was resolved by checking that Studio unmounts GraphEditor on successful application. PowerShell review prompted the precise begin-target movement and post-restoration-capture qualifications above. Local source review and executable checks supply the primary evidence.
 
 ## Design Reference
 

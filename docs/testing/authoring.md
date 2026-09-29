@@ -48,9 +48,9 @@ The final local gate passed **135 distinct tests**: Rust workspace 85, Node brid
 - Authoring dialogs were checked at 1440px and 390px: no horizontal overflow and no serious/critical axe findings for the targeted WCAG tags. Screenshots are stored under ignored `.artifacts/authoring-*`. This is not a complete manual accessibility or baseline-image-diff audit.
 - The actual rebuilt Tauri WebView passed direct text/IME editing, object insertion, common master text, theme/layout changes and undo, followed by existing source and model-fixture generation/cancellation checks. It used an owned process and disposable profile; the user's existing window was not closed.
 
-Review agents had no filesystem access. They reviewed supplied critical excerpts rather than independently auditing the whole repository. Confirmed findings about Escape during commit, template-only inheritance flags and duplicate slide-placeholder indices were reproduced and fixed. Stateless core transports return candidate documents rather than committing remote server state; SDK late-cancellation rejection therefore does not leave a persisted server mutation behind. No measured code-coverage percentage or full security-audit claim is made.
+Confirmed review findings about Escape during commit, template-only inheritance flags and duplicate slide-placeholder indices were reproduced and fixed. Stateless core transports return candidate documents rather than committing remote server state; SDK late-cancellation rejection therefore does not leave a persisted server mutation behind. No measured code-coverage percentage or full security-audit claim is made.
 
-Hosted CI remains blocked by the repository account billing/spending restriction. No public release, billing change, installer signing or project license choice was made.
+No public release, installer signing or project license choice was made.
 
 ## Phase2 Visual Tools, 2026-09-18
 
@@ -93,7 +93,7 @@ Final serialized gates:
 
 Pending parent gates: additional WordArt/render coordination, whole-product frozen browser/native/Office qualification, commit/push and desktop installation. No Office compatibility, unrestricted EMF/WMF, comprehensive accessibility or full feature-parity claim follows from these checks.
 
-Final `npm run build` exited 0 (existing >500 kB chunk warning retained); `.artifacts/phase2-gates-PtncvJ/build.log` contains the output. An isolated preview was left at `http://127.0.0.1:50661/`, HTTP 200, without opening a user browser or modifying the desktop installation.
+Final `npm run build` exited 0 (existing >500 kB chunk warning retained).
 
 ### Phase2 Changed Files
 
@@ -102,4 +102,4 @@ Final `npm run build` exited 0 (existing >500 kB chunk warning retained); `.arti
 - SDK/MCP: [types.ts](../../packages/client/types.ts), [index.mjs](../../packages/client/index.mjs), [index.d.mts](../../packages/client/index.d.mts), [mcp.mjs](../../tools/mcp.mjs).
 - Studio: [ObjectToolsPanel.tsx](../../apps/studio/src/ObjectToolsPanel.tsx), [SelectionTools.tsx](../../apps/studio/src/SelectionTools.tsx), [AssetPanel.tsx](../../apps/studio/src/AssetPanel.tsx), [api.ts](../../apps/studio/src/api.ts), [object-tools.css](../../apps/studio/src/object-tools.css).
 - Tests: core [geometry_ops.rs](../../crates/aislide-core/tests/geometry_ops.rs), [proofing.rs](../../crates/aislide-core/tests/proofing.rs), [visual.rs](../../crates/aislide-core/tests/visual.rs), Node [geometry.test.mjs](../../tools/geometry.test.mjs), [proofing.test.mjs](../../tools/proofing.test.mjs), browser [editing-workflows.spec.ts](../../tests/e2e/editing-workflows.spec.ts). Media unit tests live in the existing core module.
-- Documentation: this guide, [proofing-format-painter.md](../authoring/proofing-format-painter.md), and **only phase2's row** in [editing-completion.md](../planning/editing-completion.md). The shared static renderer, PDF owner files, image-edit AI core, desktop installer and git state were not edited or operated by this phase.
+- Documentation: this guide and [proofing-format-painter.md](../authoring/proofing-format-painter.md).

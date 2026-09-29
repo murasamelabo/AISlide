@@ -119,9 +119,8 @@ copy-on-write, unknown XML retention, unique field instances, explicit dates,
 page-order projection, stale revisions, cancellation, Undo and desktop/mobile UI.
 On 2026-09-19, the combined comments/single-file regression run passed 69 tests
 after the repeated-body-save and rich-notes recognition repairs. This is a scoped
-run, not the final workspace count. Office field/notes parity and the final
-native/install gates remain unverified; see the
-[completion plan](../planning/editing-completion.md).
+run, not the final workspace count. Office field/notes parity remains
+unverified.
 
 The existing POTX/THMX factory tests remain the bounded template baseline.
 On 2026-09-18, cached external representatives `WithMaster.pptx` and

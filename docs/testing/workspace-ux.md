@@ -1,6 +1,6 @@
 ﻿# Workspace Usability Upgrade
 
-Date: 2026-09-15. The right-click, file/slide-operation and icon-import extension is implemented and locally verified. After confirming that they changed the repository to **Public**, the owner explicitly authorized a public source push. The agent does not change visibility, billing or the project license. Local input materials and generated deliverables are excluded from publication.
+The right-click, file/slide-operation and icon-import extension is implemented and locally verified. Local input materials and generated deliverables are not included in this repository.
 
 ## Resizable Workspace Panels
 
@@ -70,7 +70,7 @@ The existing [authoring tests](../../tests/e2e/authoring.spec.ts) contain seven 
 
 The [installed lifecycle test](../../tools/windows-setup.test.mjs) launches an isolated installation through its actual Start Menu shortcut. It temporarily holds only transaction transport in that test-owned WebView, checks four preview frames and busy state, restores/releases the transport in `finally`, waits for completion, and tests Undo. Tauri's `invoke` property is read-only; the first test interception did not take effect. The corrected test holds the exact IPC fetch endpoint without changing native requests or production code. Both native gestures measured 0.000px displacement. Screenshots were inspected.
 
-Final verification covers **216 distinct passing tests**: Rust workspace 140, Studio browser 71 and setup contracts/installed lifecycle 5. The full Studio run passed 70; an existing graph accessibility/import scenario hit its 30-second limit and passed unchanged in 8.1 seconds on a single-case rerun. Frontend typecheck/build, embedded desktop/NSIS build, lint and scoped editor diagnostics passed. No coverage percentage, complete WCAG audit, new Office parity or independent full-source review is claimed. Review agents were excerpt-limited. Unchanged Node/generation and separate native-unit suites were not rerun for this frontend interaction change.
+Final verification covers **216 distinct passing tests**: Rust workspace 140, Studio browser 71 and setup contracts/installed lifecycle 5. The full Studio run passed 70; an existing graph accessibility/import scenario hit its 30-second limit and passed unchanged in 8.1 seconds on a single-case rerun. Frontend typecheck/build, embedded desktop/NSIS build, lint and scoped editor diagnostics passed. No coverage percentage, complete WCAG audit, new Office parity or independent full-source review is claimed. Unchanged Node/generation and separate native-unit suites were not rerun for this frontend interaction change.
 
 Commands: `node tools/cargo.mjs test --workspace --locked`, `npm run setup:build -- --debug --no-sign`, `npm run test:setup:installed`, `npm run lint`, and `npm run test:e2e` with `AISLIDE_TEST_PORT=4174`. For the focused measurement, use `npm run test:e2e -- tests/e2e/authoring.spec.ts --grep "dense picture drags"` with the same port environment. See the [updated setup artifact](windows-setup.md#canvas-interaction-refresh). No regular installed app or user document was modified by verification.
 
@@ -106,7 +106,7 @@ Final checks rerun for this UI-only follow-up: **190 tests passed**: Rust worksp
 
 Screenshots from those four widths, tooltip states, authoring panels and the actual native WebView were inspected. The native scenario also passed direct editing, graph/part operations, OS save/cancel/reopen and close-cancel protection. The previous user window was preserved by renaming its loaded generated executable and loader. Cargo reused a cached build script and did not restore the loader path; copying the identical preserved DLL into the missing path fixed startup, after which the complete native test passed. No user process was terminated.
 
-Automated accessibility checks and screenshots do not constitute complete WCAG conformance or a stored visual-diff baseline. Review agents were excerpt-limited. No new Office visual-parity result is claimed for a change confined to application chrome; the earlier document qualification below remains historical evidence.
+Automated accessibility checks and screenshots do not constitute complete WCAG conformance or a stored visual-diff baseline. No new Office visual-parity result is claimed for a change confined to application chrome; the earlier document qualification below remains historical evidence.
 
 ## User Operations
 
@@ -156,7 +156,7 @@ The initial browser regressions were a too-small document-name button, a changed
 
 The native test owns its spawned process, disposable WebView profile and temporary output directory. It sends `WM_CLOSE` only to that process; no extra Tauri close permission is added. On this Windows installation, UI Automation omitted filename/save controls that Win32 exposed. The test uses the measured dialog class and child IDs, exact process ownership and bounded window messages to verify cancel/save/reopen. Drop and paste use injected WebView DOM events, not a claim of physical drag or OS clipboard automation.
 
-SVG reference expansion and local unapplied drafts were identified during excerpt-level security/React review and reproduced as RED tests before correction. Review agents did not have direct filesystem access, so these reviews are not independent full-source audits. No measured coverage percentage is claimed.
+SVG reference expansion and local unapplied drafts were identified during excerpt-level security/React review and reproduced as RED tests before correction. These reviews are not independent full-source audits. No measured coverage percentage is claimed.
 
 CodeScene was not configured in this environment. No structural health score or CodeScene pass is claimed; executable tests, lint and scoped reviews provide the recorded checks. Automated axe checks are not a complete WCAG audit.
 

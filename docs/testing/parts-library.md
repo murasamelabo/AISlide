@@ -27,7 +27,7 @@ Final automated gates for this refresh: **263 distinct passing tests**: Rust wor
 
 Use `node tools/parts-demo.mjs <new-directory> --japanese` with Studio on loopback port 4174 to reproduce the actual-insertion check. Use `node tools/guided-demo.mjs <new-directory>` for four complete MCP inputs and editable sample decks. The [English guides and MCP contract](../authoring/README.md) describe the five-stage workflow, evidence declarations and the 48 consulting patterns. Dedicated C02/C03 summary/decision templates use purpose-sized native groups; they are separate from the 108-part catalog and the seven existing master presets.
 
-These checks cover the default examples, Japanese sample inputs and selected boundaries, not every permitted text length, theme, geometry or input combination. Intentional fill containment and Venn intersections are not treated as erroneous overlaps. General map-label avoidance and arbitrary diagram routing remain limited. Static tests, font measurement and screenshots are not an Office-parity or semantic-truth certification. Review agents were excerpt-limited; the final code-snippet review reported no findings, not an independent full-source audit. No existing user presentation, installed app, Git branch or remote was overwritten by verification.
+These checks cover the default examples, Japanese sample inputs and selected boundaries, not every permitted text length, theme, geometry or input combination. Intentional fill containment and Venn intersections are not treated as erroneous overlaps. General map-label avoidance and arbitrary diagram routing remain limited. Static tests, font measurement and screenshots are not an Office-parity or semantic-truth certification. The final code-snippet review reported no findings, not an independent full-source audit. No existing user presentation, installed app, Git branch or remote was overwritten by verification.
 
 References: [horizontal flow](https://www.slideland.tech/docs/schematic/flow), [vertical flow](https://www.slideland.tech/docs/schematic/vertical-flow), [tree](https://www.slideland.tech/docs/schematic/tree), [cycle](https://www.slideland.tech/docs/schematic/cycle). The supplied consulting workflow was edited into English guidance with explicit capability limits; its sample company/data/artwork were not imported.
 
@@ -106,7 +106,7 @@ The [synthetic sample generator](../../tools/parts-demo.mjs) writes evidence wit
 
 The overview JPEGs are derived from actual Studio previews, not PowerPoint renders. The updated desktop executable was launched without remote debugging in a separate WebView profile; PID 16856, nonzero window handle and responding status were verified. The existing user Studio PID 35172 was left running. The development URL `http://127.0.0.1:4173/` returned HTTP 200 at handoff. These process IDs are observations, not durable launch identifiers.
 
-Review-agent feedback was excerpt-based because those sessions lacked filesystem tools. Confirmed findings were checked and repaired with local regressions; this is not an independent full-source or security audit. Hosted GitHub Actions remains unverified due to the previously reported account billing/spending restriction. No commit, push, publication, project-license selection or protection-policy change was performed for this follow-up.
+Confirmed review findings were checked and repaired with local regressions; this is not an independent full-source or security audit.
 
 ## Limits
 

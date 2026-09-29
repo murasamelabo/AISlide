@@ -1,6 +1,6 @@
-﻿# Phase 6 Review Contracts
+﻿# Review and Comment Contracts
 
-Scope: G40/G41/G43, 2026-09-19. Core, SDK, MCP and Studio are connected, including PDF consumption of explicit table headers and the repeated native-body-save repair. This is a bounded implementation, not complete Office comment interoperability, PII detection, or WCAG certification. Final product verification, Office checks, publication and regular Windows installation are tracked separately in the [completion plan](../planning/editing-completion.md).
+Scope: modern comments, review candidates and PDF accessibility metadata. Core, SDK, MCP and Studio are connected, including PDF consumption of explicit table headers and the repeated native-body-save repair. This is a bounded implementation, not complete Office comment interoperability, PII detection, or WCAG certification.
 
 ## Modern Comments
 
@@ -54,8 +54,7 @@ PDF export consumes `review.table_headers` and uses correctly parented table/row
 - Initial focused Rust: 32 review_features + 11 review_api tests passed (43 total in the scoped log). After the repeated-body/ordering and rich-notes repairs, the comments/single-file checks passed 69 tests. These are separate scoped runs, not additive full-product totals.
 - Focused Node: 8 SDK/MCP tests passed, including exact Undo, omission versus explicit deletion, authored metadata forgery, body editing, native header reopen, stale revision/cancellation, strict schemas, no-value inspection, and exact-one-BOM checks.
 - Studio production build and focused ReviewPanel Oxlint passed. The earlier ESLint invocation failed because this repository uses Oxlint; that invocation is retained in the gate log, not counted as a code failure. Owned unique-port Playwright: 3 passed (modern native open/reply/resolve/Undo, nondeletable candidates, semantic header repair/rerun and 390px framing; existing legacy review/clean-copy; clean-copy active-session isolation).
-- OpenXML SDK 3.5.1, Office2021 mode: final fresh writer with semantic headers, edited writer including rich-body mutation, and independently authored closed-thread/resolved-reply/same-name-distinct-author/ignorable-extension fixture each validated with zero errors. Evidence: `.artifacts/phase6-review/schema-results.json`. This is schema evidence, not an Office opening/editing test.
-- Attribution logs: `.artifacts/phase6-review/{rust-final,node-final,build-final,browser-final}.log`; screenshot `.artifacts/phase6-review-candidates.png`. Only synthetic data was used.
-- Final full-product core/Node/UI/native/Office gates, commit/push and desktop installation remain pending in the completion plan. The PDF header consumption described above is implemented, not a remaining integration task. The bounded static security rereview found no remaining High/Medium findings; this is not a full security audit.
+- OpenXML SDK 3.5.1, Office2021 mode: final fresh writer with semantic headers, edited writer including rich-body mutation, and independently authored closed-thread/resolved-reply/same-name-distinct-author/ignorable-extension fixture each validated with zero errors. This is schema evidence, not an Office opening/editing test. Only synthetic data was used.
+- The bounded static security review found no remaining High/Medium findings; this is not a full security audit.
 
 Review behavior remains in the shared core, with typed SDK/MCP entry points and Studio controls. PDF semantics consume the same review metadata; display styling alone does not establish semantic headers. Focused fixtures and final product gates remain distinct evidence.
