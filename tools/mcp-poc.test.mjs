@@ -319,7 +319,7 @@ test('MCP authoring tools insert objects and edit master theme with transactiona
     assert.equal(deck.design.theme.colors.accent1, design.theme.colors.accent1);
     const stale = await client.callTool({ name: 'assign_layout', arguments: { deck_id, expected_revision: 0, slide_id: 'slide-1', layout_id: 'blank' } });
     assert.equal(stale.isError, true);
-    const parts = await call('part_catalog'); assert.equal(parts.presets.length, 111);
+    const parts = await call('part_catalog'); assert.equal(parts.presets.length, 117);
     const spec = parts.presets.find((preset) => preset.id === 'flow/balanced').example;
     await call('add_part', { deck_id, expected_revision: 6, slide_id: 'slide-1', id: 'mcp-part', spec });
     await call('update_part', { deck_id, expected_revision: 7, slide_id: 'slide-1', id: 'mcp-part', spec: { ...spec, title: 'MCP part update' } });

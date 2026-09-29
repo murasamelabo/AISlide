@@ -63,11 +63,57 @@ pub fn catalog() -> Value {
         },layout:None };
         json!({"id":id,"category":category,"category_name":category_name,"name":name,"family":"Diagrams","recommended":true,"use_when":use_when,"avoid_when":avoid_when,"example":example})
     }));
+    let example = PartSpec { version: 1, preset: "contrast/panels".into(), title: "Paired explanatory panels".into(), subtitle: "Synthetic example".into(), data: example("contrast", 3), layout: None };
+    presets.push(json!({"id":"contrast/panels","category":"contrast","category_name":"Item comparison","name":"Paired explanatory panels","family":"Diagrams","recommended":true,
+        "use_when":"Two alternatives explained through 1-5 paired statements. Tint each panel, use supplied meaningful icons, and show a transition arrow only when the relationship warrants it. Fixed typography rejects overflow.",
+        "avoid_when":"Three or more alternatives, numeric evaluation matrices or dense tabular data. Do not convert every comparison or every slide into cards.","example":example}));
+    presets.extend(super::briefing::PRESETS.iter().map(|preset| {
+        let category = preset.id.split_once('/').expect("briefing preset category").0;
+        let category_name = CATEGORIES.iter().find(|entry| entry.0 == category).expect("built-in briefing category").1;
+        let example = PartSpec { version: 1, preset: preset.id.into(), title: preset.name.into(), subtitle: "Synthetic example".into(), data: briefing_example(preset.kind), layout: None };
+        json!({"id":preset.id,"category":category,"category_name":category_name,"name":preset.name,"family":"Diagrams","recommended":true,"use_when":preset.use_when,"avoid_when":preset.avoid_when,"example":example})
+    }));
     json!({"version":1,"presets":presets,"schema":schemars::schema_for!(PartSpec),"style":"Theme-linked minimal modern","default_bounds":{"x":64,"y":144,"width":1152,"height":512}})
+}
+
+fn briefing_example(kind: &str) -> PartData {
+    let value = match kind {
+        "icon_cards" => json!({"kind":"icon_cards","numbered":true,"message":{"text":"People set direction; automation extends reach."},"cards":[
+            {"label":"Unified operations","caption":"Shared platform","detail":"Signals, context and controls are managed together.","tag":"Part 2"},
+            {"label":"Continuous protection","caption":"Closed loop","detail":"Detection, response and prevention reinforce each other.","tag":"Part 3"},
+            {"label":"Agent collaboration","caption":"Operating model","detail":"Agents coordinate routine work while people set priorities.","tag":"Part 4"}
+        ]}),
+        "icon_rows" => json!({"kind":"icon_rows","rows":[
+            {"label":"Faster discovery","detail":"Exposure is mapped continuously and prioritized by impact."},
+            {"label":"Machine-speed response","detail":"Routine containment runs within approved policy boundaries."},
+            {"label":"Wider scope for small teams","detail":"Specialists supervise many parallel investigations."}
+        ]}),
+        "shift_rows" => json!({"kind":"shift_rows","from_label":"Today","to_label":"Next","rows":[
+            {"from":"Manage tasks","to":"Govern outcomes","caption":"Outcome owner","detail":"Measure risk removed instead of work completed."},
+            {"from":"Respond at human speed","to":"Defend at machine speed","caption":"Policy-bound response","detail":"Contain routine threats within approved policy."},
+            {"from":"Count processed alerts","to":"Measure reduced risk","caption":"Outcome metrics","detail":"Track exposure closed and attack paths blocked."}
+        ]}),
+        "step_cards" => json!({"kind":"step_cards","steps":[
+            {"label":"Establish the foundation","detail":"Connect identities, endpoints, cloud and data into a shared context.","outcome":"Shared view before orchestration"},
+            {"label":"Embed agents in workflows","detail":"Start with well-defined investigation and triage tasks.","outcome":"Capacity before autonomy"},
+            {"label":"Expand to a system","detail":"Coordinate agents toward protection goals across services.","outcome":"Specialists with shared context"}
+        ]}),
+        _ => json!({"kind":"agenda","items":[
+            {"label":"Background and direction","detail":"Why the operating model is changing","meta":"10 min"},
+            {"label":"Platform overview","detail":"Shared context, controls and data","meta":"15 min"},
+            {"label":"Operating model","detail":"Roles, metrics and collaboration","meta":"15 min"},
+            {"label":"Adoption path","detail":"Three steps and review points","meta":"10 min"}
+        ]}),
+    };
+    serde_json::from_value(value).expect("built-in briefing data is valid")
 }
 
 fn example(category: &str, variant: usize) -> PartData {
     let value = match category {
+        "contrast" if variant == 3 => json!({"kind":"comparison_panels","transition":false,"panels":[
+            {"label":"Separate workflows","items":[{"text":"Signals are collected separately."},{"text":"Context is rebuilt at each handoff."},{"text":"Actions require coordination."},{"text":"Ownership is distributed."}]},
+            {"label":"Shared workflow","items":[{"text":"Signals are available together."},{"text":"Context follows the investigation."},{"text":"Actions share the same context."},{"text":"Ownership remains explicit."}]}
+        ]}),
         "tree" => json!({"kind":"tree","nodes":[{"id":"root","label":"Strategy"},{"id":"one","label":"Product","parent":"root"},{"id":"two","label":"Operations","parent":"root"},{"id":"three","label":"Experience","parent":"one"},{"id":"four","label":"Platform","parent":"one"}]}),
         "correlation" => json!({"kind":"network","nodes":[{"label":"Customers"},{"label":"Platform"},{"label":"Partners"},{"label":"Operations"}],"edges":[{"from":0,"to":1,"label":"Request"},{"from":1,"to":2,"label":"Connect"},{"from":2,"to":3,"label":"Deliver"},{"from":3,"to":0,"label":"Support"}]}),
         "matrix" | "contrast" => json!({"kind":"matrix","rows":["Speed","Control"],"columns":["Option A","Option B"],"cells":[["High","Medium"],["Shared","Dedicated"]]}),

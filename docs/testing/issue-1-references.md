@@ -97,6 +97,10 @@ score or independent maintainability approval is claimed.
 
 ## Self-Check
 
+The scorecard below describes the initial implementation. The subsequent PR
+review identified the workflow gaps recorded in the follow-up section; passing
+the original tests did not establish suitability for occupied briefing footers.
+
 | Axis | Score | Evidence or limit |
 | --- | --- | --- |
 | Accuracy | 4/5 | Core, MCP and Office outputs verified; no broad parity claim |
@@ -108,3 +112,58 @@ score or independent maintainability approval is claimed.
 Overall: 4.0/5. Integration review should prioritize the managed-reference
 transaction contract, broader Office fixtures and optional coverage measurement.
 These are follow-up limits, not claims of completed independent review.
+
+## PR Review Follow-Up (2026-09-29)
+
+The review against `1cd0537` reproduced failures with existing footer text at
+y680, placement changes on unrelated edits, CJK prose in note URLs, missing
+publication feedback, and missing authoring/CI guidance. Each changed behavior
+was first exercised with a failing test. Corrections are in `5a8e876` and the
+integration of main `9ed13f8` into the issue branch; the main worktree was not
+updated or merged into.
+
+1. Appendix markers now search upward through free horizontal bands, leaving
+   existing source labels, page numbers and body elements untouched. A synthetic
+   26-slide briefing with y680 footers passes in both auto and appendix modes.
+   Fully occupied pages still reject with slide/blocking element IDs and explicit
+   repair guidance. The reviewer's actual 26-slide deck was not available here.
+2. Only `set_references` replans placement. Ordinary edits preserve generated
+   frames, placement choices, z-order and moved appendix order. Overlaps are
+   accepted and reported as `REFERENCE_COLLISION` with involved IDs and repair
+   suggestions; no hidden conversion from footnotes to appendix occurs.
+3. Bare URLs terminate before Japanese/CJK prose. Explicitly enclosed URLs retain
+   Unicode domains/paths; parsed URLs are normalized before comparison. Bare
+   Unicode URL/prose boundaries remain ambiguous: quote or percent-encode them.
+   Raw URLs remain omitted from diagnostics to avoid leaking private note data.
+4. Core/MCP return supplied/published/excluded counts; SDK exposes a detached
+   `referencePublication` snapshot. Unapproved URLs remain excluded from storage.
+5. The portable skill and MCP workflow now require the distribution-reference
+   step and describe a reserved x32..1248/y616..672 marker band. The technical
+   briefing guide also documents the y608 body bottom variant. The integrated
+   skill is 5811 bytes, below its 6000-byte limit.
+6. Rust tests already ran in `verify.yml` via `test --workspace --locked`.
+   `test:mcp` now also runs the reference E2E and guidance/CI contract test.
+   The previous CI's three failures were unrelated full-inventory assertions
+   against compact discovery; only those fixtures now request `--tool-profile full`.
+7. URL-only text rows carry hyperlinks; appendix labels/headings use the selected
+   theme's dk1 with a contrast-preserving fallback. Appendix movement is retained.
+
+### Integrated Verification
+
+- `node tools/cargo.mjs test --workspace --locked`: 810 passed, 0 failed,
+  8 ignored across 52 result groups, including 25 reference behavior tests.
+- Node SDK/MCP/reference and extended editing tests (nine files, concurrency 1):
+  147 passed, 0 failed, 5 environment-dependent skips (152 total).
+- `npm run build`: succeeded; the existing large-chunk advisory remains.
+- Encoding: 324 files checked, 0 mismatches. Staged integration diff check passed.
+- Updated generated fixture: `.artifacts/pr2-review/`. PowerPoint opened two
+  slides with existing footer labels intact, exported PDF/PNG, and verified
+  two URL strings and exactly two URL-row hyperlinks. Source SHA256 unchanged:
+  `ACA52887F3E82C4CF5FDC6F2BD58D890149F79B8EB8C7F96229CE17753A4D0DD`.
+  The PowerPoint PDF parsing test passed; both exported PNGs were inspected.
+- Auxiliary reviewers again lacked filesystem access. Their design-level
+  feedback prompted a tested Unicode URL correction, not an independent audit.
+
+Logs are local under `target/pr2-review-integrated-{rust,node,build}.log`.
+The hosted CI result after pushing these changes must be checked separately;
+the local evidence above does not assert a GitHub Actions success.

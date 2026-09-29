@@ -190,6 +190,86 @@ test('layout_graph MCP transport discovers an advanced strict schema and forward
   }, []);
 });
 
+test('comparison panels MCP keeps strict paired rows and expands reusable image handles', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-comparison-panels-'));
+  try {
+    await writeFile(join(directory, 'indicator.png'), 'Synthetic raster fixture');
+    await feedbackMcpFixture(async ({ call, calls, registrations }) => {
+      const asset = await call('register_asset', { path: 'indicator.png' });
+      const created = await call('create_presentation', { title: 'Synthetic comparison' });
+      const spec = { version: 1, preset: 'contrast/panels', title: '', data: { kind: 'comparison_panels', transition: false, panels: [{ label: 'Before', items: [{ text: 'Separate signals', icon: { asset_id: asset.asset_id } }] }, { label: 'After', items: [{ text: 'Shared signals', icon: { asset_id: asset.asset_id } }] }] } };
+      const input = { deck_id: created.deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), operations: [{ op: 'add_part', slide_id: 'slide-1', id: 'comparison', spec }] };
+      await call('apply_operations', input);
+      const operation = calls.at(-1).request.operations[0];
+      assert.equal(operation.spec.data.panels[0].items[0].icon.mime_type, 'image/png');
+      assert.equal(operation.spec.data.panels[0].items[0].icon.base64, Buffer.from('Synthetic raster fixture').toString('base64'));
+      assert.equal(operation.spec.data.panels[0].items[0].icon.asset_id, undefined);
+      const schema = registrations.get('add_part').config.inputSchema;
+      const individual = { deck_id: created.deck_id, expected_revision: 1, slide_id: 'slide-1', id: 'comparison', spec };
+      for (const panels of [spec.data.panels.slice(0, 1), [...spec.data.panels, spec.data.panels[0]], [{ ...spec.data.panels[0], items: [] }, spec.data.panels[1]], [{ ...spec.data.panels[0], items: [...spec.data.panels[0].items, ...spec.data.panels[0].items] }, spec.data.panels[1]], [{ ...spec.data.panels[0], body_size: 8 }, spec.data.panels[1]], [{ ...spec.data.panels[0], invented: true }, spec.data.panels[1]]]) assert.equal(schema.safeParse({ ...individual, spec: { ...spec, data: { ...spec.data, panels } } }).success, false);
+    }, ['--tool-profile', 'full', '--asset-dir', directory]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('briefing parts MCP keeps strict data and Lucide assets return reusable icon objects', async () => {
+  await feedbackMcpFixture(async ({ call, calls, registrations, fixture }) => {
+    const found = await call('lucide_icons', { query: 'shield check' });
+    assert.equal(found.license, 'ISC');
+    assert.ok(found.icons.some(icon => icon.name === 'ShieldCheck'));
+    const security = await call('lucide_icons', { category: 'security', limit: 5 });
+    assert.ok(security.icons.length > 0 && security.icons.length <= 5 && security.icons.every(icon => icon.categories.includes('security')));
+    assert.ok((await call('lucide_icons', {})).categories.includes('security'));
+    assert.equal(calls.length, 0);
+    fixture.onRequest = async request => {
+      assert.equal(request.op, 'create_graph_icon');
+      assert.equal(request.mime_type, 'image/svg+xml');
+      const svg = Buffer.from(request.base64, 'base64').toString();
+      assert.match(svg, /^<svg[^>]*stroke="#[0-9A-F]{6}"/);
+      assert.doesNotMatch(svg, /<script|href=/i);
+      return { base64: Buffer.from(`synthetic-png:${createHash('sha256').update(svg).digest('hex')}`).toString('base64'), mime_type: 'image/png', alt: request.alt };
+    };
+    const prepared = await call('lucide_icon_assets', { icons: [{ name: 'ShieldCheck', color: 'c4314b' }, { name: 'ShieldCheck', color: 'C4314B' }, { name: 'Bot', stroke_width: 2, alt: 'Agent' }] });
+    assert.equal(prepared.icons.length, 3);
+    assert.deepEqual(Object.keys(prepared.icons[0].icon).sort(), ['alt', 'asset_id', 'mime_type']);
+    assert.equal(prepared.icons[0].icon.asset_id, prepared.icons[1].icon.asset_id);
+    assert.notEqual(prepared.icons[0].icon.asset_id, prepared.icons[2].icon.asset_id);
+    assert.equal(prepared.icons[2].icon.alt, 'Agent');
+    assert.equal(prepared.icons[0].icon.alt, 'Shield Check icon');
+    const assets = registrations.get('lucide_icon_assets');
+    const unknown = await assets.callback(assets.config.inputSchema.parse({ icons: [{ name: 'NotALucideIcon' }] }), { signal: new AbortController().signal });
+    assert.equal(unknown.isError, true);
+    assert.match(unknown.content[0].text, /Unknown Lucide icon/);
+    for (const invalid of [{ icons: [] }, { icons: [{ name: 'shield' }] }, { icons: [{ name: 'Bot', color: '@accent1' }] }, { icons: [{ name: 'Bot', stroke_width: 5 }] }, { icons: [{ name: 'Bot', extra: true }] }]) assert.equal(assets.config.inputSchema.safeParse(invalid).success, false);
+    fixture.onRequest = undefined;
+    const created = await call('create_presentation', { title: 'Synthetic briefing' });
+    const icon = prepared.icons[0].icon;
+    const spec = { version: 1, preset: 'list-horizontal/icon-cards', title: '', data: { kind: 'icon_cards', numbered: true, message: { text: 'Synthetic message' }, cards: [{ label: 'First', detail: 'Detail', icon }, { label: 'Second', points: ['One', 'Two'], tag: 'Tag' }] }, layout: { x: 48, y: 120, width: 1184, height: 540, show_title: false } };
+    await call('apply_operations', { deck_id: created.deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), operations: [{ op: 'add_part', slide_id: 'slide-1', id: 'cards', spec }] });
+    const forwarded = calls.at(-1).request.operations[0].spec.data.cards[0].icon;
+    assert.equal(forwarded.asset_id, undefined);
+    assert.equal(forwarded.mime_type, 'image/png');
+    assert.ok(forwarded.base64.length > 0);
+    const schema = registrations.get('add_part').config.inputSchema;
+    const input = { deck_id: created.deck_id, expected_revision: 1, slide_id: 'slide-1', id: 'briefing', spec };
+    const valid = [
+      spec,
+      { ...spec, preset: 'list/icon-rows', data: { kind: 'icon_rows', boxed: true, rows: [{ label: 'A', detail: 'Detail', icon }, { label: 'B' }] } },
+      { ...spec, preset: 'before-after/shift', data: { kind: 'shift_rows', from_label: 'Today', to_label: 'Next', rows: [{ from: 'A', to: 'B\nC', caption: 'c' }, { from: 'D', to: 'E', detail: 'Detail' }] } },
+      { ...spec, preset: 'flow/cards', data: { kind: 'step_cards', step_label: 'PHASE', steps: [{ label: 'A', outcome: 'Result', image: icon }, { label: 'B', points: ['One'] }] } },
+      { ...spec, preset: 'list/agenda', data: { kind: 'agenda', items: [{ label: 'A', meta: '10 min' }, { label: 'B', detail: 'Detail' }] } },
+    ];
+    for (const candidate of valid) assert.equal(schema.safeParse({ ...input, spec: candidate }).success, true, candidate.preset);
+    const card = { label: 'Topic' };
+    for (const data of [
+      { ...spec.data, cards: Array(7).fill(card) }, { ...spec.data, columns: 5 }, { ...spec.data, cards: Array(5).fill(card), columns: 2 }, { ...spec.data, body_size: 30 },
+      { ...spec.data, cards: [{ label: ' ' }, card] }, { ...spec.data, cards: [{ ...card, invented: true }, card] }, { ...spec.data, cards: [{ ...card, points: ['1', '2', '3', '4', '5'] }, card] },
+      { ...spec.data, message: { text: 'x'.repeat(121) } }, { ...spec.data, cards: [{ label: 'A\r\nB' }, card] },
+      { kind: 'agenda', items: [{ label: 'A', meta: 'two\nlines' }, { label: 'B' }] }, { kind: 'step_cards', step_label: 'X'.repeat(13), steps: [{ label: 'A' }, { label: 'B' }] },
+      { kind: 'shift_rows', rows: Array(6).fill({ from: 'A', to: 'B' }) }, { kind: 'icon_rows', rows: [{ label: 'A' }] },
+    ]) assert.equal(schema.safeParse({ ...input, spec: { ...spec, data } }).success, false, JSON.stringify(data).slice(0, 80));
+  });
+});
+
 test('semantic authoring MCP forwards composition and single-source text with strict schemas', async () => {
   await feedbackMcpFixture(async ({ call, calls, registrations }) => {
     const created = await call('create_presentation', { title: 'Synthetic semantic input' });
@@ -2585,7 +2665,7 @@ test('MCP open list recommendations render native text and keep failed edits ato
   try {
     await client.connect(transport);
     const catalog = await call('part_catalog');
-    assert.equal(catalog.presets.length, 111);
+    assert.equal(catalog.presets.length, 117);
     for (const id of ['list/rows', 'list-horizontal/columns', 'list-enumeration/grid']) {
       const preset = catalog.presets.find(entry => entry.id === id);
       assert.equal(preset.recommended, true);

@@ -16,6 +16,46 @@ fn open_list_spec(preset: &str) -> Value {
 }
 
 #[test]
+fn comparison_panels_are_deterministic_native_columns_with_meaningful_icons() {
+    let icon = execute_request(json!({"op":"create_graph_icon","base64":STANDARD.encode(r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect x="4" y="4" width="16" height="16" fill="teal"/></svg>"#),"mime_type":"image/svg+xml","alt":"Synthetic indicator"})).unwrap();
+    let spec = json!({"version":1,"preset":"contrast/panels","title":"Synthetic comparison","data":{"kind":"comparison_panels","transition":true,"panels":[
+        {"label":"Before","fill":"F3F5FA","heading_fill":"AEBBE9","heading_color":"202525","accent":"CC3355","icon_fill":"FBE9EE","items":[{"text":"Signals are joined manually.","icon":icon},{"text":"Context is rebuilt between tools.","icon":icon}]},
+        {"label":"After","fill":"EDF7F4","heading_fill":"087F73","heading_color":"FFFFFF","accent":"087F73","icon_fill":"DDF2EC","items":[{"text":"Signals are available together.","icon":icon},{"text":"Context is shared across the workflow.","icon":icon}]}
+    ]}});
+    let element = execute_request(json!({"op":"create_part","id":"panel-comparison","spec":spec})).unwrap();
+    assert_eq!(element, execute_request(json!({"op":"create_part","id":"panel-comparison","spec":spec})).unwrap());
+    let children = element["children"].as_array().unwrap();
+    assert_eq!(children.iter().filter(|child| child["type"] == "picture").count(), 4);
+    assert_eq!(children.iter().filter(|child| child["preset"] == "roundRect" && child["height"].as_f64().is_some_and(|height| height > 300.0)).count(), 2);
+    assert!(children.iter().any(|child| child["preset"] == "chevron"));
+    for text in ["Signals are joined manually.","Context is rebuilt between tools.","Signals are available together.","Context is shared across the workflow."] {
+        let child = children.iter().find(|child| child["text"] == text).unwrap();
+        assert_eq!(child["format"]["alignment"], "left");
+        assert_eq!(child["font_size"], 18.0);
+    }
+    let output = execute_request(json!({"op":"export","deck":deck(element)})).unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"comparison-native","base64":output["base64"]})).unwrap();
+    let reopened = &opened["document"]["deck"]["slides"][0]["elements"][0]["children"];
+    assert_eq!(reopened.as_array().unwrap().iter().filter(|child| child["type"] == "picture").count(), 4);
+    assert!(reopened.as_array().unwrap().iter().any(|child| child["text"] == "Context is shared across the workflow."));
+    let mut positioned = spec.clone();
+    positioned["layout"] = json!({"x":32,"y":120,"width":1216,"height":528,"show_title":false});
+    let fitted = execute_request(json!({"op":"create_part","id":"fitted-panels","spec":positioned})).unwrap();
+    for child in fitted["children"].as_array().unwrap().iter().filter(|child| child["type"] == "picture" || child["preset"] == "ellipse") {
+        assert!((child["width"].as_f64().unwrap() - child["height"].as_f64().unwrap()).abs() < 0.000001, "square icons and circular badges must keep their aspect ratio");
+    }
+    let document = execute_request(json!({"op":"new_document","id":"panel-clearance","deck":deck(fitted)})).unwrap();
+    let preflight = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0],"min_font_size":10}})).unwrap();
+    assert!(!preflight["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "CONTAINER_PADDING" || finding["code"] == "IMAGE_ASPECT_DISTORTED"), "{preflight}");
+    let mut crowded = spec.clone();
+    for panel in crowded["data"]["panels"].as_array_mut().unwrap() {
+        panel["body_size"] = json!(28);
+        for item in panel["items"].as_array_mut().unwrap() { item["text"] = json!("Repeated synthetic words. ".repeat(8)); }
+    }
+    assert!(execute_request(json!({"op":"create_part","id":"crowded-panels","spec":crowded})).is_err(), "panel text must not silently shrink to fit");
+}
+
+#[test]
 fn open_list_presets_keep_content_without_decorative_boxes_rails_or_numbers() {
     for preset in ["list/rows", "list-horizontal/columns", "list-enumeration/grid"] {
         let spec = open_list_spec(preset);
@@ -45,7 +85,7 @@ fn open_list_presets_keep_content_without_decorative_boxes_rails_or_numbers() {
 fn open_list_catalog_recommends_new_compositions_and_retains_legacy_ids() {
     let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
     let presets = catalog["presets"].as_array().unwrap();
-    assert_eq!(presets.len(), 111);
+    assert_eq!(presets.len(), 117);
     for (category, variant) in [("list", "rows"), ("list-horizontal", "columns"), ("list-enumeration", "grid")] {
         let id = format!("{category}/{variant}");
         let entry = presets.iter().find(|entry| entry["id"] == id).unwrap_or_else(|| panic!("missing {id}"));
@@ -858,7 +898,7 @@ fn long_part_labels_are_fitted_or_rejected_before_insertion() {
 #[test]
 fn process_diagrams_use_filled_geometry_with_safe_separate_labels() {
     let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
-    for preset in catalog["presets"].as_array().unwrap().iter().filter(|preset| matches!(preset["category"].as_str(), Some("flow" | "vertical-flow" | "tree" | "cycle"))) {
+    for preset in catalog["presets"].as_array().unwrap().iter().filter(|preset| preset["recommended"] != true && matches!(preset["category"].as_str(), Some("flow" | "vertical-flow" | "tree" | "cycle"))) {
         let element = execute_request(json!({"op":"create_part","id":"visual","spec":preset["example"]})).unwrap();
         let children = element["children"].as_array().unwrap();
         let labels = preset["example"]["data"]["items"].as_array().or_else(|| preset["example"]["data"]["nodes"].as_array()).unwrap();

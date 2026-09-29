@@ -2,10 +2,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+mod briefing;
 mod catalog;
 mod charts;
 mod diagrams;
 pub mod state;
+pub use briefing::{AgendaItem, IconCard, IconRow, PartMessage, ShiftRow, StepCard};
 pub use catalog::catalog;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -44,6 +46,12 @@ impl PartLayout {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PartData {
+    ComparisonPanels { panels: Vec<ComparisonPanel>, #[serde(default)] transition: bool },
+    IconCards { cards: Vec<IconCard>, #[serde(default, skip_serializing_if = "Option::is_none")] columns: Option<usize>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] numbered: bool, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    IconRows { rows: Vec<IconRow>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] boxed: bool, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    ShiftRows { #[serde(default, skip_serializing_if = "String::is_empty")] from_label: String, #[serde(default, skip_serializing_if = "String::is_empty")] to_label: String, rows: Vec<ShiftRow>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    StepCards { steps: Vec<StepCard>, #[serde(default, skip_serializing_if = "String::is_empty")] step_label: String, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    Agenda { items: Vec<AgendaItem>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
     Chart { categories: Vec<String>, series: Vec<PartSeries>, #[serde(default)] x_axis: String, #[serde(default)] y_axis: String },
     Items { items: Vec<PartItem>, #[serde(default)] center: String },
     Tree { nodes: Vec<TreeNode> },
@@ -63,6 +71,21 @@ pub struct PartSeries { pub name: String, pub values: Vec<f64> }
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PartItem { pub label: String, #[serde(default)] pub detail: String, #[serde(default, skip_serializing_if = "Option::is_none")] pub value: Option<f64> }
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComparisonPanel {
+    pub label: String,
+    pub items: Vec<ComparisonPanelItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub fill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub heading_fill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub heading_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub accent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub icon_fill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub body_size: Option<f64>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComparisonPanelItem { pub text: String, #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<crate::graphs::GraphIcon> }
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TreeNode { pub id: String, pub label: String, #[serde(default)] pub parent: Option<String> }
@@ -88,6 +111,19 @@ fn count(length: usize, minimum: usize, maximum: usize) -> Result<()> { if !(min
 
 fn validate_data(data: &PartData) -> Result<()> {
     match data {
+        PartData::ComparisonPanels { panels, .. } => {
+            count(panels.len(), 2, 2)?;
+            if panels[0].items.len() != panels[1].items.len() { return Err(Error::Invalid("comparison panels require paired row counts".into())); }
+            for panel in panels {
+                bounded_text(&panel.label, 64)?;
+                if panel.label.trim().is_empty() { return Err(Error::Invalid("comparison panel label is required".into())); }
+                count(panel.items.len(), 1, 5)?;
+                for item in &panel.items { bounded_text(&item.text, 240)?; if item.text.trim().is_empty() { return Err(Error::Invalid("comparison panel row text is required".into())); } }
+                for color in [&panel.fill, &panel.heading_fill, &panel.heading_color, &panel.accent, &panel.icon_fill].into_iter().flatten() { crate::model::valid_color(color)?; }
+                if panel.body_size.is_some_and(|size| !size.is_finite() || !(16.0..=28.0).contains(&size)) { return Err(Error::Invalid("comparison body size must be 16-28px".into())); }
+            }
+        }
+        PartData::IconCards { .. } | PartData::IconRows { .. } | PartData::ShiftRows { .. } | PartData::StepCards { .. } | PartData::Agenda { .. } => briefing::validate(data)?,
         PartData::Diagram { graph } => crate::graphs::validate(graph)?,
         PartData::Chart { categories, series, x_axis, y_axis } => {
             count(categories.len(), 1, 12)?; count(series.len(), 1, 4)?;
@@ -142,6 +178,18 @@ pub(super) fn validate_spec(spec: &PartSpec) -> Result<(&str, usize)> {
     valid_text(&spec.subtitle, 120)?;
     if let Some(layout) = &spec.layout { layout.validate()?; }
     if spec.version != 1 { return Err(Error::Invalid("part version".into())); }
+    if spec.preset == "contrast/panels" {
+        if !matches!(spec.data, PartData::ComparisonPanels { .. }) { return Err(Error::Invalid("contrast/panels requires comparison_panels data".into())); }
+        validate_data(&spec.data)?;
+        return Ok(("contrast", 3));
+    }
+    if matches!(spec.data, PartData::ComparisonPanels { .. }) { return Err(Error::Invalid("comparison_panels data requires contrast/panels".into())); }
+    if let Some(preset) = briefing::PRESETS.iter().find(|preset| preset.id == spec.preset) {
+        if briefing::kind(&spec.data) != Some(preset.kind) { return Err(Error::Invalid(format!("{} requires {} data", preset.id, preset.kind))); }
+        validate_data(&spec.data)?;
+        return Ok((preset.id.split_once('/').map_or(preset.id, |(category, _)| category), 4));
+    }
+    if let Some(kind) = briefing::kind(&spec.data) { return Err(Error::Invalid(format!("{kind} data requires its matching briefing preset"))); }
     if spec.preset == "diagram/custom" {
         let PartData::Diagram { graph } = &spec.data else { return Err(Error::Invalid("diagram requires graph data".into())); };
         if graph.title != spec.title || graph.subtitle != spec.subtitle { return Err(Error::Invalid("graph titles must match part metadata".into())); }
@@ -179,6 +227,7 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
     valid_text(id,40)?; if id.is_empty() {return Err(Error::Invalid("part identity".into()));}
     crate::design::validate_theme(theme)?;
     let (category,variant)=validate_spec(spec)?;
+    if briefing::kind(&spec.data).is_some() { return briefing::create(id, spec, theme); }
     if let PartData::Diagram { graph } = &spec.data {
         if category != "diagram" { return Err(Error::Invalid("graph data requires diagram/custom".into())); }
         let Some(layout) = &spec.layout else { return crate::graphs::create(id, graph, theme); };
@@ -201,6 +250,10 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
     drawing.text(&spec.subtitle, [16.0, 44.0, 1120.0, 26.0], 16.0, "@dk2", false, TextAlign::Left);
     if catalog::CATEGORIES.iter().take(10).any(|entry| entry.0 == category) { charts::render(&mut drawing, category, variant, &spec.data)?; }
     else { diagrams::render(&mut drawing, category, variant, &spec.data)?; }
+    let fixed_sizes: std::collections::BTreeMap<_, _> = drawing.elements.iter().filter_map(|element| match element {
+        Element::Text { id, text, font_size, .. } if category == "contrast" && variant == 3 && !text.is_empty() => Some((id.clone(), *font_size)),
+        _ => None,
+    }).collect();
     if spec.layout.is_none() { crate::layout::fit_part_text(&mut drawing.elements,theme)?; }
     let mut result = Element::Group { visual: None, id: id.into(), x: 64.0, y: 144.0, width: 1152.0, height: 512.0, view_width: 1152.0, view_height: 512.0, children: drawing.elements };
     validate_elements(std::slice::from_ref(&result), (1280.0, 720.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
@@ -210,6 +263,27 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
         }
         let content_top = if layout.show_title { 0.0 } else if category == "venn" && variant == 1 { 80.0 } else { 88.0 };
         adopt_layout(&mut result, layout, content_top, 512.0 - content_top, theme, &BTreeSet::new())?;
+        if category == "contrast" && variant == 3 {
+            let horizontal = layout.width / 1152.0;
+            let vertical = layout.height / (512.0 - content_top);
+            let scale = horizontal.min(vertical);
+            if let Element::Group { children, .. } = &mut result {
+                for child in children {
+                    if !matches!(child, Element::Picture { .. }) && !matches!(child, Element::Shape { preset, .. } if preset == "ellipse") { continue; }
+                    if let Element::Picture { x, y, width, height, .. } | Element::Shape { x, y, width, height, .. } = child {
+                        let fitted_width = *width * scale / horizontal;
+                        let fitted_height = *height * scale / vertical;
+                        *x += (*width - fitted_width) / 2.0; *y += (*height - fitted_height) / 2.0;
+                        *width = fitted_width; *height = fitted_height;
+                    }
+                }
+            }
+        }
+    }
+    for element in crate::model::element_list(std::slice::from_ref(&result)) {
+        if let Element::Text { id, font_size, .. } = element {
+            if fixed_sizes.get(id).is_some_and(|expected| *font_size < *expected) { return Err(Error::Invalid(format!("comparison panel text {id} does not fit its fixed font size; shorten the text, enlarge the part or split the slide"))); }
+        }
     }
     Ok(result)
 }
@@ -271,20 +345,40 @@ fn adopt_layout(element: &mut Element, layout: &PartLayout, content_top: f64, co
             _ => {}
         }
     }
+    if layout_overflow(element, theme)?.is_some() {
+        return Err(Error::Invalid("part content does not fit the requested frame without clipping".into()));
+    }
+    Ok(())
+}
+
+fn measurement_deck(element: &Element, theme: &crate::design::Theme) -> crate::model::Deck {
     let mut design = crate::design::Design { theme: theme.clone(), ..Default::default() };
     design.layouts.truncate(1);
-    let deck = crate::model::Deck {
+    crate::model::Deck {
         version: 1, title: "Part layout".into(), width: 4096, height: 4096, design: Some(design), embedded_fonts: Vec::new(), auxiliary_design: None,
         slides: vec![crate::model::Slide {
             id: "part-layout".into(), title: "Part layout".into(), background: "@lt1".into(), elements: vec![element.clone()], notes: String::new(),
             notes_paragraphs: Vec::new(), layout_id: None, inherit_background: false, hide_master_graphics: false, native_source_id: None, review: None,
         }],
-    };
-    let measured = crate::layout::measure_layout(&deck)?;
-    if measured.measurements.iter().any(|measurement| measurement.overflow || measurement.missing_glyphs > 0) {
-        return Err(Error::Invalid("part content does not fit the requested frame without clipping".into()));
     }
-    Ok(())
+}
+
+fn measured_slack(element: &Element, theme: &crate::design::Theme, ids: &[String]) -> Result<f64> {
+    let measured = crate::layout::measure_layout(&measurement_deck(element, theme))?;
+    let slack = measured.measurements.iter().filter(|measurement| ids.contains(&measurement.element_id))
+        .map(|measurement| if measurement.overflow { 0.0 } else { measurement.height - f64::from(measurement.measured_height) }).fold(f64::INFINITY, f64::min);
+    Ok(if slack.is_finite() { slack.max(0.0) } else { 0.0 })
+}
+
+fn layout_overflow(element: &Element, theme: &crate::design::Theme) -> Result<Option<(String, bool)>> {
+    let measured = crate::layout::measure_layout(&measurement_deck(element, theme))?;
+    Ok(measured.measurements.iter().find(|measurement| measurement.overflow || measurement.missing_glyphs > 0).map(|measurement| {
+        let text = crate::model::element_list(std::slice::from_ref(element)).into_iter().find_map(|candidate| match candidate {
+            Element::Text { id, text, .. } | Element::Shape { id, text, .. } if *id == measurement.element_id => Some(text.chars().take(40).collect::<String>()),
+            _ => None,
+        }).unwrap_or_else(|| measurement.element_id.clone());
+        (text, !measurement.overflow)
+    }))
 }
 
 pub(super) struct Drawing { prefix: String, pub elements: Vec<Element> }

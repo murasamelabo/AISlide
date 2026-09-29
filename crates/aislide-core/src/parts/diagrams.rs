@@ -6,6 +6,7 @@ pub(super) fn render(drawing: &mut Drawing, category: &str, variant: usize, data
     match category {
         "tree" => tree(drawing,variant,data),
         "correlation" => network(drawing,variant,data),
+        "contrast" if variant == 3 => comparison_panels(drawing, data),
         "matrix" | "contrast" => matrix(drawing,variant,data),
         "set" | "list-set" => groups(drawing,category,variant,data),
         "gantt-chart" => timeline(drawing,variant,data),
@@ -29,6 +30,49 @@ pub(super) fn render(drawing: &mut Drawing, category: &str, variant: usize, data
             }
         }
     }
+}
+
+fn comparison_panels(drawing: &mut Drawing, data: &PartData) -> Result<()> {
+    let PartData::ComparisonPanels { panels, transition } = data else { return Err(Error::Invalid("comparison panel data required".into())); };
+    for (panel_index, panel) in panels.iter().enumerate() {
+        let left = if panel_index == 0 { 16.0 } else { 608.0 };
+        let fill = panel.fill.as_deref().unwrap_or(if panel_index == 0 { "F3F5FA" } else { "EDF7F4" });
+        let heading_fill = panel.heading_fill.as_deref().unwrap_or(if panel_index == 0 { "AEBBE9" } else { "087F73" });
+        let heading_color = panel.heading_color.as_deref().unwrap_or(if panel_index == 0 { "@dk1" } else { "@lt1" });
+        let accent = panel.accent.as_deref().unwrap_or(if panel_index == 0 { "CC3355" } else { "087F73" });
+        let icon_fill = panel.icon_fill.as_deref().unwrap_or(if panel_index == 0 { "FBE9EE" } else { "DDF2EC" });
+        let body_size = panel.body_size.unwrap_or(18.0);
+        drawing.shape("roundRect", [left, 88.0, 528.0, 424.0], fill, fill);
+        if let Some(Element::Shape { visual, .. }) = drawing.elements.last_mut() { *visual = Some(crate::visual::VisualStyle { adjustments: vec![crate::visual::ShapeAdjustment { name: "adj".into(), value: 4000 }], ..Default::default() }); }
+        drawing.shape("roundRect", [left + 24.0, 104.0, 216.0, 42.0], heading_fill, heading_fill);
+        if let Some(Element::Shape { visual, .. }) = drawing.elements.last_mut() { *visual = Some(crate::visual::VisualStyle { adjustments: vec![crate::visual::ShapeAdjustment { name: "adj".into(), value: 50000 }], ..Default::default() }); }
+        drawing.text(&panel.label, [left + 44.0, 113.0, 176.0, 24.0], 18.0, heading_color, true, TextAlign::Center);
+        if let Some(Element::Text { format, .. }) = drawing.elements.last_mut() { format.vertical = crate::model::VerticalAlign::Middle; }
+        let has_icons = panel.items.iter().any(|item| item.icon.is_some());
+        let text_left = left + if has_icons { 88.0 } else { 24.0 };
+        let text_width = left + 504.0 - text_left;
+        let row_height = 336.0 / panel.items.len() as f64;
+        for (row_index, item) in panel.items.iter().enumerate() {
+            let top = 164.0 + row_index as f64 * row_height;
+            if let Some(icon) = &item.icon {
+                let badge_top = top + (row_height - 44.0) / 2.0;
+                drawing.shape("ellipse", [left + 24.0, badge_top, 44.0, 44.0], icon_fill, icon_fill);
+                let mut picture = crate::media::create_picture(&drawing.id(), icon.base64.clone(), &icon.mime_type, &icon.alt)?;
+                if let Element::Picture { x, y, width, height, .. } = &mut picture {
+                    let scale = 28.0 / width.max(*height);
+                    *width *= scale; *height *= scale;
+                    *x = left + 46.0 - *width / 2.0;
+                    *y = badge_top + 22.0 - *height / 2.0;
+                }
+                drawing.elements.push(picture);
+            }
+            drawing.text(&item.text, [text_left, top + 10.0, text_width, row_height - 20.0], body_size, "@dk1", false, TextAlign::Left);
+            if let Some(Element::Text { format, .. }) = drawing.elements.last_mut() { format.vertical = crate::model::VerticalAlign::Middle; }
+            if row_index + 1 < panel.items.len() { drawing.rect([text_left, top + row_height - 1.0, text_width, 1.0], if panel_index == 0 { "D2DBEB" } else { "B5DBD8" }); }
+        }
+        if *transition && panel_index == 1 { drawing.shape("chevron", [550.0, 280.0, 52.0, 56.0], accent, accent); }
+    }
+    Ok(())
 }
 
 fn block(drawing: &mut Drawing, item: &PartItem, bounds: [f64;4], index: usize, filled: bool) {
