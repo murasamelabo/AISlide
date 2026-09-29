@@ -411,7 +411,7 @@ test('graph feedback options preserve native details, titleless geometry and PPT
   await expect(dialog.getByRole('alert')).toBeVisible();
   await expect(dialog.locator('.graph-edge-label')).toContainText('Request');
   await dialog.locator('.react-flow__controls-fitview').click();
-  expect(await source.locator('.react-flow__resize-control.handle.bottom.right').evaluate(element => {
+  await expect.poll(() => source.locator('.react-flow__resize-control.handle.bottom.right').evaluate(element => {
     const bounds = element.getBoundingClientRect();
     const target = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
     return target === element || element.contains(target);
@@ -569,6 +569,27 @@ test('direct service icons keep presentation, resize, history and editable PPTX 
   await expect(dialog.getByRole('alert')).toHaveCount(0);
 });
 
+test('native graph preview resizing does not trigger ResizeObserver loops', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await openSample(page);
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+  for (const width of [1440, 1100, 1280, 900, 1440]) {
+    await dialog.getByRole('tab', { name: 'Preview', exact: true }).click();
+    await expect(dialog.locator('.graph-native-preview')).toBeVisible();
+    await page.setViewportSize({ width, height: 960 });
+    await expect.poll(async () => dialog.locator('.graph-native-preview').evaluate(element => {
+      const frame = element.querySelector('.graph-native-frame')!;
+      return Math.abs(frame.getBoundingClientRect().height - element.clientWidth * 512 / 1152);
+    })).toBeLessThan(1);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await dialog.getByRole('tab', { name: 'Canvas', exact: true }).click();
+  }
+  expect(errors).toEqual([]);
+});
+
 test('four-level boundaries retain icons and absolute coordinates through drag, resize, ungroup and PPTX', async ({ page }) => {
   test.setTimeout(120_000);
   await page.addInitScript(() => {
@@ -667,6 +688,9 @@ test('four-level boundaries retain icons and absolute coordinates through drag, 
   await page.mouse.move(handleBounds.x + handleBounds.width / 2, handleBounds.y + handleBounds.height / 2);
   await page.mouse.down();
   await page.mouse.move(handleBounds.x + handleBounds.width / 2 - 16 * nestedScale, handleBounds.y + handleBounds.height / 2 - 8 * nestedScale, { steps: 6 });
+  await expect.poll(() => subnet.evaluate(element => (element as HTMLElement).offsetHeight)).toBeLessThan(240);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  expect(await page.evaluate(() => (window as unknown as { __aislideGraphResizeErrors: string[] }).__aislideGraphResizeErrors)).toEqual([]);
   await changeGraph(() => page.mouse.up());
   await expect(dialog.getByLabel('Graph width', { exact: true })).not.toHaveValue('984');
   await expect(dialog.getByLabel('Graph x', { exact: true })).toHaveValue('96');

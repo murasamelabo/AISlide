@@ -1,4 +1,5 @@
 ﻿import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { ReactFlow, Background, Controls, Handle, Position, ConnectionMode, NodeResizer, BaseEdge, EdgeText, MarkerType, applyNodeChanges, applyEdgeChanges, getSmoothStepPath, getStraightPath, useUpdateNodeInternals } from '@xyflow/react'
 import type { Node, Edge, NodeProps, EdgeProps, NodeChange, EdgeChange, Connection } from '@xyflow/react'
 import { Square, RectangleHorizontal, Circle, Diamond, Database, Cloud, Plus, Trash2, Undo2, Redo2, AlignLeft, AlignCenter, AlignCenterHorizontal, AlignRight, AlignStartVertical, AlignCenterVertical, AlignEndVertical, Bold, Grid2X2, Code2, Eye, MousePointer2, Copy, Check, Sticker, ArrowLeft } from 'lucide-react'
@@ -252,6 +253,13 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
   const [spec, setSpec] = useState<GraphSpec>(() => structuredClone(initial ?? catalog.examples[0].spec))
   const current = useRef(spec)
   const [nodes, setNodes] = useState<GraphFlowNode[]>([])
+  const pendingNodeChanges = useRef<NodeChange<GraphFlowNode>[]>([])
+  const nodeFrame = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (nodeFrame.current !== null) cancelAnimationFrame(nodeFrame.current)
+    nodeFrame.current = null
+    pendingNodeChanges.current = []
+  }, [])
   const [edges, setEdges] = useState<GraphFlowEdge[]>([])
   const [selected, setSelected] = useState<string[]>([])
   const selection = useRef(selected)
@@ -287,6 +295,7 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     action.current([{ op: 'put_node', node: { ...node, ...bounds, x: bounds.x + (parent?.x ?? 0), y: bounds.y + (parent?.y ?? 0) } }])
   }, [])
   const install = useCallback((next: GraphSpec, rendered?: Element, findings?: GraphDiagnostics) => {
+    pendingNodeChanges.current = []
     current.current = next; setSpec(next)
     selection.current = selection.current.filter((id) => [...next.nodes, ...next.edges ?? [], ...next.groups ?? []].some((entry) => entry.id === id))
     setSelected(selection.current)
@@ -417,7 +426,19 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     setNodes((nodes) => nodes.map((node) => ({ ...node, selected: node.id === id })))
     setEdges((edges) => edges.map((edge) => ({ ...edge, selected: edge.id === id })))
   }
-  const nodesChange = useCallback((changes: NodeChange<GraphFlowNode>[]) => setNodes((nodes) => applyNodeChanges(changes, nodes)), [])
+  const nodesChange = useCallback((changes: NodeChange<GraphFlowNode>[]) => {
+    const selected = changes.filter(change => change.type === 'select')
+    if (selected.length) setNodes(nodes => applyNodeChanges(selected, nodes))
+    pendingNodeChanges.current.push(...changes.filter(change => change.type !== 'select'))
+    if (pendingNodeChanges.current.length && nodeFrame.current === null) {
+      nodeFrame.current = requestAnimationFrame(() => {
+        nodeFrame.current = null
+        const pending = pendingNodeChanges.current
+        pendingNodeChanges.current = []
+        if (pending.length) flushSync(() => setNodes(nodes => applyNodeChanges(pending, nodes)))
+      })
+    }
+  }, [])
   const edgesChange = useCallback((changes: EdgeChange<GraphFlowEdge>[]) => setEdges((edges) => applyEdgeChanges(changes, edges)), [])
   const selectionChange = useCallback(({ nodes, edges }: { nodes: GraphFlowNode[]; edges: GraphFlowEdge[] }) => { const ids = [...nodes, ...edges].map((entry) => entry.id); selection.current = ids; setSelected(ids) }, [])
   const dragStop = useCallback((_event: unknown, moved: GraphFlowNode, movedNodes: GraphFlowNode[]) => {

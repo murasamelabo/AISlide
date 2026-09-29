@@ -50,25 +50,45 @@ For Japanese decks, set `title:"参考資料"` explicitly; the default is `Refer
   its contents, query parameters or access tokens are suitable for distribution.
 - `auto` and `footnotes` prefer full name/URL footnotes in a clear bottom area.
   Long, numerous or obstructed footnotes fall back to numbered appendix pages.
-  `appendix` always uses those pages. Font size stays at the requested 16-32px.
+  `appendix` always uses those pages with markers on cited slides.
+  Explicitly select `placement: "appendix_only"` for a marker-free alternative:
+  cited slides receive no footnote or marker, even with full-slide dense content.
+  The appendix retains full approved names and URLs and adds separate `Slides:`
+  captions with the associated current 1-based deck page numbers. Caption text
+  never reads private slide titles, notes or source metadata.
+  Font size stays at the requested 16-32px.
   Low-contrast Office theme hyperlink colors also trigger appendix placement;
   the selected appendix theme must provide readable links on white.
 - Body content is never moved or reduced. If even a numbered footer cannot fit,
   markers search the nearest free full-width horizontal band upward from the
-  bottom. Candidates sit 8px above existing transformed element bounds, with
-  32px side margins and 24px top/bottom margins. No free band rejects atomically
-  with the slide ID and blocking element IDs; reserve space and retry
-  `set_references`. An individual
-  URL too tall for an appendix page also rejects rather than truncating it.
+  bottom, only in the bottom quarter (`y >= 0.75 * height`). Candidates retain
+  at least 8px clearance from transformed element bounds, 32px side margins and
+  a 24px bottom margin. No free band rejects atomically: the error identifies
+  the slide, bottommost candidate frame (`x`, `y`, `width`, `height`) and only
+  obstacle IDs actually intersecting that frame. It may report no intersecting
+  IDs when clearance or the bottom-quarter constraint alone prevents placement.
+  Reserve space with approval or explicitly retry `set_references` with
+  `appendix_only`; the fallback is never chosen silently. An individual caption,
+  name and URL that cannot fit one appendix page also rejects without truncation.
   Presentations with a design need an existing empty layout for appendix pages;
   the operation does not change a branded layout or create a replacement master.
 - Entries bind to stable slide IDs, not page numbers. Only `set_references`
   chooses placement. Ordinary edits preserve generated frames, footnote/appendix
   choices, z-order and the user's appendix page order. Deletion removes only
   references no longer used and empty managed pages, in the same Undo.
-  Numbers retain their approved-list positions when an earlier source slide is
+  Citation numbers such as `[2]` retain their approved-list positions when an earlier source slide is
   deleted; gaps are intentional so existing in-body numbers do not silently shift.
   New slides receive references only when explicitly included in `slide_ids`.
+- `appendix_only` page captions update after reorder, deletion and appendix
+  movement, including removal of an empty appendix page. Their frames and the
+  separate name/URL elements remain fixed; deleted associations do not reflow
+  the remaining entries. Each referenced slide reserves the measured widest
+  page-number slot across the core's maximum capacity of 256 pages, including
+  separators and wrapping space. Capacity and frame-fit failures are explicit,
+  not hidden overflow or font shrinking. Caption ownership hashes are captured
+  after text updates, so subsequent edits and Undo remain verifiable.
+  Existing persisted `auto`, `footnotes` and `appendix` states remain compatible
+  and are not silently converted to the new mode.
 - Replace the complete approved list to change citations; an empty list clears
   managed output. Repeating the request on an unchanged deck is a no-op; calling
   it after layout edits explicitly replans placement. Undo restores both the
@@ -82,18 +102,20 @@ single-line marker at the default 16px size. Existing source/page labels can
 remain at `y=680..704`; the 8px gap is intentional. Longer titles or many
 reference numbers need a taller band, measured without shrinking the body.
 These are authoring coordinates, not a fixed requirement for imported slides:
-the upward search can use any sufficiently clear horizontal band. Footer
+the upward search can use a sufficiently clear band within the bottom quarter. Footer
 occupancy therefore sends URLs to the appendix, not an automatic failure.
 
-Imported decks without reserved space may still reject because a marker needs
-a free full-width band. The current search may also place it between body
-sections. Preview every affected slide for reading order and whitespace; a
-successful operation alone is not sufficient. Error obstacle IDs are not ranked
-by repair priority. Existing-footer reuse and marker-free appendix modes are
-not implemented; obtain approval before changing imported layouts to make room.
+Imported decks without reserved space can use `appendix_only` without changing
+the original slides. Marker modes reject when the bottom quarter has no suitable
+band; they no longer search the upper body. Preview every affected slide for
+reading order and whitespace; success alone is not sufficient. Diagnostic IDs
+describe the bottommost failed candidate, not all obstacles or a ranked repair
+plan. Existing-footer reuse is not implemented; obtain approval before changing
+imported layouts rather than silently replacing their labels.
 
 Footnote names/numbers and URL rows are separate text boxes. Only the URL row
-is hyperlinked in both PPTX and native PDF. Appendix text uses the selected
+is hyperlinked in both PPTX and native PDF; page captions are plain text in a
+separate managed element. Appendix text uses the selected
 empty layout's theme `dk1`, falling back to black only when necessary for
 contrast on its white background; no theme or branded master is rewritten.
 
@@ -137,6 +159,15 @@ Limits: 64 supplied references, 128 slide IDs per reference, 2048 characters per
 URL, 200 per name; normal document/output limits still apply. Preflight selects
 at most eight pages per call. Delivery PDF/preview selection may be partial, so
 include reference appendix pages explicitly when selecting pages.
+Caption page numbers refer to the current complete deck order, including the
+positions occupied by appendix pages. They are not imported/custom footer
+labels, which remain untouched. A subset PDF retains full-deck numbers; it is
+not renumbered to subset-local pages. Use a complete delivery deck for direct
+printed page correspondence. External reordering outside AISlide is not a live
+caption field: reopen and explicitly refresh references before distributing it.
+Native PPTX reopen and AISlide transactions preserve the managed association;
+native PDF emits readable captions, full URL text and URI links. These checks
+do not establish PowerPoint/Office visual parity.
 
 Regression commands (run from the issue worktree):
 

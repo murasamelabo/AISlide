@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Placement { #[default] Auto, Footnotes, Appendix }
+pub enum Placement { #[default] Auto, Footnotes, Appendix, AppendixOnly }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -174,6 +174,59 @@ fn text_height(text: &str, width: f64, size: f64, theme: &crate::design::Theme) 
     Ok((f64::from(measurement.measured_height) * 1.2 + 16.0).ceil())
 }
 
+fn caption_metrics(width: f64, size: f64, theme: &crate::design::Theme) -> Result<(usize, f64)> {
+    let (prefix, _) = crate::layout::graph_text_metrics("Slides: ", 10000.0, 10000.0, size, false, theme)?;
+    let mut slot_width = 0.0f64;
+    let mut line_height = f64::from(prefix.measured_height);
+    for page in 1..=crate::limits::LARGE.slides {
+        let (measurement, _) = crate::layout::graph_text_metrics(&format!("{page}, "), 10000.0, 10000.0, size, false, theme)?;
+        if measurement.missing_glyphs > 0 || prefix.missing_glyphs > 0 { return Err(Error::Unsupported("reference page captions require readable page-number glyphs".into())); }
+        slot_width = slot_width.max(f64::from(measurement.measured_width));
+        line_height = line_height.max(f64::from(measurement.measured_height));
+    }
+    let per_line = ((width - 16.0 - f64::from(prefix.measured_width)) / (slot_width + 2.0)).floor();
+    if per_line < 1.0 { return Err(Error::Limit("reference page caption cannot fit a maximum-width page number; use a wider appendix canvas".into())); }
+    Ok((per_line as usize, line_height))
+}
+
+fn page_numbers(deck: &Deck) -> Result<BTreeMap<String, usize>> {
+    if deck.slides.len() > crate::limits::LARGE.slides { return Err(Error::Limit("reference page captions exceed the supported page capacity".into())); }
+    Ok(deck.slides.iter().enumerate().map(|(index, slide)| (slide.id.clone(), index + 1)).collect())
+}
+
+fn page_caption(entry: &Reference, pages: &BTreeMap<String, usize>, per_line: usize) -> String {
+    let mut numbers: Vec<_> = entry.slide_ids.iter().filter_map(|id| pages.get(id).copied()).collect();
+    numbers.sort_unstable();
+    let numbers: Vec<_> = numbers.into_iter().map(|number| number.to_string()).collect();
+    format!("Slides: {}", numbers.chunks(per_line).map(|chunk| chunk.join(", ")).collect::<Vec<_>>().join(",\n"))
+}
+
+fn refresh_captions(deck: &mut Deck, state: &mut ReferenceState) -> Result<()> {
+    if state.options.placement != Placement::AppendixOnly { return Ok(()); }
+    let pages = page_numbers(deck)?;
+    for owned in &mut state.elements {
+        let Some(id) = owned.id.strip_prefix("aislide-ref-pages-") else { continue; };
+        let entry = state.options.entries.iter().find(|entry| entry.id == id).ok_or_else(|| Error::Conflict("managed page caption has no reference".into()))?;
+        let slide = deck.slides.iter_mut().find(|slide| slide.id == owned.slide_id).ok_or_else(|| Error::Conflict("managed page caption has no appendix page".into()))?;
+        let mut theme = crate::design::slide_theme(slide, deck.design.as_ref()).cloned().unwrap_or_default();
+        let element = slide.elements.iter_mut().find(|element| element.bounds().0 == owned.id).ok_or_else(|| Error::Conflict("managed page caption is missing".into()))?;
+        let Element::Text { text, width, height, font_size, format, .. } = element else { return Err(Error::Conflict("managed page caption is not text".into())); };
+        if let Some(family) = &format.font_family {
+            theme.fonts.minor = match family.as_str() { "@major" => theme.fonts.major.clone(), "@minor" => theme.fonts.minor.clone(), _ => family.clone() };
+        }
+        let frame = format.content_frame(*width, *height, false);
+        let available_width = frame[2].min(*width - 16.0);
+        let available_height = frame[3].min(*height - 16.0);
+        let (per_line, _) = caption_metrics(available_width + 16.0, *font_size, &theme)?;
+        let caption = page_caption(entry, &pages, per_line);
+        let (measurement, _) = crate::layout::graph_text_metrics(&caption, available_width, available_height, *font_size, false, &theme)?;
+        if measurement.overflow || measurement.missing_glyphs > 0 { return Err(Error::Limit("reference page caption does not fit its reserved frame; explicitly retry set_references".into())); }
+        *text = caption;
+        owned.sha256 = fingerprint(element)?;
+    }
+    Ok(())
+}
+
 fn readable_links(theme: &crate::design::Theme, background: &str) -> Result<bool> {
     for slot in ["@hlink", "@folHlink"] {
         if crate::review::contrast_ratio(&crate::design::resolve_color(slot, Some(theme)), background)? < 4.5 { return Ok(false); }
@@ -192,15 +245,18 @@ fn footer_clear(deck: &Deck, page: usize, height: f64) -> Result<bool> {
 fn marker_top(deck: &Deck, page: usize, height: f64) -> Result<f64> {
     let bounds = crate::authoring_preflight::reference_obstacles(deck, page)?;
     let maximum = f64::from(deck.height) - 24.0 - height;
+    let minimum = f64::from(deck.height) * 0.75;
+    let width = f64::from(deck.width) - 64.0;
     let mut candidates = vec![maximum];
     candidates.extend(bounds.iter().map(|(_, bounds)| bounds.y0 - 8.0 - height));
     candidates.sort_by(|left, right| right.total_cmp(left));
-    for top in candidates.into_iter().filter(|top| *top >= 24.0 && *top <= maximum) {
+    for top in candidates.into_iter().filter(|top| *top >= minimum && *top <= maximum) {
         let frame = kurbo::Rect::new(32.0, top, f64::from(deck.width) - 32.0, top + height);
-        if bounds.iter().all(|(_, bounds)| { let overlap = bounds.intersect(frame); overlap.width() <= 0.0 || overlap.height() <= 0.0 }) { return Ok(top); }
+        if bounds.iter().all(|(_, bounds)| { let overlap = bounds.inflate(8.0, 8.0).intersect(frame); overlap.width() <= 0.0 || overlap.height() <= 0.0 }) { return Ok(top); }
     }
-    let ids: Vec<_> = bounds.iter().map(|(id, _)| id.as_str()).collect();
-    Err(Error::Conflict(format!("slide {} has no free reference marker band; blocking elements: {}; reserve a band and retry set_references", deck.slides[page].id, ids.join(", "))))
+    let frame = kurbo::Rect::new(32.0, maximum, f64::from(deck.width) - 32.0, maximum + height);
+    let ids: Vec<_> = bounds.iter().filter(|(_, bounds)| { let overlap = bounds.intersect(frame); overlap.width() > 0.0 && overlap.height() > 0.0 }).map(|(id, _)| id.as_str()).collect();
+    Err(Error::Conflict(format!("slide {} has no free reference marker band in the bottom quarter with 8px clearance; candidate frame (x=32, y={maximum}, width={width}, height={height}); blocking elements: {}; reserve a band or explicitly select placement=appendix_only and retry set_references", deck.slides[page].id, if ids.is_empty() { "none (clearance or bottom-quarter constraint)".into() } else { ids.join(", ") })))
 }
 
 pub(crate) fn refresh(document: &mut Document) -> Result<()> {
@@ -208,17 +264,18 @@ pub(crate) fn refresh(document: &mut Document) -> Result<()> {
     let mut checked = document.deck.clone();
     strip(&mut checked, &state)?;
     let active: BTreeSet<_> = state.options.entries.iter().filter(|entry| checked.slides.iter().any(|slide| entry.slide_ids.contains(&slide.id)))
-        .flat_map(|entry| [format!("aislide-ref-entry-{}", entry.id), format!("aislide-ref-url-{}", entry.id)]).collect();
+        .flat_map(|entry| [format!("aislide-ref-entry-{}", entry.id), format!("aislide-ref-url-{}", entry.id), format!("aislide-ref-pages-{}", entry.id)]).collect();
     if !active.is_empty() && state.slides.iter().any(|id| !document.deck.slides.iter().any(|slide| &slide.id == id)) {
         return Err(Error::Conflict("managed reference appendix was removed; use set_references to change or clear it".into()));
     }
     for slide in document.deck.slides.iter_mut().filter(|slide| state.slides.contains(&slide.id)) {
-        slide.elements.retain(|element| !(element.bounds().0.starts_with("aislide-ref-entry-") || element.bounds().0.starts_with("aislide-ref-url-")) || active.contains(element.bounds().0));
+        slide.elements.retain(|element| !(element.bounds().0.starts_with("aislide-ref-entry-") || element.bounds().0.starts_with("aislide-ref-url-") || element.bounds().0.starts_with("aislide-ref-pages-")) || active.contains(element.bounds().0));
     }
     document.deck.slides.retain(|slide| !state.slides.contains(&slide.id) || slide.elements.iter().any(|element| active.contains(element.bounds().0)));
     state.elements.retain(|owned| document.deck.slides.iter().any(|slide| slide.id == owned.slide_id && slide.elements.iter().any(|element| element.bounds().0 == owned.id)));
     state.slides.retain(|id| document.deck.slides.iter().any(|slide| &slide.id == id));
     state.page_sha256.retain(|id, _| state.slides.contains(id));
+    refresh_captions(&mut document.deck, &mut state)?;
     document.references = Some(state);
     Ok(())
 }
@@ -244,6 +301,7 @@ fn arrange(document: &mut Document) -> Result<()> {
         let slide = &document.deck.slides[page];
         let cited: Vec<_> = active.iter().enumerate().filter(|(_, entry)| entry.slide_ids.contains(&slide.id)).collect();
         if cited.is_empty() { continue; }
+        if state.options.placement == Placement::AppendixOnly { appendix.extend(cited.iter().map(|(number, _)| *number)); continue; }
         let theme = crate::design::slide_theme(slide, document.deck.design.as_ref()).cloned().unwrap_or_default();
         let background = crate::design::resolve_color(crate::design::slide_background(slide, document.deck.design.as_ref()), Some(&theme));
         let color = if crate::review::contrast_ratio("000000", &background)? >= crate::review::contrast_ratio("FFFFFF", &background)? { "000000" } else { "FFFFFF" };
@@ -276,14 +334,17 @@ fn arrange(document: &mut Document) -> Result<()> {
     if !appendix.is_empty() && !readable_links(&appendix_theme, "FFFFFF")? {
         return Err(Error::Unsupported("reference appendix requires theme hyperlink colors readable on white; adjust the chosen empty layout's theme".into()));
     }
+    let caption_layout = if state.options.placement == Placement::AppendixOnly { Some(caption_metrics(width, size, &appendix_theme)?) } else { None };
+    let pages = page_numbers(&document.deck)?;
     let mut top = height;
     for number in appendix {
         let entry = active[number];
         let text = format!("[{}] {}", number + 1, entry.name);
         let label_height = text_height(&text, width, size, &appendix_theme)?;
         let url_height = text_height(&entry.url, width, size, &appendix_theme)?;
-        let needed = label_height + url_height;
-        if needed > height - entry_top - 24.0 { return Err(Error::Limit("reference URL and title do not fit one appendix page at the requested font size".into())); }
+        let caption_height = caption_layout.map_or(0.0, |(per_line, line_height)| (entry.slide_ids.len().div_ceil(per_line) as f64 * line_height * 1.2 + 16.0).ceil());
+        let needed = label_height + caption_height + url_height;
+        if needed > height - entry_top - 24.0 { return Err(Error::Limit("reference page caption, URL and title do not fit one appendix page at the requested font size".into())); }
         if top + needed > height - 24.0 {
             let id = format!("aislide-ref-page-{}", state.slides.len() + 1);
             if document.deck.slides.iter().any(|slide| slide.id == id) { return Err(Error::Conflict("reference appendix ID already exists".into())); }
@@ -300,7 +361,10 @@ fn arrange(document: &mut Document) -> Result<()> {
         }
         let page = document.deck.slides.len() - 1;
         add(&mut document.deck.slides[page], &mut state, text_element(format!("aislide-ref-entry-{}", entry.id), text, 32.0, top, width, label_height, size, &appendix_color, None))?;
-        add(&mut document.deck.slides[page], &mut state, text_element(format!("aislide-ref-url-{}", entry.id), entry.url.clone(), 32.0, top + label_height, width, url_height, size, &appendix_color, Some(entry.url.clone())))?;
+        if let Some((per_line, _)) = caption_layout {
+            add(&mut document.deck.slides[page], &mut state, text_element(format!("aislide-ref-pages-{}", entry.id), page_caption(entry, &pages, per_line), 32.0, top + label_height, width, caption_height, size, &appendix_color, None))?;
+        }
+        add(&mut document.deck.slides[page], &mut state, text_element(format!("aislide-ref-url-{}", entry.id), entry.url.clone(), 32.0, top + label_height + caption_height, width, url_height, size, &appendix_color, Some(entry.url.clone())))?;
         top += needed + 12.0;
     }
     document.references = Some(state);
@@ -393,10 +457,15 @@ pub(crate) fn notes_only_count(document: &Document, page: usize) -> Result<usize
     let mut visible = BTreeSet::new();
     visible_urls(&slide.elements, &crate::authoring_preflight::visible_reference_ids(&document.deck, page)?, &mut visible);
     if let Some(state) = &document.references {
-        if state.elements.iter().any(|owned| owned.slide_id == slide.id && owned.id == "aislide-ref-marker" && slide.elements.iter().any(|element| element.bounds().0 == owned.id && fingerprint(element).ok().as_ref() == Some(&owned.sha256))) {
+        let marker = state.elements.iter().any(|owned| owned.slide_id == slide.id && owned.id == "aislide-ref-marker" && slide.elements.iter().any(|element| element.bounds().0 == owned.id && fingerprint(element).ok().as_ref() == Some(&owned.sha256)));
+        if marker || state.options.placement == Placement::AppendixOnly {
             for (page_index, page) in document.deck.slides.iter().enumerate().filter(|(_, page)| state.slides.contains(&page.id)) {
-                let mut appendix = BTreeSet::new(); visible_urls(&page.elements, &crate::authoring_preflight::visible_reference_ids(&document.deck, page_index)?, &mut appendix);
-                visible.extend(state.options.entries.iter().filter(|entry| entry.slide_ids.contains(&slide.id)).filter_map(|entry| normalized_url(&entry.url)).filter(|url| appendix.contains(url)));
+                let ids = crate::authoring_preflight::visible_reference_ids(&document.deck, page_index)?;
+                let mut appendix = BTreeSet::new(); visible_urls(&page.elements, &ids, &mut appendix);
+                visible.extend(state.options.entries.iter().filter(|entry| entry.slide_ids.contains(&slide.id)).filter(|entry| {
+                    marker || state.elements.iter().any(|owned| owned.slide_id == page.id && owned.id == format!("aislide-ref-pages-{}", entry.id) && ids.contains(&owned.id)
+                        && page.elements.iter().any(|element| element.bounds().0 == owned.id && fingerprint(element).ok().as_ref() == Some(&owned.sha256)))
+                }).filter_map(|entry| normalized_url(&entry.url)).filter(|url| appendix.contains(url)));
             }
         }
     }
