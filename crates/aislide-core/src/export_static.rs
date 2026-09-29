@@ -702,6 +702,7 @@ fn export_pdf(
         document.objects.insert(section_id, Object::Dictionary(dictionary! {"Type"=>"StructElem", "S"=>"Sect", "P"=>logical_id, "Pg"=>page_id, "T"=>pdf_unicode(&slide.title), "K"=>tags}));
         let parent_index = sections.len() as i64;
         let parents = pdf_text(&mut document, page_id, &content, &text_tree, &scene.objects, deck.height as f64)?;
+        pdf_links(&mut document, page_id, &slide.elements, &text_tree, &scene.objects, f64::from(deck.width), f64::from(deck.height))?;
         document.get_object_mut(page_id).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("StructParents", parent_index);
         document.get_object_mut(page_id).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("Tabs", Object::Name(b"S".to_vec()));
         sections.push(Object::Reference(section_id));
@@ -738,6 +739,42 @@ fn export_pdf(
         office_parity_verified: false,
         pdf_rasterized: false,
     })
+}
+
+fn pdf_links(document: &mut lopdf::Document, page_id: lopdf::ObjectId, elements: &[Element], tree: &svg2pdf::usvg::Tree, objects: &[(String, String)], width: f64, height: f64) -> Result<()> {
+    use lopdf::{dictionary, Object};
+    fn collect<'a>(elements: &'a [Element], links: &mut Vec<(&'a str, &'a str)>) {
+        for element in elements {
+            if element.visual().is_some_and(|visual| visual.hidden || visual.opacity == Some(0.0)) { continue; }
+            match element {
+                Element::Text { id, format, .. } | Element::Shape { id, format, .. } => {
+                    if let Some(url) = &format.hyperlink { links.push((id, url)); }
+                }
+                Element::Group { children, .. } => collect(children, links),
+                _ => {}
+            }
+        }
+    }
+    let mut links = Vec::new(); collect(elements, &mut links);
+    let mut annotations = Vec::new();
+    for (id, url) in links {
+        crate::model::validate_hyperlink(url)?;
+        let Some(bounds) = objects.iter().rev().find(|(element_id, _)| element_id == id)
+            .and_then(|(_, svg_id)| tree.node_by_id(svg_id)).and_then(|node| node.abs_layer_bounding_box()) else { continue; };
+        let left = f64::from(bounds.x()).max(0.0);
+        let top = f64::from(bounds.y()).max(0.0);
+        let right = f64::from(bounds.right()).min(width);
+        let bottom = f64::from(bounds.bottom()).min(height);
+        if right <= left || bottom <= top { continue; }
+        let rectangle: Vec<Object> = vec![(left * 0.75).into(), ((height - bottom) * 0.75).into(), (right * 0.75).into(), ((height - top) * 0.75).into()];
+        let target = reqwest::Url::parse(url).map_err(|_| Error::Invalid("invalid PDF link URL".into()))?;
+        let annotation = document.add_object(dictionary! {"Type"=>"Annot", "Subtype"=>"Link", "Rect"=>rectangle,
+            "Border"=>vec![Object::Integer(0), Object::Integer(0), Object::Integer(0)], "F"=>4,
+            "A"=>dictionary! {"S"=>"URI", "URI"=>Object::string_literal(target.as_str())}});
+        annotations.push(Object::Reference(annotation));
+    }
+    if !annotations.is_empty() { document.get_object_mut(page_id).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("Annots", annotations); }
+    Ok(())
 }
 
 fn pdf_error(error: lopdf::Error) -> Error {

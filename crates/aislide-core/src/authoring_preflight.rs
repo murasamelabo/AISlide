@@ -164,6 +164,16 @@ fn page_objects(deck: &Deck, page: usize) -> Result<Vec<Object<'_>>> {
 	Ok(objects)
 }
 
+pub(crate) fn visible_bounds(deck: &Deck, page: usize) -> Result<Vec<Rect>> {
+	Ok(page_objects(deck, page)?.into_iter().filter(|object| object.text || object.characters > 0 || object.bounds.width() < f64::from(deck.width) || object.bounds.height() < f64::from(deck.height)).map(|object| object.bounds).collect())
+}
+
+pub(crate) fn visible_reference_ids(deck: &Deck, page: usize) -> Result<BTreeSet<String>> {
+	Ok(page_objects(deck, page)?.into_iter().filter(|object| object.scope == "slide" && (object.text || object.characters > 0)
+		&& object.bounds.x0 >= 0.0 && object.bounds.y0 >= 0.0 && object.bounds.x1 <= f64::from(deck.width) && object.bounds.y1 <= f64::from(deck.height))
+		.map(|object| object.id.to_owned()).collect())
+}
+
 fn crosses_frame(start: Point, end: Point, rect: Rect) -> bool {
 	let mut low = 0.0_f64;
 	let mut high = 1.0_f64;
@@ -253,6 +263,12 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		office_visual_parity: false, semantic_truth_verified: false };
 	for page in selected {
 		let slide = &deck.slides[page];
+		let notes_only = crate::references::notes_only_count(document, page)?;
+		if notes_only > 0 {
+			push_finding(&mut report, page, &slide.id, &[], "SOURCE_URL_NOT_VISIBLE", "warning", "heuristic",
+				&format!("{notes_only} reference URL(s) appear in speaker notes but not as slide text; slide-only PDFs omit notes"),
+				&["Approve distribution-safe URLs before adding visible citations or a linked reference appendix", "Keep a readable URL as well as a hyperlink; never automatically publish private notes or file paths"])?;
+		}
 		let known_badges = crate::graphs::managed_badge_pairs(document, &slide.id);
 		let objects = page_objects(deck, page)?;
 		let rendered = crate::render::render_slide_svg(deck, page, false)?;

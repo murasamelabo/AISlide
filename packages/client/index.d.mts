@@ -189,6 +189,7 @@ export class DocumentSession {
   exportStatic(input?: StaticExportOptions, options?: RequestOptions): Promise<StaticExport>
   previewPresentation(input?: PreviewOptions, options?: RequestOptions): Promise<PresentationPreview>
   preflightPresentation(input?: PreflightOptions, options?: RequestOptions): Promise<PreflightReport>
+  setReferences(input: import('./types').ReferenceOptions, options?: AuthoringOptions): Promise<AislideDocument>
   prepareDelivery(input?: DeliveryOptions, options?: TransactionOptions & { expectedHash?: string }): Promise<PreparedDelivery>
   previewSlideRevision(slideId: string, edits: RevisionEdit[], options?: TransactionOptions & { expectedHash?: string; maxDimension?: number }): Promise<RevisionPreview>
   applySlideRevision(slideId: string, edits: RevisionEdit[], options: RequestOptions & { expectedRevision: number; expectedHash: string; candidateHash: string }): Promise<AislideDocument>

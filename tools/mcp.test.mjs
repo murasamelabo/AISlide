@@ -87,6 +87,25 @@ async function feedbackMcpFixture(run, args = ['--tool-profile', 'full']) {
   } finally { hooks.deregister(); delete globalThis[key]; }
 }
 
+test('reference MCP registers guarded publication with default-deny entries', async () => {
+  await feedbackMcpFixture(async ({ registrations, call, calls, fixture }) => {
+    const tool = registrations.get('set_references');
+    assert.ok(tool);
+    assert.equal(tool.config.annotations.readOnlyHint, false);
+    const input = { deck_id: randomUUID(), expected_revision: 0, expected_hash: 'a'.repeat(64), options: { placement: 'auto', entries: [{ id: 'learn', name: 'Microsoft Learn', url: 'https://learn.microsoft.com/azure/', slide_ids: ['slide-1'] }] } };
+    const parsed = tool.config.inputSchema.parse(input);
+    assert.notEqual(parsed.options.entries[0].publish, true);
+    assert.equal(tool.config.inputSchema.safeParse({ ...input, options: { ...input.options, unknown: true } }).success, false);
+    input.deck_id = (await call('create_presentation', { title: 'Synthetic reference test' })).deck_id;
+    fixture.onRequest = async request => ({ document: { ...request.document, revision: 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] } });
+    const result = await call('set_references', input);
+    assert.equal(calls.at(-1).request.op, 'set_references');
+    assert.equal(calls.at(-1).request.expected_hash, input.expected_hash);
+    assert.equal(result.revision, 1);
+    assert.doesNotMatch(JSON.stringify(result), /learn\.microsoft/);
+  }, []);
+});
+
 test('layout_graph MCP uses strict coordinate-free input and one pure core request', async () => {
   await feedbackMcpFixture(async ({ registrations, calls, call, fixture }) => {
     const tool = registrations.get('layout_graph');

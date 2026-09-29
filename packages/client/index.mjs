@@ -373,6 +373,7 @@ export class DocumentSession {
   exportStatic(input = {}, options) { return this.#read({ op: 'export_static', document: this.#document, options: input }, options); }
   previewPresentation(input = {}, options) { return this.#read({ op: 'preview_presentation', document: this.#document, options: input }, options); }
   preflightPresentation(input = {}, options) { return this.#read({ op: 'preflight_presentation', document: this.#document, options: input }, options); }
+  setReferences(input, options) { return this.#guardedAuthor('set_references', { options: input }, options); }
   prepareDelivery(input = {}, options = {}) {
     return this.#read({ op: 'prepare_delivery', document: this.#document, expected_revision: options.expectedRevision ?? this.revision,
       expected_hash: options.expectedHash ?? this.#document.hash, options: input }, options);

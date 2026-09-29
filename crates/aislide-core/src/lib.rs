@@ -29,6 +29,7 @@ pub mod graphics;
 pub mod graphs;
 pub mod architecture_icons;
 pub mod sources;
+pub mod references;
 pub mod data_report;
 pub mod document;
 pub mod recovery;
