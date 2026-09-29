@@ -213,6 +213,7 @@ export type IconRow = { label: string; detail?: string; icon?: GraphIcon | null;
 export type ShiftRow = { from: string; to: string; caption?: string; detail?: string }
 export type StepCard = { label: string; detail?: string; points?: string[]; outcome?: string; image?: GraphIcon | null; icon?: GraphIcon | null }
 export type AgendaItem = { label: string; detail?: string; meta?: string }
+export type Callout = { x: number; y: number; label: string; detail?: string }
 export type PartData =
   | { kind: 'comparison_panels'; panels: ComparisonPanel[]; transition?: boolean }
   | { kind: 'icon_cards'; cards: IconCard[]; columns?: number | null; numbered?: boolean; body_size?: number | null; message?: PartMessage | null }
@@ -220,6 +221,7 @@ export type PartData =
   | { kind: 'shift_rows'; from_label?: string; to_label?: string; rows: ShiftRow[]; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'step_cards'; steps: StepCard[]; step_label?: string; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'agenda'; items: AgendaItem[]; accent?: string | null }
+  | { kind: 'screenshot_callouts'; image: GraphIcon; callouts: Callout[]; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'chart'; categories: string[]; series: { name: string; values: number[] }[]; x_axis?: string; y_axis?: string }
   | { kind: 'items'; items: PartItem[]; center?: string }
   | { kind: 'tree'; nodes: { id: string; label: string; parent?: string | null }[] }

@@ -52,6 +52,7 @@ every presentation.
 | Architecture, boundaries and handoffs between systems | Managed graph |
 | Equal-status topics without icons | Open rows/columns/grid |
 | Required product screenshot | Original image plus focused annotation |
+| Screenshot with numbered UI callouts | `list-enumeration/screenshot-callouts` |
 
 Plan the page mix before building: a briefing usually alternates cards, rows,
 shifts, steps, graphs and required tables. Do not convert every page to cards.
@@ -100,8 +101,13 @@ instead of 540. Longer reference markers may require a taller reserved band.
 | `before-after/shift` | `shift_rows`: `rows` 2-5 `{from<=48, to<=48, caption<=64, detail<=200}`, `from_label`/`to_label` <=24, `accent`, `body_size`, `message` |
 | `flow/cards` | `step_cards`: `steps` 2-4 `{label<=48, detail<=240, points<=4x80, outcome<=64, image, icon}`, `step_label` <=12 (default STEP), `accent`, `body_size`, `message` |
 | `list/agenda` | `agenda`: `items` 2-7 `{label<=60, detail<=120, meta<=16}`, `accent` (number badge, default `@dk1`) |
+| `list-enumeration/screenshot-callouts` | `screenshot_callouts`: `image` (registered screenshot), `callouts` 1-6 `{x, y, label<=48, detail<=200}` with `x`/`y` as 0-1 fractions of the source image, `accent`, `body_size`, `message` |
 
 Step images are cover-cropped without distortion; badges and icons stay square.
+Never hand-place numbered badges or numbered legend rows next to a screenshot:
+use `screenshot-callouts`, read callout `x`/`y` from the image itself, and
+preview once. Preflight `NUMBERED_SEQUENCE_UNEVEN` flags hand-placed numbered
+columns or rows with uneven pitch or left edges.
 
 ## Section Divider
 

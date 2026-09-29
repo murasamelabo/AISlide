@@ -266,6 +266,7 @@ test('briefing parts MCP keeps strict data and Lucide assets return reusable ico
       { ...spec, preset: 'before-after/shift', data: { kind: 'shift_rows', from_label: 'Today', to_label: 'Next', rows: [{ from: 'A', to: 'B\nC', caption: 'c' }, { from: 'D', to: 'E', detail: 'Detail' }] } },
       { ...spec, preset: 'flow/cards', data: { kind: 'step_cards', step_label: 'PHASE', steps: [{ label: 'A', outcome: 'Result', image: icon }, { label: 'B', points: ['One'] }] } },
       { ...spec, preset: 'list/agenda', data: { kind: 'agenda', items: [{ label: 'A', meta: '10 min' }, { label: 'B', detail: 'Detail' }] } },
+      { ...spec, preset: 'list-enumeration/screenshot-callouts', data: { kind: 'screenshot_callouts', image: icon, callouts: [{ x: 0.2, y: 0.4, label: 'Enable', detail: 'Detail' }, { x: 1, y: 0, label: 'Assign' }] } },
     ];
     for (const candidate of valid) assert.equal(schema.safeParse({ ...input, spec: candidate }).success, true, candidate.preset);
     const card = { label: 'Topic' };
@@ -275,6 +276,8 @@ test('briefing parts MCP keeps strict data and Lucide assets return reusable ico
       { ...spec.data, message: { text: 'x'.repeat(121) } }, { ...spec.data, cards: [{ label: 'A\r\nB' }, card] },
       { kind: 'agenda', items: [{ label: 'A', meta: 'two\nlines' }, { label: 'B' }] }, { kind: 'step_cards', step_label: 'X'.repeat(13), steps: [{ label: 'A' }, { label: 'B' }] },
       { kind: 'shift_rows', rows: Array(6).fill({ from: 'A', to: 'B' }) }, { kind: 'icon_rows', rows: [{ label: 'A' }] },
+      { kind: 'screenshot_callouts', image: icon, callouts: [{ x: 1.2, y: 0.5, label: 'A' }] }, { kind: 'screenshot_callouts', image: icon, callouts: Array(7).fill({ x: 0.5, y: 0.5, label: 'A' }) },
+      { kind: 'screenshot_callouts', callouts: [{ x: 0.5, y: 0.5, label: 'A' }] },
     ]) assert.equal(schema.safeParse({ ...input, spec: { ...spec, data } }).success, false, JSON.stringify(data).slice(0, 80));
   });
 });
@@ -2674,7 +2677,7 @@ test('MCP open list recommendations render native text and keep failed edits ato
   try {
     await client.connect(transport);
     const catalog = await call('part_catalog');
-    assert.equal(catalog.presets.length, 117);
+    assert.equal(catalog.presets.length, 118);
     for (const id of ['list/rows', 'list-horizontal/columns', 'list-enumeration/grid']) {
       const preset = catalog.presets.find(entry => entry.id === id);
       assert.equal(preset.recommended, true);

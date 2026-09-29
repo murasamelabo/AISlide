@@ -124,8 +124,11 @@ Five further recommended briefing presets bind to dedicated data kinds:
 `list-horizontal/icon-cards` (`icon_cards`, 2-6 cards in 2-4 columns and at
 most two rows), `list/icon-rows` (`icon_rows`, 2-6 rows), `before-after/shift`
 (`shift_rows`, 2-5 from-to rows), `flow/cards` (`step_cards`, 2-4 steps with
-optional cover-cropped `image` and `icon`) and `list/agenda` (`agenda`, 2-7
-items). The catalog now has 117 entries in the same 36 categories. These parts
+optional cover-cropped `image` and `icon`), `list/agenda` (`agenda`, 2-7
+items) and `list-enumeration/screenshot-callouts` (`screenshot_callouts`, one
+required `image` and 1-6 `callouts` whose `x`/`y` are 0-1 fractions of the
+source image; badges stay on the contained picture and the numbered legend uses
+one measured pitch). The catalog now has 118 entries in the same 36 categories. These parts
 render at the `PartSpec.layout` frame size instead of scaling a 1152x512 canvas;
 fonts are fixed (headings 18px, `body_size` 14-22, default 16; captions, tags
 and pills 12-13px). Card and step heights shrink to measured content, row

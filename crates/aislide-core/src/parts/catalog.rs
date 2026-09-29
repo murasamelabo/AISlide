@@ -98,6 +98,11 @@ fn briefing_example(kind: &str) -> PartData {
             {"label":"Embed agents in workflows","detail":"Start with well-defined investigation and triage tasks.","outcome":"Capacity before autonomy"},
             {"label":"Expand to a system","detail":"Coordinate agents toward protection goals across services.","outcome":"Specialists with shared context"}
         ]}),
+        "screenshot_callouts" => json!({"kind":"screenshot_callouts","image":{"base64":placeholder_screenshot(),"mime_type":"image/png","alt":"Synthetic settings screen"},"callouts":[
+            {"x":0.30,"y":0.34,"label":"Turn on the method","detail":"Enable the setting before choosing targets."},
+            {"x":0.12,"y":0.50,"label":"Choose targets","detail":"Include groups; exclusions take precedence."},
+            {"x":0.62,"y":0.70,"label":"Assign a profile","detail":"Pick the profile applied to each target."}
+        ]}),
         _ => json!({"kind":"agenda","items":[
             {"label":"Background and direction","detail":"Why the operating model is changing","meta":"10 min"},
             {"label":"Platform overview","detail":"Shared context, controls and data","meta":"15 min"},
@@ -106,6 +111,17 @@ fn briefing_example(kind: &str) -> PartData {
         ]}),
     };
     serde_json::from_value(value).expect("built-in briefing data is valid")
+}
+
+fn placeholder_screenshot() -> String {
+    use base64::Engine;
+    let mut pixels = image::RgbImage::from_pixel(640, 400, image::Rgb([246, 247, 249]));
+    for (x0, y0, x1, y1, shade) in [(0, 0, 640, 44, 228u8), (24, 70, 360, 92, 214), (24, 124, 150, 146, 222), (24, 180, 600, 204, 232), (24, 216, 600, 240, 238), (380, 260, 560, 290, 214)] {
+        for y in y0..y1 { for x in x0..x1 { pixels.put_pixel(x, y, image::Rgb([shade, shade, shade.saturating_add(4)])); } }
+    }
+    let mut output = std::io::Cursor::new(Vec::new());
+    pixels.write_to(&mut output, image::ImageFormat::Png).expect("in-memory PNG encoding");
+    base64::engine::general_purpose::STANDARD.encode(output.into_inner())
 }
 
 fn example(category: &str, variant: usize) -> PartData {

@@ -30,7 +30,7 @@ Skill installation does not connect MCP.
 	comparison, part or graph. Reuse `style`; default card padding is 24px. Existing
 	native/nonempty slides reject. Use explicit editing to preserve templates.
 5. For an icon-led briefing style read `references/technical-panels.md`
-	(panels, icon cards/rows, shifts, steps, agenda, Lucide icons) only on request.
+	(panels, icon cards/rows, shifts, steps, agenda, screenshot callouts, Lucide icons) only on request.
 	Prefer managed parts/graphs. A composition graph block takes coordinate-free
 	`input` and inserts managed metadata in one operation. `layout_graph` returns
 	a bounded grid GraphSpec, not a hierarchical layout: 1-48 nodes, 64 edges,

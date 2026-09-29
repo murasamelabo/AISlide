@@ -21,6 +21,9 @@ pub(super) const PRESETS: &[Preset] = &[
     Preset { id: "list/agenda", kind: "agenda", name: "Numbered agenda",
         use_when: "2-7 agenda or chapter entries with a number badge, heading, optional one-line detail and optional duration or page label.",
         avoid_when: "Content slides or process steps with relationships; use the matching list, flow or diagram preset." },
+    Preset { id: "list-enumeration/screenshot-callouts", kind: "screenshot_callouts", name: "Screenshot with numbered callouts",
+        use_when: "One approved screenshot with 1-6 numbered UI callouts explained beside it. Callout x/y are 0-1 fractions of the source image, so badges stay on the picture; legend numbers share one uniform pitch.",
+        avoid_when: "Decorative photos, more than six callouts, or explanations unrelated to screen positions; use flow/cards images or list/icon-rows instead. Never hand-place numbered legends." },
 ];
 
 const GAP: f64 = 16.0;
@@ -30,6 +33,7 @@ const BODY: f64 = 16.0;
 const SMALL: f64 = 13.0;
 const FIT_MARGIN: f64 = 28.0;
 const ROW_PITCH: f64 = 112.0;
+const CALLOUT: f64 = 28.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -89,6 +93,16 @@ pub struct AgendaItem {
     #[serde(default, skip_serializing_if = "String::is_empty")] pub meta: String,
 }
 
+/// `x` and `y` are 0-1 fractions of the source image, measured from its top-left corner.
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Callout {
+    pub x: f64,
+    pub y: f64,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] pub detail: String,
+}
+
 pub(super) fn kind(data: &PartData) -> Option<&'static str> {
     Some(match data {
         PartData::IconCards { .. } => "icon_cards",
@@ -96,6 +110,7 @@ pub(super) fn kind(data: &PartData) -> Option<&'static str> {
         PartData::ShiftRows { .. } => "shift_rows",
         PartData::StepCards { .. } => "step_cards",
         PartData::Agenda { .. } => "agenda",
+        PartData::ScreenshotCallouts { .. } => "screenshot_callouts",
         _ => return None,
     })
 }
@@ -183,6 +198,17 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
             }
             colors(&[accent])?;
         }
+        PartData::ScreenshotCallouts { image, callouts, accent, body_size: size, message: band } => {
+            count(callouts.len(), 1, 6)?;
+            valid_text(&image.alt, 500)?;
+            for callout in callouts {
+                if ![callout.x, callout.y].iter().all(|value| value.is_finite() && (0.0..=1.0).contains(value)) {
+                    return Err(Error::Invalid("callout x/y must be 0-1 fractions of the source image".into()));
+                }
+                field(&callout.label, 48, "callout label", true)?; field(&callout.detail, 200, "callout detail", false)?;
+            }
+            colors(&[accent])?; body_size(*size)?; message(band)?;
+        }
         _ => return Err(Error::Invalid("briefing part data required".into())),
     }
     Ok(())
@@ -220,7 +246,8 @@ struct Drawn { bottom: f64, flexible: Vec<String> }
 
 fn render(drawing: &mut Drawing, data: &PartData, body: [f64; 4], theme: &Theme, shrink: f64) -> Result<Vec<String>> {
     let band = match data {
-        PartData::IconCards { message, .. } | PartData::IconRows { message, .. } | PartData::ShiftRows { message, .. } | PartData::StepCards { message, .. } => message.as_ref(),
+        PartData::IconCards { message, .. } | PartData::IconRows { message, .. } | PartData::ShiftRows { message, .. } | PartData::StepCards { message, .. }
+        | PartData::ScreenshotCallouts { message, .. } => message.as_ref(),
         _ => None,
     };
     let band_height = band.map(message_height);
@@ -233,6 +260,7 @@ fn render(drawing: &mut Drawing, data: &PartData, body: [f64; 4], theme: &Theme,
         PartData::ShiftRows { from_label, to_label, rows, accent, body_size, .. } => shift_rows(drawing, [from_label, to_label], rows, accent.as_deref().unwrap_or("@accent1"), body_size.unwrap_or(BODY), content, theme)?,
         PartData::StepCards { steps, step_label, accent, body_size, .. } => step_cards(drawing, steps, if step_label.is_empty() { "STEP" } else { step_label }, accent.as_deref().unwrap_or("@accent1"), body_size.unwrap_or(BODY), content, theme, shrink)?,
         PartData::Agenda { items, accent } => agenda(drawing, items, accent.as_deref().unwrap_or("@dk1"), content, theme)?,
+        PartData::ScreenshotCallouts { image, callouts, accent, body_size, .. } => screenshot_callouts(drawing, image, callouts, accent.as_deref().unwrap_or("@accent1"), body_size.unwrap_or(BODY), content, theme, shrink)?,
         _ => return Err(Error::Invalid("briefing part data required".into())),
     };
     if let (Some(band), Some(band_height)) = (band, band_height) { message_band(drawing, band, [left, drawn.bottom + GAP, width, band_height]); }
@@ -527,4 +555,44 @@ fn agenda(drawing: &mut Drawing, items: &[AgendaItem], fill: &str, frame: [f64; 
         if index + 1 < items.len() { shape(drawing, Fill::solid("rect", &border), [text_left, y + row_height - 0.5, left + width - text_left, 1.0], None); }
     }
     Ok(Drawn { bottom: top + height, flexible: Vec::new() })
+}
+
+fn number_badge(drawing: &mut Drawing, number: usize, origin: [f64; 2], fill: &str) {
+    let style = Fill { preset: "ellipse", fill, stroke: "@lt1", stroke_width: 2.0, radius: None };
+    shape(drawing, style, [origin[0], origin[1], CALLOUT, CALLOUT], Some((label(&number.to_string(), 14.0, "@lt1", true), TextAlign::Center, [0.0, 0.0, 0.0, 0.0])));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn screenshot_callouts(drawing: &mut Drawing, image: &GraphIcon, callouts: &[Callout], accent: &str, size: f64, frame: [f64; 4], theme: &Theme, shrink: f64) -> Result<Drawn> {
+    let [left, top, width, height] = frame;
+    let legend_minimum = 280.0;
+    let area_width = width - legend_minimum - 32.0;
+    if area_width < 240.0 { return Err(too_small("the screenshot and its callout legend")); }
+    let info = crate::media::inspect_raster(&image.base64, &image.mime_type)?;
+    let aspect = f64::from(info.width) / f64::from(info.height);
+    let (image_width, image_height) = if area_width / height > aspect { (height * aspect, height) } else { (area_width, area_width / aspect) };
+    let mut picture = crate::media::create_picture(&drawing.id(), image.base64.clone(), &image.mime_type, &image.alt)?;
+    if let Element::Picture { x, y, width, height, .. } = &mut picture { [*x, *y, *width, *height] = [left, top, image_width, image_height]; }
+    drawing.elements.push(picture);
+    shape(drawing, Fill { preset: "rect", fill: "none", stroke: &mix("@dk2", theme, 0.70), stroke_width: 1.0, radius: None }, [left, top, image_width, image_height], None);
+    let radius = CALLOUT / 2.0;
+    for (index, callout) in callouts.iter().enumerate() {
+        let center_x = (left + callout.x * image_width).clamp(left + radius, left + image_width - radius);
+        let center_y = (top + callout.y * image_height).clamp(top + radius, top + image_height - radius);
+        number_badge(drawing, index + 1, [center_x - radius, center_y - radius], accent);
+    }
+    let legend_left = left + image_width + 32.0;
+    let legend_width = left + width - legend_left;
+    // Every legend row shares one pitch, sized for the tallest measured row.
+    let natural = (height / callouts.len() as f64).min(ROW_PITCH + 20.0);
+    let pitch = (natural - shrink).max(56.0);
+    if natural < 56.0 { return Err(too_small("callout legend rows")); }
+    let mut flexible = Vec::new();
+    for (index, callout) in callouts.iter().enumerate() {
+        let row_top = top + index as f64 * pitch;
+        number_badge(drawing, index + 1, [legend_left, row_top], accent);
+        let content = Rich::default().add(&callout.label, LABEL, "@dk1", true, 300).add(&callout.detail, size, "@dk1", false, 0).finish();
+        flexible.extend(text(drawing, [legend_left + CALLOUT + 14.0, row_top + 1.0, legend_width - CALLOUT - 14.0, pitch - 16.0], content, TextAlign::Left, VerticalAlign::Top));
+    }
+    Ok(Drawn { bottom: (top + image_height).max(top + pitch * callouts.len() as f64 - 16.0), flexible })
 }

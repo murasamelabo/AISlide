@@ -85,7 +85,7 @@ fn open_list_presets_keep_content_without_decorative_boxes_rails_or_numbers() {
 fn open_list_catalog_recommends_new_compositions_and_retains_legacy_ids() {
     let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
     let presets = catalog["presets"].as_array().unwrap();
-    assert_eq!(presets.len(), 117);
+    assert_eq!(presets.len(), 118);
     for (category, variant) in [("list", "rows"), ("list-horizontal", "columns"), ("list-enumeration", "grid")] {
         let id = format!("{category}/{variant}");
         let entry = presets.iter().find(|entry| entry["id"] == id).unwrap_or_else(|| panic!("missing {id}"));

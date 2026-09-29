@@ -7,7 +7,7 @@ mod catalog;
 mod charts;
 mod diagrams;
 pub mod state;
-pub use briefing::{AgendaItem, IconCard, IconRow, PartMessage, ShiftRow, StepCard};
+pub use briefing::{AgendaItem, Callout, IconCard, IconRow, PartMessage, ShiftRow, StepCard};
 pub use catalog::catalog;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -52,6 +52,7 @@ pub enum PartData {
     ShiftRows { #[serde(default, skip_serializing_if = "String::is_empty")] from_label: String, #[serde(default, skip_serializing_if = "String::is_empty")] to_label: String, rows: Vec<ShiftRow>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     StepCards { steps: Vec<StepCard>, #[serde(default, skip_serializing_if = "String::is_empty")] step_label: String, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     Agenda { items: Vec<AgendaItem>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    ScreenshotCallouts { image: crate::graphs::GraphIcon, callouts: Vec<Callout>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     Chart { categories: Vec<String>, series: Vec<PartSeries>, #[serde(default)] x_axis: String, #[serde(default)] y_axis: String },
     Items { items: Vec<PartItem>, #[serde(default)] center: String },
     Tree { nodes: Vec<TreeNode> },
@@ -123,7 +124,7 @@ fn validate_data(data: &PartData) -> Result<()> {
                 if panel.body_size.is_some_and(|size| !size.is_finite() || !(16.0..=28.0).contains(&size)) { return Err(Error::Invalid("comparison body size must be 16-28px".into())); }
             }
         }
-        PartData::IconCards { .. } | PartData::IconRows { .. } | PartData::ShiftRows { .. } | PartData::StepCards { .. } | PartData::Agenda { .. } => briefing::validate(data)?,
+        PartData::IconCards { .. } | PartData::IconRows { .. } | PartData::ShiftRows { .. } | PartData::StepCards { .. } | PartData::Agenda { .. } | PartData::ScreenshotCallouts { .. } => briefing::validate(data)?,
         PartData::Diagram { graph } => crate::graphs::validate(graph)?,
         PartData::Chart { categories, series, x_axis, y_axis } => {
             count(categories.len(), 1, 12)?; count(series.len(), 1, 4)?;

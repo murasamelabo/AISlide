@@ -61,6 +61,7 @@ struct Object<'a> {
 	container: Option<RoundedRect>,
 	container_item: bool,
 	numbered_badge: bool,
+	picture: bool,
 	own_text_padding: Option<f64>,
 }
 
@@ -132,7 +133,7 @@ fn collect<'a>(elements: &'a [Element], parent: Affine, scope: &str, ancestor_so
 			(points.into_iter().map(|point| transform * Point::new(point[0] * width, point[1] * height)).collect(),
 				start.iter().chain(end.iter()).map(|connection| connection.element_id.as_str()).collect())
 		} else { (Vec::new(), Vec::new()) };
-		objects.push(Object { id, scope: scope.into(), bounds, frame, transform, text, font_size, characters, route, connections, container, container_item, numbered_badge, own_text_padding });
+		objects.push(Object { id, scope: scope.into(), bounds, frame, transform, text, font_size, characters, route, connections, container, container_item, numbered_badge, picture: matches!(element, Element::Picture { .. }), own_text_padding });
 		if let Element::Group { view_width, view_height, children, .. } = element {
 			collect(children, transform * Affine::scale_non_uniform(width / view_width, height / view_height), scope, soft_edge, objects)?;
 		}
@@ -252,6 +253,38 @@ fn container_findings(report: &mut PreflightReport, page: usize, slide: &str, ob
 	Ok(())
 }
 
+// Badges placed over pictures annotate screen positions and are intentionally irregular.
+fn numbered_sequence_findings(report: &mut PreflightReport, page: usize, slide: &str, objects: &[Object<'_>]) -> Result<()> {
+	let pictures: Vec<Rect> = objects.iter().filter(|object| object.picture).map(|object| object.bounds).collect();
+	let badges: Vec<&Object<'_>> = objects.iter().filter(|object| object.numbered_badge && !pictures.iter().any(|picture| picture.contains(object.bounds.center()))).collect();
+	for vertical in [true, false] {
+		let across = |object: &Object<'_>| if vertical { object.bounds.center().x } else { object.bounds.center().y };
+		let along = |object: &Object<'_>| if vertical { object.bounds.center().y } else { object.bounds.center().x };
+		let mut remaining = badges.clone();
+		remaining.sort_by(|left, right| across(left).total_cmp(&across(right)));
+		let mut clusters: Vec<Vec<&Object<'_>>> = Vec::new();
+		for badge in remaining {
+			match clusters.last_mut() {
+				Some(cluster) if cluster[0].scope == badge.scope && across(badge) - across(cluster[0]) <= 8.0 => cluster.push(badge),
+				_ => clusters.push(vec![badge]),
+			}
+		}
+		for mut cluster in clusters.into_iter().filter(|cluster| cluster.len() >= 3) {
+			cluster.sort_by(|left, right| along(left).total_cmp(&along(right)));
+			let pitches: Vec<f64> = cluster.windows(2).map(|pair| along(pair[1]) - along(pair[0])).collect();
+			let spread = pitches.iter().copied().fold(f64::NEG_INFINITY, f64::max) - pitches.iter().copied().fold(f64::INFINITY, f64::min);
+			let offset = cluster.iter().map(|badge| across(badge)).fold(f64::NEG_INFINITY, f64::max) - cluster.iter().map(|badge| across(badge)).fold(f64::INFINITY, f64::min);
+			if spread > 4.0 || offset > 1.5 {
+				let pitches = pitches.iter().map(|pitch| format!("{pitch:.0}")).collect::<Vec<_>>().join(", ");
+				push_finding(report, page, slide, &cluster, "NUMBERED_SEQUENCE_UNEVEN", "warning", "geometry",
+					&format!("{} numbered badges in one {} are unevenly placed (pitches {pitches}px, misalignment {offset:.1}px)", cluster.len(), if vertical { "column" } else { "row" }),
+					&["Use a managed part such as list-enumeration/screenshot-callouts, list/agenda or flow/cards instead of hand-placed numbers", "Otherwise give every numbered row one pitch and one left edge, then preview again"])?;
+			}
+		}
+	}
+	Ok(())
+}
+
 pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -> Result<PreflightReport> {
 	crate::document::verify(document)?;
 	let deck = &document.deck;
@@ -266,7 +299,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		checks: ["renderer_warnings", "off_slide", "text_overlap", "connector_label_interference", "connector_badge_overlap", "container_clearance", "small_text", "density"].map(String::from).to_vec(),
 		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed frame bounds, not glyph intersection; intentional overlapping text needs human review", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices are summarized per page as info; specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
 		office_visual_parity: false, semantic_truth_verified: false };
-	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into()]);
+	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into(), "numbered_sequence_spacing".into()]);
 	report.limitations.push("Reference URL detection uses normalized HTTP(S) tokens terminated by CJK prose; percent-encode CJK URL paths. Warnings do not echo private note URLs. Fixed-reference collisions require explicit repair, not automatic reflow.".into());
 	for page in selected {
 		let slide = &deck.slides[page];
@@ -310,6 +343,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				&["Compare the listed charts in Office when visual parity matters", "Review specific chart warnings separately"])?;
 		}
 		container_findings(&mut report, page, &slide.id, &objects)?;
+		numbered_sequence_findings(&mut report, page, &slide.id, &objects)?;
 		if let Some(references) = &document.references {
 			let managed: BTreeSet<_> = references.elements.iter().filter(|owned| owned.slide_id == slide.id).map(|owned| owned.id.as_str()).collect();
 			for object in objects.iter().filter(|object| object.scope == "slide" && managed.contains(object.id)) {

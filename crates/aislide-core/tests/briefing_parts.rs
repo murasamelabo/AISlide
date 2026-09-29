@@ -2,7 +2,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{json, Value};
 
-const BRIEFING: [&str; 5] = ["list-horizontal/icon-cards", "list/icon-rows", "before-after/shift", "flow/cards", "list/agenda"];
+const BRIEFING: [&str; 6] = ["list-horizontal/icon-cards", "list/icon-rows", "before-after/shift", "flow/cards", "list/agenda", "list-enumeration/screenshot-callouts"];
 const FRAME: [f64; 4] = [48.0, 120.0, 1184.0, 540.0];
 
 fn icon(width: u32, height: u32) -> Value {
@@ -33,6 +33,77 @@ fn run_sizes(child: &Value) -> Vec<f64> {
 }
 
 fn create(spec: &Value) -> Result<Value, String> { execute_request(json!({"op":"create_part","id":"briefing","spec":spec})).map_err(|error| error.to_string()) }
+
+fn screenshot_spec(callouts: Value) -> Value {
+    let image = icon(256, 160);
+    framed(json!({"version":1,"preset":"list-enumeration/screenshot-callouts","title":"","data":{"kind":"screenshot_callouts","image":{"base64":image["base64"],"mime_type":image["mime_type"],"alt":"Synthetic settings screen"},"callouts":callouts}}))
+}
+
+fn numbered(id: &str, x: f64, y: f64, text: &str) -> Value {
+    json!({"type":"shape","id":id,"x":x,"y":y,"width":30,"height":30,"preset":"ellipse","fill":"1F4E9A","stroke":"1F4E9A","stroke_width":1,"text":text,"font_size":14,"color":"FFFFFF","bold":true})
+}
+
+fn sequence_findings(elements: Vec<Value>) -> Vec<Value> {
+    let document = execute_request(json!({"op":"new_document","id":"sequence","deck":deck(elements)})).unwrap();
+    let report = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
+    report["findings"].as_array().unwrap().iter().filter(|finding| finding["code"] == "NUMBERED_SEQUENCE_UNEVEN").cloned().collect()
+}
+
+#[test]
+fn screenshot_callouts_keep_badges_on_the_image_and_a_uniform_legend() {
+    let long = "Detail text that wraps onto a second line in the legend column.";
+    let callouts = json!([{"x":0.25,"y":0.2,"label":"Enable","detail":"Short."},{"x":0.1,"y":0.5,"label":"Include and exclude","detail":long},
+        {"x":0.9,"y":0.95,"label":"Add targets","detail":"Short."},{"x":0.0,"y":0.0,"label":"Choose profiles","detail":format!("{long}\n{long}")}]);
+    let element = create(&screenshot_spec(callouts.clone())).unwrap();
+    let items = children(&element);
+    let picture = items.iter().find(|child| child["type"] == "picture").unwrap();
+    let [px, py, pw, ph] = ["x", "y", "width", "height"].map(|field| number(picture, field));
+    assert!((pw / ph - 256.0 / 160.0).abs() < 0.01, "screenshot keeps its aspect ratio");
+    let badges: Vec<&Value> = items.iter().filter(|child| child["preset"] == "ellipse").collect();
+    let (on_image, legend): (Vec<&Value>, Vec<&Value>) = badges.into_iter().partition(|badge| number(badge, "x") < px + pw);
+    assert_eq!((on_image.len(), legend.len()), (4, 4));
+    for (index, badge) in on_image.iter().enumerate() {
+        let [x, y, size] = [number(badge, "x"), number(badge, "y"), number(badge, "width")];
+        let expected = [(px + callouts[index]["x"].as_f64().unwrap() * pw).clamp(px + size / 2.0, px + pw - size / 2.0), (py + callouts[index]["y"].as_f64().unwrap() * ph).clamp(py + size / 2.0, py + ph - size / 2.0)];
+        assert!((x + size / 2.0 - expected[0]).abs() < 0.01 && (y + size / 2.0 - expected[1]).abs() < 0.01, "badge {index} follows its image fraction");
+        assert!(x >= px && y >= py && x + size <= px + pw + 0.01 && y + size <= py + ph + 0.01, "badge {index} stays on the image");
+        assert_eq!(badge["text"], (index + 1).to_string());
+        assert_eq!(legend[index]["text"], (index + 1).to_string());
+        assert_eq!(badge["fill"], legend[index]["fill"]);
+    }
+    let tops: Vec<f64> = legend.iter().map(|badge| number(badge, "y")).collect();
+    let pitches: Vec<f64> = tops.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    assert!(pitches.iter().all(|pitch| (pitch - pitches[0]).abs() < 0.01 && *pitch > 0.0), "legend rows share one pitch: {pitches:?}");
+    assert!(legend.iter().all(|badge| (number(badge, "x") - number(legend[0], "x")).abs() < 0.01), "legend badges share one left edge");
+    assert!(sequence_findings(vec![element]).is_empty());
+}
+
+#[test]
+fn screenshot_callouts_reject_unbounded_positions_and_counts() {
+    let item = |x: f64| json!({"x":x,"y":0.5,"label":"Item"});
+    assert!(create(&screenshot_spec(json!([item(1.2)]))).unwrap_err().contains("0-1 fractions"));
+    assert!(create(&screenshot_spec(json!([item(-0.1)]))).unwrap_err().contains("0-1 fractions"));
+    assert!(create(&screenshot_spec(json!((0..7).map(|_| item(0.5)).collect::<Vec<_>>()))).unwrap_err().contains("1-6 items"));
+    let mut wrong = screenshot_spec(json!([item(0.5)]));
+    wrong["preset"] = json!("list/icon-rows");
+    assert!(create(&wrong).unwrap_err().contains("requires icon_rows data"));
+}
+
+#[test]
+fn preflight_flags_unevenly_spaced_numbered_columns_but_not_screenshot_callouts() {
+    let uneven = sequence_findings(vec![numbered("n1", 880.0, 124.0, "1"), numbered("n2", 880.0, 214.0, "2"), numbered("n3", 880.0, 322.0, "3"), numbered("n4", 880.0, 412.0, "4")]);
+    assert_eq!(uneven.len(), 1, "{uneven:?}");
+    assert_eq!(uneven[0]["element_ids"], json!(["n1", "n2", "n3", "n4"]));
+    assert!(uneven[0]["message"].as_str().unwrap().contains("90, 108, 90"));
+    let misaligned = sequence_findings(vec![numbered("a", 880.0, 124.0, "1"), numbered("b", 884.0, 214.0, "2"), numbered("c", 880.0, 304.0, "3")]);
+    assert_eq!(misaligned.len(), 1, "a 4px left-edge offset is reported");
+    assert!(sequence_findings(vec![numbered("e1", 880.0, 124.0, "1"), numbered("e2", 880.0, 214.0, "2"), numbered("e3", 880.0, 304.0, "3")]).is_empty());
+    let image = icon(256, 160);
+    let mut picture = execute_request(json!({"op":"create_picture","id":"shot","base64":image["base64"],"mime_type":"image/png","alt":"Synthetic screen"})).unwrap();
+    for (field, value) in [("x", 48.0), ("y", 120.0), ("width", 800.0), ("height", 500.0)] { picture[field] = json!(value); }
+    let annotated = sequence_findings(vec![picture, numbered("c1", 138.0, 293.0, "1"), numbered("c2", 138.0, 326.0, "2"), numbered("c3", 138.0, 420.0, "3")]);
+    assert!(annotated.is_empty(), "badges over a screenshot mark screen positions, not a list");
+}
 
 #[test]
 fn briefing_presets_are_recommended_deterministic_native_size_parts() {
