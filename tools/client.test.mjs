@@ -10,7 +10,7 @@ test('reference SDK forwards guarded core mutation and records undo', async () =
   const calls = [];
   const session = new DocumentSession(async (request, options) => {
     calls.push({ request, options });
-    return { document: { ...original, revision: 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] } };
+    return { document: { ...original, revision: 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] }, publication: { supplied: 3, published: 1, excluded: 2 } };
   }, original);
   const signal = new AbortController().signal;
   const input = { placement: 'appendix', entries: [{ id: 'learn', name: 'Microsoft Learn', url: 'https://learn.microsoft.com/azure/', slide_ids: ['slide-1'], publish: true }] };
@@ -21,6 +21,9 @@ test('reference SDK forwards guarded core mutation and records undo', async () =
   assert.equal(calls[0].request.expected_hash, original.hash);
   assert.equal(calls[0].options.signal, signal);
   assert.equal(session.canUndo, true);
+  assert.deepEqual(session.referencePublication, { supplied: 3, published: 1, excluded: 2 });
+  session.referencePublication.excluded = 99;
+  assert.equal(session.referencePublication.excluded, 2);
 });
 
 test('semantic authoring SDK forwards initial setup and retains request controls', async () => {

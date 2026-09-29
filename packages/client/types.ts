@@ -6,6 +6,7 @@ export type PreviewImage = { base64: string; mime_type: 'image/png' | 'image/jpe
 export type PresentationPreview = { revision: number; hash: string; requested_max_dimension: number; actual_max_dimension: number; quality_reduced: boolean; pages: { page_index: number; slide_id: string; image_index: number; x: number; y: number; width: number; height: number }[]; images: PreviewImage[]; warnings: StaticExport['warnings']; office_visual_parity: false }
 export type PreflightOptions = { page_indices?: number[] | null; min_font_size?: number }
 export type ReferenceEntry = { id: string; name: string; url: string; slide_ids: string[]; publish?: boolean }
+export type ReferencePublication = { supplied: number; published: number; excluded: number }
 export type ReferenceOptions = { entries: ReferenceEntry[]; placement?: 'auto' | 'footnotes' | 'appendix'; title?: string; font_size?: number }
 export type ReferenceState = { options: Required<ReferenceOptions>; elements: { slide_id: string; id: string; sha256: string }[]; slides: string[]; page_sha256: Record<string, string> }
 export type PreflightFinding = { code: string; severity: 'info' | 'warning' | 'error'; evidence: 'renderer' | 'geometry' | 'heuristic' | 'document'; page_index: number; slide_id: string; element_ids: string[]; scopes: string[]; bounds: { x: number; y: number; width: number; height: number }; message: string; suggestions: string[] }

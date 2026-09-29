@@ -26,6 +26,8 @@ test('reference workflow uses real MCP core, Undo and PPTX/PDF delivery', { time
       { op: 'add_elements', slide_id: 'slide-1', elements: [
         { type: 'text', id: 'heading', x: 64, y: 64, width: 1152, height: 80, text: 'Documentation entry points', font_size: 36, color: '202525', bold: true },
         { type: 'text', id: 'body', x: 64, y: 200, width: 1152, height: 220, text: 'Microsoft Learn: Azure [1]\nMicrosoft Learn: Architecture Center [2]\n\nSynthetic reference-distribution verification fixture.', font_size: 24, color: '202525', bold: false },
+        { type: 'text', id: 'existing-source', x: 64, y: 680, width: 1050, height: 24, text: 'Microsoft Learn', font_size: 16, color: '202525', bold: false },
+        { type: 'text', id: 'page-number', x: 1160, y: 680, width: 56, height: 24, text: '1', font_size: 16, color: '202525', bold: false },
       ] },
       { op: 'update_notes', slide_id: 'slide-1', notes: 'Verification notes. Sources: https://learn.microsoft.com/azure/ https://learn.microsoft.com/azure/architecture/' },
     ] });
@@ -36,6 +38,7 @@ test('reference workflow uses real MCP core, Undo and PPTX/PDF delivery', { time
     ] };
     const updated = await call('set_references', { deck_id: created.deck_id, expected_revision: created.revision, expected_hash: created.hash, options });
     assert.equal(updated.revision, created.revision + 1);
+    assert.deepEqual(updated.publication, { supplied: 3, published: 2, excluded: 1 });
     const repeated = await call('set_references', { deck_id: created.deck_id, expected_revision: updated.revision, expected_hash: updated.hash, options });
     assert.equal(repeated.hash, updated.hash);
     const exported = await call('finalize_presentation', { deck_id: created.deck_id, expected_revision: updated.revision, expected_hash: updated.hash, name: 'references', options: { pdf: true, preview: 'contact_sheet', preflight: true, max_dimension: 1280 }, include_images: false });
@@ -48,7 +51,7 @@ test('reference workflow uses real MCP core, Undo and PPTX/PDF delivery', { time
     assert.doesNotMatch(xml, /DO_NOT_PUBLISH/);
     assert.equal((await readFile(pdf.path)).subarray(0, 5).toString(), '%PDF-');
     const checked = await call('preflight_presentation', { deck_id: created.deck_id, options: { page_indices: [0, 1] } });
-    assert.ok(!checked.findings.some(finding => ['TEXT_OVERFLOW', 'TEXT_OVERLAP', 'OFF_SLIDE', 'SOURCE_URL_NOT_VISIBLE'].includes(finding.code)), JSON.stringify(checked.findings));
+    assert.ok(!checked.findings.some(finding => ['TEXT_OVERFLOW', 'TEXT_OVERLAP', 'OFF_SLIDE', 'SOURCE_URL_NOT_VISIBLE', 'REFERENCE_COLLISION'].includes(finding.code)), JSON.stringify(checked.findings));
     const undone = await call('undo', { deck_id: created.deck_id });
     assert.equal(undone.hash, created.hash);
     console.log(JSON.stringify({ output, pptx: presentation.path, pdf: pdf.path, checked: 2, retained: Boolean(retained) }));
@@ -56,4 +59,17 @@ test('reference workflow uses real MCP core, Undo and PPTX/PDF delivery', { time
     await client.close();
     if (!retained) await rm(output, { recursive: true, force: true });
   }
+});
+
+test('reference guidance and CI include the publication workflow within the skill budget', async () => {
+  const skill = await readFile(new URL('../.github/skills/aislide-authoring/SKILL.md', import.meta.url), 'utf8');
+  assert.ok(Buffer.byteLength(skill) <= 6000);
+  for (const required of ['set_references', 'publication.excluded', '616..672', 'REFERENCE_COLLISION']) assert.ok(skill.includes(required));
+  const server = await readFile(new URL('./mcp.mjs', import.meta.url), 'utf8');
+  assert.match(server, /Before customer\/PDF distribution, call set_references/);
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.ok(manifest.scripts['test:mcp'].includes('tools/references.test.mjs'));
+  const workflow = await readFile(new URL('../.github/workflows/verify.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /cargo\.mjs test --workspace --locked/);
+  assert.match(workflow, /run: npm run test:mcp/);
 });

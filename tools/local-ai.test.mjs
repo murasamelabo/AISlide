@@ -80,7 +80,7 @@ test('bounded fixture provider proves review-only text, native apply, stale guar
 
 test('local AI MCP schemas reject unknown paths and share the actual core apply history', async () => {
   const client = new Client({ name: 'local-ai-tests', version: '1.0.0' });
-  const channel = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const channel = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe' });
   const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text); };
   try {
     await client.connect(channel);

@@ -45,6 +45,16 @@ pub struct ReferenceState {
     pub page_sha256: BTreeMap<String, String>,
 }
 
+#[derive(Serialize)]
+pub struct Publication { pub supplied: usize, pub published: usize, pub excluded: usize }
+
+#[derive(Serialize)]
+pub struct ReferenceResult {
+    #[serde(flatten)]
+    pub transaction: TransactionResult,
+    pub publication: Publication,
+}
+
 fn fingerprint(element: &Element) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(crate::canonical::bytes(element)?)))
 }
@@ -179,7 +189,41 @@ fn footer_clear(deck: &Deck, page: usize, height: f64) -> Result<bool> {
     }))
 }
 
+fn marker_top(deck: &Deck, page: usize, height: f64) -> Result<f64> {
+    let bounds = crate::authoring_preflight::reference_obstacles(deck, page)?;
+    let maximum = f64::from(deck.height) - 24.0 - height;
+    let mut candidates = vec![maximum];
+    candidates.extend(bounds.iter().map(|(_, bounds)| bounds.y0 - 8.0 - height));
+    candidates.sort_by(|left, right| right.total_cmp(left));
+    for top in candidates.into_iter().filter(|top| *top >= 24.0 && *top <= maximum) {
+        let frame = kurbo::Rect::new(32.0, top, f64::from(deck.width) - 32.0, top + height);
+        if bounds.iter().all(|(_, bounds)| { let overlap = bounds.intersect(frame); overlap.width() <= 0.0 || overlap.height() <= 0.0 }) { return Ok(top); }
+    }
+    let ids: Vec<_> = bounds.iter().map(|(id, _)| id.as_str()).collect();
+    Err(Error::Conflict(format!("slide {} has no free reference marker band; blocking elements: {}; reserve a band and retry set_references", deck.slides[page].id, ids.join(", "))))
+}
+
 pub(crate) fn refresh(document: &mut Document) -> Result<()> {
+    let Some(mut state) = document.references.take() else { return Ok(()); };
+    let mut checked = document.deck.clone();
+    strip(&mut checked, &state)?;
+    let active: BTreeSet<_> = state.options.entries.iter().filter(|entry| checked.slides.iter().any(|slide| entry.slide_ids.contains(&slide.id)))
+        .flat_map(|entry| [format!("aislide-ref-entry-{}", entry.id), format!("aislide-ref-url-{}", entry.id)]).collect();
+    if !active.is_empty() && state.slides.iter().any(|id| !document.deck.slides.iter().any(|slide| &slide.id == id)) {
+        return Err(Error::Conflict("managed reference appendix was removed; use set_references to change or clear it".into()));
+    }
+    for slide in document.deck.slides.iter_mut().filter(|slide| state.slides.contains(&slide.id)) {
+        slide.elements.retain(|element| !(element.bounds().0.starts_with("aislide-ref-entry-") || element.bounds().0.starts_with("aislide-ref-url-")) || active.contains(element.bounds().0));
+    }
+    document.deck.slides.retain(|slide| !state.slides.contains(&slide.id) || slide.elements.iter().any(|element| active.contains(element.bounds().0)));
+    state.elements.retain(|owned| document.deck.slides.iter().any(|slide| slide.id == owned.slide_id && slide.elements.iter().any(|element| element.bounds().0 == owned.id)));
+    state.slides.retain(|id| document.deck.slides.iter().any(|slide| &slide.id == id));
+    state.page_sha256.retain(|id, _| state.slides.contains(id));
+    document.references = Some(state);
+    Ok(())
+}
+
+fn arrange(document: &mut Document) -> Result<()> {
     let Some(mut state) = document.references.take() else { return Ok(()); };
     strip(&mut document.deck, &state)?;
     state.elements.clear(); state.slides.clear(); state.page_sha256.clear();
@@ -191,6 +235,8 @@ pub(crate) fn refresh(document: &mut Document) -> Result<()> {
     let size = state.options.font_size;
     let appendix_layout = document.deck.design.as_ref().and_then(|design| design.layouts.iter().find(|layout| layout.elements.is_empty())).cloned();
     let appendix_theme = document.deck.design.as_ref().zip(appendix_layout.as_ref()).map(|(design, layout)| crate::design::master_theme(design, &layout.master_id).clone()).unwrap_or_default();
+    let theme_color = crate::design::resolve_color("@dk1", Some(&appendix_theme));
+    let appendix_color = if crate::review::contrast_ratio(&theme_color, "FFFFFF")? >= 4.5 { theme_color } else { "000000".into() };
     let heading_height = text_height(&state.options.title, width, 28.0, &appendix_theme)?.max(64.0);
     let entry_top = 40.0 + heading_height;
     let mut appendix = BTreeSet::new();
@@ -204,26 +250,27 @@ pub(crate) fn refresh(document: &mut Document) -> Result<()> {
         let mut footnotes = Vec::new();
         let mut total = 0.0;
         for (number, entry) in &cited {
-            let text = format!("[{}] {}\n{}", number + 1, entry.name, entry.url);
-            let needed = text_height(&text, width, size, &theme)?;
-            total += needed;
-            footnotes.push((text, needed, *entry));
+            let text = format!("[{}] {}", number + 1, entry.name);
+            let label_height = text_height(&text, width, size, &theme)?;
+            let url_height = text_height(&entry.url, width, size, &theme)?;
+            total += label_height + url_height;
+            footnotes.push((text, label_height, url_height, *entry));
         }
         let use_footer = state.options.placement != Placement::Appendix && total <= height * 0.22 && readable_links(&theme, &background)? && footer_clear(&document.deck, page, total)?;
         if use_footer {
             let mut top = height - 24.0 - total;
-            for (index, (text, needed, entry)) in footnotes.into_iter().enumerate() {
-                add(&mut document.deck.slides[page], &mut state, text_element(format!("aislide-ref-footnote-{index}"), text, 32.0, top, width, needed, size, color, Some(entry.url.clone())))?;
-                top += needed;
+            for (index, (text, label_height, url_height, entry)) in footnotes.into_iter().enumerate() {
+                add(&mut document.deck.slides[page], &mut state, text_element(format!("aislide-ref-footnote-{index}"), text, 32.0, top, width, label_height, size, color, None))?;
+                top += label_height;
+                add(&mut document.deck.slides[page], &mut state, text_element(format!("aislide-ref-footnote-url-{index}"), entry.url.clone(), 32.0, top, width, url_height, size, color, Some(entry.url.clone())))?;
+                top += url_height;
             }
         } else {
             appendix.extend(cited.iter().map(|(number, _)| *number));
             let text = format!("{}: {}", state.options.title.lines().collect::<Vec<_>>().join(" "), cited.iter().map(|(number, _)| format!("[{}]", number + 1)).collect::<Vec<_>>().join(" "));
             let needed = text_height(&text, width, size, &theme)?;
-            if !footer_clear(&document.deck, page, needed)? {
-                return Err(Error::Conflict("no clear footer for reference markers; reserve space without shrinking body text".into()));
-            }
-            add(&mut document.deck.slides[page], &mut state, text_element("aislide-ref-marker".into(), text, 32.0, height - 24.0 - needed, width, needed, size, color, None))?;
+            let top = marker_top(&document.deck, page, needed)?;
+            add(&mut document.deck.slides[page], &mut state, text_element("aislide-ref-marker".into(), text, 32.0, top, width, needed, size, color, None))?;
         }
     }
     if !appendix.is_empty() && !readable_links(&appendix_theme, "FFFFFF")? {
@@ -232,8 +279,10 @@ pub(crate) fn refresh(document: &mut Document) -> Result<()> {
     let mut top = height;
     for number in appendix {
         let entry = active[number];
-        let text = format!("[{}] {}\n{}", number + 1, entry.name, entry.url);
-        let needed = text_height(&text, width, size, &appendix_theme)?;
+        let text = format!("[{}] {}", number + 1, entry.name);
+        let label_height = text_height(&text, width, size, &appendix_theme)?;
+        let url_height = text_height(&entry.url, width, size, &appendix_theme)?;
+        let needed = label_height + url_height;
         if needed > height - entry_top - 24.0 { return Err(Error::Limit("reference URL and title do not fit one appendix page at the requested font size".into())); }
         if top + needed > height - 24.0 {
             let id = format!("aislide-ref-page-{}", state.slides.len() + 1);
@@ -243,24 +292,28 @@ pub(crate) fn refresh(document: &mut Document) -> Result<()> {
             if document.deck.design.is_some() {
                 slide.layout_id = Some(appendix_layout.as_ref().ok_or_else(|| Error::Unsupported("reference appendix requires an existing empty layout".into()))?.id.clone());
             }
-            add(&mut slide, &mut state, text_element("aislide-ref-heading".into(), title, 32.0, 24.0, width, heading_height, 28.0, "202525", None))?;
+            add(&mut slide, &mut state, text_element("aislide-ref-heading".into(), title, 32.0, 24.0, width, heading_height, 28.0, &appendix_color, None))?;
             state.page_sha256.insert(id.clone(), page_fingerprint(&slide)?);
             state.slides.push(id);
             document.deck.slides.push(slide);
             top = entry_top;
         }
         let page = document.deck.slides.len() - 1;
-        add(&mut document.deck.slides[page], &mut state, text_element(format!("aislide-ref-entry-{}", entry.id), text, 32.0, top, width, needed, size, "202525", Some(entry.url.clone())))?;
+        add(&mut document.deck.slides[page], &mut state, text_element(format!("aislide-ref-entry-{}", entry.id), text, 32.0, top, width, label_height, size, &appendix_color, None))?;
+        add(&mut document.deck.slides[page], &mut state, text_element(format!("aislide-ref-url-{}", entry.id), entry.url.clone(), 32.0, top + label_height, width, url_height, size, &appendix_color, Some(entry.url.clone())))?;
         top += needed + 12.0;
     }
     document.references = Some(state);
     Ok(())
 }
 
-pub fn set_references(document: &Document, expected_revision: u64, expected_hash: &str, mut options: ReferenceOptions) -> Result<TransactionResult> {
+pub fn set_references(document: &Document, expected_revision: u64, expected_hash: &str, mut options: ReferenceOptions) -> Result<ReferenceResult> {
     crate::document::verify(document)?;
+    if document.revision != expected_revision || document.hash != expected_hash { return Err(Error::Conflict("stale document revision or content hash".into())); }
     if options.entries.len() > 64 { return Err(Error::Limit("at most 64 references".into())); }
+    let supplied = options.entries.len();
     options.entries.retain(|entry| entry.publish);
+    let publication = Publication { supplied, published: options.entries.len(), excluded: supplied - options.entries.len() };
     validate_options(&options)?;
     let mut working = document.clone();
     if let Some(state) = working.references.take() { strip(&mut working.deck, &state)?; }
@@ -268,20 +321,54 @@ pub fn set_references(document: &Document, expected_revision: u64, expected_hash
         if entry.slide_ids.iter().any(|id| !working.deck.slides.iter().any(|slide| &slide.id == id)) { return Err(Error::Invalid("reference target slide does not exist".into())); }
     }
     working.references = if options.entries.is_empty() { None } else { Some(ReferenceState { options, elements: Vec::new(), slides: Vec::new(), page_sha256: BTreeMap::new() }) };
-    refresh(&mut working)?;
+    arrange(&mut working)?;
     let mut operations = vec![json!({"op":"replace","path":"/deck","value":working.deck})];
     if let Some(state) = working.references { operations.push(json!({"op":"add","path":"/references","value":state})); }
     else if document.references.is_some() { operations.push(json!({"op":"remove","path":"/references"})); }
-    crate::document::transact(document, Transaction { expected_revision, expected_hash: expected_hash.into(), operations: serde_json::from_value(json!(operations))? })
+    let transaction = crate::document::transact(document, Transaction { expected_revision, expected_hash: expected_hash.into(), operations: serde_json::from_value(json!(operations))? })?;
+    Ok(ReferenceResult { transaction, publication })
+}
+
+fn normalized_url(value: &str) -> Option<String> {
+    crate::model::validate_hyperlink(value).ok()?;
+    reqwest::Url::parse(value).ok().map(|url| url.to_string())
 }
 
 fn urls(text: &str) -> BTreeSet<String> {
-    text.split(|character: char| character.is_whitespace() || matches!(character, '<' | '>' | '"' | '\''))
-        .filter_map(|token| {
-            let start = token.find("https://").or_else(|| token.find("http://"))?;
-            let value = token[start..].trim_end_matches(['.', ',', ';', ')', ']', '}']);
-            crate::model::validate_hyperlink(value).ok().map(|()| value.to_owned())
-        }).collect()
+    let mut result = BTreeSet::new();
+    let mut offset = 0;
+    while offset < text.len() {
+        let Some(relative) = [text[offset..].find("https://"), text[offset..].find("http://")].into_iter().flatten().min() else { break; };
+        let start = offset + relative;
+        let tail = &text[start..];
+        let opener = text[..start].chars().next_back();
+        let closer = match opener {
+            Some('(') => Some(')'), Some('[') => Some(']'), Some('<') => Some('>'),
+            Some('\u{ff08}') => Some('\u{ff09}'), Some('\u{300c}') => Some('\u{300d}'), Some('\u{300e}') => Some('\u{300f}'),
+            Some('"') => Some('"'), Some('\'') => Some('\''), _ => None,
+        };
+        let explicit_end = closer.and_then(|close| {
+            let mut depth = 0;
+            for (index, character) in tail.char_indices() {
+                if Some(character) == opener && Some(character) != closer { depth += 1; }
+                if character == close { if depth == 0 { return Some(index); } depth -= 1; }
+                if character.is_whitespace() { break; }
+            }
+            None
+        });
+        let end = explicit_end.unwrap_or_else(|| {
+            tail.char_indices().find(|(_, character)| character.is_whitespace() || matches!(character, '<' | '>' | '"' | '\'' | '\u{2e80}'..='\u{9fff}' | '\u{ac00}'..='\u{d7af}' | '\u{ff00}'..='\u{ffef}')).map_or(tail.len(), |(index, _)| index)
+        });
+        let mut value = tail[..end].trim_end_matches(['.', ',', ';']);
+        for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
+            while value.ends_with(close) && value.chars().filter(|character| *character == close).count() > value.chars().filter(|character| *character == open).count() {
+                value = &value[..value.len() - close.len_utf8()];
+            }
+        }
+        if let Some(url) = normalized_url(value) { result.insert(url); }
+        offset = start + end.max("http://".len());
+    }
+    result
 }
 
 fn visible_urls(elements: &[Element], ids: &BTreeSet<String>, result: &mut BTreeSet<String>) {
@@ -309,7 +396,7 @@ pub(crate) fn notes_only_count(document: &Document, page: usize) -> Result<usize
         if state.elements.iter().any(|owned| owned.slide_id == slide.id && owned.id == "aislide-ref-marker" && slide.elements.iter().any(|element| element.bounds().0 == owned.id && fingerprint(element).ok().as_ref() == Some(&owned.sha256))) {
             for (page_index, page) in document.deck.slides.iter().enumerate().filter(|(_, page)| state.slides.contains(&page.id)) {
                 let mut appendix = BTreeSet::new(); visible_urls(&page.elements, &crate::authoring_preflight::visible_reference_ids(&document.deck, page_index)?, &mut appendix);
-                visible.extend(state.options.entries.iter().filter(|entry| entry.slide_ids.contains(&slide.id) && appendix.contains(&entry.url)).map(|entry| entry.url.clone()));
+                visible.extend(state.options.entries.iter().filter(|entry| entry.slide_ids.contains(&slide.id)).filter_map(|entry| normalized_url(&entry.url)).filter(|url| appendix.contains(url)));
             }
         }
     }

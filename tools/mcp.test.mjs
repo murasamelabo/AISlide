@@ -97,11 +97,12 @@ test('reference MCP registers guarded publication with default-deny entries', as
     assert.notEqual(parsed.options.entries[0].publish, true);
     assert.equal(tool.config.inputSchema.safeParse({ ...input, options: { ...input.options, unknown: true } }).success, false);
     input.deck_id = (await call('create_presentation', { title: 'Synthetic reference test' })).deck_id;
-    fixture.onRequest = async request => ({ document: { ...request.document, revision: 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] } });
+    fixture.onRequest = async request => ({ document: { ...request.document, revision: 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] }, publication: { supplied: 1, published: 0, excluded: 1 } });
     const result = await call('set_references', input);
     assert.equal(calls.at(-1).request.op, 'set_references');
     assert.equal(calls.at(-1).request.expected_hash, input.expected_hash);
     assert.equal(result.revision, 1);
+    assert.deepEqual(result.publication, { supplied: 1, published: 0, excluded: 1 });
     assert.doesNotMatch(JSON.stringify(result), /learn\.microsoft/);
   }, []);
 });

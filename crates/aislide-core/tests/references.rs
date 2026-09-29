@@ -17,6 +17,143 @@ fn scene() -> Value {
     json!({"version":1,"title":"Reference test","width":1280,"height":720,"slides":[{"id":"slide-1","title":"Example","background":"FFFFFF","notes":"Source: https://learn.microsoft.com/azure/","elements":[{"type":"text","id":"title","x":64,"y":80,"width":1152,"height":120,"text":"Synthetic reference example","font_size":42,"color":"202525","bold":true}]}]})
 }
 
+fn edit(original: &Value, operations: Value) -> aislide_core::Result<Value> {
+    aislide_core::execute_request(json!({"op":"transaction","document":original,"transaction":{"expected_revision":original["revision"],"expected_hash":original["hash"],"operations":operations}}))
+}
+
+#[test]
+fn review_existing_footer_uses_free_band_above_without_moving_content() {
+    for placement in ["auto", "appendix"] {
+        let mut deck = scene();
+        deck["slides"][0]["elements"].as_array_mut().unwrap().extend([
+            json!({"type":"text","id":"existing-source","x":64,"y":680,"width":1050,"height":24,"text":"Microsoft Learn","font_size":16,"color":"202525","bold":false}),
+            json!({"type":"text","id":"page-number","x":1160,"y":680,"width":56,"height":24,"text":"1","font_size":16,"color":"202525","bold":false}),
+        ]);
+        let original = serde_json::to_value(document::create("occupied-footer".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+        let changed = set_references(&original, placement, json!([public_entry()])).unwrap();
+        let elements = changed["document"]["deck"]["slides"][0]["elements"].as_array().unwrap();
+        assert_eq!(&elements[..3], original["deck"]["slides"][0]["elements"].as_array().unwrap());
+        assert!(elements[3]["y"].as_f64().unwrap() + elements[3]["height"].as_f64().unwrap() <= 672.0);
+    }
+}
+
+#[test]
+fn review_unrelated_edits_keep_reference_geometry_and_page_count() {
+    let changed = set_references(&new_document(), "auto", json!([public_entry()])).unwrap();
+    let original = &changed["document"];
+    for top in [600, 668] {
+        let edited = edit(original, json!([{"op":"add","path":"/deck/slides/0/elements/-","value":{"type":"text","id":"new-label","x":64,"y":top,"width":600,"height":24,"text":"New body label","font_size":16,"color":"202525","bold":false}}])).unwrap();
+        assert_eq!(edited["document"]["deck"]["slides"].as_array().unwrap().len(), 1);
+        assert_eq!(edited["document"]["deck"]["slides"][0]["elements"][1], original["deck"]["slides"][0]["elements"][1]);
+        assert_eq!(edited["document"]["references"], original["references"]);
+    }
+}
+
+#[test]
+fn review_appendix_reordering_is_preserved() {
+    let changed = set_references(&new_document(), "appendix", json!([public_entry()])).unwrap();
+    let moved = edit(&changed["document"], json!([{"op":"move","from":"/deck/slides/1","path":"/deck/slides/0"}])).unwrap();
+    assert_eq!(moved["document"]["deck"]["slides"][0]["id"], "aislide-ref-page-1");
+}
+
+#[test]
+fn review_japanese_note_urls_are_normalized_without_leaking_them() {
+    for note in ["（https://aka.ms/mysecurityinfo）から行う", "https://aka.ms/mysecurityinfo。参照", "https://aka.ms/mysecurityinfoから行う", "https://aka.ms/mysecurityinfoから行う。", "https://LEARN.microsoft.com"] {
+        let mut deck = scene(); deck["slides"][0]["notes"] = json!(note);
+        let original = serde_json::to_value(document::create("cjk-url".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+        let mut entry = public_entry(); entry["url"] = json!(if note.contains("LEARN") { "https://learn.microsoft.com/" } else { "https://aka.ms/mysecurityinfo" });
+        let changed = set_references(&original, "appendix", json!([entry])).unwrap();
+        let report = aislide_core::execute_request(json!({"op":"preflight_presentation","document":changed["document"],"options":{"page_indices":[0]}})).unwrap();
+        assert!(!report["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "SOURCE_URL_NOT_VISIBLE"), "{note}");
+    }
+}
+
+#[test]
+fn review_explicitly_delimited_unicode_urls_are_not_truncated() {
+    for (note, url) in [
+        ("参照：<https://example.com/資料>。", "https://example.com/%E8%B3%87%E6%96%99"),
+        ("「https://example.com/資料」から行う", "https://example.com/%E8%B3%87%E6%96%99"),
+        ("（https://例え.テスト/資料）から行う", "https://xn--r8jz45g.xn--zckzah/%E8%B3%87%E6%96%99"),
+        ("<https://example.com/a(b)> を参照", "https://example.com/a(b)"),
+    ] {
+        let mut deck = scene(); deck["slides"][0]["notes"] = json!(note);
+        let original = serde_json::to_value(document::create("unicode-url".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+        let mut entry = public_entry(); entry["url"] = json!(url);
+        let changed = set_references(&original, "appendix", json!([entry])).unwrap();
+        let report = aislide_core::execute_request(json!({"op":"preflight_presentation","document":changed["document"],"options":{"page_indices":[0]}})).unwrap();
+        assert!(!report["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "SOURCE_URL_NOT_VISIBLE"), "{note}");
+    }
+}
+
+#[test]
+fn review_publication_reports_ignored_count_without_private_values() {
+    let result = set_references(&new_document(), "auto", json!([public_entry(), {"id":"secret","name":"Private","url":"file:///secret","slide_ids":["slide-1"]}, {"id":"unapproved","name":"Private","url":"https://private.example/","slide_ids":["slide-1"],"publish":false}])).unwrap();
+    assert_eq!(result["publication"], json!({"supplied":3,"published":1,"excluded":2}));
+    assert!(!result.to_string().contains("file:///secret"));
+}
+
+#[test]
+fn review_links_cover_only_url_rows_and_appendix_uses_theme_text() {
+    let mut deck = scene();
+    let mut design = aislide_core::execute_request(json!({"op":"design_defaults"})).unwrap();
+    design["theme"]["colors"]["dk1"] = json!("123456");
+    deck["design"] = design;
+    let original = serde_json::to_value(document::create("theme-refs".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+    for placement in ["auto", "appendix"] {
+        let changed = set_references(&original, placement, json!([public_entry()])).unwrap();
+        for slide in changed["document"]["deck"]["slides"].as_array().unwrap() {
+            for element in slide["elements"].as_array().unwrap() {
+                if !element["format"]["hyperlink"].is_null() { assert_eq!(element["text"], public_entry()["url"]); }
+                if slide["id"].as_str().unwrap().starts_with("aislide-ref-page-") { assert_eq!(element["color"], "123456"); }
+            }
+        }
+    }
+}
+
+#[test]
+fn review_collision_warning_identifies_elements_and_explicit_repair() {
+    let changed = set_references(&new_document(), "auto", json!([public_entry()])).unwrap();
+    let original = &changed["document"];
+    let mut overlap = original["deck"]["slides"][0]["elements"][1].clone();
+    overlap["id"] = json!("overlapping-body"); overlap["text"] = json!("Body"); overlap["format"] = json!({});
+    let edited = edit(original, json!([{"op":"add","path":"/deck/slides/0/elements/-","value":overlap}])).unwrap();
+    let checked = aislide_core::execute_request(json!({"op":"preflight_presentation","document":edited["document"]})).unwrap();
+    let warning = checked["findings"].as_array().unwrap().iter().find(|finding| finding["code"] == "REFERENCE_COLLISION").unwrap();
+    assert_eq!(warning["slide_id"], "slide-1");
+    assert!(warning["element_ids"].as_array().unwrap().contains(&json!("overlapping-body")));
+    assert!(warning["suggestions"].to_string().contains("set_references"));
+    let restored = aislide_core::execute_request(json!({"op":"undo_transaction","document":edited["document"],"expected_revision":edited["document"]["revision"],"receipt":edited["receipt"]})).unwrap();
+    assert_eq!(restored["document"]["hash"], original["hash"]);
+}
+
+#[test]
+fn review_twenty_six_slide_briefing_footer_layout_remains_usable() {
+    for placement in ["auto", "appendix"] {
+        let mut deck = scene();
+        let source_slide = deck["slides"][0].clone();
+        let slides: Vec<_> = (1..=26).map(|number| {
+            let mut slide = source_slide.clone(); slide["id"] = json!(format!("slide-{number}"));
+            slide["elements"].as_array_mut().unwrap().extend([
+                json!({"type":"text","id":"body","x":64,"y":240,"width":1152,"height":360,"text":"Synthetic technical briefing content","font_size":24,"color":"202525","bold":false}),
+                json!({"type":"text","id":"source","x":64,"y":680,"width":1050,"height":24,"text":"Microsoft Learn","font_size":16,"color":"202525","bold":false}),
+                json!({"type":"text","id":"page","x":1160,"y":680,"width":56,"height":24,"text":number.to_string(),"font_size":16,"color":"202525","bold":false}),
+            ]); slide
+        }).collect();
+        deck["slides"] = json!(slides);
+        let original = serde_json::to_value(document::create_with_profile("briefing-26".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None, aislide_core::limits::CapacityProfile::Large).unwrap()).unwrap();
+        let mut entry = public_entry(); entry["slide_ids"] = json!((1..=26).map(|number| format!("slide-{number}")).collect::<Vec<_>>());
+        let changed = set_references(&original, placement, json!([entry])).unwrap();
+        assert_eq!(changed["document"]["deck"]["slides"].as_array().unwrap().len(), 27);
+        for page in 0..26 {
+            assert_eq!(&changed["document"]["deck"]["slides"][page]["elements"].as_array().unwrap()[..4], original["deck"]["slides"][page]["elements"].as_array().unwrap());
+        }
+        for first in (0..27).step_by(8) {
+            let checked = aislide_core::execute_request(json!({"op":"preflight_presentation","document":changed["document"],"options":{"page_indices":(first..(first+8).min(27)).collect::<Vec<_>>()}})).unwrap();
+            assert!(!checked["findings"].as_array().unwrap().iter().any(|finding| ["REFERENCE_COLLISION","TEXT_OVERLAP","OFF_SLIDE","SOURCE_URL_NOT_VISIBLE","TEXT_OVERFLOW"].contains(&finding["code"].as_str().unwrap())));
+        }
+    }
+}
+
 #[test]
 fn notes_only_reference_urls_warn_without_publishing_them() {
     let document = document::create("references-test".into(), serde_json::from_value(scene()).unwrap(), vec![], vec![], None).unwrap();
@@ -154,7 +291,8 @@ fn full_slide_body_must_not_be_mistaken_for_a_background() {
     let mut deck = scene();
     for (key, value) in [("x", 0), ("y", 0), ("width", 1280), ("height", 720)] { deck["slides"][0]["elements"][0][key] = json!(value); }
     let original = serde_json::to_value(document::create("references-test".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
-    assert!(set_references(&original, "auto", json!([public_entry()])).is_err());
+    let error = set_references(&original, "auto", json!([public_entry()])).unwrap_err().to_string();
+    assert!(error.contains("slide-1") && error.contains("title") && error.contains("set_references"));
 }
 
 #[test]

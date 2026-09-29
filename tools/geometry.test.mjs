@@ -68,7 +68,7 @@ test('G10 real SDK native hole, pixels, reopen and Undo', async () => {
 
 test('G10 MCP strict combine schema, transaction, native export and Undo', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-g10-'));
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--output-dir', directory], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe' });
   const client = new Client({ name: 'g10-proof', version: '1.0.0' });
   const call = async (name, args = {}) => {
     const reply = await client.callTool({ name, arguments: args });
