@@ -37,6 +37,8 @@ the document and the same revision/hash/options. All document behavior is in
 `aislide-core`; the Studio document session shares this implementation, but no
 new Studio reference-editing panel is provided.
 
+For Japanese decks, set `title:"参考資料"` explicitly; the default is `References`.
+
 ## Publication And Layout
 
 - Only `publish: true` entries are retained. Omitted or false approval is ignored,
@@ -83,6 +85,13 @@ These are authoring coordinates, not a fixed requirement for imported slides:
 the upward search can use any sufficiently clear horizontal band. Footer
 occupancy therefore sends URLs to the appendix, not an automatic failure.
 
+Imported decks without reserved space may still reject because a marker needs
+a free full-width band. The current search may also place it between body
+sections. Preview every affected slide for reading order and whitespace; a
+successful operation alone is not sufficient. Error obstacle IDs are not ranked
+by repair priority. Existing-footer reuse and marker-free appendix modes are
+not implemented; obtain approval before changing imported layouts to make room.
+
 Footnote names/numbers and URL rows are separate text boxes. Only the URL row
 is hyperlinked in both PPTX and native PDF. Appendix text uses the selected
 empty layout's theme `dk1`, falling back to black only when necessary for
@@ -99,7 +108,10 @@ unmanaged appendix associations and master-only citations require human review.
 
 Japanese/CJK prose and full-width punctuation terminate bare note URLs; parsed
 URLs are normalized before comparison (including hostname case and an omitted
-root slash). URLs enclosed in quotes, angle brackets, Japanese quotation marks
+root slash). Register the same URL as the notes after normalization: a non-root
+path such as `https://learn.microsoft.com/azure/` is distinct from
+`https://learn.microsoft.com/azure`. No redirect or equivalence check is fetched.
+URLs enclosed in quotes, angle brackets, Japanese quotation marks
 or parentheses are parsed intact, preserving Unicode domains and paths. Enclose
 or percent-encode paths containing literal CJK text to distinguish them from
 surrounding prose. Raw note URLs remain absent from

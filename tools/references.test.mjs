@@ -64,7 +64,14 @@ test('reference workflow uses real MCP core, Undo and PPTX/PDF delivery', { time
 test('reference guidance and CI include the publication workflow within the skill budget', async () => {
   const skill = await readFile(new URL('../.github/skills/aislide-authoring/SKILL.md', import.meta.url), 'utf8');
   assert.ok(Buffer.byteLength(skill) <= 6000);
-  for (const required of ['set_references', 'publication.excluded', '616..672', 'REFERENCE_COLLISION']) assert.ok(skill.includes(required));
+  for (const required of ['Retain attribution.', 'legacy stretch', '1-48 nodes', '64 edges', '1-8 columns', 'default 3', 'no groups or node resizing', '`null` resets defaults', 'empty input clears', 'set_references', 'publication.excluded', 'title:"参考資料"']) {
+    assert.ok(skill.includes(required), `Missing authoring guidance: ${required}`);
+  }
+  assert.match(skill, /\[distribution references\]\(references\/distribution-references\.md\)/);
+  const references = await readFile(new URL('../.github/skills/aislide-authoring/references/distribution-references.md', import.meta.url), 'utf8');
+  for (const required of ['publish:true', 'slide_ids', 'publication.excluded', '616..672', 'REFERENCE_COLLISION', 'appendix', 'never auto-publish', '/azure/', '/azure']) {
+    assert.ok(references.includes(required), `Missing distribution guidance: ${required}`);
+  }
   const server = await readFile(new URL('./mcp.mjs', import.meta.url), 'utf8');
   assert.match(server, /Before customer\/PDF distribution, call set_references/);
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));

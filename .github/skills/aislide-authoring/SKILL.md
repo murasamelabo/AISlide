@@ -33,28 +33,29 @@ Skill installation does not connect MCP.
 	(panels, icon cards/rows, shifts, steps, agenda, Lucide icons) only on request.
 	Prefer managed parts/graphs. A composition graph block takes coordinate-free
 	`input` and inserts managed metadata in one operation. `layout_graph` returns
-	a bounded grid GraphSpec, not a hierarchical layout.
+	a bounded grid GraphSpec, not a hierarchical layout: 1-48 nodes, 64 edges,
+	1-8 columns (default 3), no groups or node resizing.
 6. Register approved local images with `register_asset` or atomic `register_assets`
 	(1-32). Use returned `asset_id` and dimensions; never regenerate/output base64
 	through the model. Optional `prepare_assets` batches explicit resize/format
 	changes and preserves originals. Use `fit:"contain"` or intentional `fit:"cover"`.
+	Omitting `fit` uses legacy stretch. Retain attribution.
 7. Batch final content and metadata into 1-128 `apply_operations`. After target
 	insertion, include `update_notes`, `set_table_headers`, `set_accessibility`
 	(metadata uses `element_id`). Supply the planned revision/hash; a changed batch
 	is one Undo and invalid input rejects atomically. Do not refresh guards merely
 	to force a stale plan through.
 8. `set_text_padding` takes text/shape IDs and slide-pixel edges, leaving positive
-	content space without shrinking frames/fonts. `set_rich_text` takes paragraphs;
-	core derives plain text. Use dedicated operations for dynamic fields.
+	content space without shrinking frames/fonts and detaching inheritance when
+	changed; `null` resets defaults. `set_rich_text` takes only paragraphs; core
+	derives plain text and empty input clears it. Use dedicated operations for
+	dynamic fields. Do not weaken canonical plain/rich validation.
 9. Serialize core-backed AISlide calls, including reads/previews. Await each batch;
 	do not assume automatic queues/retries or parallel edit capacity per handle.
 10. Review all required pages in groups of at most 8, then recheck affected pages.
-	 For customer/PDF delivery, discover and call `set_references` with only approved
-	 `publish:true` URLs and stable `slide_ids`; check `publication.excluded`.
-	 On 1280x720 slides reserve x32..1248/y616..672 for markers, with source/page
-	 labels at y680. `appendix` searches upward for a clear band; existing content
-	 is never moved. Ordinary edits keep placement; `REFERENCE_COLLISION` requires
-	 explicit `set_references` or body repair. Never auto-publish note URLs.
+	 For customer/PDF delivery use `set_references`; check `publication.excluded`.
+	 Read [distribution references](references/distribution-references.md);
+	 for Japanese use `title:"参考資料"`.
 	 Compact preview defaults to the first 8; inspect `page_scope`. Verify images,
 	 notes, headers, alt text, Japanese glyphs/fallbacks, inner padding, overflow and
 	 graph collisions. Ordinary composition text rejects overflow; managed parts
