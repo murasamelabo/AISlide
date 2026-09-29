@@ -21,6 +21,272 @@ fn edit(original: &Value, operations: Value) -> aislide_core::Result<Value> {
     aislide_core::execute_request(json!({"op":"transaction","document":original,"transaction":{"expected_revision":original["revision"],"expected_hash":original["hash"],"operations":operations}}))
 }
 
+fn reference_element<'a>(document: &'a Value, id: &str) -> &'a Value {
+    document["deck"]["slides"].as_array().unwrap().iter().flat_map(|slide| slide["elements"].as_array().unwrap()).find(|element| element["id"] == id).unwrap()
+}
+
+fn assert_reference_frames_unchanged(before: &Value, after: &Value) {
+    for owned in after["references"]["elements"].as_array().unwrap() {
+        let id = owned["id"].as_str().unwrap();
+        let original = reference_element(before, id);
+        let mut updated = reference_element(after, id).clone();
+        if id.starts_with("aislide-ref-pages-") { updated["text"] = original["text"].clone(); }
+        assert_eq!(&updated, original, "{id}");
+    }
+}
+
+#[test]
+fn appendix_only_preserves_dense_slides_and_publishes_only_approved_entries() {
+    let mut deck = scene();
+    let mut source = deck["slides"][0].clone();
+    source["title"] = json!("Private source title");
+    source["notes"] = json!("Private speaker note. https://learn.microsoft.com/azure/");
+    for (key, value) in [("x", 0), ("y", 0), ("width", 1280), ("height", 720)] { source["elements"][0][key] = json!(value); }
+    deck["slides"] = json!((1..=22).map(|number| { let mut slide = source.clone(); slide["id"] = json!(format!("slide-{number}")); slide }).collect::<Vec<_>>());
+    let original = serde_json::to_value(document::create("dense-references".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+    let mut entry = public_entry();
+    entry["slide_ids"] = json!((1..=22).rev().map(|number| format!("slide-{number}")).collect::<Vec<_>>());
+    let entries = json!([entry, {"id":"private","name":"Unapproved source","url":"file:///secret/DO_NOT_PUBLISH","slide_ids":["slide-1"]}]);
+    let changed = set_references(&original, "appendix_only", entries.clone()).unwrap();
+    let updated = &changed["document"];
+    assert_eq!(changed["publication"], json!({"supplied":2,"published":1,"excluded":1}));
+    assert_eq!(&updated["deck"]["slides"].as_array().unwrap()[..22], original["deck"]["slides"].as_array().unwrap());
+    assert_eq!(updated["sources"], original["sources"]);
+    assert_eq!(updated["deck"]["slides"].as_array().unwrap().len(), 23);
+    assert_eq!(reference_element(updated, "aislide-ref-pages-learn")["text"], format!("Slides: {}", (1..=22).map(|number| number.to_string()).collect::<Vec<_>>().join(", ")));
+    assert_eq!(reference_element(updated, "aislide-ref-entry-learn")["text"], "[1] Microsoft Learn");
+    assert_eq!(reference_element(updated, "aislide-ref-url-learn")["text"], public_entry()["url"]);
+    let appendix = &updated["deck"]["slides"][22];
+    for private in ["Private source title", "Private speaker note", "DO_NOT_PUBLISH", "Unapproved source"] { assert!(!appendix.to_string().contains(private)); }
+    assert!(!updated["references"].to_string().contains("DO_NOT_PUBLISH"));
+    for element in appendix["elements"].as_array().unwrap() {
+        assert!(element["font_size"].as_f64().unwrap() >= 16.0);
+        if !element["format"]["hyperlink"].is_null() { assert_eq!(element["text"], public_entry()["url"]); }
+    }
+    let repeated = set_references(updated, "appendix_only", entries).unwrap();
+    assert_eq!(repeated["document"]["hash"], updated["hash"]);
+    assert!(repeated["receipt"].is_null());
+    let checked = aislide_core::execute_request(json!({"op":"preflight_presentation","document":updated,"options":{"page_indices":[0,21,22]}})).unwrap();
+    assert!(!checked["findings"].as_array().unwrap().iter().any(|finding| ["SOURCE_URL_NOT_VISIBLE", "TEXT_OVERFLOW", "REFERENCE_COLLISION"].contains(&finding["code"].as_str().unwrap())), "{}", checked["findings"]);
+}
+
+#[test]
+fn appendix_only_on_imported_dense_deck_preserves_existing_slide_parts() {
+    use base64::Engine;
+    let mut deck = scene();
+    for (key, value) in [("x", 0), ("y", 0), ("width", 1280), ("height", 720)] { deck["slides"][0]["elements"][0][key] = json!(value); }
+    let original = serde_json::to_value(document::create("dense-import-source".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+    let exported = aislide_core::execute_request(json!({"op":"export_presentation","document":original})).unwrap();
+    let source_bytes = base64::engine::general_purpose::STANDARD.decode(exported["base64"].as_str().unwrap()).unwrap();
+    let source_package = aislide_core::package::Package::open(source_bytes).unwrap();
+    let opened = aislide_core::execute_request(json!({"op":"open_presentation","id":"dense-imported","base64":exported["base64"]})).unwrap();
+    let before = opened["document"].clone();
+    let changed = set_references(&before, "appendix_only", json!([public_entry()])).unwrap();
+    assert_eq!(changed["document"]["deck"]["slides"][0], before["deck"]["slides"][0]);
+    let output = aislide_core::execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+    let output_bytes = base64::engine::general_purpose::STANDARD.decode(output["base64"].as_str().unwrap()).unwrap();
+    let output_package = aislide_core::package::Package::open(output_bytes).unwrap();
+    for path in ["ppt/slides/slide1.xml", "ppt/slides/_rels/slide1.xml.rels", "ppt/notesSlides/notesSlide1.xml"] {
+        assert_eq!(output_package.text(path).unwrap(), source_package.text(path).unwrap(), "{path}");
+    }
+    let reopened = aislide_core::execute_request(json!({"op":"open_presentation","id":"dense-imported-result","base64":output["base64"]})).unwrap();
+    assert_eq!(reference_element(&reopened["document"], "aislide-ref-pages-learn")["text"], "Slides: 1");
+    let restored = aislide_core::execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":changed["document"]["revision"],"receipt":changed["receipt"]})).unwrap();
+    assert_eq!(restored["document"]["hash"], before["hash"]);
+}
+
+#[test]
+fn appendix_only_updates_captions_after_reorder_delete_and_undo_without_reflow() {
+    let mut deck = scene();
+    let source = deck["slides"][0].clone();
+    deck["slides"] = json!((1..=3).map(|number| { let mut slide = source.clone(); slide["id"] = json!(format!("slide-{number}")); slide }).collect::<Vec<_>>());
+    let original = serde_json::to_value(document::create("reference-order".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+    let mut entry = public_entry(); entry["slide_ids"] = json!(["slide-3", "slide-1"]);
+    let mut second = public_entry(); second["id"] = json!("second"); second["slide_ids"] = json!(["slide-2"]);
+    let changed = set_references(&original, "appendix_only", json!([entry, second])).unwrap();
+    let updated = &changed["document"];
+    assert_eq!(reference_element(updated, "aislide-ref-pages-learn")["text"], "Slides: 1, 3");
+    let moved = edit(updated, json!([{"op":"move","from":"/deck/slides/3","path":"/deck/slides/0"}])).unwrap();
+    assert_eq!(moved["document"]["deck"]["slides"][0]["id"], "aislide-ref-page-1");
+    assert_eq!(reference_element(&moved["document"], "aislide-ref-pages-learn")["text"], "Slides: 2, 4");
+    assert_reference_frames_unchanged(updated, &moved["document"]);
+    let reordered = edit(&moved["document"], json!([{"op":"move","from":"/deck/slides/3","path":"/deck/slides/1"}])).unwrap();
+    assert_eq!(reference_element(&reordered["document"], "aislide-ref-pages-learn")["text"], "Slides: 2, 3");
+    assert_reference_frames_unchanged(updated, &reordered["document"]);
+    let deleted = edit(&reordered["document"], json!([{"op":"remove","path":"/deck/slides/2"}])).unwrap();
+    assert_eq!(reference_element(&deleted["document"], "aislide-ref-pages-learn")["text"], "Slides: 2");
+    assert_eq!(reference_element(&deleted["document"], "aislide-ref-pages-second")["text"], "Slides: 3");
+    assert_reference_frames_unchanged(updated, &deleted["document"]);
+    let restored = aislide_core::execute_request(json!({"op":"undo_transaction","document":deleted["document"],"expected_revision":deleted["document"]["revision"],"receipt":deleted["receipt"]})).unwrap();
+    assert_eq!(restored["document"]["hash"], reordered["document"]["hash"]);
+    let removed = edit(&restored["document"], json!([{"op":"remove","path":"/deck/slides/3"}])).unwrap();
+    assert!(!removed["document"]["references"]["elements"].as_array().unwrap().iter().any(|owned| owned["id"].as_str().unwrap().ends_with("-second")));
+    assert!(!removed["document"]["deck"]["slides"][0]["elements"].to_string().contains("aislide-ref-pages-second"));
+    assert_eq!(reference_element(&removed["document"], "aislide-ref-pages-learn")["text"], "Slides: 2, 3");
+    let caption_index = removed["document"]["deck"]["slides"][0]["elements"].as_array().unwrap().iter().position(|element| element["id"] == "aislide-ref-pages-learn").unwrap();
+    let before = removed["document"].clone();
+    assert!(edit(&before, json!([{"op":"replace","path":format!("/deck/slides/0/elements/{caption_index}/text"),"value":"Slides: 999"}])).is_err());
+    assert_eq!(before, removed["document"]);
+    let cleared = set_references(&before, "appendix_only", json!([])).unwrap();
+    assert!(cleared["document"]["references"].is_null());
+    assert_eq!(cleared["document"]["deck"]["slides"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn appendix_only_reserves_digit_width_through_maximum_page_capacity() {
+    let mut deck = scene();
+    deck["width"] = json!(320);
+    deck["slides"] = json!((1..=9).map(|number| json!({"id":format!("slide-{number}"),"title":"Private","background":"FFFFFF","notes":"","elements":[]})).collect::<Vec<_>>());
+    let original = serde_json::to_value(document::create("caption-capacity".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+    let mut entry = public_entry(); entry["name"] = json!("Source"); entry["url"] = json!("https://a.example/"); entry["slide_ids"] = json!((1..=9).map(|number| format!("slide-{number}")).collect::<Vec<_>>());
+    let changed = set_references(&original, "appendix_only", json!([entry])).unwrap();
+    let updated = &changed["document"];
+    let capacity = aislide_core::limits::LARGE.slides;
+    let mut expanded: Vec<_> = (0..capacity - 10).map(|number| json!({"id":format!("filler-{number}"),"title":"Private filler","background":"FFFFFF","notes":"","elements":[]})).collect();
+    expanded.extend(updated["deck"]["slides"].as_array().unwrap().iter().cloned());
+    let grown = edit(updated, json!([{"op":"replace","path":"/deck/slides","value":expanded}])).unwrap();
+    let moved = edit(&grown["document"], json!([{"op":"move","from":format!("/deck/slides/{}", capacity - 1),"path":"/deck/slides/0"}])).unwrap();
+    let caption = reference_element(&moved["document"], "aislide-ref-pages-learn")["text"].as_str().unwrap().split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(caption, format!("Slides: {}", (capacity - 8..=capacity).map(|number| number.to_string()).collect::<Vec<_>>().join(", ")));
+    assert_reference_frames_unchanged(updated, &moved["document"]);
+    let measured = aislide_core::execute_request(json!({"op":"measure_layout","deck":moved["document"]["deck"]})).unwrap();
+    assert!(!measured["measurements"].as_array().unwrap().iter().any(|measurement| measurement["overflow"] == true));
+    let beyond_capacity = json!({"id":"too-many","title":"Extra","background":"FFFFFF","notes":"","elements":[]});
+    assert!(edit(&moved["document"], json!([{"op":"add","path":"/deck/slides/-","value":beyond_capacity}])).is_err());
+    assert_eq!(moved["document"]["deck"]["slides"].as_array().unwrap().len(), capacity);
+}
+
+#[test]
+fn appendix_only_rejects_unfittable_captions_and_invalid_targets_atomically() {
+    let mut deck = scene(); deck["width"] = json!(320); deck["height"] = json!(320);
+    deck["slides"] = json!((1..=40).map(|number| json!({"id":format!("slide-{number}"),"title":"Private","background":"FFFFFF","notes":"","elements":[]})).collect::<Vec<_>>());
+    let original = serde_json::to_value(document::create("caption-limit".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+    let before = original.clone();
+    let mut entry = public_entry(); entry["name"] = json!("Source"); entry["url"] = json!("https://a.example/"); entry["slide_ids"] = json!((1..=40).map(|number| format!("slide-{number}")).collect::<Vec<_>>());
+    let error = set_references(&original, "appendix_only", json!([entry])).unwrap_err().to_string();
+    assert!(error.contains("caption") && error.contains("fit"), "{error}");
+    assert_eq!(original, before);
+    for (field, value) in [("url", json!("file:///DO_NOT_PUBLISH")), ("url", json!("https://user:password@example.com/")), ("slide_ids", json!(["missing"]))] {
+        let mut invalid = public_entry(); invalid[field] = value;
+        assert!(set_references(&original, "appendix_only", json!([invalid])).is_err());
+        assert_eq!(original, before);
+    }
+    let mut private = public_entry(); private["publish"] = json!(false); private["url"] = json!("file:///DO_NOT_PUBLISH");
+    let excluded = set_references(&original, "appendix_only", json!([private])).unwrap();
+    assert_eq!(excluded["publication"], json!({"supplied":1,"published":0,"excluded":1}));
+    assert_eq!(excluded["document"]["hash"], original["hash"]);
+    assert!(excluded["document"]["references"].is_null());
+}
+
+#[test]
+fn appendix_only_reopens_updates_native_captions_and_exports_readable_pdf() {
+    use base64::Engine;
+    let mut deck = scene();
+    let mut second = deck["slides"][0].clone(); second["id"] = json!("slide-2");
+    deck["slides"].as_array_mut().unwrap().push(second);
+    let original = serde_json::to_value(document::create("native-captions".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+    let changed = set_references(&original, "appendix_only", json!([public_entry()])).unwrap();
+    let moved = edit(&changed["document"], json!([{"op":"move","from":"/deck/slides/2","path":"/deck/slides/0"}])).unwrap();
+    let exported = aislide_core::execute_request(json!({"op":"export_presentation","document":moved["document"]})).unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD.decode(exported["base64"].as_str().unwrap()).unwrap();
+    let package = aislide_core::package::Package::open(bytes).unwrap();
+    assert!(package.text("ppt/slides/slide1.xml").unwrap().contains("Slides: 2"));
+    let reopened = aislide_core::execute_request(json!({"op":"open_presentation","id":"reopened-captions","base64":exported["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["references"]["options"]["entries"][0]["slide_ids"], json!(["slide-1"]));
+    let reordered = edit(&reopened["document"], json!([{"op":"move","from":"/deck/slides/1","path":"/deck/slides/2"}])).unwrap();
+    let caption = reference_element(&reordered["document"], "aislide-ref-pages-learn");
+    assert_eq!(caption["text"], "Slides: 3");
+    for key in ["x", "y", "width", "height", "font_size"] { assert_eq!(caption[key], reference_element(&reopened["document"], "aislide-ref-pages-learn")[key]); }
+    for id in ["aislide-ref-entry-learn", "aislide-ref-url-learn"] { assert_eq!(reference_element(&reordered["document"], id), reference_element(&reopened["document"], id)); }
+    let reexported = aislide_core::execute_request(json!({"op":"export_presentation","document":reordered["document"]})).unwrap();
+    let reopened_again = aislide_core::execute_request(json!({"op":"open_presentation","id":"roundtrip-captions","base64":reexported["base64"]})).unwrap();
+    assert_eq!(reference_element(&reopened_again["document"], "aislide-ref-pages-learn")["text"], "Slides: 3");
+    let document: document::Document = serde_json::from_value(reopened_again["document"].clone()).unwrap();
+    let pdf_output = aislide_core::export_static::export_static(&document.deck, &serde_json::from_value(json!({"format":"pdf"})).unwrap()).unwrap();
+    let pdf = lopdf::Document::load_mem(&pdf_output.artifacts[0].bytes).unwrap();
+    let visible = pdf.extract_text(&[1]).unwrap();
+    assert!(visible.contains("Slides: 3") && visible.contains("Microsoft Learn") && visible.contains("https://learn.microsoft.com/azure/"), "{visible}");
+    let page_id = pdf.get_pages()[&1];
+    let annotations = pdf.get_object(page_id).unwrap().as_dict().unwrap().get(b"Annots").unwrap().as_array().unwrap();
+    assert_eq!(annotations.len(), 1);
+    let annotation = pdf.get_object(annotations[0].as_reference().unwrap()).unwrap().as_dict().unwrap();
+    assert_eq!(annotation.get(b"A").unwrap().as_dict().unwrap().get(b"URI").unwrap().as_str().unwrap(), b"https://learn.microsoft.com/azure/");
+    let restored = aislide_core::execute_request(json!({"op":"undo_transaction","document":reordered["document"],"expected_revision":reordered["document"]["revision"],"receipt":reordered["receipt"]})).unwrap();
+    assert_eq!(restored["document"]["hash"], reopened["document"]["hash"]);
+}
+
+#[test]
+fn appendix_only_prunes_empty_appendix_pages_before_updating_remaining_numbers() {
+    let mut deck = scene(); deck["width"] = json!(320); deck["height"] = json!(320);
+    deck["slides"] = json!((1..=2).map(|number| json!({"id":format!("slide-{number}"),"title":"Private","background":"FFFFFF","notes":"","elements":[]})).collect::<Vec<_>>());
+    let original = serde_json::to_value(document::create("appendix-pruning".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+    let mut first = public_entry(); first["name"] = json!("Source"); first["url"] = json!("https://a.example/");
+    let mut second = first.clone(); second["id"] = json!("second"); second["slide_ids"] = json!(["slide-2"]);
+    let changed = set_references(&original, "appendix_only", json!([first, second])).unwrap();
+    assert_eq!(changed["document"]["deck"]["slides"].as_array().unwrap().len(), 4);
+    let moved = edit(&changed["document"], json!([{"op":"move","from":"/deck/slides/2","path":"/deck/slides/0"},{"op":"move","from":"/deck/slides/3","path":"/deck/slides/1"}])).unwrap();
+    assert_eq!(reference_element(&moved["document"], "aislide-ref-pages-second")["text"], "Slides: 4");
+    let deleted = edit(&moved["document"], json!([{"op":"remove","path":"/deck/slides/2"}])).unwrap();
+    assert_eq!(deleted["document"]["deck"]["slides"].as_array().unwrap().len(), 2);
+    assert_eq!(deleted["document"]["references"]["slides"], json!(["aislide-ref-page-2"]));
+    assert_eq!(reference_element(&deleted["document"], "aislide-ref-pages-second")["text"], "Slides: 2");
+    assert_reference_frames_unchanged(&moved["document"], &deleted["document"]);
+    let restored = aislide_core::execute_request(json!({"op":"undo_transaction","document":deleted["document"],"expected_revision":deleted["document"]["revision"],"receipt":deleted["receipt"]})).unwrap();
+    assert_eq!(restored["document"]["hash"], moved["document"]["hash"]);
+}
+
+#[test]
+fn appendix_only_multiline_caption_survives_native_reopen_and_refresh() {
+    let mut deck = scene(); deck["width"] = json!(320);
+    deck["slides"] = json!((1..=9).map(|number| json!({"id":format!("slide-{number}"),"title":"Private","background":"FFFFFF","notes":"","elements":[]})).collect::<Vec<_>>());
+    let original = serde_json::to_value(document::create("multiline-caption".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+    let mut entry = public_entry(); entry["name"] = json!("Source"); entry["url"] = json!("https://a.example/"); entry["slide_ids"] = json!((1..=9).map(|number| format!("slide-{number}")).collect::<Vec<_>>());
+    let changed = set_references(&original, "appendix_only", json!([entry])).unwrap();
+    assert!(reference_element(&changed["document"], "aislide-ref-pages-learn")["text"].as_str().unwrap().contains('\n'));
+    let exported = aislide_core::execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+    let reopened = aislide_core::execute_request(json!({"op":"open_presentation","id":"multiline-reopened","base64":exported["base64"]})).unwrap();
+    let moved = edit(&reopened["document"], json!([{"op":"move","from":"/deck/slides/9","path":"/deck/slides/0"}])).unwrap();
+    let caption = reference_element(&moved["document"], "aislide-ref-pages-learn");
+    assert_eq!(caption["text"].as_str().unwrap().split_whitespace().collect::<Vec<_>>().join(" "), "Slides: 2, 3, 4, 5, 6, 7, 8, 9, 10");
+    for key in ["x", "y", "width", "height", "font_size"] { assert_eq!(caption[key], reference_element(&reopened["document"], "aislide-ref-pages-learn")[key]); }
+    let reexported = aislide_core::execute_request(json!({"op":"export_presentation","document":moved["document"]})).unwrap();
+    let reopened_again = aislide_core::execute_request(json!({"op":"open_presentation","id":"multiline-again","base64":reexported["base64"]})).unwrap();
+    assert_eq!(reference_element(&reopened_again["document"], "aislide-ref-pages-learn")["text"], caption["text"]);
+    let restored = aislide_core::execute_request(json!({"op":"undo_transaction","document":moved["document"],"expected_revision":moved["document"]["revision"],"receipt":moved["receipt"]})).unwrap();
+    assert_eq!(restored["document"]["hash"], reopened["document"]["hash"]);
+}
+
+#[test]
+fn marker_stays_in_bottom_quarter_and_reports_only_candidate_obstacles() {
+    let free = set_references(&new_document(), "appendix", json!([public_entry()])).unwrap();
+    let marker = reference_element(&free["document"], "aislide-ref-marker");
+    let expected_frame = format!("x=32, y={}, width=1216, height={}", marker["y"].as_f64().unwrap(), marker["height"].as_f64().unwrap());
+    for placement in ["auto", "footnotes", "appendix"] {
+        let mut deck = scene();
+        deck["slides"][0]["elements"].as_array_mut().unwrap().push(json!({"type":"text","id":"lower-body","x":32,"y":540,"width":1216,"height":180,"text":"Dense lower body","font_size":24,"color":"202525","bold":false}));
+        let original = serde_json::to_value(document::create("bounded-marker".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+        let before = original.clone();
+        let error = set_references(&original, placement, json!([public_entry()])).unwrap_err().to_string();
+        assert!(error.contains("slide-1") && error.contains("candidate frame") && error.contains(&expected_frame), "{error}");
+        let blockers = error.split("blocking elements: ").nth(1).unwrap().split(';').next().unwrap();
+        assert!(blockers.contains("lower-body") && !blockers.contains("title"), "{error}");
+        assert!(error.contains("appendix_only") && error.contains("set_references"), "{error}");
+        assert_eq!(original, before);
+    }
+}
+
+#[test]
+fn marker_requires_eight_pixels_clearance_even_without_candidate_intersection() {
+    let free = set_references(&new_document(), "appendix", json!([public_entry()])).unwrap();
+    let top = reference_element(&free["document"], "aislide-ref-marker")["y"].as_f64().unwrap();
+    let mut deck = scene();
+    deck["slides"][0]["elements"].as_array_mut().unwrap().push(json!({"type":"text","id":"nearby-body","x":32,"y":540,"width":1216,"height":top - 544.0,"text":"Only four pixels of clearance","font_size":24,"color":"202525","bold":false}));
+    let original = serde_json::to_value(document::create("marker-clearance".into(), serde_json::from_value(deck).unwrap(), vec![], vec![], None).unwrap()).unwrap();
+    let error = set_references(&original, "appendix", json!([public_entry()])).unwrap_err().to_string();
+    assert!(error.contains("8px clearance") && error.contains("blocking elements: none"), "{error}");
+    assert!(!error.contains("nearby-body") && !error.contains("title"), "{error}");
+}
+
 #[test]
 fn review_existing_footer_uses_free_band_above_without_moving_content() {
     for placement in ["auto", "appendix"] {
@@ -33,6 +299,7 @@ fn review_existing_footer_uses_free_band_above_without_moving_content() {
         let changed = set_references(&original, placement, json!([public_entry()])).unwrap();
         let elements = changed["document"]["deck"]["slides"][0]["elements"].as_array().unwrap();
         assert_eq!(&elements[..3], original["deck"]["slides"][0]["elements"].as_array().unwrap());
+        assert!(elements[3]["y"].as_f64().unwrap() >= 616.0);
         assert!(elements[3]["y"].as_f64().unwrap() + elements[3]["height"].as_f64().unwrap() <= 672.0);
     }
 }

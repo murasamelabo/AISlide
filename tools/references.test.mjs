@@ -61,6 +61,61 @@ test('reference workflow uses real MCP core, Undo and PPTX/PDF delivery', { time
   }
 });
 
+test('appendix-only publication explicitly handles a dense slide through real MCP', { timeout: 120_000 }, async () => {
+  const output = await mkdtemp(join(tmpdir(), 'aislide-appendix-only-'));
+  const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('./mcp.mjs', import.meta.url)), '--output-dir', output], env: process.env.AISLIDE_CORE_BINARY ? { AISLIDE_CORE_BINARY: process.env.AISLIDE_CORE_BINARY } : undefined });
+  const client = new Client({ name: 'appendix-only-verification', version: '1.0.0' });
+  const call = async (name, args) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    return JSON.parse(result.content.find(item => item.type === 'text').text);
+  };
+  try {
+    await client.connect(transport);
+    let original = await call('create_presentation', { title: 'Private source title' });
+    original = await call('apply_operations', { deck_id: original.deck_id, expected_revision: original.revision, expected_hash: original.hash, operations: [
+      { op: 'add_elements', slide_id: 'slide-1', elements: [{ type: 'text', id: 'dense-body', x: 0, y: 0, width: 1280, height: 720, text: 'Synthetic dense body without a marker band', font_size: 24, color: '202525', bold: false }] },
+      { op: 'update_notes', slide_id: 'slide-1', notes: 'Private speaker note. https://learn.microsoft.com/azure/' },
+    ] });
+    const entries = [
+      { id: 'learn', name: 'Microsoft Learn: Azure', url: 'https://learn.microsoft.com/azure/', slide_ids: ['slide-1'], publish: true },
+      { id: 'private', name: 'Unapproved source', url: 'file:///DO_NOT_PUBLISH.pdf', slide_ids: ['slide-1'] },
+    ];
+    const guard = { deck_id: original.deck_id, expected_revision: original.revision, expected_hash: original.hash };
+    const blocked = await client.callTool({ name: 'set_references', arguments: { ...guard, options: { placement: 'appendix', entries } } });
+    assert.equal(blocked.isError, true);
+    assert.match(JSON.stringify(blocked.content), /candidate frame.*dense-body.*appendix_only/);
+    assert.equal((await call('get_deck_summary', { deck_id: original.deck_id })).hash, original.hash);
+    const updated = await call('set_references', { ...guard, options: { placement: 'appendix_only', entries } });
+    assert.deepEqual(updated.publication, { supplied: 2, published: 1, excluded: 1 });
+    const invalid = await client.callTool({ name: 'set_references', arguments: { deck_id: original.deck_id, expected_revision: updated.revision, expected_hash: updated.hash, options: { placement: 'appendix_only', entries: [{ ...entries[0], url: 'file:///DO_NOT_PUBLISH.pdf' }] } } });
+    assert.equal(invalid.isError, true);
+    assert.equal((await call('get_deck_summary', { deck_id: original.deck_id })).hash, updated.hash);
+    const exported = await call('finalize_presentation', { deck_id: original.deck_id, expected_revision: updated.revision, expected_hash: updated.hash, name: 'appendix-only', options: { pdf: true, preview: 'contact_sheet', preflight: true, max_dimension: 640 }, include_images: false });
+    const presentation = exported.files.find(file => file.kind === 'pptx');
+    const pdf = exported.files.find(file => file.kind === 'pdf');
+    assert.ok(presentation && pdf);
+    const parts = unzipSync(await readFile(presentation.path));
+    const source = strFromU8(parts['ppt/slides/slide1.xml']);
+    const appendix = strFromU8(parts['ppt/slides/slide2.xml']);
+    assert.match(source, /Synthetic dense body without a marker band/);
+    assert.doesNotMatch(source, /aislide-ref-|Slides:|learn\.microsoft/);
+    assert.match(appendix, /Slides: 1/);
+    assert.match(appendix, /Microsoft Learn: Azure/);
+    assert.match(appendix, /https:\/\/learn\.microsoft\.com\/azure\//);
+    assert.doesNotMatch(appendix, /Private source title|Private speaker note|DO_NOT_PUBLISH|Unapproved source/);
+    assert.match(strFromU8(parts['ppt/slides/_rels/slide2.xml.rels']), /https:\/\/learn\.microsoft\.com\/azure\//);
+    assert.equal((await readFile(pdf.path)).subarray(0, 5).toString(), '%PDF-');
+    const checked = await call('preflight_presentation', { deck_id: original.deck_id, options: { page_indices: [0, 1] } });
+    assert.ok(!checked.findings.some(finding => ['TEXT_OVERFLOW', 'SOURCE_URL_NOT_VISIBLE', 'REFERENCE_COLLISION'].includes(finding.code)), JSON.stringify(checked.findings));
+    const undone = await call('undo', { deck_id: original.deck_id });
+    assert.equal(undone.hash, original.hash);
+  } finally {
+    await client.close();
+    await rm(output, { recursive: true, force: true });
+  }
+});
+
 test('reference guidance and CI include the publication workflow within the skill budget', async () => {
   const skill = await readFile(new URL('../.github/skills/aislide-authoring/SKILL.md', import.meta.url), 'utf8');
   assert.ok(Buffer.byteLength(skill) <= 6000);
@@ -69,9 +124,14 @@ test('reference guidance and CI include the publication workflow within the skil
   }
   assert.match(skill, /\[distribution references\]\(references\/distribution-references\.md\)/);
   const references = await readFile(new URL('../.github/skills/aislide-authoring/references/distribution-references.md', import.meta.url), 'utf8');
-  for (const required of ['publish:true', 'slide_ids', 'publication.excluded', '616..672', 'REFERENCE_COLLISION', 'appendix', 'never auto-publish', '/azure/', '/azure']) {
+  for (const required of ['publish:true', 'slide_ids', 'publication.excluded', '616..672', 'REFERENCE_COLLISION', 'appendix_only', 'bottom quarter', 'page numbers', '256', 'subset', 'never auto-publish', '/azure/', '/azure']) {
     assert.ok(references.includes(required), `Missing distribution guidance: ${required}`);
   }
+  const technical = await readFile(new URL('../.github/skills/aislide-authoring/references/technical-panels.md', import.meta.url), 'utf8');
+  assert.match(technical, /appendix_only/);
+  assert.match(technical, /bottom quarter/);
+  const documentation = await readFile(new URL('../docs/authoring/references.md', import.meta.url), 'utf8');
+  for (const required of ['appendix_only', 'bottom quarter', '1-based', '256', 'subset', 'Undo', 'PPTX']) assert.ok(documentation.includes(required), `Missing reference documentation: ${required}`);
   const server = await readFile(new URL('./mcp.mjs', import.meta.url), 'utf8');
   assert.match(server, /Before customer\/PDF distribution, call set_references/);
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));

@@ -19,10 +19,16 @@ every presentation.
   `publish:true` URLs and stable slide IDs; inspect `publication.excluded`.
   Reserve x32..1248/y616..672 for 16px reference markers above source/page labels
   at y680. Use a body bottom at or above y608 for this reserved-band variant.
-  Markers can search upward for other clear bands without moving existing content.
+  Markers search only the bottom quarter with at least 8px clearance. For dense
+  imported slides explicitly choose `placement:"appendix_only"`: no marker or
+  footnote is added to the cited slide; a separate appendix caption shows current
+  1-based deck page numbers without copying private titles or notes. No automatic
+  fallback or body shrinking occurs. Caption frames reserve maximum supported
+  number widths and stay fixed through reorder, deletion and appendix movement.
   Ordinary edits keep reference placement and page order; resolve
   `REFERENCE_COLLISION` through body edits or explicit `set_references`.
-  Include appendix pages in the exported PDF; never rely on notes alone.
+  Include appendix pages in the exported PDF; subset PDFs retain full-deck
+  numbers, not subset-local numbering. Never rely on notes alone.
 - Use left-aligned body text, nominally 18px, in a fixed content region. Do not
   shrink text to make an overfull panel fit. Shorten with approval, enlarge the
   region, or split the explanation while preserving required content.
