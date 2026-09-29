@@ -5,6 +5,27 @@ import { AislideClient, DocumentSession } from '../packages/client/index.mjs';
 import { requestCore } from './core-client.mjs';
 import { guidedExamples } from './guided-demo.mjs';
 
+test('reference SDK forwards guarded core mutation and records undo', async () => {
+  const original = { id: 'references-sdk', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
+  const calls = [];
+  const session = new DocumentSession(async (request, options) => {
+    calls.push({ request, options });
+    return { document: { ...original, revision: 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] }, publication: { supplied: 3, published: 1, excluded: 2 } };
+  }, original);
+  const signal = new AbortController().signal;
+  const input = { placement: 'appendix', entries: [{ id: 'learn', name: 'Microsoft Learn', url: 'https://learn.microsoft.com/azure/', slide_ids: ['slide-1'], publish: true }] };
+  await session.setReferences(input, { expectedRevision: 0, expectedHash: original.hash, signal });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].request.op, 'set_references');
+  assert.deepEqual(calls[0].request.options, input);
+  assert.equal(calls[0].request.expected_hash, original.hash);
+  assert.equal(calls[0].options.signal, signal);
+  assert.equal(session.canUndo, true);
+  assert.deepEqual(session.referencePublication, { supplied: 3, published: 1, excluded: 2 });
+  session.referencePublication.excluded = 99;
+  assert.equal(session.referencePublication.excluded, 2);
+});
+
 test('semantic authoring SDK forwards initial setup and retains request controls', async () => {
   const calls = [];
   const client = new AislideClient(async (request, options) => { calls.push({ request, options }); return { id: request.id, revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } }; });

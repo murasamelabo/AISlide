@@ -164,6 +164,21 @@ fn page_objects(deck: &Deck, page: usize) -> Result<Vec<Object<'_>>> {
 	Ok(objects)
 }
 
+pub(crate) fn visible_bounds(deck: &Deck, page: usize) -> Result<Vec<Rect>> {
+	Ok(page_objects(deck, page)?.into_iter().filter(|object| object.text || object.characters > 0 || object.bounds.width() < f64::from(deck.width) || object.bounds.height() < f64::from(deck.height)).map(|object| object.bounds).collect())
+}
+
+pub(crate) fn reference_obstacles(deck: &Deck, page: usize) -> Result<Vec<(String, Rect)>> {
+	Ok(page_objects(deck, page)?.into_iter().filter(|object| object.text || object.characters > 0 || object.bounds.width() < f64::from(deck.width) || object.bounds.height() < f64::from(deck.height))
+		.map(|object| (format!("{}:{}", object.scope, object.id), object.bounds)).collect())
+}
+
+pub(crate) fn visible_reference_ids(deck: &Deck, page: usize) -> Result<BTreeSet<String>> {
+	Ok(page_objects(deck, page)?.into_iter().filter(|object| object.scope == "slide" && (object.text || object.characters > 0)
+		&& object.bounds.x0 >= 0.0 && object.bounds.y0 >= 0.0 && object.bounds.x1 <= f64::from(deck.width) && object.bounds.y1 <= f64::from(deck.height))
+		.map(|object| object.id.to_owned()).collect())
+}
+
 fn crosses_frame(start: Point, end: Point, rect: Rect) -> bool {
 	let mut low = 0.0_f64;
 	let mut high = 1.0_f64;
@@ -251,8 +266,16 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		checks: ["renderer_warnings", "off_slide", "text_overlap", "connector_label_interference", "connector_badge_overlap", "container_clearance", "small_text", "density"].map(String::from).to_vec(),
 		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed frame bounds, not glyph intersection; intentional overlapping text needs human review", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices are summarized per page as info; specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
 		office_visual_parity: false, semantic_truth_verified: false };
+	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into()]);
+	report.limitations.push("Reference URL detection uses normalized HTTP(S) tokens terminated by CJK prose; percent-encode CJK URL paths. Warnings do not echo private note URLs. Fixed-reference collisions require explicit repair, not automatic reflow.".into());
 	for page in selected {
 		let slide = &deck.slides[page];
+		let notes_only = crate::references::notes_only_count(document, page)?;
+		if notes_only > 0 {
+			push_finding(&mut report, page, &slide.id, &[], "SOURCE_URL_NOT_VISIBLE", "warning", "heuristic",
+				&format!("{notes_only} reference URL(s) appear in speaker notes but not as slide text; slide-only PDFs omit notes"),
+				&["Approve distribution-safe URLs before adding visible citations or a linked reference appendix", "Keep a readable URL as well as a hyperlink; never automatically publish private notes or file paths"])?;
+		}
 		let known_badges = crate::graphs::managed_badge_pairs(document, &slide.id);
 		let objects = page_objects(deck, page)?;
 		let rendered = crate::render::render_slide_svg(deck, page, false)?;
@@ -287,6 +310,20 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				&["Compare the listed charts in Office when visual parity matters", "Review specific chart warnings separately"])?;
 		}
 		container_findings(&mut report, page, &slide.id, &objects)?;
+		if let Some(references) = &document.references {
+			let managed: BTreeSet<_> = references.elements.iter().filter(|owned| owned.slide_id == slide.id).map(|owned| owned.id.as_str()).collect();
+			for object in objects.iter().filter(|object| object.scope == "slide" && managed.contains(object.id)) {
+				for other in objects.iter().filter(|other| !(other.scope == "slide" && managed.contains(other.id))) {
+					if !other.text && other.characters == 0 && other.bounds.width() >= f64::from(deck.width) && other.bounds.height() >= f64::from(deck.height) { continue; }
+					let overlap = object.bounds.intersect(other.bounds);
+					if overlap.width() > 2.0 && overlap.height() > 2.0 {
+						push_finding(&mut report, page, &slide.id, &[object, other], "REFERENCE_COLLISION", "warning", "geometry",
+							"Content overlaps a fixed reference frame; ordinary edits do not reflow references",
+							&["Move the listed body element or call set_references explicitly to choose a new placement", "Preview affected pages; do not shrink body text to hide a collision"])?;
+					}
+				}
+			}
+		}
 		for (index, object) in objects.iter().enumerate() {
 			if object.bounds.x0 < -0.5 || object.bounds.y0 < -0.5 || object.bounds.x1 > f64::from(deck.width) + 0.5 || object.bounds.y1 > f64::from(deck.height) + 0.5 {
 				push_finding(&mut report, page, &slide.id, &[object], "OFF_SLIDE", "warning", "geometry", "Transformed object extends beyond the slide", &["Move or resize the object within the slide"])?;

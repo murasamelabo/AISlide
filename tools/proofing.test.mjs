@@ -63,7 +63,7 @@ test('format SDK native rich text and language persist and Undo restores exact p
 });
 
 test('proofing and painter MCP tools are strict and share revision history', async () => {
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe' });
   const client = new Client({ name: 'proofing-tests', version: '1.0.0' });
   const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text); };
   try {

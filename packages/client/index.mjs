@@ -141,6 +141,7 @@ export class DocumentSession {
   #busy = false;
   #fieldWarnings = [];
   #graphDiagnostics = null;
+  #referencePublication = null;
   #profile;
   #historyBoundary = null;
   constructor(transport, document, options = {}) {
@@ -181,6 +182,7 @@ export class DocumentSession {
   get busy() { return this.#busy; }
   get fieldWarnings() { return [...this.#fieldWarnings]; }
   get graphDiagnostics() { return structuredClone(this.#graphDiagnostics); }
+  get referencePublication() { return structuredClone(this.#referencePublication); }
 
   getSummary({ offset = 0, limit = 16, slideId } = {}) {
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 0 || limit > 32) throw new Error('Summary requires a nonnegative offset and limit 0..32');
@@ -259,6 +261,10 @@ export class DocumentSession {
     if (result.receipt) { this.#retain(this.#past, result.receipt); this.#future = []; }
     this.#document = result.document;
     this.#graphDiagnostics = graphDiagnosticsSnapshot(result, this.#document);
+    const publication = result.publication;
+    this.#referencePublication = publication && [publication.supplied, publication.published, publication.excluded].every(value => Number.isInteger(value) && value >= 0 && value <= 64)
+      && publication.supplied === publication.published + publication.excluded
+      ? { supplied: publication.supplied, published: publication.published, excluded: publication.excluded } : null;
     return this.document;
   }
   #part(op, slideId, input, options = {}) {
@@ -373,6 +379,7 @@ export class DocumentSession {
   exportStatic(input = {}, options) { return this.#read({ op: 'export_static', document: this.#document, options: input }, options); }
   previewPresentation(input = {}, options) { return this.#read({ op: 'preview_presentation', document: this.#document, options: input }, options); }
   preflightPresentation(input = {}, options) { return this.#read({ op: 'preflight_presentation', document: this.#document, options: input }, options); }
+  setReferences(input, options) { return this.#guardedAuthor('set_references', { options: input }, options); }
   prepareDelivery(input = {}, options = {}) {
     return this.#read({ op: 'prepare_delivery', document: this.#document, expected_revision: options.expectedRevision ?? this.revision,
       expected_hash: options.expectedHash ?? this.#document.hash, options: input }, options);

@@ -15,6 +15,20 @@ every presentation.
 - Reference chrome: section at (108,20), 12px; heading at (108,44), 32px;
   header icon at (56,42), 32x32, within a 48px pale circle; rule at y=98;
   source/footer at (48,680), 11px. Keep necessary caveats visible.
+- For customer/PDF distribution call `set_references` with explicitly approved
+  `publish:true` URLs and stable slide IDs; inspect `publication.excluded`.
+  Reserve x32..1248/y616..672 for 16px reference markers above source/page labels
+  at y680. Use a body bottom at or above y608 for this reserved-band variant.
+  Markers search only the bottom quarter with at least 8px clearance. For dense
+  imported slides explicitly choose `placement:"appendix_only"`: no marker or
+  footnote is added to the cited slide; a separate appendix caption shows current
+  1-based deck page numbers without copying private titles or notes. No automatic
+  fallback or body shrinking occurs. Caption frames reserve maximum supported
+  number widths and stay fixed through reorder, deletion and appendix movement.
+  Ordinary edits keep reference placement and page order; resolve
+  `REFERENCE_COLLISION` through body edits or explicit `set_references`.
+  Include appendix pages in the exported PDF; subset PDFs retain full-deck
+  numbers, not subset-local numbering. Never rely on notes alone.
 - Use left-aligned body text, nominally 18px, in a fixed content region. Do not
   shrink text to make an overfull panel fit. Shorten with approval, enlarge the
   region, or split the explanation while preserving required content.
@@ -62,6 +76,8 @@ images for step cards through `register_asset`/`prepare_assets`.
 Fetch `part_catalog({preset_id})` and the complete `apply_operations` schema.
 A typical body frame below the reference chrome is
 `"layout":{"x":48,"y":120,"width":1184,"height":540,"show_title":false}`.
+For the reserved reference-band variant, use height 488 (body ends at y608)
+instead of 540. Longer reference markers may require a taller reserved band.
 
 - These parts render at the layout frame size; they are not scaled. Fonts are
   fixed: headings 18px, body `body_size` 14-22 (default 16), captions, tags and

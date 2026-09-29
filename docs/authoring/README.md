@@ -1,5 +1,7 @@
 ﻿# Guided Authoring
 
+For readable source URLs in customer/PDF deliveries, see [Distribution references](references.md).
+
 For local spelling, proofing-language assignment, synonyms, bilingual terms, and text-format reuse, see [Local proofing and format painter](proofing-format-painter.md). These are bounded editing functions, not model-based grammar or full-sentence translation.
 
 AISlide exposes English, purpose-specific best practices and a deterministic compiler for evidence-linked outlines. The calling assistant plans the claims and supplies content; these tools do not contact a model, fetch source URLs, execute source text, or invent missing values.
