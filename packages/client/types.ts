@@ -232,10 +232,19 @@ export type PartData =
   | { kind: 'waterfall'; steps: { label: string; value: number; total?: boolean }[]; unit?: string }
   | { kind: 'map'; points: { label: string; longitude: number; latitude: number; value?: number | null }[] }
   | { kind: 'diagram'; graph: GraphSpec }
-export type PartLayout = Frame & { show_title?: boolean }
+export type PartLayout = Frame & { show_title?: boolean; fit?: 'stretch' | 'contain' }
 export type PartSpec = { version: 1; preset: string; title: string; subtitle?: string; data: PartData; layout?: PartLayout | null }
 export type PartPreset = { id: string; category: string; category_name: string; name: string; family: 'Charts' | 'Diagrams'; example: PartSpec; recommended?: boolean; use_when?: string; avoid_when?: string }
 export type PartCatalog = { version: 1; presets: PartPreset[]; schema: unknown; style: string; default_bounds: Omit<Bounds, 'id'> }
+export type LayoutSlotKind = 'visual' | 'thumbnail' | 'panel' | 'card' | 'text' | 'statement' | 'band' | 'tile' | 'label' | 'marker'
+export type LayoutPattern = { id: string; family: string; name: string; ratio: string; relationships: string[]; use_when: string; avoid_when: string; parts: string[]; fallback: string | null; full_page: boolean; message_band: boolean; count: { min: number; max: number; default: number } | null }
+export type LayoutPatternCatalog = { version: 1; canvas_default: { width: number; height: number }; tokens: Record<string, unknown>; guidance: string[]; patterns: (LayoutPattern & { slots: { id: string; kind: LayoutSlotKind }[] })[] }
+export type LayoutPatternRequest = { pattern_id: string; canvas?: { width: number; height: number }; body?: Frame; options?: { mirror?: boolean; message_band?: boolean; reference_band?: boolean; count?: number; body_size?: number; part?: string; part_title?: boolean } }
+export type PartAspectProfile = { layout: 'canvas' | 'native'; canvas: [number, number]; sensitivity: 'free' | 'tolerant' | 'strict'; encoding: 'none' | 'area' | 'count' | 'geography'; markers: number; tolerance: number | null; reasons: string[] }
+export type PartFitAdvice = { distortion: number; fit: 'stretch' | 'contain' | 'native'; area_used: number; tolerance: number | null }
+export type LayoutPatternRanking = { version: 1; part: PartAspectProfile; canvas: { width: number; height: number }; patterns: { pattern_id: string; name: string; slot: string; frame: Frame; fit: PartFitAdvice['fit']; distortion: number; area_used: number; slot_share: number }[] }
+export type LayoutSlot = { id: string; kind: LayoutSlotKind; frame: Frame; accepts: string[]; min: { width: number; height: number }; fits: boolean; capacity: { font_size: number; padding: number; cjk_chars_per_line: number; lines: number } | null; part_fit: PartFitAdvice | null }
+export type LayoutPatternResolution = { version: 1; pattern: LayoutPattern; canvas: { width: number; height: number }; body: Frame; options: { mirror: boolean; message_band: boolean; reference_band: boolean; count: number | null; body_size: number }; gaps: Record<'tight' | 'peer' | 'support' | 'contrast', number>; slots: LayoutSlot[]; fits: boolean; issues: string[]; fallback: string | null; part: PartAspectProfile | null }
 export type PartInstance = { slide_id: string; element_id: string; spec: PartSpec; render_sha256: string; native_sha256?: string | null; stale: boolean }
 
 export type AuthoringProfile = 'consulting-decision' | 'technical-explainer' | 'event-talk' | 'status-report'

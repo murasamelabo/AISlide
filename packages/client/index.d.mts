@@ -69,6 +69,10 @@ export class AislideClient {
   designPresets(options?: RequestOptions): Promise<DesignPreset[]>
   objectCatalog(options?: RequestOptions): Promise<ObjectCatalog>
   partCatalog(options?: RequestOptions): Promise<PartCatalog>
+  layoutPatterns(options?: RequestOptions): Promise<import('./types').LayoutPatternCatalog>
+  resolveLayoutPattern(input: import('./types').LayoutPatternRequest, options?: RequestOptions): Promise<import('./types').LayoutPatternResolution>
+  rankLayoutPatterns(input: { part: string; canvas?: { width: number; height: number }; part_title?: boolean }, options?: RequestOptions): Promise<import('./types').LayoutPatternRanking>
+  partAspect(spec: PartSpec, options?: RequestOptions): Promise<import('./types').PartAspectProfile>
   bestPracticeProfiles(options?: RequestOptions): Promise<BestPracticeProfiles>
   bestPracticeGuide(profileId: AuthoringProfile, options?: RequestOptions): Promise<BestPracticeGuide>
   validateGuidedPresentation(input: GuidedInput, options?: RequestOptions): Promise<GuidedReview>

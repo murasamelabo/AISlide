@@ -15,9 +15,11 @@ import { AislideClient } from '../packages/client/index.mjs';
 import { McpAssets } from './mcp-assets.mjs';
 
 const serverInfo = { name: 'aislide', version: '0.1.0' };
-const server = new McpServer(serverInfo, { instructions: 'Serialize core-backed AISlide calls, including previews; no automatic queue or retry. Use apply_operations for bounded cross-slide content, notes, table headers and accessibility edits with current revision/hash guards. Register assets once and pass asset_id, never regenerate base64 through the model. Resume with list_decks/get_deck_summary; discover advanced tools only when needed. Correct named validation paths instead of regenerating the deck. Check required images, page scope and actual exported files; disclose substitutions and unmet requirements.' });
-const { values: args } = parseArgs({ options: { 'output-dir': { type: 'string' }, 'tool-profile': { type: 'string', default: 'compact' }, 'asset-dir': { type: 'string', multiple: true, default: [] } }, allowPositionals: false });
+const { values: args } = parseArgs({ options: { 'output-dir': { type: 'string' }, 'tool-profile': { type: 'string', default: 'compact' }, 'asset-dir': { type: 'string', multiple: true, default: [] }, 'layout-patterns': { type: 'string', default: 'off' } }, allowPositionals: false });
 const toolProfile = z.enum(['compact', 'full']).parse(args['tool-profile']);
+const layoutPatternsEnabled = z.enum(['on', 'off']).parse(args['layout-patterns']) === 'on';
+const layoutPatternInstruction = ' Before placing body content on a new slide, choose a pattern with layout_patterns by information relationship and use its resolved slot frames unchanged, unless the user asks for free placement, no layout patterns or an existing template.';
+const server = new McpServer(serverInfo, { instructions: 'Serialize core-backed AISlide calls, including previews; no automatic queue or retry. Use apply_operations for bounded cross-slide content, notes, table headers and accessibility edits with current revision/hash guards. Register assets once and pass asset_id, never regenerate base64 through the model. Resume with list_decks/get_deck_summary; discover advanced tools only when needed. Correct named validation paths instead of regenerating the deck. Check required images, page scope and actual exported files; disclose substitutions and unmet requirements.' + (layoutPatternsEnabled ? layoutPatternInstruction : '') });
 const assets = await McpAssets.create(args['asset-dir']);
 let outputDirectory;
 if (args['output-dir']) {
@@ -331,7 +333,7 @@ const partData = z.discriminatedUnion('kind', [
 	z.object({ kind: z.literal('map'), points: z.array(z.object({ label: z.string().max(32), longitude: z.number().min(-180).max(180), latitude: z.number().min(-85).max(85), value: partValue.nullable().optional() }).strict()).min(1).max(8) }).strict(),
 	z.object({ kind: z.literal('diagram'), graph: graphSpec }).strict(),
 ]);
-const partLayout = frameSchema.extend({ show_title: z.boolean().optional() }).strict();
+const partLayout = frameSchema.extend({ show_title: z.boolean().optional(), fit: z.enum(['stretch', 'contain']).optional().describe('stretch (default) scales each axis to the frame; contain scales uniformly and centers, keeping circles round') }).strict();
 const partSpec = z.object({ version: z.literal(1), preset: z.string().min(1).max(100), title: z.string().max(80), subtitle: z.string().max(120).optional(), data: partData, layout: optional(partLayout) }).strict();
 const compositionSpec = z.object({
 	title: z.string().max(120), subtitle: z.string().max(160).optional(), footer: z.string().max(200).optional(),
@@ -948,6 +950,37 @@ register('part_catalog', 'Search 118 original presets across 36 categories. Comp
 	const presets = matching.slice(start, start + count).map(({ example, ...preset }) => ({ ...preset, ...(!compactResponse(detail) || preset_id ? { example } : {}) }));
 	return { version: catalog.version, style: catalog.style, default_bounds: catalog.default_bounds, total: matching.length, presets, next_offset: start + count < matching.length ? start + count : null, ...(!compactResponse(detail) ? { schema: catalog.schema } : {}) };
 });
+if (layoutPatternsEnabled) {
+	compactTools.add('layout_patterns');
+	const resolution = { deck_id: handle.optional(), canvas: z.object({ width: z.number().int().min(320).max(4096), height: z.number().int().min(320).max(4096) }).strict().optional(), body: frameSchema.optional(),
+		mirror: z.boolean().optional(), message_band: z.boolean().optional().describe('Add a 72px takeaway band below the pattern'), reference_band: z.boolean().optional().describe('End the default body at the reserved reference band'),
+		count: z.number().int().min(1).max(12).optional().describe('Item count for patterns with a count range'), body_size: z.number().min(12).max(40).optional() };
+	const partInput = { part_preset: z.string().min(1).max(100).optional().describe('part_catalog preset placed in the slot; ranks patterns by distortion-free area or adds per-slot part_fit'), part_title: z.boolean().optional().describe('The part keeps its title band (charts require it)') };
+	register('layout_patterns', 'Search 54 original slide-body layout patterns by information relationship (contrast, image-explanation, overview, peers, sequence, metric, options, screenshot and more), or pass pattern_id to resolve integer slot frames for the actual canvas (deck_id or canvas; 16:9 and 4:3 tokens). Resolution returns accepted content, approximate CJK capacity, fits, issues and fallback. With part_preset, search ranks patterns by how much of the body the part fills without distortion, and resolution adds part_fit {distortion, fit, area_used} to part slots; set PartSpec.layout.fit to that fit. Use frames unchanged as PartSpec.layout or element frames; follow the fallback when fits is false. Patterns allocate body regions only; they are deterministic guidance, not a visual-quality certification. No mutation.', { ...catalogPage, relationship: z.string().regex(/^[a-z][a-z-]{0,31}$/).optional(), pattern_id: z.string().min(1).max(64).optional(), ...resolution, ...partInput }, true, async ({ query, relationship, pattern_id, offset, limit, detail, deck_id, canvas, body, part_preset, part_title, ...options }, signal) => {
+		if (pattern_id === undefined) {
+			if (deck_id !== undefined || body !== undefined || Object.values(options).some(value => value !== undefined) || (canvas !== undefined && part_preset === undefined)) throw new Error('Resolution options require pattern_id');
+			const catalog = await client.layoutPatterns({ signal });
+			const term = (query ?? '').toLowerCase();
+			const matches = pattern => (!relationship || pattern.relationships.includes(relationship)) && [pattern.id, pattern.name, pattern.ratio, pattern.use_when, pattern.avoid_when, ...pattern.relationships].join(' ').toLowerCase().includes(term);
+			const start = offset ?? 0, count = limit ?? 12, full = !compactResponse(detail);
+			if (part_preset !== undefined) {
+				const ranking = await client.rankLayoutPatterns({ part: part_preset, ...(canvas ? { canvas } : {}), ...(part_title ? { part_title } : {}) }, { signal });
+				const byId = new Map(catalog.patterns.map(pattern => [pattern.id, pattern]));
+				const ranked = ranking.patterns.filter(entry => matches(byId.get(entry.pattern_id)));
+				return { version: catalog.version, part: ranking.part, total: ranked.length, patterns: ranked.slice(start, start + count), next_offset: start + count < ranked.length ? start + count : null, guidance: catalog.guidance };
+			}
+			if (part_title !== undefined) throw new Error('part_title requires part_preset');
+			const matching = catalog.patterns.filter(matches);
+			const patterns = matching.slice(start, start + count).map(pattern => full ? pattern : { id: pattern.id, name: pattern.name, ratio: pattern.ratio, relationships: pattern.relationships, use_when: pattern.use_when, avoid_when: pattern.avoid_when });
+			return { version: catalog.version, total: matching.length, patterns, next_offset: start + count < matching.length ? start + count : null, guidance: catalog.guidance, ...(full ? { tokens: catalog.tokens } : {}) };
+		}
+		if ([query, relationship, offset, limit].some(value => value !== undefined)) throw new Error('pattern_id resolution does not accept search filters');
+		if (deck_id !== undefined && canvas !== undefined) throw new Error('Supply deck_id or canvas, not both');
+		const summary = deck_id === undefined ? undefined : getDeck(deck_id).getSummary({ limit: 0 });
+		const selected = Object.fromEntries(Object.entries({ ...options, part: part_preset, part_title }).filter(([, value]) => value !== undefined));
+		return client.resolveLayoutPattern({ pattern_id, ...(summary ? { canvas: { width: summary.width, height: summary.height } } : canvas ? { canvas } : {}), ...(body ? { body } : {}), options: selected }, { signal });
+	});
+}
 register('best_practice_profiles', 'List four evidence-led authoring profiles: consulting decisions, technical explanations, event talks and reports. English guides are retrieved separately; no file or model access.', {}, true, async (_input, signal) => client.bestPracticeProfiles({ signal }));
 register('best_practice_guide', 'Retrieve the English five-stage workflow, profile-specific guidance and strict creation schema. The consulting catalog retains 48 patterns with honest native-template, composition-required or guidance-only status. Read this before planning; guidance does not verify truth.', { profile_id: authoringProfile }, true, async ({ profile_id }, signal) => client.bestPracticeGuide(profile_id, { signal }));
 register('validate_guided_presentation', 'Dry-run a structured outline, clause-to-body evidence, numeric source declarations and native layout. ready means compilable, not semantically proven or Office-qualified. Returns unmet checks and human-review requirements; no deck handle or file is created.', { input: guidedInput }, true, async ({ input }, signal) => client.validateGuidedPresentation(input, { signal }));

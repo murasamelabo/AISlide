@@ -2702,6 +2702,57 @@ test('MCP open list recommendations render native text and keep failed edits ato
   } finally { await client.close(); }
 });
 
+test('MCP layout patterns are opt-in and resolve frames for the deck canvas', async () => {
+  const connect = async (args, name) => {
+    const client = new Client({ name, version: '1.0.0' });
+    await client.connect(new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), ...args], stderr: 'pipe', env: coreEnvironment }));
+    const call = async (tool, input = {}) => {
+      const result = await client.callTool({ name: tool, arguments: input });
+      assert.ok(!result.isError, JSON.stringify(result.content));
+      return JSON.parse(result.content[0].text);
+    };
+    return { client, call };
+  };
+  const disabled = await connect([], 'layout-patterns-off-test');
+  try {
+    assert.equal((await disabled.client.listTools()).tools.some(tool => tool.name === 'layout_patterns'), false);
+    assert.equal((await disabled.call('discover_tools', { query: 'layout pattern' })).tools.some(tool => tool.name === 'layout_patterns'), false);
+    assert.equal((await disabled.client.callTool({ name: 'get_tool_schema', arguments: { name: 'layout_patterns' } })).isError, true);
+    assert.doesNotMatch(disabled.client.getInstructions(), /layout_patterns/);
+  } finally { await disabled.client.close(); }
+  const enabled = await connect(['--layout-patterns', 'on'], 'layout-patterns-on-test');
+  try {
+    assert.ok((await enabled.client.listTools()).tools.some(tool => tool.name === 'layout_patterns'));
+    assert.match(enabled.client.getInstructions(), /layout_patterns/);
+    const contrast = await enabled.call('layout_patterns', { relationship: 'contrast' });
+    assert.ok(contrast.patterns.some(pattern => pattern.id === 'split/1-1'));
+    assert.equal(contrast.patterns[0].slots, undefined);
+    assert.equal(contrast.guidance.length, 8);
+    const all = await enabled.call('layout_patterns', { limit: 50, offset: 50 });
+    assert.equal(all.total, 54);
+    assert.equal(all.next_offset, null);
+    const standard = await enabled.call('layout_patterns', { pattern_id: 'columns/4', canvas: { width: 960, height: 720 } });
+    assert.equal(standard.fits, false);
+    assert.equal(standard.fallback, 'grid/2x2');
+    const { deck_id } = await enabled.call('create_presentation', { title: 'Synthetic layout pattern canvas' });
+    const resolved = await enabled.call('layout_patterns', { pattern_id: 'split/2-1', deck_id, message_band: true });
+    assert.deepEqual(resolved.slots.map(slot => [slot.id, slot.frame]), [
+      ['primary', { x: 48, y: 120, width: 768, height: 444 }],
+      ['support', { x: 848, y: 120, width: 384, height: 444 }],
+      ['message', { x: 48, y: 588, width: 1184, height: 72 }],
+    ]);
+    const ranked = await enabled.call('layout_patterns', { part_preset: 'cycle/balanced' });
+    assert.equal(ranked.part.sensitivity, 'strict');
+    assert.equal(ranked.patterns[0].fit, 'stretch');
+    const fitted = await enabled.call('layout_patterns', { pattern_id: 'sequence/cycle', deck_id, part_preset: 'cycle/balanced' });
+    assert.equal(fitted.slots[0].part_fit.fit, 'contain');
+    assert.equal(fitted.slots[1].part_fit, null);
+    for (const input of [{ pattern_id: 'split/1-1', query: 'contrast' }, { mirror: true }, { pattern_id: 'split/1-1', deck_id, canvas: { width: 1280, height: 720 } }, { pattern_id: 'columns/3', count: 3 }]) {
+      assert.equal((await enabled.client.callTool({ name: 'layout_patterns', arguments: input })).isError, true, JSON.stringify(input));
+    }
+  } finally { await enabled.client.close(); }
+});
+
 test('MCP bounded graph annotations honor small fonts and report actionable group bounds', async () => {
   const client = new Client({ name: 'bounded-graph-feedback-test', version: '1.0.0' });
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });

@@ -564,6 +564,22 @@ title or compose explicitly. Chart-internal typography is not newly qualified
 by this text/table measurement. Omitted `layout` preserves the existing
 placement path. Retain the layout specification when regenerating a part.
 
+`layout.fit` selects how the 1152x424 body canvas (1152x512 with the title)
+maps into the frame. `stretch` (default, legacy) scales each axis
+independently, so circles, arcs and hexagons become ovals when the frame aspect
+differs. `contain` scales both axes by the smaller factor and centers the
+result, leaving empty margins instead of distortion; text fitting and the 12px
+floor apply to the smaller result. Briefing parts lay out natively within the
+frame and are unaffected. With `stretch`, small square markers and images
+(number badges, milestone diamonds, icons, unit tiles) are re-squared around
+their centers so they never distort. `part_aspect({spec})` classifies the
+rendered geometry, not the category: `free` (rectangles, text, tables, native
+charts), `tolerant` (large diagonal edges, arrows, chevrons, ovals; 1.15) or
+`strict` (large circles, curved outlines, square shapes or images; 1.05), and
+categories whose area, unit count or geography encodes data are strict at
+1.02. Visual preflight reports `PART_ASPECT_DISTORTED` when a stretched part
+exceeds its measured tolerance.
+
 This placement override applies to part creation/direct insertion. Guided
 creation subsequently fits its part into the guided body region, so use
 direct insertion or complete typed elements for exact slide coordinates.
@@ -571,6 +587,34 @@ direct insertion or complete typed elements for exact slide coordinates.
 `Document.parts` is optional when empty. An instance contains `slide_id`, `element_id`, `spec`, `render_sha256`, optional `native_sha256`, and `stale`. Hashes cover rendered children and original native group/resources, including chart workbooks. Root-only movement/resizing in Studio is allowed; mismatched manual/native edits mark the part stale and block semantic update. Missing fingerprints on existing native roots also mark stale. There is no automatic regeneration, no cryptographic authentication, and benign external XML reserialization can conservatively mark stale. Ordinary native objects remain available even without metadata.
 
 SDK: `client.partCatalog()`, `client.createPart({id,spec,theme?})`, `session.addPart(slideId,{id,spec},options?)`, `session.updatePart(slideId,{id,spec},options?)`. Session options accept `expectedRevision` and cancellation; late transport success after cancellation cannot commit. MCP: `part_catalog`, `create_part`, `add_part`, `update_part`; mutations require `deck_id`, `expected_revision`, `slide_id`, `id`, `spec` and use the same core/session gates.
+
+### Layout patterns
+
+`layout_patterns` returns 54 original slide-body patterns (focus, split, stack,
+columns, grid, compound, sequence, compare, text, media and structure) with
+ratio, relationship tags, `use_when`, `avoid_when`, suggested parts, optional
+count range, fallback, spacing tokens and guidance. `resolve_layout_pattern`
+takes `{pattern_id, canvas?, body?, options?:{mirror?, message_band?,
+reference_band?, count?, body_size?}}` and returns integer slot frames with
+their kind, accepted content, minimum size, approximate full-width character
+capacity, `fits`, `issues` and `fallback`. The default body is x=48, y=120 and
+1184x540 on 1280x720; canvases narrower than 1.5:1 (for example 960x720) use a
+40px margin and narrower support/contrast gaps. `reference_band` ends the
+default body at the reserved reference band. Patterns allocate body regions only
+and do not change part rendering; they are deterministic guidance, not a
+visual-quality certification.
+
+SDK: `client.layoutPatterns()`, `client.resolveLayoutPattern(input)`,
+`client.rankLayoutPatterns({part, canvas?, part_title?})` and
+`client.partAspect(spec)`. Resolution with `options.part` adds `part_fit`
+`{distortion, fit, area_used, tolerance}` to slots that accept parts; ranking
+orders patterns by the share of the body the part fills without exceeding its
+tolerance. MCP exposes
+the read-only `layout_patterns` tool only when the server starts with
+`--layout-patterns on` (default `off`): search with `query`/`relationship`, or
+pass `pattern_id` with `deck_id` or `canvas` to resolve frames. `part_preset`
+ranks patterns for that part or adds `part_fit` during resolution. When off, the
+tool is not registered, not discoverable and absent from server instructions.
 
 For mixed reusable content, prefer [typed managed batches](#typed-authoring-batches)
 through `session.applyOperations` / MCP `apply_operations`. Individual managed

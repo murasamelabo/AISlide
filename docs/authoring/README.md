@@ -72,6 +72,8 @@ The short project-owned [AISlide authoring SKILL](../../.github/skills/aislide-a
 
 The default connection is lightweight: ten common tools are initially exposed. `discover_tools({query})` searches advanced operations without their full schemas; `get_tool_schema({name})` returns the needed schema and publishes that tool. The four most recently requested advanced tools remain in the additional list. Existing direct calls are still valid; `--tool-profile full` restores full discovery and legacy response defaults.
 
+Layout patterns are opt-in. Starting the server with `--layout-patterns on` exposes `layout_patterns` alongside the common tools and adds one server instruction: choose a body pattern by information relationship, resolve it for the deck and use the returned slot frames unchanged. Without the flag (default `off`) the tool is absent and discovery does not list it. Authors can also decline patterns per request, for example by asking for free placement or an existing template; that instruction depends on the model, while the server flag is deterministic.
+
 For ordinary freeform authoring, use `create_presentation`, `edit_slides`, and bounded `apply_operations` batches with final content/geometry. Compact mutation replies carry the next revision/hash. `list_decks` restores lost handles and last successful operations/exports; `get_deck_summary` returns small paginated slide or element indexes without core calls, image/source bytes, notes or rendering. This removes the need for a manual progress file or repeated full-document reads just to continue working. It does not persist across server restarts or determine whether content is complete.
 
 With operator-approved `--asset-dir` roots, `register_asset({path:"image.png"})` reads the file once. Use its `asset_id` in binary tools, `apply_operations` with `add_picture`, or graph `icon` values. Prepared graph icons and catalog icon assets already return handles in compact mode. `list_assets` recovers them and `close_asset` releases unused registry bytes. No arbitrary paths, external relationship fetching or source overwrite is enabled. See [local asset bounds and contracts](../api.md#local-asset-handles).
@@ -215,6 +217,11 @@ graph annotations have the exception described below. Enlarge the region or redu
 content when it cannot fit. Some chart axis labels occupy the removed 88px
 band and make title removal reject. Chart-internal typography has not been
 newly qualified by these checks. Omitted layout retains previous placement.
+`fit:"contain"` scales the part uniformly and centers it, keeping circles and
+arcs round in frames whose aspect differs from the part canvas; the default
+`stretch` keeps legacy per-axis scaling but re-squares small markers and
+images. Preflight flags `PART_ASPECT_DISTORTED` when a stretched part exceeds
+the tolerance measured from its rendered geometry.
 
 For graphs, `GraphSpec.show_title:false` allows content at y=0 instead of
 reserving the 88px title band on the 1152x512 graph canvas. Node `detail`

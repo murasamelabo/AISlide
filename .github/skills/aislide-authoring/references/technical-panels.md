@@ -59,6 +59,18 @@ shifts, steps, graphs and required tables. Do not convert every page to cards.
 In `compose_slide`, the `comparison` block remains a matrix. To request these
 visuals, use a `part` block with the preset, or insert it with managed `add_part`.
 
+When the server exposes `layout_patterns` and the user has not asked for free
+placement, no layout patterns or an existing template, choose the body pattern
+by relationship: `split/1-1` for two approaches, `split/2-1` for a main
+image/diagram with explanation, `focus/full` for one overview, `columns/3` for
+three peers, `media/screenshot-callouts` for numbered UI screenshots. Resolve it
+with `deck_id` and pass slot frames unchanged as `PartSpec.layout` or element
+frames. When a slot holds a part, add `part_preset` and copy `part_fit.fit` to
+`layout.fit`; to choose a pattern for a shape-sensitive part (cycle, radial,
+pyramid, map), search with `part_preset` and prefer the top-ranked stretch
+slot. A multi-panel part such as `contrast/panels` fills one slot; do not split
+it across slots. When `fits` is false, follow `fallback` or split the content.
+
 ## Icons
 
 1. `lucide_icons({query})` searches the installed Lucide library (ISC) by name,

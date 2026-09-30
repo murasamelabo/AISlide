@@ -2,6 +2,7 @@
 
 - The PPTX mapping is independently implemented from public OOXML/OPC specifications. Do not copy an existing PPTX engine or replace the core with one without user approval.
 - Put document behavior in `crates/aislide-core`. Studio, CLI and MCP must share it.
+- New canvas parts draw through `Drawing` on the 1152px canvas; add the category to `ENCODINGS` in `parts/aspect.rs` (area, unit count or geography when shape carries data). Aspect handling derives from rendered geometry; `tests/part_aspect.rs` must pass for every catalog preset.
 - Use `node tools/cargo.mjs test --workspace` and `npm run build` for the first-slice gates.
 - Use the official MCP SDK; protocol reference: https://modelcontextprotocol.io/specification/ and SDK reference: https://github.com/modelcontextprotocol/typescript-sdk/tree/v1.x/docs.
 - Never execute imported content or fetch external relationships. Do not overwrite source presentations.

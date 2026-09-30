@@ -119,7 +119,7 @@ pub(crate) fn compose(deck: &mut Deck, parts: &mut Vec<crate::parts::state::Part
             }
         };
         if let Some(mut part) = part {
-            part.layout = Some(PartLayout { x: frame[0], y: frame[1], width: frame[2], height: frame[3], show_title: !part.title.is_empty() });
+            part.layout = Some(PartLayout { x: frame[0], y: frame[1], width: frame[2], height: frame[3], show_title: !part.title.is_empty(), fit: crate::parts::PartFit::Stretch });
             managed.push((block_id, part));
         }
     }

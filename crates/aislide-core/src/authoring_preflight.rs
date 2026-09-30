@@ -285,6 +285,17 @@ fn numbered_sequence_findings(report: &mut PreflightReport, page: usize, slide: 
 	Ok(())
 }
 
+fn part_aspect_findings(report: &mut PreflightReport, document: &Document, page: usize, slide: &str, objects: &[Object<'_>]) -> Result<()> {
+	for part in document.parts.iter().filter(|part| part.slide_id == slide) {
+		let Some((distortion, profile)) = crate::parts::aspect::excessive_distortion(&part.spec)? else { continue };
+		let evidence: Vec<&Object<'_>> = objects.iter().filter(|object| object.id == part.element_id).collect();
+		push_finding(report, page, slide, &evidence, "PART_ASPECT_DISTORTED", "warning", "geometry",
+			&format!("Part {} stretches {} {distortion:.2}x more along one axis (tolerance {:.2})", part.element_id, profile.reasons.join(", "), profile.tolerance.unwrap_or(f64::INFINITY)),
+			&["Set layout.fit to \"contain\" for uniform scaling", "Resolve layout_patterns with part_preset to find a slot near the part canvas aspect"])?;
+	}
+	Ok(())
+}
+
 pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -> Result<PreflightReport> {
 	crate::document::verify(document)?;
 	let deck = &document.deck;
@@ -299,7 +310,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		checks: ["renderer_warnings", "off_slide", "text_overlap", "connector_label_interference", "connector_badge_overlap", "container_clearance", "small_text", "density"].map(String::from).to_vec(),
 		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed frame bounds, not glyph intersection; intentional overlapping text needs human review", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices are summarized per page as info; specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
 		office_visual_parity: false, semantic_truth_verified: false };
-	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into(), "numbered_sequence_spacing".into()]);
+	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into(), "numbered_sequence_spacing".into(), "part_aspect".into()]);
 	report.limitations.push("Reference URL detection uses normalized HTTP(S) tokens terminated by CJK prose; percent-encode CJK URL paths. Warnings do not echo private note URLs. Fixed-reference collisions require explicit repair, not automatic reflow.".into());
 	for page in selected {
 		let slide = &deck.slides[page];
@@ -344,6 +355,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		}
 		container_findings(&mut report, page, &slide.id, &objects)?;
 		numbered_sequence_findings(&mut report, page, &slide.id, &objects)?;
+		part_aspect_findings(&mut report, document, page, &slide.id, &objects)?;
 		if let Some(references) = &document.references {
 			let managed: BTreeSet<_> = references.elements.iter().filter(|owned| owned.slide_id == slide.id).map(|owned| owned.id.as_str()).collect();
 			for object in objects.iter().filter(|object| object.scope == "slide" && managed.contains(object.id)) {
