@@ -128,7 +128,7 @@ optional cover-cropped `image` and `icon`), `list/agenda` (`agenda`, 2-7
 items) and `list-enumeration/screenshot-callouts` (`screenshot_callouts`, one
 required `image` and 1-6 `callouts` whose `x`/`y` are 0-1 fractions of the
 source image; badges stay on the contained picture and the numbered legend uses
-one measured pitch). The catalog now has 118 entries in the same 36 categories. These parts
+one measured pitch). These parts
 render at the `PartSpec.layout` frame size instead of scaling a 1152x512 canvas;
 fonts are fixed (headings 18px, `body_size` 14-22, default 16; captions, tags
 and pills 12-13px). Card and step heights shrink to measured content, row
@@ -137,6 +137,39 @@ optional `message:{text,detail?,fill?,color?}` adds a takeaway band below the
 content, except on agendas. Legacy presets and data kinds keep their rendering;
 a briefing kind with another preset, or a briefing preset with another kind,
 rejects.
+
+Fourteen recommended business-analysis presets use the same frame-size
+rendering, fixed typography, overflow rejection and optional `message` band:
+`list-horizontal/kpi-cards` (`kpi_cards`, 1-8 cards with supplied `value`
+text, `unit`, `delta`, `status` good/bad/neutral and `comparison`; only the
+value grows, up to 44px), `horizontal-bar-graph/bullet` (`bullet_graphs`, 1-6
+rows of `actual`, `target`, 1-3 ascending `ranges` and `lower_is_better`),
+`water-fall/variance` (`variance`, 2-10 plan/actual rows and an optional total
+row; each gap is colored by whether it helps), `matrix/harvey-balls`
+(`harvey_matrix`, 0-4 quarter levels drawn as native curved freeforms),
+`matrix/heatmap` (`heatmap`, printed numbers tinted around `midpoint`, default
+the mean), `matrix/raci` (`raci`, exactly one A and at least one R per task),
+`matrix/risk` (`risk_matrix`, 1-10 risks on a 5x5 likelihood x impact grid;
+zones follow the product score 15+, 10-14, 5-9 and 1-4, and the list is ranked
+by score), `vertical-bar-graph/pareto` (`pareto`, a native combo chart with
+sorted columns plus the cumulative share and threshold on the right-hand
+0-100% axis), `line-graph/control-chart` (`control_chart`, a native line chart;
+omitted limits use the individuals-chart rule mean +/- 3 x average moving range
+/ 1.128 and the value axis is scaled to the data), `tree/fishbone`
+(`fishbone`, 2-6 categories with 1-3 causes and `focus` highlights),
+`flow/sankey` (`sankey`, up to five stages; a node with inflow and outflow must
+balance), `flow/journey` (`journey`, 2-6 stages, 1-4 rows, an optional -2..2
+emotion curve and one highlighted stage), `flow/swimlane` (`swimlane`) and
+`correlation/c4-container` (`architecture`). The last two are converted to
+managed-graph geometry and drawn by the diagram engine, so connectors stay
+glued to their boxes. Swimlane columns follow the longest forward path unless
+`column` pins a step; `exception` flows are dashed return routes. The C4 view
+places people left, external systems right and containers and databases inside
+the system boundary, choosing slots that keep relation lines out of unrelated
+boxes. Where a label field is omitted, English defaults such as `Plan`,
+`Actual`, `Variance`, `Value`, `Cumulative` and `Emotion` are used; pass
+localized labels in the data. The catalog now has 132 entries in the same 36
+categories.
 
 MCP `lucide_icons({query?,category?,offset?,limit?})` searches the installed
 Lucide React library (ISC) and `lucide_icon_assets({icons:[{name,color?,
