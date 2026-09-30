@@ -69,9 +69,10 @@ pub fn catalog() -> Value {
         "avoid_when":"Three or more alternatives, numeric evaluation matrices or dense tabular data. Do not convert every comparison or every slide into cards.","example":example}));
     presets.extend(super::briefing::PRESETS.iter().map(|preset| {
         let category = preset.id.split_once('/').expect("briefing preset category").0;
-        let category_name = CATEGORIES.iter().find(|entry| entry.0 == category).expect("built-in briefing category").1;
+        let position = CATEGORIES.iter().position(|entry| entry.0 == category).expect("built-in briefing category");
+        let category_name = CATEGORIES[position].1;
         let example = PartSpec { version: 1, preset: preset.id.into(), title: preset.name.into(), subtitle: "Synthetic example".into(), data: briefing_example(preset.kind), layout: None };
-        json!({"id":preset.id,"category":category,"category_name":category_name,"name":preset.name,"family":"Diagrams","recommended":true,"use_when":preset.use_when,"avoid_when":preset.avoid_when,"example":example})
+        json!({"id":preset.id,"category":category,"category_name":category_name,"name":preset.name,"family":if position < 10 {"Charts"} else {"Diagrams"},"recommended":true,"use_when":preset.use_when,"avoid_when":preset.avoid_when,"example":example})
     }));
     json!({"version":1,"presets":presets,"schema":schemars::schema_for!(PartSpec),"style":"Theme-linked minimal modern","default_bounds":{"x":64,"y":144,"width":1152,"height":512}})
 }
@@ -102,6 +103,97 @@ fn briefing_example(kind: &str) -> PartData {
             {"x":0.30,"y":0.34,"label":"Turn on the method","detail":"Enable the setting before choosing targets."},
             {"x":0.12,"y":0.50,"label":"Choose targets","detail":"Include groups; exclusions take precedence."},
             {"x":0.62,"y":0.70,"label":"Assign a profile","detail":"Pick the profile applied to each target."}
+        ]}),
+        "kpi_cards" => json!({"kind":"kpi_cards","message":{"text":"Revenue and margin beat plan; churn needs attention."},"cards":[
+            {"label":"Revenue","value":"12.4","unit":"B","delta":"+8.2% YoY","status":"good","comparison":"Plan 12.0"},
+            {"label":"Operating margin","value":"14.8","unit":"%","delta":"+1.1 pt","status":"good","comparison":"Plan 14.0%"},
+            {"label":"Monthly churn","value":"2.9","unit":"%","delta":"+0.4 pt","status":"bad","comparison":"Target 2.5%"},
+            {"label":"Active customers","value":"48.2k","delta":"+3.1k QoQ","comparison":"Target 50k"}
+        ]}),
+        "bullet_graphs" => json!({"kind":"bullet_graphs","rows":[
+            {"label":"Revenue","actual":12.4,"target":12.0,"ranges":[9,11,14],"unit":"B","note":"Ahead of plan"},
+            {"label":"Gross margin","actual":38,"target":40,"ranges":[30,36,45],"unit":"%","note":"Mix shift toward services"},
+            {"label":"Net promoter score","actual":42,"target":45,"ranges":[20,35,60]},
+            {"label":"Lead time","actual":6.5,"target":5,"ranges":[4,7,10],"unit":"d","lower_is_better":true,"note":"Lower is better"}
+        ]}),
+        "variance" => json!({"kind":"variance","unit":"M","total_label":"Operating profit","message":{"text":"Sales and SG&A savings offset higher cost of sales."},"rows":[
+            {"label":"Product sales","plan":820,"actual":865},
+            {"label":"Services","plan":310,"actual":296},
+            {"label":"Cost of sales","plan":-540,"actual":-561},
+            {"label":"SG&A","plan":-380,"actual":-352}
+        ]}),
+        "harvey_matrix" => json!({"kind":"harvey_matrix","columns":["Speed","Cost","Control","Scalability"],"legend":["None","Low","Partial","High","Full"],
+            "message":{"text":"The partner platform balances speed and scalability."},"rows":[
+            {"label":"Build in-house","levels":[1,2,4,3]},
+            {"label":"Buy a package","levels":[4,3,2,2]},
+            {"label":"Partner platform","levels":[3,3,3,4]}
+        ]}),
+        "heatmap" => json!({"kind":"heatmap","unit":"%","columns":["Jan","Feb","Mar","Apr","May","Jun"],"rows":[
+            {"label":"North","values":[92,94,95,91,96,97]},
+            {"label":"East","values":[88,86,84,83,85,87]},
+            {"label":"West","values":[95,96,94,97,98,97]},
+            {"label":"South","values":[81,79,82,84,86,88]}
+        ]}),
+        "raci" => json!({"kind":"raci","roles":["Product","Engineering","Security","Support"],"legend":["Responsible","Accountable","Consulted","Informed"],"tasks":[
+            {"label":"Define requirements","assignments":["A/R","C","C","I"]},
+            {"label":"Build and test","assignments":["C","A/R","C",""]},
+            {"label":"Security review","assignments":["I","R","A",""]},
+            {"label":"Release communication","assignments":["A","I","I","R"]}
+        ]}),
+        "risk_matrix" => json!({"kind":"risk_matrix","likelihood_label":"Likelihood","impact_label":"Impact","zone_labels":["Critical","High","Medium","Low"],"risks":[
+            {"id":"R1","label":"Key supplier delay","likelihood":4,"impact":5,"action":"Qualify a second supplier by Q3"},
+            {"id":"R2","label":"Data migration errors","likelihood":3,"impact":4,"action":"Run two rehearsal migrations"},
+            {"id":"R3","label":"Adoption below plan","likelihood":3,"impact":3,"action":"Train champions in each team"},
+            {"id":"R4","label":"Budget overrun","likelihood":2,"impact":3,"action":"Review costs monthly"},
+            {"id":"R5","label":"Regulatory change","likelihood":1,"impact":5,"action":"Monitor consultation papers"}
+        ]}),
+        "pareto" => json!({"kind":"pareto","value_label":"Defects","cumulative_label":"Cumulative share","message":{"text":"Two causes explain 69% of defects."},"items":[
+            {"label":"Labeling","value":42},{"label":"Packaging","value":27},{"label":"Scratches","value":14},
+            {"label":"Missing parts","value":9},{"label":"Color","value":5},{"label":"Other","value":3}
+        ]}),
+        "control_chart" => json!({"kind":"control_chart","series_label":"Cycle time (min)",
+            "labels":["W1","W2","W3","W4","W5","W6","W7","W8","W9","W10","W11","W12","W13","W14","W15","W16"],
+            "values":[12.1,11.8,12.4,12.0,11.6,12.3,12.8,12.2,11.9,12.5,13.9,12.1,11.7,12.0,12.4,12.2]}),
+        "fishbone" => json!({"kind":"fishbone","effect":"Late deliveries","message":{"text":"Handovers and manual entry are the first two fixes."},"categories":[
+            {"label":"People","causes":[{"text":"New staff onboarding"},{"text":"Shift handover gaps","focus":true}]},
+            {"label":"Process","causes":[{"text":"Manual order entry","focus":true},{"text":"Unclear escalation"}]},
+            {"label":"Systems","causes":[{"text":"Overnight batch updates"},{"text":"No stock alerts"}]},
+            {"label":"Suppliers","causes":[{"text":"Variable lead times"},{"text":"Single-source parts"}]}
+        ]}),
+        "swimlane" => json!({"kind":"swimlane","lanes":["Customer","Sales","Operations"],"steps":[
+            {"id":"order","label":"Place order","lane":0,"shape":"event"},
+            {"id":"check","label":"Check credit","lane":1},
+            {"id":"approve","label":"Approved?","lane":1,"shape":"decision"},
+            {"id":"ship","label":"Pick and ship","lane":2},
+            {"id":"receive","label":"Receive goods","lane":0,"shape":"event"}
+        ],"flows":[
+            {"from":"order","to":"check"},{"from":"check","to":"approve"},{"from":"approve","to":"ship","label":"Yes"},
+            {"from":"ship","to":"receive"},{"from":"approve","to":"order","label":"No","exception":true}
+        ]}),
+        "sankey" => json!({"kind":"sankey","unit":"k","nodes":[
+            {"id":"search","label":"Search"},{"id":"ads","label":"Ads"},{"id":"referral","label":"Referral"},{"id":"visit","label":"Site visits"},
+            {"id":"trial","label":"Trials"},{"id":"left","label":"Left"},{"id":"paid","label":"Paid"},{"id":"lapsed","label":"Lapsed"}
+        ],"links":[
+            {"from":"search","to":"visit","value":48},{"from":"ads","to":"visit","value":32},{"from":"referral","to":"visit","value":20},
+            {"from":"visit","to":"trial","value":35},{"from":"visit","to":"left","value":65},
+            {"from":"trial","to":"paid","value":14},{"from":"trial","to":"lapsed","value":21}
+        ]}),
+        "journey" => json!({"kind":"journey","stages":["Discover","Compare","Sign up","Onboard","Renew"],"emotions":[1,0,-2,-1,2],
+            "emotion_notes":["Curious","Unsure","Form too long","Needs setup help","Clear value"],"highlight":2,"rows":[
+            {"label":"Actions","cells":["Reads reviews","Compares plans","Fills in the form","Imports data","Reviews usage"]},
+            {"label":"Touchpoints","cells":["Search and blog","Pricing page","Sign-up form","Setup wizard","Account team"]},
+            {"label":"Opportunities","boxed":true,"cells":["Customer stories","Plan finder","Three-field sign-up","Guided import","Usage digest"]}
+        ]}),
+        "architecture" => json!({"kind":"architecture","system":"Order platform","elements":[
+            {"id":"customer","label":"Customer","kind":"person","detail":"Places and tracks orders"},
+            {"id":"web","label":"Web app","kind":"container","detail":"Storefront UI"},
+            {"id":"api","label":"Order API","kind":"container","detail":"Validates orders"},
+            {"id":"worker","label":"Fulfilment","kind":"container","detail":"Queues shipments"},
+            {"id":"db","label":"Order database","kind":"database","detail":"Relational store"},
+            {"id":"payments","label":"Payment provider","kind":"external","detail":"Card authorization"}
+        ],"relations":[
+            {"from":"customer","to":"web","label":"Uses"},{"from":"web","to":"api","label":"HTTPS"},{"from":"api","to":"db","label":"Reads and writes"},
+            {"from":"api","to":"payments","label":"Authorizes"},{"from":"api","to":"worker","label":"Enqueues"}
         ]}),
         _ => json!({"kind":"agenda","items":[
             {"label":"Background and direction","detail":"Why the operating model is changing","meta":"10 min"},
