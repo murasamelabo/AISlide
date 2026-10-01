@@ -1,5 +1,6 @@
 ﻿use aislide_core::execute_request;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 const PRESETS: [&str; 14] = [
     "list-horizontal/kpi-cards", "horizontal-bar-graph/bullet", "water-fall/variance", "matrix/harvey-balls", "matrix/heatmap", "matrix/raci", "matrix/risk",
@@ -48,9 +49,54 @@ fn with_data(id: &str, edit: impl FnOnce(&mut Value)) -> Result<Value, String> {
     create(&spec)
 }
 
+/// Replaces the C4 example's inner boxes with `containers` containers and `databases` databases.
+/// The person relates to the first inner box and the last inner box relates to the external system.
+fn c4_inner(data: &mut Value, containers: usize, databases: usize) {
+    let mut elements = vec![json!({"id":"customer","label":"Customer","kind":"person"}), json!({"id":"payments","label":"Payments","kind":"external"})];
+    elements.extend((0..containers).map(|index| json!({"id":format!("c{index}"),"label":format!("Service {index}"),"kind":"container"})));
+    elements.extend((0..databases).map(|index| json!({"id":format!("d{index}"),"label":format!("Store {index}"),"kind":"database"})));
+    let first = if containers > 0 { "c0".to_string() } else { "d0".to_string() };
+    let last = if databases > 0 { format!("d{}", databases - 1) } else { format!("c{}", containers - 1) };
+    let mut relations = vec![json!({"from":"customer","to":first,"label":"Uses"}), json!({"from":last,"to":"payments","label":"Pays"})];
+    if containers > 0 && databases > 0 { relations.push(json!({"from":"c0","to":"d0","label":"Reads"})); }
+    data["elements"] = json!(elements);
+    data["relations"] = json!(relations);
+}
+
+fn route_points(connector: &Value) -> Vec<[f64; 2]> {
+    let [x, y, width, height] = ["x", "y", "width", "height"].map(|field| number(connector, field));
+    connector["routing"]["points"].as_array().unwrap().iter().map(|point| [x + point[0].as_f64().unwrap() * width, y + point[1].as_f64().unwrap() * height]).collect()
+}
+
+/// Samples every connector segment and fails when it passes through the interior of any other diagram node box.
+/// A connector's own endpoints are skipped: ports on a diamond or ellipse outline lie inside its bounding box.
+fn assert_routes_clear_nodes(element: &Value, context: &str) {
+    let all = descendants(element);
+    let boxes: Vec<(&str, [f64; 4])> = all.iter().filter(|child| child["type"] == "shape" && child["id"].as_str().unwrap().contains("-n-"))
+        .map(|child| (child["id"].as_str().unwrap(), ["x", "y", "width", "height"].map(|field| number(child, field)))).collect();
+    assert!(!boxes.is_empty(), "{context}: no nodes");
+    for connector in all.iter().filter(|child| child["type"] == "connector") {
+        let own = [connector["start"]["element_id"].as_str().unwrap(), connector["end"]["element_id"].as_str().unwrap()];
+        for segment in route_points(connector).windows(2) {
+            for step in 1..64 {
+                let t = f64::from(step) / 64.0;
+                let point = [segment[0][0] + (segment[1][0] - segment[0][0]) * t, segment[0][1] + (segment[1][1] - segment[0][1]) * t];
+                let crossed = boxes.iter().find(|(id, bounds)| !own.contains(id) && point[0] > bounds[0] + 1.0 && point[0] < bounds[0] + bounds[2] - 1.0 && point[1] > bounds[1] + 1.0 && point[1] < bounds[1] + bounds[3] - 1.0);
+                assert!(crossed.is_none(), "{context}: {} runs through {} at {point:?}", connector["id"], crossed.unwrap().0);
+            }
+        }
+    }
+}
+
+fn swimlane(lanes: &[&str], steps: Value, flows: Value) -> Value {
+    json!({"version":1,"preset":"flow/swimlane","title":"Swimlane","subtitle":"","data":{"kind":"swimlane","lanes":lanes,"steps":steps,"flows":flows}})
+}
+
 #[test]
 fn business_presets_are_recommended_deterministic_and_preflight_clean() {
     let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let specialized: Vec<&str> = catalog["presets"].as_array().unwrap().iter().filter(|entry| entry["specialized"] == true).map(|entry| entry["id"].as_str().unwrap()).collect();
+    assert_eq!(specialized, PRESETS, "exactly the business presets are specialized, so editors keep general category defaults");
     for id in PRESETS {
         let entry = catalog["presets"].as_array().unwrap().iter().find(|entry| entry["id"] == id).unwrap_or_else(|| panic!("missing {id}"));
         assert_eq!(entry["recommended"], true, "{id}");
@@ -117,13 +163,20 @@ fn business_parts_validate_their_domain_rules() {
         ("matrix/risk", Box::new(|data| { for index in 0..5 { data["risks"][index]["likelihood"] = json!(3); data["risks"][index]["impact"] = json!(3); } }), "at most four risks"),
         ("vertical-bar-graph/pareto", Box::new(|data| data["items"][0]["value"] = json!(-1)), "nonnegative"),
         ("vertical-bar-graph/pareto", Box::new(|data| data["threshold"] = json!(1.2)), "between 0 and 1"),
-        ("line-graph/control-chart", Box::new(|data| { data["upper"] = json!(10); data["lower"] = json!(12); }), "upper limit must exceed"),
+        ("line-graph/control-chart", Box::new(|data| { data["upper"] = json!(10); data["lower"] = json!(12); }), "lower < center < upper"),
+        ("line-graph/control-chart", Box::new(|data| data["upper"] = json!(5)), "lower < center < upper after defaults; got lower"),
+        ("line-graph/control-chart", Box::new(|data| data["lower"] = json!(13)), "lower < center < upper"),
+        ("line-graph/control-chart", Box::new(|data| { let count = data["values"].as_array().unwrap().len(); data["values"] = json!(vec![7.0; count]); }), "do not vary"),
+        ("line-graph/control-chart", Box::new(|data| { let count = data["values"].as_array().unwrap().len(); data["values"] = json!(vec![7.0; count]); data["upper"] = json!(9); }), "supply both upper and lower"),
         ("line-graph/control-chart", Box::new(|data| data["labels"] = json!(["W1"])), "labels must match values"),
         ("tree/fishbone", Box::new(|data| data["categories"][0]["causes"] = json!([{"text":"a"},{"text":"b"},{"text":"c"},{"text":"d"}])), "require 1-3 items"),
         ("flow/swimlane", Box::new(|data| data["flows"][4]["exception"] = json!(false)), "form a cycle"),
         ("flow/swimlane", Box::new(|data| data["steps"][1]["lane"] = json!(9)), "must index lanes"),
         ("flow/swimlane", Box::new(|data| data["flows"][0]["to"] = json!("missing")), "two different step ids"),
         ("flow/swimlane", Box::new(|data| { data["steps"][4]["lane"] = json!(1); data["steps"][4]["column"] = json!(2); }), "share lane 1 column 2"),
+        ("flow/swimlane", Box::new(|data| data["lanes"] = json!(["A", "B", "C", "D", "E", "F"])), "swimlane lanes require 2-5 items"),
+        ("flow/swimlane", Box::new(|data| data["steps"][0]["column"] = json!(7)), "at most seven columns"),
+        ("line-graph/control-chart", Box::new(|data| { data["labels"] = json!((1..=33).map(|index| format!("W{index}")).collect::<Vec<_>>()); data["values"] = json!(vec![12.0; 33]); }), "control chart values require 5-32 items"),
         ("flow/sankey", Box::new(|data| data["links"][5]["value"] = json!(20)), "receives 35 but sends 41"),
         ("flow/sankey", Box::new(|data| data["links"][0]["to"] = json!("search")), "different nodes"),
         ("flow/sankey", Box::new(|data| { data["nodes"] = json!([{"id":"a","label":"A"},{"id":"b","label":"B"}]); data["links"] = json!([{"from":"a","to":"b","value":1},{"from":"b","to":"a","value":1}]); }), "cycle"),
@@ -132,6 +185,9 @@ fn business_parts_validate_their_domain_rules() {
         ("flow/journey", Box::new(|data| data["rows"][0]["cells"] = json!(["a"])), "one cell per stage"),
         ("correlation/c4-container", Box::new(|data| data["relations"][0]["to"] = json!("customer")), "two different element ids"),
         ("correlation/c4-container", Box::new(|data| data["elements"][1]["id"] = json!("customer")), "duplicate architecture element id customer"),
+        ("correlation/c4-container", Box::new(|data| c4_inner(data, 4, 4)), "4 containers and 4 databases need 4 rows"),
+        ("correlation/c4-container", Box::new(|data| c4_inner(data, 7, 2)), "7 containers and 2 databases need 4 rows"),
+        ("correlation/c4-container", Box::new(|data| c4_inner(data, 1, 7)), "1 containers and 7 databases need 4 rows"),
     ];
     for (id, edit, expected) in cases {
         let error = with_data(id, edit).unwrap_err();
@@ -146,6 +202,95 @@ fn business_parts_reject_frames_that_are_too_small() {
         spec["layout"] = json!({"x":40,"y":120,"width":360,"height":150,"show_title":false});
         assert!(create(&spec).is_err(), "{id} accepted a 360x150 frame");
     }
+}
+
+fn repeated(data: &mut Value, key: &str, count: usize, edit: impl Fn(&mut Value, usize)) {
+    let template = data[key][0].clone();
+    data[key] = json!((0..count).map(|index| { let mut item = template.clone(); edit(&mut item, index); item }).collect::<Vec<_>>());
+}
+
+/// Every maximum stated in use_when renders in the default and a framed layout, so documented and actual limits agree.
+#[test]
+fn business_parts_render_at_their_documented_capacity() {
+    let cases: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+        ("list-horizontal/kpi-cards", Box::new(|data| repeated(data, "cards", 8, |card, index| card["label"] = json!(format!("Metric {index}"))))),
+        ("horizontal-bar-graph/bullet", Box::new(|data| repeated(data, "rows", 6, |row, index| row["label"] = json!(format!("Metric {index}"))))),
+        ("water-fall/variance", Box::new(|data| repeated(data, "rows", 10, |row, index| row["label"] = json!(format!("Line item {index}"))))),
+        ("matrix/harvey-balls", Box::new(|data| {
+            // Eight options fit with the legend; together with a message band the limit is seven.
+            data.as_object_mut().unwrap().remove("message");
+            data["columns"] = json!(["Speed", "Cost", "Control", "Scale", "Risk", "Support"]);
+            repeated(data, "rows", 8, |row, index| { row["label"] = json!(format!("Option {index}")); row["levels"] = json!((0..6).map(|column| (index + column) % 5).collect::<Vec<_>>()); });
+        })),
+        ("matrix/heatmap", Box::new(|data| {
+            data["columns"] = json!(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]);
+            repeated(data, "rows", 10, |row, index| { row["label"] = json!(format!("Region {index}")); row["values"] = json!((0..12).map(|column| 80 + (index * 3 + column) % 19).collect::<Vec<_>>()); });
+        })),
+        ("matrix/raci", Box::new(|data| {
+            // Ten tasks fit without the legend; with it the limit is nine.
+            data.as_object_mut().unwrap().remove("legend");
+            data["roles"] = json!(["Product", "Engineering", "Security", "Support", "Legal", "Finance", "Sales", "Operations"]);
+            repeated(data, "tasks", 10, |task, index| {
+                task["label"] = json!(format!("Task {index}"));
+                task["assignments"] = json!((0..8).map(|role| if role == index % 8 { "A/R" } else if role % 3 == 0 { "C" } else { "I" }).collect::<Vec<_>>());
+            });
+        })),
+        ("matrix/risk", Box::new(|data| repeated(data, "risks", 10, |risk, index| {
+            risk["id"] = json!(format!("R{}", index + 1)); risk["label"] = json!(format!("Risk {index}"));
+            risk["likelihood"] = json!(1 + index % 5); risk["impact"] = json!(1 + (index * 2) % 5);
+        }))),
+        ("vertical-bar-graph/pareto", Box::new(|data| repeated(data, "items", 12, |item, index| { item["label"] = json!(format!("Cause {index}")); item["value"] = json!(50 - 3 * index); }))),
+        ("line-graph/control-chart", Box::new(|data| {
+            data["labels"] = json!((1..=32).map(|index| format!("W{index}")).collect::<Vec<_>>());
+            data["values"] = json!((0..32).map(|index| 12.0 + ((index * 7) % 11) as f64 / 10.0).collect::<Vec<_>>());
+        })),
+        ("tree/fishbone", Box::new(|data| repeated(data, "categories", 6, |category, index| {
+            category["label"] = json!(format!("Category {index}"));
+            category["causes"] = json!((0..3).map(|cause| json!({"text":format!("Cause {index}.{cause}")})).collect::<Vec<_>>());
+        }))),
+        ("flow/swimlane", Box::new(|data| {
+            data["lanes"] = json!(["Customer", "Sales", "Finance", "Operations", "Support"]);
+            data["steps"] = json!((0..16).map(|index| json!({"id":format!("s{index}"),"label":format!("Step {index}"),"lane":index % 5,"column":index * 7 / 16})).collect::<Vec<_>>());
+            let mut flows: Vec<Value> = (0..15).map(|index| json!({"from":format!("s{index}"),"to":format!("s{}", index + 1)})).collect();
+            flows.push(json!({"from":"s15","to":"s0","label":"Restart","exception":true}));
+            data["flows"] = json!(flows);
+        })),
+        ("flow/sankey", Box::new(|data| {
+            let stages = [4, 4, 4, 2, 2];
+            data["nodes"] = json!(stages.iter().enumerate().flat_map(|(stage, count)| (0..*count).map(move |index| json!({"id":format!("n{stage}{index}"),"label":format!("Node {stage}.{index}")}))).collect::<Vec<_>>());
+            let mut links: Vec<Value> = (0..4).flat_map(|index| [json!({"from":format!("n0{index}"),"to":format!("n1{index}"),"value":10}), json!({"from":format!("n1{index}"),"to":format!("n2{index}"),"value":10})]).collect();
+            links.extend((0..4).map(|index| json!({"from":format!("n2{index}"),"to":format!("n3{}", index / 2),"value":10})));
+            links.extend((0..2).map(|index| json!({"from":format!("n3{index}"),"to":format!("n4{index}"),"value":20})));
+            data["links"] = json!(links);
+        })),
+        ("flow/journey", Box::new(|data| {
+            data["stages"] = json!(["Discover", "Compare", "Sign up", "Onboard", "Use", "Renew"]);
+            data["emotions"] = json!([1, 0, -2, -1, 1, 2]);
+            data["emotion_notes"] = json!(["Curious", "Unsure", "Form too long", "Needs help", "Productive", "Clear value"]);
+            repeated(data, "rows", 4, |row, index| { row["label"] = json!(format!("Row {index}")); row["cells"] = json!((0..6).map(|stage| format!("Cell {index}.{stage}")).collect::<Vec<_>>()); });
+        })),
+        ("correlation/c4-container", Box::new(|data| {
+            let mut elements: Vec<Value> = (0..3).map(|index| json!({"id":format!("p{index}"),"label":format!("Person {index}"),"kind":"person"})).collect();
+            elements.extend((0..3).map(|index| json!({"id":format!("c{index}"),"label":format!("Service {index}"),"kind":"container"})));
+            elements.extend((0..3).map(|index| json!({"id":format!("d{index}"),"label":format!("Store {index}"),"kind":"database"})));
+            elements.extend((0..3).map(|index| json!({"id":format!("x{index}"),"label":format!("External {index}"),"kind":"external"})));
+            let mut relations: Vec<Value> = (0..3).map(|index| json!({"from":format!("p{index}"),"to":"c0"})).collect();
+            relations.extend([json!({"from":"c0","to":"c1"}), json!({"from":"c1","to":"c2"})]);
+            relations.extend((0..3).map(|index| json!({"from":format!("c{index}"),"to":format!("d{index}")})));
+            relations.extend((0..3).map(|index| json!({"from":"c2","to":format!("x{index}")})));
+            data["elements"] = json!(elements);
+            data["relations"] = json!(relations);
+        })),
+    ];
+    let mut failures = Vec::new();
+    for (id, edit) in cases {
+        for spec in [example(id), framed(example(id))] {
+            let mut spec = spec;
+            edit(&mut spec["data"]);
+            if let Err(error) = create(&spec) { failures.push(format!("{id} (layout {}): {error}", spec["layout"])); }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 #[test]
@@ -278,6 +423,79 @@ fn c4_relations_run_between_boxes_instead_of_through_them() {
                 assert!(!inside, "{} runs through a box at {point:?}", connector["id"]);
             }
         }
+    }
+}
+
+#[test]
+fn c4_capacity_follows_the_documented_row_rule() {
+    for (containers, databases) in [(9, 0), (6, 3), (3, 6), (0, 9), (4, 2), (1, 1)] {
+        let element = with_data("correlation/c4-container", |data| c4_inner(data, containers, databases)).unwrap_or_else(|error| panic!("{containers}+{databases}: {error}"));
+        assert_routes_clear_nodes(&element, &format!("c4 {containers} containers and {databases} databases"));
+    }
+    // A middle box of a full row cannot reach both sides with straight lines, so creation fails instead of drawing through a box.
+    let error = with_data("correlation/c4-container", |data| {
+        c4_inner(data, 9, 0);
+        data["relations"] = json!([{"from":"customer","to":"c0"},{"from":"c0","to":"payments"}]);
+    }).unwrap_err();
+    assert!(error.contains("architecture relation") && error.contains("would run through"), "{error}");
+}
+
+#[test]
+fn swimlane_returns_skips_and_blocked_columns_route_around_steps() {
+    let cases = [
+        ("review repro: rework return under an intermediate lane", swimlane(&["Customer", "Sales"],
+            json!([{"id":"a","label":"Request","lane":1},{"id":"b","label":"Review","lane":0},{"id":"c","label":"Approve","lane":0},{"id":"d","label":"Notify","lane":1}]),
+            json!([{"from":"a","to":"b"},{"from":"b","to":"c"},{"from":"b","to":"d"},{"from":"c","to":"a","label":"Rework","exception":true}]))),
+        ("forward flow past an occupied cell", swimlane(&["Team", "Lead"],
+            json!([{"id":"a","label":"Draft","lane":0},{"id":"b","label":"Edit","lane":0},{"id":"c","label":"Publish","lane":0},{"id":"r","label":"Sign off","lane":1,"column":1}]),
+            json!([{"from":"a","to":"b"},{"from":"b","to":"c"},{"from":"a","to":"c","label":"Minor"},{"from":"a","to":"r"}]))),
+        ("same column past a middle lane", swimlane(&["Desk", "Review", "Archive"],
+            json!([{"id":"p","label":"Receive","lane":0,"column":0},{"id":"q","label":"Assess","lane":1,"column":0},{"id":"r","label":"File","lane":2,"column":0},{"id":"s","label":"Close","lane":1,"column":1}]),
+            json!([{"from":"p","to":"r"},{"from":"q","to":"s"}]))),
+        ("returns and exceptions across three lanes", swimlane(&["Intake", "Work", "Check"],
+            json!([{"id":"a","label":"Start","lane":0},{"id":"b","label":"Work","lane":1},{"id":"c","label":"Check","lane":2},{"id":"x","label":"Side task","lane":1,"column":0},{"id":"y","label":"Escalated","lane":0,"column":2}]),
+            json!([{"from":"a","to":"b"},{"from":"b","to":"c"},{"from":"c","to":"a","label":"Redo","exception":true},{"from":"c","to":"x","exception":true},{"from":"a","to":"y","label":"Escalate","exception":true}]))),
+    ];
+    for (name, spec) in cases {
+        let element = create(&spec).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_routes_clear_nodes(&element, name);
+        let document = execute_request(json!({"op":"new_document","id":"swimlane-preflight","deck":deck(vec![element])})).unwrap();
+        let preflight = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0],"min_font_size":12}})).unwrap();
+        let findings: Vec<&Value> = preflight["findings"].as_array().unwrap().iter()
+            .filter(|finding| ["CONNECTOR_LABEL_INTERFERENCE", "TEXT_OVERLAP", "CONTAINER_PADDING", "OFF_SLIDE"].contains(&finding["code"].as_str().unwrap())).collect();
+        assert!(findings.is_empty(), "{name}: {findings:?}");
+    }
+}
+
+#[test]
+fn swimlane_routes_never_cross_steps_in_generated_processes() {
+    let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+    let mut next = |bound: usize| { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; (seed % bound as u64) as usize };
+    let names = ["Customer", "Sales", "Finance", "Operations", "Support"];
+    for case in 0..120 {
+        let (lanes, columns) = (2 + next(4), 2 + next(5));
+        let count = (2 + next(10)).min(lanes * columns);
+        let mut cells: Vec<(usize, usize)> = (0..lanes).flat_map(|lane| (0..columns).map(move |column| (lane, column))).collect();
+        for index in (1..cells.len()).rev() { let other = next(index + 1); cells.swap(index, other); }
+        let mut chosen = cells[..count].to_vec();
+        chosen.sort_by_key(|&(lane, column)| (column, lane));
+        let steps: Vec<Value> = chosen.iter().enumerate().map(|(index, &(lane, column))| {
+            let shape = ["task", "decision", "event"][next(3)];
+            json!({"id":format!("s{index}"),"label":format!("Step {index}"),"lane":lane,"column":column,"shape":shape})
+        }).collect();
+        let mut pairs = BTreeSet::new();
+        let mut flows = Vec::new();
+        for _ in 0..count + next(count) {
+            let (from, to) = (next(count), next(count));
+            if from == to || !pairs.insert((from, to)) { continue; }
+            // Forward flows follow the (column, lane) order of the step ids, so only exceptions can point back.
+            let exception = to < from || next(5) == 0;
+            flows.push(json!({"from":format!("s{from}"),"to":format!("s{to}"),"exception":exception,"label":if next(3) == 0 { "Rework" } else { "" }}));
+        }
+        if flows.is_empty() { flows.push(json!({"from":"s0","to":"s1"})); }
+        let spec = swimlane(&names[..lanes], json!(steps), json!(flows));
+        let element = create(&spec).unwrap_or_else(|error| panic!("case {case}: {error}\n{spec}"));
+        assert_routes_clear_nodes(&element, &format!("case {case}: {spec}"));
     }
 }
 

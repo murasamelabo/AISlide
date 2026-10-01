@@ -153,23 +153,31 @@ the mean), `matrix/raci` (`raci`, exactly one A and at least one R per task),
 zones follow the product score 15+, 10-14, 5-9 and 1-4, and the list is ranked
 by score), `vertical-bar-graph/pareto` (`pareto`, a native combo chart with
 sorted columns plus the cumulative share and threshold on the right-hand
-0-100% axis), `line-graph/control-chart` (`control_chart`, a native line chart;
-omitted limits use the individuals-chart rule mean +/- 3 x average moving range
-/ 1.128 and the value axis is scaled to the data), `tree/fishbone`
+0-100% axis), `line-graph/control-chart` (`control_chart`, a native line chart
+of 5-32 values; omitted limits use the individuals-chart rule mean +/- 3 x
+average moving range / 1.128, limits must satisfy lower < center < upper after
+that default, and the value axis is scaled to the data), `tree/fishbone`
 (`fishbone`, 2-6 categories with 1-3 causes and `focus` highlights),
 `flow/sankey` (`sankey`, up to five stages; a node with inflow and outflow must
 balance), `flow/journey` (`journey`, 2-6 stages, 1-4 rows, an optional -2..2
-emotion curve and one highlighted stage), `flow/swimlane` (`swimlane`) and
-`correlation/c4-container` (`architecture`). The last two are converted to
-managed-graph geometry and drawn by the diagram engine, so connectors stay
-glued to their boxes. Swimlane columns follow the longest forward path unless
-`column` pins a step; `exception` flows are dashed return routes. The C4 view
-places people left, external systems right and containers and databases inside
-the system boundary, choosing slots that keep relation lines out of unrelated
-boxes. Where a label field is omitted, English defaults such as `Plan`,
+emotion curve and one highlighted stage), `flow/swimlane` (`swimlane`, 2-5
+lanes and up to seven columns) and `correlation/c4-container` (`architecture`).
+The last two are converted to managed-graph geometry and drawn by the diagram
+engine, so connectors stay glued to their boxes. Swimlane columns follow the
+longest forward path unless `column` pins a step; `exception` and return flows
+are dashed routes through lane channels and column gutters, and flows that
+would skip past an occupied cell use the same free space. The C4 view places
+people left, external systems right and containers then databases inside the
+system boundary in at most three rows of up to three, choosing slots and ports
+that keep relation lines out of unrelated boxes. Both parts reject a route that
+would still pass through another box instead of drawing it; in PowerPoint
+their custom routes are freeform lines that keep their shape but do not follow
+a moved box. Where a label field is omitted, English defaults such as `Plan`,
 `Actual`, `Variance`, `Value`, `Cumulative` and `Emotion` are used; pass
 localized labels in the data. The catalog now has 132 entries in the same 36
-categories.
+categories. These 14 entries are marked `specialized: true`: they stay
+`recommended` for agents whose data fits `use_when`, while Studio lists them
+after the general variants and never selects one as a category default.
 
 MCP `lucide_icons({query?,category?,offset?,limit?})` searches the installed
 Lucide React library (ISC) and `lucide_icon_assets({icons:[{name,color?,

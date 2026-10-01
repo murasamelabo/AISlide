@@ -44,7 +44,9 @@ export function PartsPanel({ catalog, theme, instance, onApply, onBusy }: { cata
   const deferred = useDeferredValue(spec)
   const renderKey = JSON.stringify(spec)
   const categories = [...new Map(catalog.presets.map((preset) => [preset.category, preset.category_name])).entries()]
-  const preferredPresets = [...catalog.presets].sort((left, right) => Number(right.recommended === true) - Number(left.recommended === true))
+  // Recommended general presets lead a category; specialized analysis presets stay listed but never become its default.
+  const rank = (preset: PartPreset) => preset.specialized === true ? 0 : preset.recommended === true ? 2 : 1
+  const preferredPresets = [...catalog.presets].sort((left, right) => rank(right) - rank(left))
   const presets = preferredPresets.filter((preset) => query ? `${preset.name} ${preset.category_name} ${preset.category}`.toLowerCase().includes(query.toLowerCase()) : preset.category === category)
   useEffect(() => {
     let obsolete = false

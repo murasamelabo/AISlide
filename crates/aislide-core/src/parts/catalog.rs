@@ -72,7 +72,9 @@ pub fn catalog() -> Value {
         let position = CATEGORIES.iter().position(|entry| entry.0 == category).expect("built-in briefing category");
         let category_name = CATEGORIES[position].1;
         let example = PartSpec { version: 1, preset: preset.id.into(), title: preset.name.into(), subtitle: "Synthetic example".into(), data: briefing_example(preset.kind), layout: None };
-        json!({"id":preset.id,"category":category,"category_name":category_name,"name":preset.name,"family":if position < 10 {"Charts"} else {"Diagrams"},"recommended":true,"use_when":preset.use_when,"avoid_when":preset.avoid_when,"example":example})
+        let mut entry = json!({"id":preset.id,"category":category,"category_name":category_name,"name":preset.name,"family":if position < 10 {"Charts"} else {"Diagrams"},"recommended":true,"use_when":preset.use_when,"avoid_when":preset.avoid_when,"example":example});
+        if preset.specialized { entry["specialized"] = json!(true); }
+        entry
     }));
     json!({"version":1,"presets":presets,"schema":schemars::schema_for!(PartSpec),"style":"Theme-linked minimal modern","default_bounds":{"x":64,"y":144,"width":1152,"height":512}})
 }

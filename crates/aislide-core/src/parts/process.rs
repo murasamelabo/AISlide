@@ -367,6 +367,21 @@ fn graph_data(spec: &PartSpec, theme: &Theme) -> Result<GraphSpec> {
     let graph: GraphSpec = serde_json::from_value(json!({"version":1,"title":spec.title,"subtitle":spec.subtitle,"nodes":nodes,"edges":edges,"groups":groups}))
         .map_err(|error| Error::Invalid(format!("graph part conversion failed: {error}")))?;
     crate::graphs::validate(&graph)?;
+    // The engine draws routes as given without obstacle avoidance, so refuse any route that would run through another box.
+    let (what, hint) = match &spec.data {
+        PartData::Swimlane { .. } => ("swimlane flow", "set explicit step columns so the flow has a free gutter"),
+        _ => ("architecture relation", "relate boxes on the edge of a full row, move the relation to a neighboring box or split the view"),
+    };
+    let node = |id: &str| graph.nodes.iter().find(|node| node.id == id).ok_or_else(|| Error::Invalid("unknown graph node".into()));
+    for edge in &graph.edges {
+        let points = crate::graphs::edge_points(node(&edge.source)?, node(&edge.target)?, edge);
+        for other in graph.nodes.iter().filter(|other| other.id != edge.source && other.id != edge.target) {
+            let bounds = [other.x + 1.0, other.y + 1.0, other.width - 2.0, other.height - 2.0];
+            if points.windows(2).any(|segment| crosses_box(segment[0], segment[1], bounds)) {
+                return Err(Error::Invalid(format!("{what} {} -> {} would run through {}; {hint}", edge.source, edge.target, other.id)));
+            }
+        }
+    }
     Ok(graph)
 }
 
@@ -390,7 +405,7 @@ fn swimlane_columns(steps: &[SwimlaneStep], flows: &[SwimlaneFlow], index: &BTre
         }
     }
     if visited != steps.len() { return Err(Error::Invalid("swimlane forward flows form a cycle; mark return or rework flows with exception: true".into())); }
-    if column.iter().any(|value| *value >= 8) { return Err(Error::Invalid("swimlane layouts allow at most eight columns".into())); }
+    if column.iter().any(|value| *value >= 7) { return Err(Error::Invalid("swimlane layouts allow at most seven columns (0-6); split longer processes across slides".into())); }
     let mut occupied = BTreeSet::new();
     for (position, step) in steps.iter().enumerate() {
         if !occupied.insert((step.lane, column[position])) { return Err(Error::Invalid(format!("swimlane steps share lane {} column {}; set column explicitly", step.lane, column[position]))); }
@@ -399,7 +414,8 @@ fn swimlane_columns(steps: &[SwimlaneStep], flows: &[SwimlaneFlow], index: &BTre
 }
 
 fn swimlane(lanes: &[String], steps: &[SwimlaneStep], flows: &[SwimlaneFlow], theme: &Theme) -> Result<GraphParts> {
-    items(lanes.len(), 2, 6, "swimlane lanes")?; items(steps.len(), 2, 16, "swimlane steps")?; items(flows.len(), 1, 24, "swimlane flows")?;
+    // Five lanes keep 50px steps and seven columns keep 104px steps on the fixed canvas.
+    items(lanes.len(), 2, 5, "swimlane lanes")?; items(steps.len(), 2, 16, "swimlane steps")?; items(flows.len(), 1, 24, "swimlane flows")?;
     for lane in lanes { single(lane, 24, "swimlane lane", true)?; }
     let index = unique(steps.iter().map(|step| step.id.as_str()), "swimlane step id")?;
     for step in steps {
@@ -443,26 +459,115 @@ fn swimlane(lanes: &[String], steps: &[SwimlaneStep], flows: &[SwimlaneFlow], th
         bounds.push([x, y, width, height]);
         json!({"id": step.id, "label": step.label, "kind": kind, "x": round(x), "y": round(y), "width": round(width), "height": round(height), "fill": fill, "stroke": outline, "color": "@dk1", "font_size": 14, "group": format!("lane-{}", step.lane)})
     }));
-    let edges = flows.iter().enumerate().map(|(position, flow)| {
+    // Steps keep at least 20px from every column boundary and sit between the lane header and a bottom band,
+    // so returns, exceptions and flows past occupied cells run through those free gutters and channels instead of across steps.
+    let occupied: BTreeSet<(usize, usize)> = steps.iter().zip(&column).map(|(step, column)| (step.lane, *column)).collect();
+    let blocked = |lanes: std::ops::Range<usize>, columns: std::ops::Range<usize>| lanes.into_iter().any(|lane| columns.clone().any(|column| occupied.contains(&(lane, column))));
+    let half_gap = (column_width - node_width) / 2.0;
+    let lane_bottom = |lane: usize| lane_top(lane) + lane_height;
+    let floor = |lane: usize| steps.iter().zip(&bounds).filter(|(step, _)| step.lane == lane).map(|(_, bounds)| bounds[1] + bounds[3]).fold(lane_top(lane) + header, f64::max);
+    // Routes sharing a lane channel take successive slots while space allows; later ones reuse the last slot.
+    let mut uses: BTreeMap<(char, usize), usize> = BTreeMap::new();
+    let mut slot = |channel: char, index: usize| { let count = uses.entry((channel, index)).or_default(); *count += 1; *count - 1 };
+    let below = |lane: usize, slot: usize| { let space = lane_bottom(lane) - 3.0 - floor(lane); (floor(lane) + (space / 2.0).min(12.0) + 8.0 * slot as f64).min(lane_bottom(lane) - 3.0) };
+    let above = |lane: usize, slot: usize| lane_top(lane) + header / 2.0 + [0.0, 5.0, -5.0][slot.min(2)];
+    // Gutter `index` is the boundary left of that column. Each route takes a free offset into the gap, preferring `side`
+    // (toward the step it enters or leaves) and staying 6px from every other vertical, including the turn of each forward
+    // elbow (midway between its boxes, so a narrow event node moves it off the boundary). Outer gutters end at the
+    // lane-label column and at the lane edge.
+    let direct = |flow: &SwimlaneFlow| {
         let (from, to) = (index[flow.from.as_str()], index[flow.to.as_str()]);
-        let mut edge = json!({"id": format!("flow-{position}"), "source": flow.from, "target": flow.to, "label": flow.label, "label_font_size": 12,
-            "color": if flow.exception { "@accent2" } else { "@dk2" }, "dashed": flow.exception});
-        if flow.exception && flow.label.is_empty() { edge["label"] = json!(""); }
-        if column[to] > column[from] {
-            edge["route"] = json!(if steps[from].lane == steps[to].lane { "straight" } else { "elbow" });
-            edge["source_port"] = json!("right"); edge["target_port"] = json!("left");
-        } else if column[to] == column[from] {
-            let down = steps[to].lane > steps[from].lane;
-            edge["source_port"] = json!(if down { "bottom" } else { "top" }); edge["target_port"] = json!(if down { "top" } else { "bottom" });
-        } else {
-            let (source, target) = (bounds[from], bounds[to]);
-            let below = lane_top(steps[from].lane.max(steps[to].lane)) + lane_height - 6.0;
-            edge["route"] = json!("manual");
-            edge["source_port"] = json!("bottom"); edge["target_port"] = json!("bottom");
-            edge["waypoints"] = json!([[round(source[0] + source[2] / 2.0), round(below)], [round(target[0] + target[2] / 2.0), round(below)]]);
-        }
-        edge
+        let (low, high) = (steps[from].lane.min(steps[to].lane), steps[from].lane.max(steps[to].lane));
+        !flow.exception && column[to] > column[from] && !blocked(low..high + 1, column[from] + 1..column[to])
+    };
+    let mut taken: Vec<f64> = flows.iter().filter(|flow| direct(flow)).filter_map(|flow| {
+        let (from, to) = (index[flow.from.as_str()], index[flow.to.as_str()]);
+        (steps[from].lane != steps[to].lane).then(|| (bounds[from][0] + bounds[from][2] + bounds[to][0]) / 2.0)
     }).collect();
+    let mut gutter = |index: usize, side: i32| {
+        let boundary = columns_left + index as f64 * column_width;
+        let low = if index == 0 { 6.0 + label_width } else { boundary - half_gap };
+        let high = if index == columns { 1150.0 } else { boundary + half_gap };
+        let inside: Vec<f64> = [50, 75, 25, -50, -75, -25].into_iter().map(|share| boundary + half_gap * f64::from(share * side) / 100.0)
+            .filter(|x| (low + 4.0..high - 4.0).contains(x)).collect();
+        let x = inside.iter().copied().find(|x| taken.iter().all(|other| (other - x).abs() >= 6.0)).unwrap_or(inside.first().copied().unwrap_or(boundary));
+        taken.push(x);
+        x
+    };
+    let center = |position: usize| [bounds[position][0] + bounds[position][2] / 2.0, bounds[position][1] + bounds[position][3] / 2.0];
+    // Pass 1: ports plus either an engine route or manual waypoints.
+    let mut plans: Vec<([&str; 2], Option<&str>, Vec<[f64; 2]>)> = Vec::new();
+    for flow in flows {
+        let (from, to) = (index[flow.from.as_str()], index[flow.to.as_str()]);
+        let (source_lane, target_lane, source_column, target_column) = (steps[from].lane, steps[to].lane, column[from], column[to]);
+        let (low, high) = (source_lane.min(target_lane), source_lane.max(target_lane));
+        let (source, target) = (center(from), center(to));
+        plans.push(if direct(flow) {
+            (["right", "left"], Some(if source_lane == target_lane { "straight" } else { "elbow" }), Vec::new())
+        } else if !flow.exception && target_column == source_column && !blocked(low + 1..high, source_column..source_column + 1) {
+            (if target_lane > source_lane { ["bottom", "top"] } else { ["top", "bottom"] }, None, Vec::new())
+        } else if !flow.exception && target_column > source_column {
+            // Pass occupied cells through the target lane's empty header band.
+            let (exit, enter, y) = (gutter(source_column + 1, -1), gutter(target_column, 1), above(target_lane, slot('t', target_lane)));
+            (["right", "left"], Some("manual"), vec![[exit, source[1]], [exit, y], [enter, y], [enter, target[1]]])
+        } else if !flow.exception && target_column == source_column {
+            let x = gutter(source_column + 1, -1);
+            (["right", "right"], Some("manual"), vec![[x, source[1]], [x, target[1]]])
+        } else {
+            // Returns and exceptions drop into the source lane's bottom channel, cross lanes in the gutter beside the
+            // target column and enter the target from its own lane's bottom channel or header band.
+            let start = below(source_lane, slot('b', source_lane));
+            if source_lane == target_lane {
+                (["bottom", "bottom"], Some("manual"), vec![[source[0], start], [target[0], start]])
+            } else {
+                let x = if source_column < target_column { gutter(target_column, 1) } else { gutter(target_column + 1, -1) };
+                let (end, port) = if target_lane < source_lane { (below(target_lane, slot('b', target_lane)), "bottom") } else { (above(target_lane, slot('t', target_lane)), "top") };
+                (["bottom", port], Some("manual"), vec![[source[0], start], [x, start], [x, end], [target[0], end]])
+            }
+        });
+    }
+    // Pass 2: manual ends sharing a top or bottom side spread apart. Ends heading left sit left of center and ends heading
+    // right sit right of it; on each side the end whose channel lies nearest the step sits outermost, so no stub crosses
+    // another end's channel segment. A straight vertical flow on that side keeps the center.
+    let mut ends: BTreeMap<(usize, &str), (bool, Vec<(bool, f64, usize, usize)>)> = BTreeMap::new();
+    for (position, (flow, (ports, route, waypoints))) in flows.iter().zip(&plans).enumerate() {
+        for (end, node) in [(0, index[flow.from.as_str()]), (1, index[flow.to.as_str()])] {
+            if !matches!(ports[end], "top" | "bottom") { continue; }
+            let group = ends.entry((node, ports[end])).or_default();
+            if *route != Some("manual") { group.0 = true; continue; }
+            let (stub, next) = if end == 0 { (waypoints[0], waypoints[1]) } else { (waypoints[waypoints.len() - 1], waypoints[waypoints.len() - 2]) };
+            let edge = if ports[end] == "top" { bounds[node][1] } else { bounds[node][1] + bounds[node][3] };
+            group.1.push((next[0] < bounds[node][0] + bounds[node][2] / 2.0, (stub[1] - edge).abs(), position, end));
+        }
+    }
+    let mut offsets: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+    for (straight, mut manual) in ends.into_values() {
+        if manual.is_empty() || manual.len() == 1 && !straight { continue; }
+        manual.sort_by(|left, right| left.1.total_cmp(&right.1).then(left.2.cmp(&right.2)));
+        for leftward in [true, false] {
+            let side: Vec<_> = manual.iter().filter(|entry| entry.0 == leftward).collect();
+            let count = side.len();
+            for (order, (_, _, position, end)) in side.into_iter().enumerate() {
+                let magnitude = (0.15 + 0.1 * (count - 1 - order) as f64).min(0.45);
+                offsets.insert((*position, *end), if leftward { -magnitude } else { magnitude });
+            }
+        }
+    }
+    // Pass 3: the stub waypoint moves with its port, keeping both the stub and the channel segment axis-aligned.
+    let mut edges = Vec::new();
+    for (position, (flow, (ports, route, mut waypoints))) in flows.iter().zip(plans).enumerate() {
+        let mut edge = json!({"id": format!("flow-{position}"), "source": flow.from, "target": flow.to, "label": flow.label, "label_font_size": 12,
+            "color": if flow.exception { "@accent2" } else { "@dk2" }, "dashed": flow.exception, "source_port": ports[0], "target_port": ports[1]});
+        if let Some(route) = route { edge["route"] = json!(route); }
+        for (end, field, node) in [(0, "source_offset", index[flow.from.as_str()]), (1, "target_offset", index[flow.to.as_str()])] {
+            let Some(share) = offsets.get(&(position, end)).map(|share| round(*share)) else { continue };
+            edge[field] = json!(share);
+            let stub = if end == 0 { 0 } else { waypoints.len() - 1 };
+            waypoints[stub][0] = round(bounds[node][0]) + (0.5 + share) * round(bounds[node][2]);
+        }
+        if !waypoints.is_empty() { edge["waypoints"] = json!(waypoints.iter().map(|point| [round(point[0]), round(point[1])]).collect::<Vec<_>>()); }
+        edges.push(edge);
+    }
     Ok((nodes, edges, groups))
 }
 
@@ -484,7 +589,12 @@ fn architecture(system: &str, elements: &[ArchitectureElement], relations: &[Arc
     let of = |kind: ArchitectureKind| elements.iter().enumerate().filter(|(_, element)| element.kind == kind).map(|(position, _)| position).collect::<Vec<_>>();
     let (people, externals, containers, databases) = (of(ArchitectureKind::Person), of(ArchitectureKind::External), of(ArchitectureKind::Container), of(ArchitectureKind::Database));
     if containers.is_empty() && databases.is_empty() { return Err(Error::Invalid("architecture requires at least one container or database inside the system boundary".into())); }
-    if people.len() > 3 || externals.len() > 3 || containers.len() + databases.len() > 9 { return Err(Error::Invalid("architecture allows up to nine containers and databases and three people or external systems per side".into())); }
+    if people.len() > 3 || externals.len() > 3 { return Err(Error::Invalid("architecture allows at most three people and three external systems".into())); }
+    // Containers fill rows of up to three and databases start a new row; three rows fit the boundary on the fixed canvas.
+    let inner_rows = containers.len().div_ceil(3) + databases.len().div_ceil(3);
+    if inner_rows > 3 {
+        return Err(Error::Invalid(format!("architecture boundary holds at most three rows of up to three boxes, and databases start a new row; {} containers and {} databases need {inner_rows} rows (for example, six containers and three databases fit)", containers.len(), databases.len())));
+    }
     let (side, gap, header) = (196.0, 44.0, 34.0);
     let boundary_left = if people.is_empty() { 16.0 } else { 16.0 + side + gap };
     let boundary_right = if externals.is_empty() { 1136.0 } else { 1136.0 - side - gap };
@@ -524,7 +634,8 @@ fn architecture(system: &str, elements: &[ArchitectureElement], relations: &[Arc
         let (cost, occupants) = arrange(&slots, occupants, elements, &links);
         if best.as_ref().is_none_or(|(current, ..)| cost + 1e-9 < *current) { best = Some((cost, slots, occupants)); }
     }
-    let (_, slots, occupants) = best.ok_or_else(|| too_small("architecture rows"))?;
+    // Three columns always fit once inner_rows <= 3 (87px boxes at least 149px wide), so a candidate always exists.
+    let (_, slots, occupants) = best.ok_or_else(|| Error::Invalid("architecture layout found no arrangement".into()))?;
     let style = |kind: ArchitectureKind| -> (&'static str, String, String, &'static str) {
         match kind {
             ArchitectureKind::Person => ("rounded_rectangle", darken("@accent1", theme, 0.1), darken("@accent1", theme, 0.3), "@lt1"),
@@ -545,21 +656,31 @@ fn architecture(system: &str, elements: &[ArchitectureElement], relations: &[Arc
     let edges: Vec<Value> = relations.iter().enumerate().map(|(position, relation)| json!({"id": format!("relation-{position}"), "source": relation.from, "target": relation.to, "label": relation.label, "label_font_size": 12, "color": "@dk2"})).collect();
     let mut slot_of = vec![0; elements.len()];
     for (slot, element) in occupants.iter().enumerate() { slot_of[*element] = slot; }
-    let edges = relation_ports(edges, &links, |element| slots[slot_of[element]]);
+    let boxes: Vec<[f64; 4]> = slot_of.iter().map(|slot| slots[*slot]).collect();
+    let edges = relation_ports(edges, &links, &boxes);
     Ok((nodes, edges, groups))
 }
 
 /// Explicit ports that face each other across the larger gap. Automatic ports can pick left/right for boxes
 /// that overlap horizontally, which runs the line back through both boxes and hides its arrowhead.
+/// When that straight line would cross another box (stacked people reaching one container), the other facing pair is used.
 /// Several relations on one side are spread in the order of their far ends, so they neither share a point nor cross.
-fn relation_ports(mut edges: Vec<Value>, links: &[(usize, usize)], bounds: impl Fn(usize) -> [f64; 4]) -> Vec<Value> {
+fn relation_ports(mut edges: Vec<Value>, links: &[(usize, usize)], boxes: &[[f64; 4]]) -> Vec<Value> {
     let mut sides: BTreeMap<(usize, &str), Vec<(f64, usize, &str)>> = BTreeMap::new();
+    let port = |bounds: [f64; 4], side: &str| match side {
+        "right" => [bounds[0] + bounds[2], bounds[1] + bounds[3] / 2.0], "left" => [bounds[0], bounds[1] + bounds[3] / 2.0],
+        "bottom" => [bounds[0] + bounds[2] / 2.0, bounds[1] + bounds[3]], _ => [bounds[0] + bounds[2] / 2.0, bounds[1]],
+    };
     for (position, &(from, to)) in links.iter().enumerate() {
-        let (source, target) = (bounds(from), bounds(to));
+        let (source, target) = (boxes[from], boxes[to]);
         let horizontal = (target[0] - source[0] - source[2]).max(source[0] - target[0] - target[2]).max(0.0);
         let vertical = (target[1] - source[1] - source[3]).max(source[1] - target[1] - target[3]).max(0.0);
-        let (source_port, target_port) = if horizontal >= vertical { if target[0] > source[0] { ("right", "left") } else { ("left", "right") } }
-            else if target[1] > source[1] { ("bottom", "top") } else { ("top", "bottom") };
+        let across = if target[0] > source[0] { ("right", "left") } else { ("left", "right") };
+        let down = if target[1] > source[1] { ("bottom", "top") } else { ("top", "bottom") };
+        let crosses = |(start, end): (&str, &str)| boxes.iter().enumerate().any(|(element, bounds)| element != from && element != to
+            && crosses_box(port(source, start), port(target, end), [bounds[0] + 1.0, bounds[1] + 1.0, bounds[2] - 2.0, bounds[3] - 2.0]));
+        let (preferred, other) = if horizontal >= vertical { (across, down) } else { (down, across) };
+        let (source_port, target_port) = if crosses(preferred) && !crosses(other) { other } else { preferred };
         edges[position]["source_port"] = json!(source_port);
         edges[position]["target_port"] = json!(target_port);
         let along = |far: [f64; 4], port: &str| if matches!(port, "top" | "bottom") { far[0] + far[2] / 2.0 } else { far[1] + far[3] / 2.0 };

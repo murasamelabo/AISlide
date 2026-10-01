@@ -193,12 +193,19 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
             message(band)?;
         }
         PartData::ControlChart { labels: names, values, series_label, center, upper, lower, message: band } => {
-            items(values.len(), 5, 60, "control chart values")?;
+            // The shared chart engine draws at most 32 categories.
+            items(values.len(), 5, 32, "control chart values")?;
             if names.len() != values.len() { return Err(Error::Invalid("control chart labels must match values".into())); }
             for name in names { single(name, 12, "control chart label", true)?; }
             single(series_label, 24, "series_label", false)?;
             for value in values.iter().chain(center.iter()).chain(upper.iter()).chain(lower.iter()) { finite(*value, "control chart values")?; }
-            if let (Some(upper), Some(lower)) = (upper, lower) { if upper <= lower { return Err(Error::Invalid("control chart upper limit must exceed the lower limit".into())); } }
+            if (upper.is_none() || lower.is_none()) && values.windows(2).all(|pair| pair[0] == pair[1]) {
+                return Err(Error::Invalid("control chart values do not vary, so derived limits would collapse onto the center line; supply both upper and lower limits".into()));
+            }
+            let [middle, top, bottom] = control_limits(values, *center, *upper, *lower);
+            if !(bottom < middle && middle < top) {
+                return Err(Error::Invalid(format!("control chart limits must satisfy lower < center < upper after defaults; got lower {}, center {}, upper {}", figure(bottom), figure(middle), figure(top))));
+            }
             message(band)?;
         }
         _ => super::process::validate(data)?,
