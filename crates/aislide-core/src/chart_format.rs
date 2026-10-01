@@ -26,9 +26,20 @@ pub struct AxisOptions {
     pub reverse: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_position: Option<AxisLabelPosition>,
 }
 
 impl AxisOptions { pub fn is_default(&self) -> bool { *self == Self::default() } }
+
+/// `low` keeps category labels at the plot edge when bars extend to both sides of zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AxisLabelPosition { NextTo, Low, High, Hidden }
+
+impl AxisLabelPosition {
+    pub(crate) fn native(self) -> &'static str { match self { Self::NextTo => "nextTo", Self::Low => "low", Self::High => "high", Self::Hidden => "none" } }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -252,6 +263,10 @@ pub(crate) fn read_axis(node: Node<'_, '_>, defaults: &AxisOptions, default_form
             let code = format.attribute("formatCode")?;
             if default_format == Some((code, format.attribute("sourceLinked").unwrap_or("1"))) { None } else { Some(code.to_owned()) }
         }),
+        label_position: match attribute(node, "tickLblPos") {
+            None | Some("nextTo") => None, Some("low") => Some(AxisLabelPosition::Low), Some("high") => Some(AxisLabelPosition::High), Some("none") => Some(AxisLabelPosition::Hidden),
+            _ => return Err(Error::Unsupported("chart tick label position".into())),
+        },
     };
     if options.log_base.is_none() {
         if options.min == defaults.min { options.min = None; }

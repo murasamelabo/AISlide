@@ -53,6 +53,20 @@ every presentation.
 | Equal-status topics without icons | Open rows/columns/grid |
 | Required product screenshot | Original image plus focused annotation |
 | Screenshot with numbered UI callouts | `list-enumeration/screenshot-callouts` |
+| Headline metrics with change and status | `list-horizontal/kpi-cards` |
+| Metrics against a target and qualitative ranges | `horizontal-bar-graph/bullet` |
+| Plan versus actual by line item | `water-fall/variance` |
+| Options rated on shared criteria (0-4) | `matrix/harvey-balls` |
+| Comparable numbers where hot spots matter | `matrix/heatmap` |
+| Responsibilities per task and role | `matrix/raci` |
+| Scored risks with actions | `matrix/risk` |
+| Few causes explain most occurrences | `vertical-bar-graph/pareto` |
+| Process stability over time | `line-graph/control-chart` |
+| Candidate causes for one effect | `tree/fishbone` |
+| Handoffs between roles or systems | `flow/swimlane` |
+| Quantities that split and merge across stages | `flow/sankey` |
+| Customer stages, touchpoints and emotions | `flow/journey` |
+| Containers inside one system boundary | `correlation/c4-container` |
 
 Plan the page mix before building: a briefing usually alternates cards, rows,
 shifts, steps, graphs and required tables. Do not convert every page to cards.
@@ -120,6 +134,40 @@ Never hand-place numbered badges or numbered legend rows next to a screenshot:
 use `screenshot-callouts`, read callout `x`/`y` from the image itself, and
 preview once. Preflight `NUMBERED_SEQUENCE_UNEVEN` flags hand-placed numbered
 columns or rows with uneven pitch or left edges.
+
+## Business Analysis Part Contracts
+
+These presets share the briefing rules above: frame-size rendering, fixed
+12-22px typography (a KPI value may grow to 44px), overflow rejection and an
+optional `message` band (not on swimlane or C4). Supply numbers from approved
+sources; the parts never invent data. Omitted label fields fall back to short
+English words, so pass localized labels for Japanese decks.
+
+| Preset | `data.kind` and fields |
+| --- | --- |
+| `list-horizontal/kpi-cards` | `kpi_cards`: `cards` 1-8 `{label<=48, value<=16 (text), unit<=12, delta<=40, status good/bad/neutral, comparison<=60}`, `columns` 1-4 (max two rows) |
+| `horizontal-bar-graph/bullet` | `bullet_graphs`: `rows` 1-6 `{label<=40, actual, target, ranges 1-3 ascending (last = axis max), unit<=8, note<=80, lower_is_better}` |
+| `water-fall/variance` | `variance`: `rows` 2-10 `{label<=32, plan, actual}`, `unit`, `plan_label`/`actual_label`/`variance_label`, `total_label` (adds a total row), `lower_is_better` |
+| `matrix/harvey-balls` | `harvey_matrix`: `columns` 2-6, `rows` 2-8 `{label<=40, levels 0-4 per column}` (7 with both `message` and legend), `legend` 0 or 5 labels |
+| `matrix/heatmap` | `heatmap`: `columns` 2-12, `rows` 2-10 `{label<=32, values}`, `unit<=4`, `midpoint` (default mean), `lower_is_better` |
+| `matrix/raci` | `raci`: `roles` 2-8, `tasks` 2-10 `{label<=48, assignments ""/R/A/C/I/A/R per role}` (9 with the legend); exactly one A and at least one R per task; `legend` 0 or 4 labels |
+| `matrix/risk` | `risk_matrix`: `risks` 1-10 `{id<=3, label<=48, likelihood 1-5, impact 1-5, action<=80}`, at most four per cell; `likelihood_label`, `impact_label`, `zone_labels` 0 or 4 |
+| `vertical-bar-graph/pareto` | `pareto`: `items` 3-12 `{label<=24, value>=0}`, `value_label`, `cumulative_label`, `threshold` 0-1 (default 0.8) |
+| `line-graph/control-chart` | `control_chart`: `labels`/`values` 5-32, `series_label`, optional `center`/`upper`/`lower` (default mean +/- 3 x average moving range / 1.128); after defaults `lower < center < upper`, and flat values need both limits |
+| `tree/fishbone` | `fishbone`: `effect<=60`, `categories` 2-6 `{label<=20, causes 1-3 {text<=28, focus}}` |
+| `flow/swimlane` | `swimlane`: `lanes` 2-5, `steps` 2-16 `{id, label<=40, lane, shape task/decision/event, column 0-6}`, `flows` 1-24 `{from, to, label<=16, exception}`; forward flows must not form a cycle |
+| `flow/sankey` | `sankey`: `nodes` 2-16 `{id, label<=24, color}`, `links` 1-32 `{from, to, value>0}`, up to five stages, balanced intermediate nodes, `unit<=8` |
+| `flow/journey` | `journey`: `stages` 2-6, `rows` 1-4 `{label<=16, cells<=60 per stage, boxed}`, `emotions` -2..2 per stage, `emotion_label`, `emotion_notes`, `highlight` |
+| `correlation/c4-container` | `architecture`: `system<=40`, `elements` 2-12 `{id, label<=32, kind person/container/database/external, detail<=48}` with at most 3 people, 3 external systems and three inner rows of up to three (databases start a new row), `relations` 1-16 `{from, to, label<=24}` |
+
+IDs are 1-24 ASCII letters, digits, `-` or `_`. Swimlane and C4 render through
+the diagram engine with glued native connectors; the other presets are drawn
+shapes, native freeforms or native charts. Swimlane returns, exceptions and
+flows past occupied cells run through lane channels and column gutters. A
+swimlane flow or C4 relation that would still pass through another box is
+rejected rather than drawn. In PowerPoint those custom routes are freeform
+lines: they keep their shape but do not follow a moved box, so change the part
+data in AISlide instead of dragging steps in Office.
 
 ## Section Divider
 

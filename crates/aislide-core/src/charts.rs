@@ -295,7 +295,9 @@ fn chart_with_label_positions(kind: ChartKind, categories: &[String], series: &[
             }
             if value_axis || custom.number_format.is_some() { empty(writer, "c:numFmt", &[("formatCode", custom.number_format.as_deref().unwrap_or(if kind.is_percent() { "0%" } else { "General" })), ("sourceLinked", if custom.number_format.is_some() || kind.is_percent() { "0" } else { "1" })]); }
             empty(writer, "c:majorTickMark", &[("val", "none")]); empty(writer, "c:minorTickMark", &[("val", "none")]);
-            empty(writer, "c:tickLblPos", &[("val", "nextTo")]); empty(writer, "c:crossAx", &[("val", cross)]); empty(writer, "c:crosses", &[("val", "autoZero")]);
+            empty(writer, "c:tickLblPos", &[("val", custom.label_position.map_or("nextTo", |position| position.native()))]); empty(writer, "c:crossAx", &[("val", cross)]);
+            // A secondary value axis must cross its category axis at the far end or Office draws it beside the primary axis.
+            empty(writer, "c:crosses", &[("val", if secondary && value_axis { "max" } else { "autoZero" })]);
             if tag == "c:catAx" { empty(writer, "c:auto", &[("val", "1")]); empty(writer, "c:lblAlgn", &[("val", "ctr")]); empty(writer, "c:lblOffset", &[("val", "100")]); }
             else { empty(writer, "c:crossBetween", &[("val", "between")]); if let Some(unit) = custom.major_unit { empty(writer, "c:majorUnit", &[("val", &unit.to_string())]); } if let Some(unit) = custom.minor_unit { empty(writer, "c:minorUnit", &[("val", &unit.to_string())]); } }
             writer.end_element();

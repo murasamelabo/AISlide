@@ -4,12 +4,16 @@ use std::collections::BTreeSet;
 
 pub mod aspect;
 mod briefing;
+mod business;
 mod catalog;
 mod charts;
 mod diagrams;
+mod process;
 pub mod state;
 pub use briefing::{AgendaItem, Callout, IconCard, IconRow, PartMessage, ShiftRow, StepCard};
+pub use business::{BulletRow, HarveyRow, HeatmapRow, KpiCard, KpiStatus, ParetoItem, RaciTask, Risk, VarianceRow};
 pub use catalog::catalog;
+pub use process::{ArchitectureElement, ArchitectureKind, ArchitectureRelation, FishboneCategory, FishboneCause, JourneyRow, SankeyLink, SankeyNode, StepShape, SwimlaneFlow, SwimlaneStep};
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +67,64 @@ pub enum PartData {
     StepCards { steps: Vec<StepCard>, #[serde(default, skip_serializing_if = "String::is_empty")] step_label: String, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     Agenda { items: Vec<AgendaItem>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
     ScreenshotCallouts { image: crate::graphs::GraphIcon, callouts: Vec<Callout>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    KpiCards { cards: Vec<KpiCard>, #[serde(default, skip_serializing_if = "Option::is_none")] columns: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    BulletGraphs { rows: Vec<BulletRow>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    Variance {
+        rows: Vec<VarianceRow>,
+        #[serde(default, skip_serializing_if = "String::is_empty")] unit: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")] plan_label: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")] actual_label: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")] variance_label: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")] total_label: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")] lower_is_better: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
+    },
+    HarveyMatrix { columns: Vec<String>, rows: Vec<HarveyRow>, #[serde(default, skip_serializing_if = "Vec::is_empty")] legend: Vec<String>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    Heatmap {
+        columns: Vec<String>,
+        rows: Vec<HeatmapRow>,
+        #[serde(default, skip_serializing_if = "String::is_empty")] unit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")] midpoint: Option<f64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")] lower_is_better: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
+    },
+    Raci { roles: Vec<String>, tasks: Vec<RaciTask>, #[serde(default, skip_serializing_if = "Vec::is_empty")] legend: Vec<String>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    RiskMatrix {
+        risks: Vec<Risk>,
+        #[serde(default, skip_serializing_if = "String::is_empty")] likelihood_label: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")] impact_label: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")] zone_labels: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
+    },
+    Pareto {
+        items: Vec<ParetoItem>,
+        #[serde(default, skip_serializing_if = "String::is_empty")] value_label: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")] cumulative_label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")] threshold: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
+    },
+    ControlChart {
+        labels: Vec<String>,
+        values: Vec<f64>,
+        #[serde(default, skip_serializing_if = "String::is_empty")] series_label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")] center: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] upper: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] lower: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
+    },
+    Fishbone { effect: String, categories: Vec<FishboneCategory>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    Swimlane { lanes: Vec<String>, steps: Vec<SwimlaneStep>, flows: Vec<SwimlaneFlow> },
+    Sankey { nodes: Vec<SankeyNode>, links: Vec<SankeyLink>, #[serde(default, skip_serializing_if = "String::is_empty")] unit: String, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    Journey {
+        stages: Vec<String>,
+        rows: Vec<JourneyRow>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")] emotions: Vec<i8>,
+        #[serde(default, skip_serializing_if = "String::is_empty")] emotion_label: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")] emotion_notes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] highlight: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
+    },
+    Architecture { system: String, elements: Vec<ArchitectureElement>, relations: Vec<ArchitectureRelation> },
     Chart { categories: Vec<String>, series: Vec<PartSeries>, #[serde(default)] x_axis: String, #[serde(default)] y_axis: String },
     Items { items: Vec<PartItem>, #[serde(default)] center: String },
     Tree { nodes: Vec<TreeNode> },
@@ -134,7 +196,10 @@ fn validate_data(data: &PartData) -> Result<()> {
                 if panel.body_size.is_some_and(|size| !size.is_finite() || !(16.0..=28.0).contains(&size)) { return Err(Error::Invalid("comparison body size must be 16-28px".into())); }
             }
         }
-        PartData::IconCards { .. } | PartData::IconRows { .. } | PartData::ShiftRows { .. } | PartData::StepCards { .. } | PartData::Agenda { .. } | PartData::ScreenshotCallouts { .. } => briefing::validate(data)?,
+        PartData::IconCards { .. } | PartData::IconRows { .. } | PartData::ShiftRows { .. } | PartData::StepCards { .. } | PartData::Agenda { .. } | PartData::ScreenshotCallouts { .. }
+        | PartData::KpiCards { .. } | PartData::BulletGraphs { .. } | PartData::Variance { .. } | PartData::HarveyMatrix { .. } | PartData::Heatmap { .. } | PartData::Raci { .. }
+        | PartData::RiskMatrix { .. } | PartData::Pareto { .. } | PartData::ControlChart { .. } | PartData::Fishbone { .. } | PartData::Swimlane { .. } | PartData::Sankey { .. }
+        | PartData::Journey { .. } | PartData::Architecture { .. } => briefing::validate(data)?,
         PartData::Diagram { graph } => crate::graphs::validate(graph)?,
         PartData::Chart { categories, series, x_axis, y_axis } => {
             count(categories.len(), 1, 12)?; count(series.len(), 1, 4)?;
@@ -220,6 +285,10 @@ pub fn create(id: &str, spec: &PartSpec) -> Result<Element> { create_with_theme(
 
 pub(crate) fn graph_render_context(id: &str, spec: &PartSpec) -> Result<(String, crate::graphs::GraphSpec, f64)> {
     let PartData::Diagram { graph } = &spec.data else { return Err(Error::Invalid("graph context requires diagram data".into())); };
+    graph_context(id, spec, graph)
+}
+
+fn graph_context(id: &str, spec: &PartSpec, graph: &crate::graphs::GraphSpec) -> Result<(String, crate::graphs::GraphSpec, f64)> {
     let Some(layout) = &spec.layout else { return Ok((id.into(), graph.clone(), 512.0)); };
     let mut rendered_graph = graph.clone();
     rendered_graph.show_title = graph.show_title && layout.show_title;
@@ -238,21 +307,11 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
     valid_text(id,40)?; if id.is_empty() {return Err(Error::Invalid("part identity".into()));}
     crate::design::validate_theme(theme)?;
     let (category,variant)=validate_spec(spec)?;
+    if let Some(graph) = process::graph(spec, theme)? { return graph_part(id, spec, &graph, theme); }
     if briefing::kind(&spec.data).is_some() { return briefing::create(id, spec, theme); }
     if let PartData::Diagram { graph } = &spec.data {
         if category != "diagram" { return Err(Error::Invalid("graph data requires diagram/custom".into())); }
-        let Some(layout) = &spec.layout else { return crate::graphs::create(id, graph, theme); };
-        let (graph_id, rendered_graph, content_height) = graph_render_context(id, spec)?;
-        let mut result = crate::graphs::create(&graph_id, &rendered_graph, theme)?;
-        if let Element::Group { id: root_id, .. } = &mut result { *root_id = id.into(); }
-        adopt_layout(&mut result, layout, 0.0, content_height, theme, &crate::graphs::small_annotation_ids(&graph_id, &rendered_graph)?)?;
-        if let Element::Group { children, .. } = &mut result {
-            crate::graphs::fit_node_labels(&graph_id, &rendered_graph, children, theme)?;
-            crate::graphs::cap_detail_fonts(&graph_id, &rendered_graph, children)?;
-            crate::graphs::fit_detail_widows(&graph_id, &rendered_graph, children, theme)?;
-            crate::graphs::validate_label_overlaps(&graph_id, &rendered_graph, children)?;
-        }
-        return Ok(result);
+        return graph_part(id, spec, graph, theme);
     }
     let identity = crate::canonical::bytes(spec)?;
     use sha2::{Digest, Sha256};
@@ -279,6 +338,21 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
         if let Element::Text { id, font_size, .. } = element {
             if fixed_sizes.get(id).is_some_and(|expected| *font_size < *expected) { return Err(Error::Invalid(format!("comparison panel text {id} does not fit its fixed font size; shorten the text, enlarge the part or split the slide"))); }
         }
+    }
+    Ok(result)
+}
+
+fn graph_part(id: &str, spec: &PartSpec, graph: &crate::graphs::GraphSpec, theme: &crate::design::Theme) -> Result<Element> {
+    let Some(layout) = &spec.layout else { return crate::graphs::create(id, graph, theme); };
+    let (graph_id, rendered_graph, content_height) = graph_context(id, spec, graph)?;
+    let mut result = crate::graphs::create(&graph_id, &rendered_graph, theme)?;
+    if let Element::Group { id: root_id, .. } = &mut result { *root_id = id.into(); }
+    adopt_layout(&mut result, layout, 0.0, content_height, theme, &crate::graphs::small_annotation_ids(&graph_id, &rendered_graph)?)?;
+    if let Element::Group { children, .. } = &mut result {
+        crate::graphs::fit_node_labels(&graph_id, &rendered_graph, children, theme)?;
+        crate::graphs::cap_detail_fonts(&graph_id, &rendered_graph, children)?;
+        crate::graphs::fit_detail_widows(&graph_id, &rendered_graph, children, theme)?;
+        crate::graphs::validate_label_overlaps(&graph_id, &rendered_graph, children)?;
     }
     Ok(result)
 }

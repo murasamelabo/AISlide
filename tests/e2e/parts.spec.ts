@@ -38,6 +38,23 @@ for (const width of [1440, 390]) {
   });
 }
 
+test('specialized analysis presets stay listed without replacing category defaults', async ({ page }) => {
+  await openSample(page);
+  await page.getByRole('button', { name: 'Parts library', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Parts library', exact: true });
+  for (const [category, generic, specialized] of [
+    ['vertical-bar-graph', 'Balanced columns', 'Pareto chart'], ['horizontal-bar-graph', 'Balanced bars', 'Bullet graphs'], ['line-graph', 'Trend overview', 'Control chart'],
+    ['water-fall', 'Running bridge', 'Plan versus actual variance'], ['matrix', 'Labeled grid', 'Risk matrix'], ['tree', 'Hierarchy blocks', 'Fishbone diagram'],
+    ['correlation', 'Circular network', 'C4 container diagram'], ['flow', 'Step cards', 'Swimlane process'], ['list-horizontal', 'Open editorial columns', 'KPI cards'],
+  ]) {
+    await dialog.getByLabel('Part category', { exact: true }).selectOption(category);
+    await expect(dialog.locator('.part-preset').first()).toHaveAttribute('aria-label', generic);
+    await expect(dialog.getByRole('button', { name: generic, exact: true })).toHaveAttribute('aria-pressed', 'true');
+    const names = await dialog.locator('.part-preset').evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-label')));
+    expect(names.indexOf(specialized), category).toBeGreaterThan(names.indexOf(generic));
+  }
+});
+
 test('parts library inserts, updates and reopens editable metadata from one PPTX', async ({ page }) => {
   await openSample(page);
   await page.getByRole('button', { name: 'Parts library', exact: true }).click();

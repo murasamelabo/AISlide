@@ -8,6 +8,8 @@ pub(crate) const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/mai
 pub(crate) const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 pub(crate) const C: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 pub(crate) const REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+/// Marks an open freeform `p:sp` as an AISlide custom-routed connector and keeps its endpoint bindings.
+pub(crate) const CONNECTOR_NS: &str = "urn:aislide:connector:v1";
 const CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 
 pub(crate) struct NativePart { pub path: String, pub id: String, pub nodes: BTreeMap<String, String> }
@@ -18,6 +20,29 @@ fn number(node: Node<'_, '_>, attribute: &str, default: f64) -> f64 { node.attri
 pub(crate) fn properties<'a>(node: Node<'a, '_>) -> Option<Node<'a, 'a>> { node.children().find(|node| node.tag_name().namespace() == Some(P) && ["nvSpPr", "nvPicPr", "nvGraphicFramePr", "nvCxnSpPr", "nvGrpSpPr"].contains(&node.tag_name().name())).and_then(|node| child(node, P, "cNvPr")) }
 fn transform<'a>(node: Node<'a, '_>) -> Option<Node<'a, 'a>> { child(node, P, "xfrm").or_else(|| child(node, P, if node.has_tag_name((P, "grpSp")) { "grpSpPr" } else { "spPr" }).and_then(|node| child(node, A, "xfrm"))) }
 pub(crate) fn is_shape(node: Node<'_, '_>) -> bool { node.tag_name().namespace() == Some(P) && ["sp", "pic", "graphicFrame", "grpSp", "cxnSp"].contains(&node.tag_name().name()) }
+
+pub(crate) fn connector_marker<'a>(node: Node<'a, '_>) -> Option<Node<'a, 'a>> {
+    if !node.has_tag_name((P, "sp")) { return None; }
+    child(node, P, "nvSpPr").and_then(|node| child(node, P, "nvPr")).and_then(|node| child(node, P, "extLst")).into_iter().flat_map(|list| list.children())
+        .find(|entry| entry.has_tag_name((P, "ext")) && entry.attribute("uri") == Some(CONNECTOR_NS)).and_then(|entry| child(entry, CONNECTOR_NS, "route"))
+}
+
+fn custom_route_points(geometry: Node<'_, '_>) -> Result<Vec<[f64; 2]>> {
+    let paths: Vec<_> = child(geometry, A, "pathLst").into_iter().flat_map(|node| node.children()).filter(|node| node.has_tag_name((A, "path"))).collect();
+    if paths.len() != 1 { return Err(Error::Unsupported("complex connector path".into())); }
+    let path = paths[0]; let path_width = number(path, "w", 0.0); let path_height = number(path, "h", 0.0);
+    if !path_width.is_finite() || !path_height.is_finite() || path_width <= 0.0 || path_height <= 0.0 { return Err(Error::Unsupported("connector coordinate space".into())); }
+    let mut points = Vec::new();
+    for (index, command) in path.children().filter(|node| node.is_element()).enumerate() {
+        if index >= 18 { return Err(Error::Limit("custom connector exceeds 18 points".into())); }
+        if !command.has_tag_name((A, if index == 0 { "moveTo" } else { "lnTo" })) { return Err(Error::Unsupported("curved connector path".into())); }
+        if command.children().filter(|node| node.is_element()).count() != 1 { return Err(Error::Unsupported("custom connector command requires exactly one point".into())); }
+        let point = child(command, A, "pt").ok_or_else(|| Error::Unsupported("connector point".into()))?;
+        let coordinate = |name| point.attribute(name).and_then(|value| value.parse::<f64>().ok()).ok_or_else(|| Error::Unsupported("formula connector path".into()));
+        points.push([coordinate("x")? / path_width, coordinate("y")? / path_height]);
+    }
+    Ok(points)
+}
 
 fn color(node: Node<'_, '_>, default: &str) -> String {
     let Some(fill) = child(node, A, "solidFill") else { return default.into() };
@@ -293,20 +318,7 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
         let connection = |name| node.descendants().find(|node| node.has_tag_name((A, name))).and_then(|node| Some(Connection { element_id: ids.get(node.attribute("id")?)?.clone(), site: number(node, "idx", 0.0) as u32 }));
         let custom = child(properties, A, "custGeom").is_some();
         let mut points = if let Some(geometry) = child(properties, A, "custGeom") {
-            let paths: Vec<_> = child(geometry, A, "pathLst").into_iter().flat_map(|node| node.children()).filter(|node| node.has_tag_name((A, "path"))).collect();
-            if paths.len() != 1 { return Err(Error::Unsupported("complex connector path".into())); }
-            let path = paths[0]; let path_width = number(path, "w", 0.0); let path_height = number(path, "h", 0.0);
-            if !path_width.is_finite() || !path_height.is_finite() || path_width <= 0.0 || path_height <= 0.0 { return Err(Error::Unsupported("connector coordinate space".into())); }
-            let mut points = Vec::new();
-            for (index, command) in path.children().filter(|node| node.is_element()).enumerate() {
-                if index >= 18 { return Err(Error::Limit("custom connector exceeds 18 points".into())); }
-                if !command.has_tag_name((A, if index == 0 { "moveTo" } else { "lnTo" })) { return Err(Error::Unsupported("curved connector path".into())); }
-                if command.children().filter(|node| node.is_element()).count() != 1 { return Err(Error::Unsupported("custom connector command requires exactly one point".into())); }
-                let point = child(command, A, "pt").ok_or_else(|| Error::Unsupported("connector point".into()))?;
-                let coordinate = |name| point.attribute(name).and_then(|value| value.parse::<f64>().ok()).ok_or_else(|| Error::Unsupported("formula connector path".into()));
-                points.push([coordinate("x")? / path_width, coordinate("y")? / path_height]);
-            }
-            Some(points)
+            Some(custom_route_points(geometry)?)
         } else {
             let geometry = child(properties, A, "prstGeom").ok_or_else(|| Error::Unsupported("connector geometry".into()))?;
             let preset = geometry.attribute("prst").unwrap_or("");
@@ -356,6 +368,21 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
     }
     let properties = child(node, P, "spPr");
     let body = child(node, P, "txBody");
+    if let Some(route) = connector_marker(node) {
+        let properties = properties.ok_or_else(|| Error::Unsupported("connector properties".into()))?;
+        let geometry = child(properties, A, "custGeom").filter(|_| body.is_none()).ok_or_else(|| Error::Unsupported("marked connector requires an open custom path without text".into()))?;
+        let mut points = custom_route_points(geometry)?;
+        let flip_h = matches!(xfrm.and_then(|node| node.attribute("flipH")), Some("1" | "true"));
+        let flip_v = matches!(xfrm.and_then(|node| node.attribute("flipV")), Some("1" | "true"));
+        for point in &mut points { if flip_h { point[0] = ((1.0 - point[0]) * 1e6).round() / 1e6; } if flip_v { point[1] = ((1.0 - point[1]) * 1e6).round() / 1e6; } }
+        if let Some(extent) = xfrm.and_then(|node| child(node, A, "ext")) {
+            for (axis, name) in [(0, "cx"), (1, "cy")] { if number(extent, name, 0.0) == 0.0 { for point in &mut points { point[axis] = 0.0; } } }
+        }
+        let line = child(properties, A, "ln");
+        let end = |prefix: &str| Some(Connection { element_id: ids.get(route.attribute(prefix)?)?.clone(), site: route.attribute(format!("{prefix}Site").as_str())?.parse().ok()? });
+        let routing = crate::model::ConnectorRouting { points, custom: true, start_arrow: line.and_then(|node| child(node, A, "headEnd")).is_some_and(|node| node.attribute("type").is_some_and(|value| value != "none")), dashed: line.and_then(|node| child(node, A, "prstDash")).is_some_and(|node| node.attribute("val") == Some("dash")) };
+        return Ok(Element::Connector { visual: None, id, x, y, width, height, color: line.map_or_else(|| "@dk2".into(), |node| color(node, "@dk2")), stroke_width: line.map_or(1.0, |node| number(node, "w", 9525.0) / 9525.0), arrow: line.and_then(|node| child(node, A, "tailEnd")).is_some_and(|node| node.attribute("type").is_some_and(|value| value != "none")), flip_v: false, start: end("start"), end: end("end"), routing: Some(routing) });
+    }
     let connection_geometry = properties.and_then(|node| child(node, A, "custGeom")).map(crate::vector::read_connection_geometry).transpose()?.flatten();
     let preset = connection_geometry.as_ref().map(|(preset, _, _)| preset.as_str()).or_else(|| properties.and_then(|node| child(node, A, "prstGeom")).and_then(|node| node.attribute("prst"))).unwrap_or("rect");
     let filled = properties.is_some_and(|node| child(node, A, "solidFill").is_some() || child(node, A, "gradFill").is_some());

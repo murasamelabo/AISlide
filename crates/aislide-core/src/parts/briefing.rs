@@ -3,34 +3,78 @@ use crate::{design::Theme, graphs::GraphIcon, model::{Bullet, Crop, Element, Tex
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub(super) struct Preset { pub id: &'static str, pub kind: &'static str, pub name: &'static str, pub use_when: &'static str, pub avoid_when: &'static str }
+/// `specialized` presets fit one analysis or modeling method: they stay recommended for agents when their
+/// use_when applies, but editors list them after the general variants and never pick them as a category default.
+pub(super) struct Preset { pub id: &'static str, pub kind: &'static str, pub name: &'static str, pub specialized: bool, pub use_when: &'static str, pub avoid_when: &'static str }
 
 pub(super) const PRESETS: &[Preset] = &[
-    Preset { id: "list-horizontal/icon-cards", kind: "icon_cards", name: "Icon feature cards",
+    Preset { id: "list-horizontal/icon-cards", kind: "icon_cards", name: "Icon feature cards", specialized: false,
         use_when: "2-6 equal-status concepts that each need a meaningful icon, a heading and a short explanation, optional caption, check points or footer tag. Fixed typography; overflow rejects.",
         avoid_when: "Ordered stages, measured comparisons or two paired alternatives; use flow/cards, a chart or contrast/panels instead. Do not add icons that only decorate." },
-    Preset { id: "list/icon-rows", kind: "icon_rows", name: "Icon explanation rows",
+    Preset { id: "list/icon-rows", kind: "icon_rows", name: "Icon explanation rows", specialized: false,
         use_when: "2-6 stacked statements, risks or capabilities read top to bottom, each with a meaningful icon, bold heading and supporting detail.",
         avoid_when: "Sequences with handoffs, dense tables, or topics without supporting detail; use flow/cards, a table or list/rows instead." },
-    Preset { id: "before-after/shift", kind: "shift_rows", name: "Role and focus shift rows",
+    Preset { id: "before-after/shift", kind: "shift_rows", name: "Role and focus shift rows", specialized: false,
         use_when: "2-5 explicit from-to changes such as role, metric or operating-model shifts, optionally with column headings and one explanation per row.",
         avoid_when: "Two broad alternatives explained through paired statements (contrast/panels) or changes without a real from-to relationship." },
-    Preset { id: "flow/cards", kind: "step_cards", name: "Step cards",
+    Preset { id: "flow/cards", kind: "step_cards", name: "Step cards", specialized: false,
         use_when: "2-4 ordered steps with a numbered step pill, heading, explanation, optional supplied image or icon, check points and an outcome box.",
         avoid_when: "Unordered peers (list-horizontal/icon-cards) or more than four stages; split long procedures across slides." },
-    Preset { id: "list/agenda", kind: "agenda", name: "Numbered agenda",
+    Preset { id: "list/agenda", kind: "agenda", name: "Numbered agenda", specialized: false,
         use_when: "2-7 agenda or chapter entries with a number badge, heading, optional one-line detail and optional duration or page label.",
         avoid_when: "Content slides or process steps with relationships; use the matching list, flow or diagram preset." },
-    Preset { id: "list-enumeration/screenshot-callouts", kind: "screenshot_callouts", name: "Screenshot with numbered callouts",
+    Preset { id: "list-enumeration/screenshot-callouts", kind: "screenshot_callouts", name: "Screenshot with numbered callouts", specialized: false,
         use_when: "One approved screenshot with 1-6 numbered UI callouts explained beside it. Callout x/y are 0-1 fractions of the source image, so badges stay on the picture; legend numbers share one uniform pitch.",
         avoid_when: "Decorative photos, more than six callouts, or explanations unrelated to screen positions; use flow/cards images or list/icon-rows instead. Never hand-place numbered legends." },
+    Preset { id: "list-horizontal/kpi-cards", kind: "kpi_cards", name: "KPI cards", specialized: true,
+        use_when: "1-8 headline metrics, each with a large supplied value, unit, change versus a baseline and a good, bad or neutral status. Values are text, so round and format them first.",
+        avoid_when: "Trends over time or many comparable numbers; use a chart or table. Do not assign good or bad without an agreed target or baseline." },
+    Preset { id: "horizontal-bar-graph/bullet", kind: "bullet_graphs", name: "Bullet graphs", specialized: true,
+        use_when: "1-6 metrics compared with a target marker and 1-3 qualitative ranges, one compact row each; set lower_is_better for costs, times or defects.",
+        avoid_when: "Metrics without a target or ranges, or values over time; use list-horizontal/kpi-cards or a line chart." },
+    Preset { id: "water-fall/variance", kind: "variance", name: "Plan versus actual variance", specialized: true,
+        use_when: "2-10 line items with plan and actual values where each gap, colored by whether it helps, and an optional total drive the discussion.",
+        avoid_when: "A cumulative bridge from a start value to an end value (water-fall/balanced) or rows measured in different units." },
+    Preset { id: "matrix/harvey-balls", kind: "harvey_matrix", name: "Harvey ball comparison", specialized: true,
+        use_when: "2-8 options rated on 2-6 criteria with 0-4 quarter levels, optionally explained by a five-entry legend; with both a message band and the legend, up to seven options fit.",
+        avoid_when: "Measured numbers (matrix/heatmap or a chart) or ratings without a shared, explained scale." },
+    Preset { id: "matrix/heatmap", kind: "heatmap", name: "Heatmap table", specialized: true,
+        use_when: "2-10 rows by 2-12 columns of comparable numbers where color intensity around a midpoint reveals hot spots; every value stays printed.",
+        avoid_when: "Mixed units, a handful of values or data where position matters more than intensity; use a table or chart." },
+    Preset { id: "matrix/raci", kind: "raci", name: "RACI matrix", specialized: true,
+        use_when: "2-10 tasks by 2-8 roles with R, A, C, I or A/R assignments; every task needs exactly one A and at least one R. With the legend, up to nine tasks fit.",
+        avoid_when: "Reporting lines or ordered handoffs; use tree or flow/swimlane." },
+    Preset { id: "matrix/risk", kind: "risk_matrix", name: "Risk matrix", specialized: true,
+        use_when: "1-10 risks scored 1-5 for likelihood and impact, placed on a 5x5 grid with a list ranked by likelihood x impact and one action each.",
+        avoid_when: "Unscored risks or more than four risks in one cell; use a table. Zones follow the product score (15+, 10-14, 5-9, 1-4)." },
+    Preset { id: "vertical-bar-graph/pareto", kind: "pareto", name: "Pareto chart", specialized: true,
+        use_when: "3-12 nonnegative causes sorted into a native column chart with the cumulative share and a threshold line on the right-hand percentage axis.",
+        avoid_when: "Categories whose order carries meaning, such as time, or negative values; use a column or line chart." },
+    Preset { id: "line-graph/control-chart", kind: "control_chart", name: "Control chart", specialized: true,
+        use_when: "5-32 sequential measurements checked against a center line and control limits; omitted limits use the individuals chart rule of 3 x average moving range / 1.128, and limits must satisfy lower < center < upper.",
+        avoid_when: "Comparing categories or showing goals; use bullet graphs or a line chart." },
+    Preset { id: "tree/fishbone", kind: "fishbone", name: "Fishbone diagram", specialized: true,
+        use_when: "One effect with 2-6 cause categories and 1-3 short causes each; mark focus causes to highlight what will be addressed first.",
+        avoid_when: "Verified causal chains or quantified drivers; use a flow or chart." },
+    Preset { id: "flow/swimlane", kind: "swimlane", name: "Swimlane process", specialized: true,
+        use_when: "2-5 lanes for roles or systems with 2-16 steps and handoffs across up to seven columns; exception and return flows draw dashed routes through free lane channels and column gutters. Renders through the diagram engine with glued native connectors.",
+        avoid_when: "Linear steps without handoffs (flow/cards) or processes longer than seven columns; split them across slides." },
+    Preset { id: "flow/sankey", kind: "sankey", name: "Sankey flow", specialized: true,
+        use_when: "2-16 nodes in up to five stages where link widths show how quantities split and merge; nodes with inflow and outflow must balance.",
+        avoid_when: "Flows that do not balance (add an explicit loss node) or precise value comparison; use a table or bar chart." },
+    Preset { id: "flow/journey", kind: "journey", name: "Customer journey map", specialized: true,
+        use_when: "2-6 stages with 1-4 text rows such as actions, touchpoints and opportunities, an optional -2..2 emotion curve and one highlighted stage.",
+        avoid_when: "Internal procedures with owners (flow/swimlane) or stages without customer-facing content." },
+    Preset { id: "correlation/c4-container", kind: "architecture", name: "C4 container diagram", specialized: true,
+        use_when: "One system boundary with containers and then databases in at most three rows of up to three (for example six containers and three databases), up to three people and three external systems, and labeled straight relations; a relation that would pass through another box is rejected. Renders through the diagram engine.",
+        avoid_when: "Deployment or network topology, or more than twelve elements; use diagram/custom or split the view." },
 ];
 
-const GAP: f64 = 16.0;
+pub(super) const GAP: f64 = 16.0;
 const PAD: f64 = 20.0;
 const LABEL: f64 = 18.0;
 const BODY: f64 = 16.0;
-const SMALL: f64 = 13.0;
+pub(super) const SMALL: f64 = 13.0;
 const FIT_MARGIN: f64 = 28.0;
 const ROW_PITCH: f64 = 112.0;
 const CALLOUT: f64 = 28.0;
@@ -111,11 +155,25 @@ pub(super) fn kind(data: &PartData) -> Option<&'static str> {
         PartData::StepCards { .. } => "step_cards",
         PartData::Agenda { .. } => "agenda",
         PartData::ScreenshotCallouts { .. } => "screenshot_callouts",
+        PartData::KpiCards { .. } => "kpi_cards",
+        PartData::BulletGraphs { .. } => "bullet_graphs",
+        PartData::Variance { .. } => "variance",
+        PartData::HarveyMatrix { .. } => "harvey_matrix",
+        PartData::Heatmap { .. } => "heatmap",
+        PartData::Raci { .. } => "raci",
+        PartData::RiskMatrix { .. } => "risk_matrix",
+        PartData::Pareto { .. } => "pareto",
+        PartData::ControlChart { .. } => "control_chart",
+        PartData::Fishbone { .. } => "fishbone",
+        PartData::Swimlane { .. } => "swimlane",
+        PartData::Sankey { .. } => "sankey",
+        PartData::Journey { .. } => "journey",
+        PartData::Architecture { .. } => "architecture",
         _ => return None,
     })
 }
 
-fn field(value: &str, maximum: usize, name: &str, required: bool) -> Result<()> {
+pub(super) fn field(value: &str, maximum: usize, name: &str, required: bool) -> Result<()> {
     if value.chars().count() > maximum { return Err(Error::Limit(format!("{name} exceeds {maximum} Unicode scalars"))); }
     valid_text(value, maximum)?;
     if value.contains('\r') { return Err(Error::Invalid(format!("{name} must use LF line breaks"))); }
@@ -124,7 +182,7 @@ fn field(value: &str, maximum: usize, name: &str, required: bool) -> Result<()> 
     Ok(())
 }
 
-fn colors(values: &[&Option<String>]) -> Result<()> {
+pub(super) fn colors(values: &[&Option<String>]) -> Result<()> {
     for value in values.iter().copied().flatten() { valid_color(value)?; }
     Ok(())
 }
@@ -145,7 +203,7 @@ fn points(values: &[String], name: &str) -> Result<()> {
     Ok(())
 }
 
-fn message(value: &Option<PartMessage>) -> Result<()> {
+pub(super) fn message(value: &Option<PartMessage>) -> Result<()> {
     if let Some(value) = value {
         field(&value.text, 120, "message text", true)?;
         field(&value.detail, 160, "message detail", false)?;
@@ -209,7 +267,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
             }
             colors(&[accent])?; body_size(*size)?; message(band)?;
         }
-        _ => return Err(Error::Invalid("briefing part data required".into())),
+        _ => super::business::validate(data)?,
     }
     Ok(())
 }
@@ -242,13 +300,13 @@ pub(super) fn create(id: &str, spec: &PartSpec, theme: &Theme) -> Result<Element
     Ok(result)
 }
 
-struct Drawn { bottom: f64, flexible: Vec<String> }
+pub(super) struct Drawn { pub(super) bottom: f64, pub(super) flexible: Vec<String> }
 
 fn render(drawing: &mut Drawing, data: &PartData, body: [f64; 4], theme: &Theme, shrink: f64) -> Result<Vec<String>> {
     let band = match data {
         PartData::IconCards { message, .. } | PartData::IconRows { message, .. } | PartData::ShiftRows { message, .. } | PartData::StepCards { message, .. }
         | PartData::ScreenshotCallouts { message, .. } => message.as_ref(),
-        _ => None,
+        other => super::business::message_of(other),
     };
     let band_height = band.map(message_height);
     let [left, top, width, height] = body;
@@ -261,13 +319,13 @@ fn render(drawing: &mut Drawing, data: &PartData, body: [f64; 4], theme: &Theme,
         PartData::StepCards { steps, step_label, accent, body_size, .. } => step_cards(drawing, steps, if step_label.is_empty() { "STEP" } else { step_label }, accent.as_deref().unwrap_or("@accent1"), body_size.unwrap_or(BODY), content, theme, shrink)?,
         PartData::Agenda { items, accent } => agenda(drawing, items, accent.as_deref().unwrap_or("@dk1"), content, theme)?,
         PartData::ScreenshotCallouts { image, callouts, accent, body_size, .. } => screenshot_callouts(drawing, image, callouts, accent.as_deref().unwrap_or("@accent1"), body_size.unwrap_or(BODY), content, theme, shrink)?,
-        _ => return Err(Error::Invalid("briefing part data required".into())),
+        other => super::business::render(drawing, other, content, theme)?,
     };
     if let (Some(band), Some(band_height)) = (band, band_height) { message_band(drawing, band, [left, drawn.bottom + GAP, width, band_height]); }
     Ok(drawn.flexible)
 }
 
-fn mix(color: &str, theme: &Theme, white: f64) -> String {
+pub(super) fn mix(color: &str, theme: &Theme, white: f64) -> String {
     let resolved = crate::design::resolve_color(color, Some(theme));
     let value = u32::from_str_radix(&resolved, 16).unwrap_or(0x80_80_80);
     let channel = |shift: u32| { let current = f64::from((value >> shift) & 0xFF); (current + (255.0 - current) * white).round() as u8 };
@@ -279,11 +337,17 @@ fn pill_width(text: &str, size: f64) -> f64 {
 }
 
 #[derive(Default)]
-struct Rich(Vec<RichParagraph>);
+pub(super) struct Rich(Vec<RichParagraph>);
 
 impl Rich {
-    fn add(&mut self, value: &str, size: f64, color: &str, bold: bool, after: u32) -> &mut Self { self.lines(value, size, color, bold, after, false) }
+    pub(super) fn add(&mut self, value: &str, size: f64, color: &str, bold: bool, after: u32) -> &mut Self { self.lines(value, size, color, bold, after, false) }
     fn bullet(&mut self, value: &str, size: f64, color: &str, after: u32) -> &mut Self { self.lines(value, size, color, false, after, true) }
+    /// One paragraph of differently styled runs, such as a KPI value followed by its unit; empty runs are skipped.
+    pub(super) fn runs(&mut self, runs: &[(&str, f64, &str, bool)], after: u32) -> &mut Self {
+        let runs: Vec<RichRun> = runs.iter().filter(|run| !run.0.is_empty()).map(|&(value, size, color, bold)| RichRun { text: value.into(), style: RunStyle { bold: Some(bold), font_size: Some(size), color: Some(color.into()), font_family: Some("@minor".into()), ..Default::default() }, field: None }).collect();
+        if !runs.is_empty() { self.0.push(RichParagraph { runs, space_after: (after > 0).then_some(Spacing::Points(after)), ..Default::default() }); }
+        self
+    }
     fn lines(&mut self, value: &str, size: f64, color: &str, bold: bool, after: u32, bullet: bool) -> &mut Self {
         if value.is_empty() { return self; }
         let lines: Vec<_> = value.split('\n').collect();
@@ -298,7 +362,7 @@ impl Rich {
         }
         self
     }
-    fn finish(&mut self) -> Vec<RichParagraph> {
+    pub(super) fn finish(&mut self) -> Vec<RichParagraph> {
         let mut paragraphs = std::mem::take(&mut self.0);
         if let Some(last) = paragraphs.last_mut() { last.space_after = None; }
         paragraphs
@@ -309,7 +373,7 @@ fn format(alignment: TextAlign, vertical: VerticalAlign, padding: Option<[f64; 4
     TextFormat { alignment, vertical, font_family: Some("@minor".into()), padding: padding.map(|[left, top, right, bottom]| TextPadding { left, top, right, bottom }), paragraphs, ..TextFormat::default() }
 }
 
-fn text(drawing: &mut Drawing, bounds: [f64; 4], paragraphs: Vec<RichParagraph>, alignment: TextAlign, vertical: VerticalAlign) -> Option<String> {
+pub(super) fn text(drawing: &mut Drawing, bounds: [f64; 4], paragraphs: Vec<RichParagraph>, alignment: TextAlign, vertical: VerticalAlign) -> Option<String> {
     if paragraphs.is_empty() { return None; }
     let [x, y, width, height] = bounds;
     let id = drawing.id();
@@ -325,14 +389,14 @@ fn frame_style(paragraphs: &[RichParagraph]) -> (f64, String, bool) {
     (style.and_then(|style| style.font_size).unwrap_or(BODY), style.and_then(|style| style.color.clone()).unwrap_or_else(|| "@dk1".into()), style.and_then(|style| style.bold).unwrap_or(false))
 }
 
-struct Fill<'a> { preset: &'a str, fill: &'a str, stroke: &'a str, stroke_width: f64, radius: Option<i32> }
+pub(super) struct Fill<'a> { pub(super) preset: &'a str, pub(super) fill: &'a str, pub(super) stroke: &'a str, pub(super) stroke_width: f64, pub(super) radius: Option<i32> }
 
 impl<'a> Fill<'a> {
-    fn solid(preset: &'a str, fill: &'a str) -> Self { Self { preset, fill, stroke: fill, stroke_width: 0.75, radius: None } }
-    fn rounded(mut self, radius: i32) -> Self { self.radius = Some(radius); self }
+    pub(super) fn solid(preset: &'a str, fill: &'a str) -> Self { Self { preset, fill, stroke: fill, stroke_width: 0.75, radius: None } }
+    pub(super) fn rounded(mut self, radius: i32) -> Self { self.radius = Some(radius); self }
 }
 
-fn shape(drawing: &mut Drawing, style: Fill<'_>, bounds: [f64; 4], content: Option<(Vec<RichParagraph>, TextAlign, [f64; 4])>) {
+pub(super) fn shape(drawing: &mut Drawing, style: Fill<'_>, bounds: [f64; 4], content: Option<(Vec<RichParagraph>, TextAlign, [f64; 4])>) {
     let [x, y, width, height] = bounds;
     let id = drawing.id();
     let (text, font_size, color, bold, format) = match content {
@@ -343,7 +407,7 @@ fn shape(drawing: &mut Drawing, style: Fill<'_>, bounds: [f64; 4], content: Opti
     drawing.elements.push(Element::Shape { visual, id, x, y, width, height, preset: style.preset.into(), fill: style.fill.into(), stroke: style.stroke.into(), stroke_width: style.stroke_width, rotation: 0.0, text, font_size, color, bold, format });
 }
 
-fn label(value: &str, size: f64, color: &str, bold: bool) -> Vec<RichParagraph> { Rich::default().add(value, size, color, bold, 0).finish() }
+pub(super) fn label(value: &str, size: f64, color: &str, bold: bool) -> Vec<RichParagraph> { Rich::default().add(value, size, color, bold, 0).finish() }
 
 fn icon(drawing: &mut Drawing, icon: &GraphIcon, center: [f64; 2], size: f64) -> Result<()> {
     let mut picture = crate::media::create_picture(&drawing.id(), icon.base64.clone(), &icon.mime_type, &icon.alt)?;
@@ -375,7 +439,7 @@ fn cover(drawing: &mut Drawing, image: &GraphIcon, bounds: [f64; 4]) -> Result<(
     Ok(())
 }
 
-fn too_small(what: &str) -> Error { Error::Invalid(format!("{what} do not fit the part frame at fixed font sizes; enlarge the frame, reduce items or split the slide")) }
+pub(super) fn too_small(what: &str) -> Error { Error::Invalid(format!("{what} do not fit the part frame at fixed font sizes; enlarge the frame, reduce items or split the slide")) }
 
 fn message_height(band: &PartMessage) -> f64 {
     let lines = band.text.split('\n').count() as f64;
