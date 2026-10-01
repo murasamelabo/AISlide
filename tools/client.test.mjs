@@ -1228,7 +1228,7 @@ test('graph authoring SDK retains routes annotations sites and group layout thro
 test('metadata parts share catalog, revisioned updates, undo and single PPTX persistence', async () => {
   const client = new AislideClient(requestCore);
   const catalog = await client.partCatalog();
-  assert.equal(catalog.presets.length, 118);
+  assert.equal(catalog.presets.length, 132);
   const spec = catalog.presets.find((preset) => preset.id === 'vertical-bar-graph/balanced').example;
   const deck = { version: 1, title: 'Parts', width: 1280, height: 720, slides: [{ id: 'slide', title: 'Parts', background: 'FFFFFF', notes: 'Synthetic fixture', elements: [] }] };
   const session = await client.createDocument({ id: 'parts-sdk', deck });

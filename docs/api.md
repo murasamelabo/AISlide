@@ -32,7 +32,7 @@ PDF semantics use the renderer's shaped clusters, baselines, widths and group/ro
 
 The PDF contains `StructTreeRoot`, `MarkInfo`, per-page `StructParents`, a `ParentTree` and marked content with MCIDs. Each selected page has a `Sect`, text has paragraph tags, and tables have correctly parented row/header/data-cell tags with merge spans. Explicit `slide.review.table_headers` controls semantics: unknown/none (including missing metadata) produce TD only; first_row produces TH with Scope Column, first_column with Scope Row, and both uses Scope Both at the corner. Visual first-row styling never implies semantic headers. Complex merged associations require manual review. `slide.review.reading_order` controls top-level logical order; absent metadata uses scene order. Groups use child order. Decorative/hidden content is excluded from semantic reading. Figure descriptions use review metadata or picture `alt`, with nonpainting tagged geometry proxies; original visual artwork is marked Artifact. Alt-text adequacy, document language, inherited-layer reading order and assistive-technology behavior are not certified.
 
-The renderer supports represented basic forms of all 24 chart kinds, plus six SVD trendline types, forecasts, error bars, secondary axes, log/reverse scales and bounded custom ticks. Numeric formatting is limited and reports General fallback; unsupported combinations reject rather than disappear. Eight default WordArt presets use shaped glyph outlines. See [shared chart/WordArt display contracts](authoring/chart-wordart-presentation.md). PNG/JPEG render modeled effect filters. PDF rasterizes effect-bearing top-level objects at 2x with `PDF_EFFECT_RASTERIZED`; other visual objects and outlines remain vector. Visible text inside such an affected object/group is rasterized with it; the semantic layer remains separate. `pdf_rasterized:false` is not a promise of an entirely raster-free PDF. No Office visual parity is implied.
+The renderer supports represented basic forms of all 24 chart kinds, plus six SVD trendline types, forecasts, error bars, secondary axes, log/reverse scales and bounded custom ticks. Numeric formatting is limited and reports General fallback; unsupported combinations reject rather than disappear. Axis options also accept `label_position` (`next_to` default, `low`, `high`, `hidden`), written as native `c:tickLblPos`; use `category_axis.label_position:"low"` for tornado, butterfly and diverging Likert bars so category names stay at the plot edge instead of the zero line. Native export places a secondary value axis at the far side (`c:crosses="max"`) so Office does not stack it beside the primary axis. Eight default WordArt presets use shaped glyph outlines. See [shared chart/WordArt display contracts](authoring/chart-wordart-presentation.md). PNG/JPEG render modeled effect filters. PDF rasterizes effect-bearing top-level objects at 2x with `PDF_EFFECT_RASTERIZED`; other visual objects and outlines remain vector. Visible text inside such an affected object/group is rasterized with it; the semantic layer remains separate. `pdf_rasterized:false` is not a promise of an entirely raster-free PDF. No Office visual parity is implied.
 
 SDK: `session.exportStatic(options?, requestOptions?)` is read-only, serialized with other session operations and rejects early/late cancellation. `client.verifyRecovery(document, requestOptions?)` calls core `verify_recovery` and returns a deeply frozen copy. `client.recoverPresentation(document, requestOptions?)` additionally creates a separate `DocumentSession` with empty Undo/Redo history. The core verifier calls `document::verify`, including shape, canonical hash, sources and native-origin checks; storage hashes are never a substitute. Hashes are unkeyed consistency checks, not authentication. Protected/unsupported origins are not decrypted, detached or bypassed.
 
@@ -128,7 +128,7 @@ optional cover-cropped `image` and `icon`), `list/agenda` (`agenda`, 2-7
 items) and `list-enumeration/screenshot-callouts` (`screenshot_callouts`, one
 required `image` and 1-6 `callouts` whose `x`/`y` are 0-1 fractions of the
 source image; badges stay on the contained picture and the numbered legend uses
-one measured pitch). The catalog now has 118 entries in the same 36 categories. These parts
+one measured pitch). These parts
 render at the `PartSpec.layout` frame size instead of scaling a 1152x512 canvas;
 fonts are fixed (headings 18px, `body_size` 14-22, default 16; captions, tags
 and pills 12-13px). Card and step heights shrink to measured content, row
@@ -137,6 +137,47 @@ optional `message:{text,detail?,fill?,color?}` adds a takeaway band below the
 content, except on agendas. Legacy presets and data kinds keep their rendering;
 a briefing kind with another preset, or a briefing preset with another kind,
 rejects.
+
+Fourteen recommended business-analysis presets use the same frame-size
+rendering, fixed typography, overflow rejection and optional `message` band:
+`list-horizontal/kpi-cards` (`kpi_cards`, 1-8 cards with supplied `value`
+text, `unit`, `delta`, `status` good/bad/neutral and `comparison`; only the
+value grows, up to 44px), `horizontal-bar-graph/bullet` (`bullet_graphs`, 1-6
+rows of `actual`, `target`, 1-3 ascending `ranges` and `lower_is_better`),
+`water-fall/variance` (`variance`, 2-10 plan/actual rows and an optional total
+row; each gap is colored by whether it helps), `matrix/harvey-balls`
+(`harvey_matrix`, 0-4 quarter levels drawn as native curved freeforms),
+`matrix/heatmap` (`heatmap`, printed numbers tinted around `midpoint`, default
+the mean), `matrix/raci` (`raci`, exactly one A and at least one R per task),
+`matrix/risk` (`risk_matrix`, 1-10 risks on a 5x5 likelihood x impact grid;
+zones follow the product score 15+, 10-14, 5-9 and 1-4, and the list is ranked
+by score), `vertical-bar-graph/pareto` (`pareto`, a native combo chart with
+sorted columns plus the cumulative share and threshold on the right-hand
+0-100% axis), `line-graph/control-chart` (`control_chart`, a native line chart
+of 5-32 values; omitted limits use the individuals-chart rule mean +/- 3 x
+average moving range / 1.128, limits must satisfy lower < center < upper after
+that default, and the value axis is scaled to the data), `tree/fishbone`
+(`fishbone`, 2-6 categories with 1-3 causes and `focus` highlights),
+`flow/sankey` (`sankey`, up to five stages; a node with inflow and outflow must
+balance), `flow/journey` (`journey`, 2-6 stages, 1-4 rows, an optional -2..2
+emotion curve and one highlighted stage), `flow/swimlane` (`swimlane`, 2-5
+lanes and up to seven columns) and `correlation/c4-container` (`architecture`).
+The last two are converted to managed-graph geometry and drawn by the diagram
+engine, so connectors stay glued to their boxes. Swimlane columns follow the
+longest forward path unless `column` pins a step; `exception` and return flows
+are dashed routes through lane channels and column gutters, and flows that
+would skip past an occupied cell use the same free space. The C4 view places
+people left, external systems right and containers then databases inside the
+system boundary in at most three rows of up to three, choosing slots and ports
+that keep relation lines out of unrelated boxes. Both parts reject a route that
+would still pass through another box instead of drawing it; in PowerPoint
+their custom routes are freeform lines that keep their shape but do not follow
+a moved box. Where a label field is omitted, English defaults such as `Plan`,
+`Actual`, `Variance`, `Value`, `Cumulative` and `Emotion` are used; pass
+localized labels in the data. The catalog now has 132 entries in the same 36
+categories. These 14 entries are marked `specialized: true`: they stay
+`recommended` for agents whose data fits `use_when`, while Studio lists them
+after the general variants and never selects one as a category default.
 
 MCP `lucide_icons({query?,category?,offset?,limit?})` searches the installed
 Lucide React library (ISC) and `lucide_icon_assets({icons:[{name,color?,
@@ -663,7 +704,7 @@ Omitted presentation preserves legacy card output, including the aspect-fitted p
 
 Operation batches contain 1-128 entries. `put_node`, `put_edge`, `put_group` carry a complete typed `node`, `edge` or `group`. `move` takes `{ids,dx,dy}`; `remove` takes `{ids}`; `align` takes `{ids,alignment}` with left/center/right/top/middle/bottom; `layout` takes `{columns}` in 1-8. Selection is 1-120 unique existing IDs. Alignment requires at least two nodes. Moving an ancestor moves every descendant once, including multi-selection. Removing a node removes incident edges; removing boundaries promotes direct children to the nearest remaining parent without changing absolute bounds. Grid preserves sizes and fails when they do not fit; with boundaries, all nodes must belong to a group. Grid is disabled/rejected for nested boundaries. Validation is atomic.
 
-Native output uses ordinary shapes, separate label text and attached `p:cxnSp` objects with `straightConnector1` or `bentConnector2/3/4`. Shape-specific connection indices are independent of logical port direction. Standard adjustment values/flips retain reverse and vertical routes. Raw connector `routing` accepts only representable 2-4 normalized points plus `start_arrow`/`dashed`; arbitrary waypoints, curves and unsupported formulas fail closed. Routing is deterministic midpoint routing, not obstacle avoidance. In Office, moving only a native node shape does not automatically move its separate text label.
+Native output uses ordinary shapes, separate label text and attached `p:cxnSp` objects with `straightConnector1` or `bentConnector2/3/4`. Manual routes and other `routing.custom` polylines are written as open freeform `p:sp` shapes (`a:custGeom`, no fill) marked with the `urn:aislide:connector:v1` extension that keeps endpoint bindings, because PowerPoint refuses packages whose `p:cxnSp` uses custom geometry; Office edits them as freeform lines without glue, and AISlide reopens them as connectors. Editing a route that an earlier export stored in `p:cxnSp` rewrites it in the freeform form. Shape-specific connection indices are independent of logical port direction. Standard adjustment values/flips retain reverse and vertical routes. Raw connector `routing` accepts only representable 2-4 normalized points plus `start_arrow`/`dashed`; arbitrary waypoints, curves and unsupported formulas fail closed. Routing is deterministic midpoint routing, not obstacle avoidance. In Office, moving only a native node shape does not automatically move its separate text label.
 
 Managed graphs use `Document.parts` with preset `diagram/custom` and data `{kind:"diagram",graph:spec}`. They share native/render fingerprints, root placement preservation and Undo/Redo with parts. External edits can conservatively mark metadata stale; graph updates then fail rather than overwrite manual content. Ordinary native objects remain editable without metadata only within the supported native subset; unknown XML still guards against unsupported replacement.
 

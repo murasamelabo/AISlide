@@ -270,7 +270,7 @@ pub(crate) fn read(node: Node<'_, '_>) -> Result<Option<VisualStyle>> {
     let mut style = VisualStyle::default();
     let Some(parent) = child(node, P, if node.has_tag_name((P, "grpSp")) { "grpSpPr" } else { "spPr" }) else { return Ok(None); };
     if let Some(transform) = child(parent, A, "xfrm") {
-        if !node.has_tag_name((P, "cxnSp")) {
+        if !node.has_tag_name((P, "cxnSp")) && crate::native::connector_marker(node).is_none() {
             let rotation = numeric(transform, "rot", 0.0)? / 60000.0;
             if rotation != 0.0 { style.rotation = Some(rotation); }
             style.flip_h = is_true(transform, "flipH"); style.flip_v = is_true(transform, "flipV");

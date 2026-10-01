@@ -24,7 +24,7 @@ export type ImmutableValue<Value> = Value extends object ? { readonly [Key in ke
 export type VerifiedRecoveryDocument = ImmutableValue<AislideDocument>
 export type ChartKind = 'column' | 'bar' | 'line' | 'pie' | 'doughnut' | 'area' | 'scatter' | 'stacked_column' | 'stacked_bar' | 'percent_stacked_column' | 'percent_stacked_bar' | 'combo' | 'bubble' | 'radar' | 'radar_filled' | 'column3d' | 'bar3d' | 'pie3d' | 'funnel' | 'waterfall' | 'histogram' | 'box_whisker' | 'treemap' | 'sunburst'
 export type ChartAxis = 'primary' | 'secondary'
-export type AxisOptions = { min?: number | null; max?: number | null; major_unit?: number | null; minor_unit?: number | null; log_base?: number | null; reverse?: boolean; number_format?: string | null }
+export type AxisOptions = { min?: number | null; max?: number | null; major_unit?: number | null; minor_unit?: number | null; log_base?: number | null; reverse?: boolean; number_format?: string | null; label_position?: 'next_to' | 'low' | 'high' | 'hidden' | null }
 export type ChartDataLabels = { show_value?: boolean; show_category_name?: boolean; show_series_name?: boolean; show_percent?: boolean; position?: 'center' | 'inside_end' | 'outside_end' | 'best_fit' | null; number_format?: string | null }
 export type HistogramOptions = { samples: number[]; binning: { rule: 'count'; count: number } | { rule: 'width'; width: number }; interval_closed: 'left' | 'right'; underflow?: number | null; overflow?: number | null }
 export type BoxWhiskerOptions = { samples: number[][]; quartile_method: 'inclusive' | 'exclusive'; mean_line: boolean; mean_marker: boolean; nonoutliers: boolean; outliers: boolean }
@@ -214,6 +214,24 @@ export type ShiftRow = { from: string; to: string; caption?: string; detail?: st
 export type StepCard = { label: string; detail?: string; points?: string[]; outcome?: string; image?: GraphIcon | null; icon?: GraphIcon | null }
 export type AgendaItem = { label: string; detail?: string; meta?: string }
 export type Callout = { x: number; y: number; label: string; detail?: string }
+export type KpiCard = { label: string; value: string; unit?: string; delta?: string; status?: 'neutral' | 'good' | 'bad'; comparison?: string }
+/** `ranges` are ascending qualitative limits; the last one is the axis maximum. */
+export type BulletRow = { label: string; actual: number; target: number; ranges: number[]; unit?: string; note?: string; lower_is_better?: boolean }
+export type VarianceRow = { label: string; plan: number; actual: number }
+export type HarveyRow = { label: string; levels: number[] }
+export type HeatmapRow = { label: string; values: number[] }
+export type RaciCode = '' | 'R' | 'A' | 'C' | 'I' | 'A/R'
+export type RaciTask = { label: string; assignments: RaciCode[] }
+export type Risk = { id: string; label: string; likelihood: number; impact: number; action?: string }
+export type ParetoItem = { label: string; value: number }
+export type FishboneCategory = { label: string; causes: { text: string; focus?: boolean }[] }
+export type SwimlaneStep = { id: string; label: string; lane: number; shape?: 'task' | 'decision' | 'event'; column?: number | null }
+export type SwimlaneFlow = { from: string; to: string; label?: string; exception?: boolean }
+export type SankeyNode = { id: string; label: string; color?: string | null }
+export type SankeyLink = { from: string; to: string; value: number }
+export type JourneyRow = { label: string; cells: string[]; boxed?: boolean }
+export type ArchitectureElement = { id: string; label: string; kind: 'person' | 'container' | 'database' | 'external'; detail?: string }
+export type ArchitectureRelation = { from: string; to: string; label?: string }
 export type PartData =
   | { kind: 'comparison_panels'; panels: ComparisonPanel[]; transition?: boolean }
   | { kind: 'icon_cards'; cards: IconCard[]; columns?: number | null; numbered?: boolean; body_size?: number | null; message?: PartMessage | null }
@@ -222,6 +240,20 @@ export type PartData =
   | { kind: 'step_cards'; steps: StepCard[]; step_label?: string; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'agenda'; items: AgendaItem[]; accent?: string | null }
   | { kind: 'screenshot_callouts'; image: GraphIcon; callouts: Callout[]; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
+  | { kind: 'kpi_cards'; cards: KpiCard[]; columns?: number | null; message?: PartMessage | null }
+  | { kind: 'bullet_graphs'; rows: BulletRow[]; message?: PartMessage | null }
+  | { kind: 'variance'; rows: VarianceRow[]; unit?: string; plan_label?: string; actual_label?: string; variance_label?: string; total_label?: string; lower_is_better?: boolean; message?: PartMessage | null }
+  | { kind: 'harvey_matrix'; columns: string[]; rows: HarveyRow[]; legend?: string[]; message?: PartMessage | null }
+  | { kind: 'heatmap'; columns: string[]; rows: HeatmapRow[]; unit?: string; midpoint?: number | null; lower_is_better?: boolean; message?: PartMessage | null }
+  | { kind: 'raci'; roles: string[]; tasks: RaciTask[]; legend?: string[]; message?: PartMessage | null }
+  | { kind: 'risk_matrix'; risks: Risk[]; likelihood_label?: string; impact_label?: string; zone_labels?: string[]; message?: PartMessage | null }
+  | { kind: 'pareto'; items: ParetoItem[]; value_label?: string; cumulative_label?: string; threshold?: number | null; message?: PartMessage | null }
+  | { kind: 'control_chart'; labels: string[]; values: number[]; series_label?: string; center?: number | null; upper?: number | null; lower?: number | null; message?: PartMessage | null }
+  | { kind: 'fishbone'; effect: string; categories: FishboneCategory[]; message?: PartMessage | null }
+  | { kind: 'swimlane'; lanes: string[]; steps: SwimlaneStep[]; flows: SwimlaneFlow[] }
+  | { kind: 'sankey'; nodes: SankeyNode[]; links: SankeyLink[]; unit?: string; message?: PartMessage | null }
+  | { kind: 'journey'; stages: string[]; rows: JourneyRow[]; emotions?: number[]; emotion_label?: string; emotion_notes?: string[]; highlight?: number | null; message?: PartMessage | null }
+  | { kind: 'architecture'; system: string; elements: ArchitectureElement[]; relations: ArchitectureRelation[] }
   | { kind: 'chart'; categories: string[]; series: { name: string; values: number[] }[]; x_axis?: string; y_axis?: string }
   | { kind: 'items'; items: PartItem[]; center?: string }
   | { kind: 'tree'; nodes: { id: string; label: string; parent?: string | null }[] }
@@ -234,7 +266,7 @@ export type PartData =
   | { kind: 'diagram'; graph: GraphSpec }
 export type PartLayout = Frame & { show_title?: boolean }
 export type PartSpec = { version: 1; preset: string; title: string; subtitle?: string; data: PartData; layout?: PartLayout | null }
-export type PartPreset = { id: string; category: string; category_name: string; name: string; family: 'Charts' | 'Diagrams'; example: PartSpec; recommended?: boolean; use_when?: string; avoid_when?: string }
+export type PartPreset = { id: string; category: string; category_name: string; name: string; family: 'Charts' | 'Diagrams'; example: PartSpec; recommended?: boolean; specialized?: boolean; use_when?: string; avoid_when?: string }
 export type PartCatalog = { version: 1; presets: PartPreset[]; schema: unknown; style: string; default_bounds: Omit<Bounds, 'id'> }
 export type PartInstance = { slide_id: string; element_id: string; spec: PartSpec; render_sha256: string; native_sha256?: string | null; stale: boolean }
 

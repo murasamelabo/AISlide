@@ -217,6 +217,36 @@ fn shape(writer: &mut XmlWriter, element: &Element, id: usize, ids: &BTreeMap<&s
         writer.start_element("a:prstGeom"); writer.write_attribute("prst", "rect"); empty(writer, "a:avLst", &[]); writer.end_element(); writer.end_element(); writer.end_element(); return;
     }
     if let Element::Connector { color: shade, stroke_width, arrow, flip_v, start, end, routing, .. } = element {
+        let line = |writer: &mut XmlWriter| {
+            writer.start_element("a:ln"); writer.write_attribute("w", &emu(*stroke_width)); color(writer, shade); empty(writer, "a:prstDash", &[("val", if routing.as_ref().is_some_and(|route| route.dashed) { "dash" } else { "solid" })]);
+            if routing.as_ref().is_some_and(|route| route.start_arrow) { empty(writer, "a:headEnd", &[("type", "triangle")]); }
+            if *arrow { empty(writer, "a:tailEnd", &[("type", "triangle")]); }
+            writer.end_element();
+        };
+        // PowerPoint refuses packages with custom geometry inside p:cxnSp, so custom routes are marked open freeforms.
+        if let Some(route) = routing.as_ref().filter(|route| route.custom) {
+            writer.start_element("p:sp"); writer.start_element("p:nvSpPr"); empty(writer, "p:cNvPr", &[("id", &id.to_string()), ("name", name)]); empty(writer, "p:cNvSpPr", &[]);
+            writer.start_element("p:nvPr"); writer.start_element("p:extLst"); writer.start_element("p:ext"); writer.write_attribute("uri", crate::native::CONNECTOR_NS);
+            writer.start_element("acx:route"); writer.write_attribute("xmlns:acx", crate::native::CONNECTOR_NS);
+            for (prefix, connection) in [("start", start), ("end", end)] {
+                if let Some(connection) = connection { writer.write_attribute(prefix, &ids[connection.element_id.as_str()].to_string()); writer.write_attribute(&format!("{prefix}Site"), &connection.site.to_string()); }
+            }
+            writer.end_element(); writer.end_element(); writer.end_element(); writer.end_element(); writer.end_element();
+            writer.start_element("p:spPr"); transform(writer, "a:xfrm", x, y, width, height);
+            writer.start_element("a:custGeom");
+            for tag in ["a:avLst", "a:gdLst", "a:ahLst", "a:cxnLst"] { empty(writer, tag, &[]); }
+            empty(writer, "a:rect", &[("l", "0"), ("t", "0"), ("r", "r"), ("b", "b")]);
+            writer.start_element("a:pathLst"); writer.start_element("a:path");
+            writer.write_attribute("w", "1000000"); writer.write_attribute("h", "1000000"); writer.write_attribute("fill", "none");
+            for (index, point) in route.points.iter().enumerate() {
+                writer.start_element(if index == 0 { "a:moveTo" } else { "a:lnTo" });
+                empty(writer, "a:pt", &[("x", &(point[0] * 1e6).round().to_string()), ("y", &(point[1] * 1e6).round().to_string())]);
+                writer.end_element();
+            }
+            writer.end_element(); writer.end_element(); writer.end_element();
+            empty(writer, "a:noFill", &[]); line(writer);
+            writer.end_element(); writer.end_element(); return;
+        }
         writer.start_element("p:cxnSp"); writer.start_element("p:nvCxnSpPr"); empty(writer, "p:cNvPr", &[("id", &id.to_string()), ("name", name)]);
         writer.start_element("p:cNvCxnSpPr");
         for (tag, connection) in [("a:stCxn", start), ("a:endCxn", end)] {
@@ -230,27 +260,13 @@ fn shape(writer: &mut XmlWriter, element: &Element, id: usize, ids: &BTreeMap<&s
         let native_width = if preset.as_ref().is_some_and(|preset| preset.zero_width) { 0.0 } else { width };
         let native_height = if preset.as_ref().is_some_and(|preset| preset.zero_height) { 0.0 } else { height };
         empty(writer, "a:off", &[("x", &emu(x)), ("y", &emu(y))]); empty(writer, "a:ext", &[("cx", &emu(native_width)), ("cy", &emu(native_height))]); writer.end_element();
-        if let Some(route) = routing.as_ref().filter(|route| route.custom) {
-            writer.start_element("a:custGeom");
-            for tag in ["a:avLst", "a:gdLst", "a:ahLst", "a:cxnLst"] { empty(writer, tag, &[]); }
-            empty(writer, "a:rect", &[("l", "0"), ("t", "0"), ("r", "r"), ("b", "b")]);
-            writer.start_element("a:pathLst"); writer.start_element("a:path");
-            writer.write_attribute("w", "1000000"); writer.write_attribute("h", "1000000"); writer.write_attribute("fill", "none");
-            for (index, point) in route.points.iter().enumerate() {
-                writer.start_element(if index == 0 { "a:moveTo" } else { "a:lnTo" });
-                empty(writer, "a:pt", &[("x", &(point[0] * 1e6).round().to_string()), ("y", &(point[1] * 1e6).round().to_string())]);
-                writer.end_element();
-            }
-            writer.end_element(); writer.end_element(); writer.end_element();
-        } else if let Some(preset) = preset {
+        if let Some(preset) = preset {
             writer.start_element("a:prstGeom"); writer.write_attribute("prst", preset.name); writer.start_element("a:avLst");
             for (name, value) in preset.adjustments { empty(writer, "a:gd", &[("name", name), ("fmla", &format!("val {}", value.round()))]); }
             writer.end_element(); writer.end_element();
         } else { writer.start_element("a:prstGeom"); writer.write_attribute("prst", "line"); empty(writer, "a:avLst", &[]); writer.end_element(); }
-        writer.start_element("a:ln"); writer.write_attribute("w", &emu(*stroke_width)); color(writer, shade); empty(writer, "a:prstDash", &[("val", if routing.as_ref().is_some_and(|route| route.dashed) { "dash" } else { "solid" })]);
-        if routing.as_ref().is_some_and(|route| route.start_arrow) { empty(writer, "a:headEnd", &[("type", "triangle")]); }
-        if *arrow { empty(writer, "a:tailEnd", &[("type", "triangle")]); }
-        writer.end_element(); writer.end_element(); writer.end_element(); return;
+        line(writer);
+        writer.end_element(); writer.end_element(); return;
     }
     if let Element::Chart { kind, .. } = element {
         writer.start_element("p:graphicFrame"); writer.start_element("p:nvGraphicFramePr");

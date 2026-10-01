@@ -313,8 +313,11 @@ IDs, these minimum coordinates, the allowed right/bottom boundaries and the
 actual frame, so horizontal padding violations are also distinguishable.
 All options are retained through SDK/MCP managed edits and Studio's Canvas,
 Preview and JSON views. Optional styles/placements accept null to remove
-them; `waypoints` is an array, not null. Native polyline/custom-site tests
-verify structural round trips, not PowerPoint visual parity.
+them; `waypoints` is an array, not null. Manual and other custom routes are
+written as marked open freeform shapes so PowerPoint can open the package;
+Office treats them as freeform lines without connector glue. Native
+polyline/custom-site tests verify structural round trips, not PowerPoint
+visual parity.
 
 For mixed managed batches, use `add_part` / `update_part` with
 `{slide_id,id,spec:PartSpec}` and `add_graph` with

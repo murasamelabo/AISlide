@@ -279,6 +279,38 @@ test('briefing parts MCP keeps strict data and Lucide assets return reusable ico
       { kind: 'screenshot_callouts', image: icon, callouts: [{ x: 1.2, y: 0.5, label: 'A' }] }, { kind: 'screenshot_callouts', image: icon, callouts: Array(7).fill({ x: 0.5, y: 0.5, label: 'A' }) },
       { kind: 'screenshot_callouts', callouts: [{ x: 0.5, y: 0.5, label: 'A' }] },
     ]) assert.equal(schema.safeParse({ ...input, spec: { ...spec, data } }).success, false, JSON.stringify(data).slice(0, 80));
+    const business = [
+      ['list-horizontal/kpi-cards', { kind: 'kpi_cards', cards: [{ label: 'Revenue', value: '12.4', unit: 'B', delta: '+8%', status: 'good', comparison: 'Plan 12' }], columns: null }],
+      ['horizontal-bar-graph/bullet', { kind: 'bullet_graphs', rows: [{ label: 'Margin', actual: 38, target: 40, ranges: [30, 36, 45], unit: '%', lower_is_better: false }] }],
+      ['water-fall/variance', { kind: 'variance', total_label: 'Total', unit: 'M', rows: [{ label: 'A', plan: 1, actual: 2 }, { label: 'B', plan: -3, actual: -2 }] }],
+      ['matrix/harvey-balls', { kind: 'harvey_matrix', columns: ['Speed', 'Cost'], rows: [{ label: 'A', levels: [0, 4] }, { label: 'B', levels: [2, 3] }], legend: ['0', '1', '2', '3', '4'] }],
+      ['matrix/heatmap', { kind: 'heatmap', columns: ['Q1', 'Q2'], rows: [{ label: 'A', values: [1, 2] }, { label: 'B', values: [3, 4] }], unit: '%', midpoint: null }],
+      ['matrix/raci', { kind: 'raci', roles: ['PM', 'Dev'], tasks: [{ label: 'Plan', assignments: ['A/R', 'C'] }, { label: 'Build', assignments: ['A', 'R'] }] }],
+      ['matrix/risk', { kind: 'risk_matrix', risks: [{ id: 'R1', label: 'Delay', likelihood: 4, impact: 5, action: 'Mitigate' }], zone_labels: ['Critical', 'High', 'Medium', 'Low'] }],
+      ['vertical-bar-graph/pareto', { kind: 'pareto', items: [{ label: 'A', value: 5 }, { label: 'B', value: 3 }, { label: 'C', value: 0 }], threshold: 0.8 }],
+      ['line-graph/control-chart', { kind: 'control_chart', labels: ['1', '2', '3', '4', '5'], values: [1, 2, 1, 2, 1], upper: null }],
+      ['tree/fishbone', { kind: 'fishbone', effect: 'Delay', categories: [{ label: 'People', causes: [{ text: 'Handover', focus: true }] }, { label: 'Process', causes: [{ text: 'Manual entry' }] }] }],
+      ['flow/swimlane', { kind: 'swimlane', lanes: ['A', 'B'], steps: [{ id: 's1', label: 'Start', lane: 0, shape: 'event' }, { id: 's2', label: 'Do', lane: 1, column: 1 }], flows: [{ from: 's1', to: 's2', label: 'Go' }, { from: 's2', to: 's1', exception: true }] }],
+      ['flow/sankey', { kind: 'sankey', unit: 'k', nodes: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B', color: '@accent2' }], links: [{ from: 'a', to: 'b', value: 3 }] }],
+      ['flow/journey', { kind: 'journey', stages: ['One', 'Two'], rows: [{ label: 'Do', cells: ['a', 'b'], boxed: true }], emotions: [1, -1], emotion_notes: ['Good', 'Bad'], highlight: 1 }],
+      ['correlation/c4-container', { kind: 'architecture', system: 'Shop', elements: [{ id: 'u', label: 'User', kind: 'person' }, { id: 'w', label: 'Web', kind: 'container', detail: 'UI' }], relations: [{ from: 'u', to: 'w', label: 'Uses' }] }],
+    ];
+    for (const [preset, data] of business) assert.equal(schema.safeParse({ ...input, spec: { ...spec, preset, data } }).success, true, preset);
+    for (const data of [
+      { kind: 'kpi_cards', cards: [{ label: 'A', value: '1\n2' }] }, { kind: 'kpi_cards', cards: [{ label: 'A', value: '1', status: 'great' }] },
+      { kind: 'bullet_graphs', rows: [{ label: 'A', actual: 1, target: 1, ranges: [0] }] }, { kind: 'bullet_graphs', rows: [{ label: 'A', actual: 1, target: 1, ranges: [1, 2, 3, 4] }] },
+      { kind: 'raci', roles: ['PM', 'Dev'], tasks: [{ label: 'Plan', assignments: ['X', 'C'] }, { label: 'Build', assignments: ['A', 'R'] }] },
+      { kind: 'risk_matrix', risks: [{ id: 'R100', label: 'Delay', likelihood: 4, impact: 5 }] }, { kind: 'risk_matrix', risks: [{ id: 'R1', label: 'Delay', likelihood: 6, impact: 5 }] },
+      { kind: 'pareto', items: [{ label: 'A', value: -1 }, { label: 'B', value: 1 }, { label: 'C', value: 1 }] }, { kind: 'pareto', items: [{ label: 'A', value: 1 }, { label: 'B', value: 1 }, { label: 'C', value: 1 }], threshold: 1 },
+      { kind: 'swimlane', lanes: ['A', 'B'], steps: [{ id: 'bad id', label: 'S', lane: 0 }, { id: 's2', label: 'T', lane: 1 }], flows: [{ from: 'bad id', to: 's2' }] },
+      { kind: 'swimlane', lanes: ['A', 'B', 'C', 'D', 'E', 'F'], steps: [{ id: 's1', label: 'S', lane: 0 }, { id: 's2', label: 'T', lane: 1 }], flows: [{ from: 's1', to: 's2' }] },
+      { kind: 'swimlane', lanes: ['A', 'B'], steps: [{ id: 's1', label: 'S', lane: 0, column: 7 }, { id: 's2', label: 'T', lane: 1 }], flows: [{ from: 's1', to: 's2' }] },
+      { kind: 'control_chart', labels: Array.from({ length: 33 }, (_, index) => `W${index}`), values: Array.from({ length: 33 }, () => 1) },
+      { kind: 'sankey', nodes: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }], links: [{ from: 'a', to: 'b', value: 0 }] },
+      { kind: 'journey', stages: ['One', 'Two'], rows: [{ label: 'Do', cells: ['a', 'b'] }], emotions: [3, 0] },
+      { kind: 'architecture', system: 'Shop', elements: [{ id: 'u', label: 'User', kind: 'robot' }, { id: 'w', label: 'Web', kind: 'container' }], relations: [{ from: 'u', to: 'w' }] },
+      { kind: 'heatmap', columns: ['Q1', 'Q2'], rows: [{ label: 'A', values: [1, 2], extra: 1 }, { label: 'B', values: [3, 4] }] },
+    ]) assert.equal(schema.safeParse({ ...input, spec: { ...spec, data } }).success, false, JSON.stringify(data).slice(0, 80));
   });
 });
 
@@ -2677,7 +2709,7 @@ test('MCP open list recommendations render native text and keep failed edits ato
   try {
     await client.connect(transport);
     const catalog = await call('part_catalog');
-    assert.equal(catalog.presets.length, 118);
+    assert.equal(catalog.presets.length, 132);
     for (const id of ['list/rows', 'list-horizontal/columns', 'list-enumeration/grid']) {
       const preset = catalog.presets.find(entry => entry.id === id);
       assert.equal(preset.recommended, true);
