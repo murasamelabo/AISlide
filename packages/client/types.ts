@@ -212,6 +212,10 @@ export type IconCard = { label: string; caption?: string; detail?: string; point
 export type IconRow = { label: string; detail?: string; icon?: GraphIcon | null; accent?: string | null }
 export type ShiftRow = { from: string; to: string; caption?: string; detail?: string }
 export type StepCard = { label: string; detail?: string; points?: string[]; outcome?: string; image?: GraphIcon | null; icon?: GraphIcon | null }
+export type EditorialStep = { label: string; detail?: string }
+export type RoadmapPhase = { period: string; label: string; detail?: string; points?: string[]; outcome?: string }
+export type FactColumn = { value: string; label: string; unit?: string; detail?: string; qualifier?: string }
+export type ImageColumn = { image: GraphIcon; label: string; detail?: string; caption?: string }
 export type AgendaItem = { label: string; detail?: string; meta?: string }
 export type Callout = { x: number; y: number; label: string; detail?: string }
 export type KpiCard = { label: string; value: string; unit?: string; delta?: string; status?: 'neutral' | 'good' | 'bad'; comparison?: string }
@@ -238,6 +242,12 @@ export type PartData =
   | { kind: 'icon_rows'; rows: IconRow[]; boxed?: boolean; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'shift_rows'; from_label?: string; to_label?: string; rows: ShiftRow[]; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'step_cards'; steps: StepCard[]; step_label?: string; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
+  | { kind: 'open_steps'; steps: EditorialStep[]; accent?: string | null }
+  | { kind: 'rail_steps'; steps: EditorialStep[]; accent?: string | null }
+  | { kind: 'roadmap'; phases: RoadmapPhase[]; accent?: string | null }
+  | { kind: 'icon_columns'; items: IconRow[] }
+  | { kind: 'fact_columns'; items: FactColumn[]; columns?: number | null; accent?: string | null }
+  | { kind: 'image_columns'; items: ImageColumn[] }
   | { kind: 'agenda'; items: AgendaItem[]; accent?: string | null }
   | { kind: 'screenshot_callouts'; image: GraphIcon; callouts: Callout[]; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'kpi_cards'; cards: KpiCard[]; columns?: number | null; message?: PartMessage | null }

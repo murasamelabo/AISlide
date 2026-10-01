@@ -174,10 +174,36 @@ would still pass through another box instead of drawing it; in PowerPoint
 their custom routes are freeform lines that keep their shape but do not follow
 a moved box. Where a label field is omitted, English defaults such as `Plan`,
 `Actual`, `Variance`, `Value`, `Cumulative` and `Emotion` are used; pass
-localized labels in the data. The catalog now has 132 entries in the same 36
+localized labels in the data. The catalog now has 138 entries in the same 36
 categories. These 14 entries are marked `specialized: true`: they stay
 `recommended` for agents whose data fits `use_when`, while Studio lists them
 after the general variants and never selects one as a category default.
+
+Six non-card presets share the native-frame and fixed-font validation path:
+
+| Preset | Data |
+| --- | --- |
+| `flow/open-steps` | `open_steps`: 2-5 `steps:{label,detail?}`, optional `accent`; one horizontal milestone axis |
+| `vertical-flow/rail` | `rail_steps`: the same step fields, 2-5 items; one vertical rail with explanations on the right |
+| `flow/roadmap` | `roadmap`: 2-4 `phases:{period,label,detail?,points?,outcome?}`, optional `accent`; at most four short points per phase |
+| `list-horizontal/icon-columns` | `icon_columns`: 2-4 `items:{label,detail?,icon?,accent?}` grouped by whitespace |
+| `list-horizontal/fact-columns` | `fact_columns`: 2-6 `items:{value,label,unit?,detail?,qualifier?}`, optional `columns` 2-3 and `accent`; at most two rows |
+| `list-horizontal/image-columns` | `image_columns`: 2-4 `items:{image,label,detail?,caption?}` with required approved `GraphIcon` images kept in full |
+
+Headings/body text remain 18/16px; milestone numbers and qualifiers are 14px,
+fact values 44px and units 22px. These presets never shrink typography or crop
+images to hide overflow. Labels allow 48 Unicode scalars; step/roadmap/image
+details allow 160, icon details 200, fact qualifiers 100 and image captions 80.
+Roadmap periods are one-line text up to 24 scalars; phase points allow 80 each
+and outcomes 64. Fact values/units are one-line verbatim text up to 24/12
+scalars. Values, denominators and conditions must come from supplied evidence;
+fact items never encode magnitude by area or length. Roadmap phases have equal
+categorical spacing, not a proportional time axis. Omit `layout.fit` when
+layout guidance returns `fit:"native"`; that advice describes native-size
+rendering and is not a `PartLayout.fit` enum value. Legacy IDs are unchanged.
+`node tools/briefing-demo.mjs <new-empty-directory> --editorial` creates a
+12-page synthetic before/after comparison, verifies every page, reopens its
+editable parts and checks update/Undo without overwriting an existing deck.
 
 MCP `lucide_icons({query?,category?,offset?,limit?})` searches the installed
 Lucide React library (ISC) and `lucide_icon_assets({icons:[{name,color?,

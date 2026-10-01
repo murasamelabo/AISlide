@@ -3,6 +3,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{json, Value};
 
 const BRIEFING: [&str; 6] = ["list-horizontal/icon-cards", "list/icon-rows", "before-after/shift", "flow/cards", "list/agenda", "list-enumeration/screenshot-callouts"];
+const EDITORIAL: [&str; 6] = ["flow/open-steps", "vertical-flow/rail", "flow/roadmap", "list-horizontal/icon-columns", "list-horizontal/fact-columns", "list-horizontal/image-columns"];
 const FRAME: [f64; 4] = [48.0, 120.0, 1184.0, 540.0];
 
 fn icon(width: u32, height: u32) -> Value {
@@ -47,6 +48,131 @@ fn sequence_findings(elements: Vec<Value>) -> Vec<Value> {
     let document = execute_request(json!({"op":"new_document","id":"sequence","deck":deck(elements)})).unwrap();
     let report = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
     report["findings"].as_array().unwrap().iter().filter(|finding| finding["code"] == "NUMBERED_SEQUENCE_UNEVEN").cloned().collect()
+}
+
+#[test]
+fn editorial_open_steps_draw_a_native_axis_without_cards() {
+    let spec = framed(json!({"version":1,"preset":"flow/open-steps","title":"","data":{"kind":"open_steps","steps":[
+        {"label":"Collect","detail":"Gather the approved evidence."},
+        {"label":"Assess","detail":"Choose the next action."},
+        {"label":"Respond","detail":"Record the outcome."}
+    ]}}));
+    let element = create(&spec).unwrap();
+    let items = children(&element);
+    assert!(items.iter().any(|child| child["type"] == "connector"), "the common axis is native");
+    assert_eq!(items.iter().filter(|child| child["preset"] == "ellipse").count(), 3);
+    assert!(!items.iter().any(|child| child["preset"] == "rect" && number(child, "height") > 60.0), "no enclosing cards");
+    for child in items { for size in run_sizes(child) { assert!(size >= 14.0, "fixed readable typography"); } }
+    let exported = execute_request(json!({"op":"export","deck":deck(vec![element.clone()])})).unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"open-flow-native","base64":exported["base64"]})).unwrap();
+    assert_eq!(children(&opened["document"]["deck"]["slides"][0]["elements"][0]).len(), items.len());
+}
+
+#[test]
+fn editorial_presets_are_documented_fixed_size_and_reopenable() {
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    for id in EDITORIAL {
+        let entry = catalog["presets"].as_array().unwrap().iter().find(|entry| entry["id"] == id).unwrap_or_else(|| panic!("missing {id}"));
+        assert_eq!(entry["recommended"], true, "{id}");
+        assert!(!entry["use_when"].as_str().unwrap().is_empty() && !entry["avoid_when"].as_str().unwrap().is_empty(), "{id}");
+        for spec in [entry["example"].clone(), framed(entry["example"].clone())] {
+            let element = create(&spec).unwrap_or_else(|error| panic!("{id}: {error}"));
+            assert_eq!(element, create(&spec).unwrap(), "{id}: deterministic");
+            assert_eq!(number(&element, "width"), number(&element, "view_width"), "{id}: native width");
+            assert_eq!(number(&element, "height"), number(&element, "view_height"), "{id}: native height");
+            for child in children(&element) {
+                let [x, y, width, height] = ["x", "y", "width", "height"].map(|field| number(child, field));
+                assert!(x >= 0.0 && y >= 0.0 && x + width <= number(&element, "width") + 0.5 && y + height <= number(&element, "height") + 0.5, "{id}: outside frame");
+                for size in run_sizes(child) { assert!(size >= 14.0, "{id}: typography is not shrunk"); }
+            }
+            let scene = deck(vec![element.clone()]);
+            let measured = execute_request(json!({"op":"measure_layout","deck":scene})).unwrap();
+            assert!(measured["measurements"].as_array().unwrap().iter().all(|item| item["overflow"] == false && item["missing_glyphs"] == 0), "{id}: {measured}");
+            let document = execute_request(json!({"op":"new_document","id":"editorial-check","deck":scene})).unwrap();
+            let report = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0],"min_font_size":14}})).unwrap();
+            assert!(!report["findings"].as_array().unwrap().iter().any(|finding| ["TEXT_OVERLAP", "CONNECTOR_LABEL_INTERFERENCE", "OFF_SLIDE", "TEXT_OVERFLOW", "CONTAINER_PADDING"].contains(&finding["code"].as_str().unwrap())), "{id}: {report}");
+            let exported = execute_request(json!({"op":"export","deck":scene})).unwrap();
+            let opened = execute_request(json!({"op":"open_presentation","id":"editorial-native","base64":exported["base64"]})).unwrap();
+            assert_eq!(children(&opened["document"]["deck"]["slides"][0]["elements"][0]).len(), children(&element).len(), "{id}");
+        }
+    }
+}
+
+#[test]
+fn editorial_limits_reject_invalid_data_and_tiny_frames() {
+    let cases: Vec<(&str, Box<dyn Fn(&mut Value)>, &str)> = vec![
+        ("flow/open-steps", Box::new(|data| data["steps"] = json!([{ "label":"Only" }])), "2-5 items"),
+        ("vertical-flow/rail", Box::new(|data| data["steps"][0]["label"] = json!(" ")), "label is required"),
+        ("flow/roadmap", Box::new(|data| data["phases"][0]["points"] = json!(["a","b","c","d","e"])), "four points"),
+        ("flow/roadmap", Box::new(|data| data["phases"][0]["period"] = json!("Now\nLater")), "one line"),
+        ("list-horizontal/icon-columns", Box::new(|data| data["items"][0]["accent"] = json!("blue")), "color"),
+        ("list-horizontal/fact-columns", Box::new(|data| data["columns"] = json!(1)), "2-3 columns"),
+        ("list-horizontal/fact-columns", Box::new(|data| data["items"][0]["value"] = json!("1\n2")), "one line"),
+        ("list-horizontal/image-columns", Box::new(|data| { data["items"][0].as_object_mut().unwrap().remove("image"); }), "image"),
+    ];
+    for (id, edit, expected) in cases {
+        let mut spec = example(id);
+        edit(&mut spec["data"]);
+        let error = create(&spec).unwrap_err();
+        assert!(error.contains(expected), "{id}: {error}");
+    }
+    for id in EDITORIAL {
+        let mut spec = example(id);
+        spec["layout"] = json!({"x":40,"y":120,"width":360,"height":150,"show_title":false});
+        assert!(create(&spec).is_err(), "{id} accepts a tiny frame");
+    }
+    let mut wrong = example("flow/open-steps");
+    wrong["preset"] = json!("vertical-flow/rail");
+    assert!(create(&wrong).unwrap_err().contains("requires rail_steps"));
+    let mut long = example("flow/open-steps");
+    long["layout"] = json!({"x":40,"y":120,"width":1152,"height":164,"show_title":false});
+    long["data"]["steps"] = json!((0..5).map(|index| json!({"label":format!("Stage {index}"),"detail":"A long phrase ".repeat(11)})).collect::<Vec<_>>());
+    assert!(create(&long).unwrap_err().contains("fixed font size"));
+}
+
+#[test]
+fn editorial_documented_maximum_counts_render_without_shrinking() {
+    for (id, key, count) in [
+        ("flow/open-steps","steps",5), ("vertical-flow/rail","steps",5), ("flow/roadmap","phases",4),
+        ("list-horizontal/icon-columns","items",4), ("list-horizontal/fact-columns","items",6), ("list-horizontal/image-columns","items",4),
+    ] {
+        let mut spec = example(id);
+        let item = spec["data"][key][0].clone();
+        spec["data"][key] = json!(vec![item; count]);
+        for spec in [spec.clone(), framed(spec)] {
+            let element = create(&spec).unwrap_or_else(|error| panic!("{id}: {error}"));
+            for child in children(&element) { for size in run_sizes(child) { assert!(size >= 14.0, "{id}"); } }
+        }
+    }
+}
+
+#[test]
+fn editorial_images_are_contained_and_facts_do_not_encode_values_as_area() {
+    let mut images = framed(example("list-horizontal/image-columns"));
+    let wide = icon(240, 120);
+    let tall = icon(120, 240);
+    images["data"]["items"] = json!([
+        {"image":wide,"label":"Wide evidence","detail":"Every edge stays visible."},
+        {"image":tall,"label":"Tall evidence","detail":"No crop is introduced."}
+    ]);
+    let rendered = create(&images).unwrap();
+    let pictures: Vec<&Value> = children(&rendered).iter().filter(|child| child["type"] == "picture").collect();
+    assert_eq!(pictures.len(), 2);
+    for (picture, ratio) in pictures.iter().zip([2.0, 0.5]) {
+        assert!((number(picture,"width") / number(picture,"height") - ratio).abs() < 1e-6);
+        for side in ["left","right","top","bottom"] { assert_eq!(picture["crop"][side].as_f64().unwrap_or(0.0), 0.0); }
+    }
+    let mut facts = framed(example("list-horizontal/fact-columns"));
+    facts["data"]["items"] = json!([
+        {"value":"0.04","unit":"%","label":"First fact","qualifier":"Its own denominator."},
+        {"value":"85","unit":"%","label":"Second fact","qualifier":"A different denominator."}
+    ]);
+    let rendered = create(&facts).unwrap();
+    assert!(!children(&rendered).iter().any(|child| child["type"] == "chart" || child["type"] == "connector"));
+    let rules: Vec<&Value> = children(&rendered).iter().filter(|child| child["preset"] == "rect").collect();
+    assert_eq!(rules.len(), 2);
+    assert_eq!([number(rules[0],"width"), number(rules[0],"height")], [number(rules[1],"width"), number(rules[1],"height")]);
+    assert!(children(&rendered).iter().any(|child| child["text"].as_str().is_some_and(|text| text.contains("0.04 %") && text.contains("Its own denominator."))));
 }
 
 #[test]

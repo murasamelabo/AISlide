@@ -13,7 +13,7 @@ function Fields({ value, label, onChange }: { value: FieldValue; label: string; 
   if (Array.isArray(value)) return <div className="part-array"><div className="part-array-heading"><h4>{label}</h4><button type="button" className="tool" aria-label={`Add ${label}`} title={`Add ${label}`} disabled={!value.length || value.length >= 12} onClick={() => onChange([...value, structuredClone(value[0])])}><Plus size={16} /></button></div><div className={value.every((item) => typeof item !== 'object') ? 'part-values' : 'part-records'}>{value.map((item, index) => <div className="part-record" key={index}><Fields value={item} label={`${label} ${index + 1}`} onChange={(next) => onChange(value.map((old, position) => position === index ? next : old))} /><button type="button" className="tool" aria-label={`Remove ${label} ${index + 1}`} title={`Remove ${label} ${index + 1}`} disabled={value.length <= 1} onClick={() => onChange(value.filter((_, position) => position !== index))}><Trash2 size={14} /></button></div>)}</div></div>
   if (value !== null && typeof value === 'object') return <div className="part-fields">{Object.entries(value).filter(([key]) => key !== 'kind').map(([key, item]) => <Fields key={key} value={item} label={label === 'Data' ? key.replaceAll('_', ' ') : `${label} ${key.replaceAll('_', ' ')}`} onChange={(next) => onChange({ ...value, [key]: next })} />)}</div>
   if (typeof value === 'boolean') return <label className="checkbox"><input type="checkbox" checked={value} onChange={(event) => onChange(event.target.checked)} />{label}</label>
-  const numeric = typeof value === 'number' || / value$/.test(label)
+  const numeric = typeof value === 'number' || value === null && / value$/.test(label)
   return <label className="field">{label}<input aria-label={label} type={numeric ? 'number' : 'text'} step={numeric ? 'any' : undefined} value={value ?? ''} maxLength={numeric ? undefined : 120} onChange={(event) => onChange(numeric ? event.target.value === '' ? null : event.currentTarget.valueAsNumber : event.target.value || (value === null ? null : ''))} /></label>
 }
 
@@ -67,9 +67,10 @@ export function PartsPanel({ catalog, theme, instance, onApply, onBusy }: { cata
       if (saved) { setSpec(structuredClone(saved.spec)); setRaw(saved.raw); setInputMode(saved.mode); setCategory(preset.category); setQuery(''); setError(''); return }
     }
     const currentExample = catalog.presets.find((preset) => preset.id === spec.preset)?.example
+    const compatible = currentExample?.data.kind === preset.example.data.kind
     const unchangedExample = JSON.stringify(currentExample?.data) === JSON.stringify(spec.data)
-    const keepRaw = keepData && preset.category === category && mode === 'json' && raw !== JSON.stringify(spec.data, null, 2)
-    const next = keepData && preset.category === category ? { ...spec, preset: preset.id, data: unchangedExample && !keepRaw ? structuredClone(preset.example.data) : spec.data } : structuredClone(preset.example)
+    const keepRaw = keepData && compatible && preset.category === category && mode === 'json' && raw !== JSON.stringify(spec.data, null, 2)
+    const next = keepData && preset.category === category ? { ...spec, preset: preset.id, data: !compatible || unchangedExample && !keepRaw ? structuredClone(preset.example.data) : spec.data } : structuredClone(preset.example)
     setSpec(next); if (!keepRaw) setRaw(JSON.stringify(next.data, null, 2)); setCategory(preset.category); setQuery(''); setError('')
   }
   async function submit() {

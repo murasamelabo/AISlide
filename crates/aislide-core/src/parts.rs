@@ -8,11 +8,13 @@ mod business;
 mod catalog;
 mod charts;
 mod diagrams;
+mod editorial;
 mod process;
 pub mod state;
 pub use briefing::{AgendaItem, Callout, IconCard, IconRow, PartMessage, ShiftRow, StepCard};
 pub use business::{BulletRow, HarveyRow, HeatmapRow, KpiCard, KpiStatus, ParetoItem, RaciTask, Risk, VarianceRow};
 pub use catalog::catalog;
+pub use editorial::{EditorialStep, FactColumn, ImageColumn, RoadmapPhase};
 pub use process::{ArchitectureElement, ArchitectureKind, ArchitectureRelation, FishboneCategory, FishboneCause, JourneyRow, SankeyLink, SankeyNode, StepShape, SwimlaneFlow, SwimlaneStep};
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -65,6 +67,12 @@ pub enum PartData {
     IconRows { rows: Vec<IconRow>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] boxed: bool, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     ShiftRows { #[serde(default, skip_serializing_if = "String::is_empty")] from_label: String, #[serde(default, skip_serializing_if = "String::is_empty")] to_label: String, rows: Vec<ShiftRow>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     StepCards { steps: Vec<StepCard>, #[serde(default, skip_serializing_if = "String::is_empty")] step_label: String, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    OpenSteps { steps: Vec<EditorialStep>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    RailSteps { steps: Vec<EditorialStep>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    Roadmap { phases: Vec<RoadmapPhase>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    IconColumns { items: Vec<IconRow> },
+    FactColumns { items: Vec<FactColumn>, #[serde(default, skip_serializing_if = "Option::is_none")] columns: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    ImageColumns { items: Vec<ImageColumn> },
     Agenda { items: Vec<AgendaItem>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
     ScreenshotCallouts { image: crate::graphs::GraphIcon, callouts: Vec<Callout>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     KpiCards { cards: Vec<KpiCard>, #[serde(default, skip_serializing_if = "Option::is_none")] columns: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
@@ -197,6 +205,7 @@ fn validate_data(data: &PartData) -> Result<()> {
             }
         }
         PartData::IconCards { .. } | PartData::IconRows { .. } | PartData::ShiftRows { .. } | PartData::StepCards { .. } | PartData::Agenda { .. } | PartData::ScreenshotCallouts { .. }
+        | PartData::OpenSteps { .. } | PartData::RailSteps { .. } | PartData::Roadmap { .. } | PartData::IconColumns { .. } | PartData::FactColumns { .. } | PartData::ImageColumns { .. }
         | PartData::KpiCards { .. } | PartData::BulletGraphs { .. } | PartData::Variance { .. } | PartData::HarveyMatrix { .. } | PartData::Heatmap { .. } | PartData::Raci { .. }
         | PartData::RiskMatrix { .. } | PartData::Pareto { .. } | PartData::ControlChart { .. } | PartData::Fishbone { .. } | PartData::Swimlane { .. } | PartData::Sankey { .. }
         | PartData::Journey { .. } | PartData::Architecture { .. } => briefing::validate(data)?,

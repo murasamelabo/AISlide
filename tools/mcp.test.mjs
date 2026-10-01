@@ -267,6 +267,12 @@ test('briefing parts MCP keeps strict data and Lucide assets return reusable ico
       { ...spec, preset: 'flow/cards', data: { kind: 'step_cards', step_label: 'PHASE', steps: [{ label: 'A', outcome: 'Result', image: icon }, { label: 'B', points: ['One'] }] } },
       { ...spec, preset: 'list/agenda', data: { kind: 'agenda', items: [{ label: 'A', meta: '10 min' }, { label: 'B', detail: 'Detail' }] } },
       { ...spec, preset: 'list-enumeration/screenshot-callouts', data: { kind: 'screenshot_callouts', image: icon, callouts: [{ x: 0.2, y: 0.4, label: 'Enable', detail: 'Detail' }, { x: 1, y: 0, label: 'Assign' }] } },
+      { ...spec, preset: 'flow/open-steps', data: { kind: 'open_steps', steps: [{ label: 'A' }, { label: 'B', detail: 'Explain' }] } },
+      { ...spec, preset: 'vertical-flow/rail', data: { kind: 'rail_steps', steps: [{ label: 'A' }, { label: 'B' }], accent: '@accent1' } },
+      { ...spec, preset: 'flow/roadmap', data: { kind: 'roadmap', phases: [{ period: 'Now', label: 'A', points: ['One'], outcome: 'Done' }, { period: 'Later', label: 'B' }] } },
+      { ...spec, preset: 'list-horizontal/icon-columns', data: { kind: 'icon_columns', items: [{ label: 'A', icon }, { label: 'B' }] } },
+      { ...spec, preset: 'list-horizontal/fact-columns', data: { kind: 'fact_columns', items: [{ value: '0.04', unit: '%', label: 'A', qualifier: 'Own denominator' }, { value: 'Slow', label: 'B' }], columns: 2 } },
+      { ...spec, preset: 'list-horizontal/image-columns', data: { kind: 'image_columns', items: [{ image: icon, label: 'A', caption: 'Evidence' }, { image: icon, label: 'B' }] } },
     ];
     for (const candidate of valid) assert.equal(schema.safeParse({ ...input, spec: candidate }).success, true, candidate.preset);
     const card = { label: 'Topic' };
@@ -278,6 +284,12 @@ test('briefing parts MCP keeps strict data and Lucide assets return reusable ico
       { kind: 'shift_rows', rows: Array(6).fill({ from: 'A', to: 'B' }) }, { kind: 'icon_rows', rows: [{ label: 'A' }] },
       { kind: 'screenshot_callouts', image: icon, callouts: [{ x: 1.2, y: 0.5, label: 'A' }] }, { kind: 'screenshot_callouts', image: icon, callouts: Array(7).fill({ x: 0.5, y: 0.5, label: 'A' }) },
       { kind: 'screenshot_callouts', callouts: [{ x: 0.5, y: 0.5, label: 'A' }] },
+      { kind: 'open_steps', steps: [{ label: 'Only' }] },
+      { kind: 'rail_steps', steps: Array(6).fill({ label: 'Too many' }) },
+      { kind: 'roadmap', phases: [{ period: 'Now\nLater', label: 'A' }, { period: 'Later', label: 'B' }] },
+      { kind: 'fact_columns', items: [{ value: '1\n2', label: 'A' }, { value: '3', label: 'B' }] },
+      { kind: 'fact_columns', items: Array(6).fill({ value: '1', label: 'A' }), columns: 2 },
+      { kind: 'image_columns', items: [{ label: 'A' }, { image: icon, label: 'B' }] },
     ]) assert.equal(schema.safeParse({ ...input, spec: { ...spec, data } }).success, false, JSON.stringify(data).slice(0, 80));
     const business = [
       ['list-horizontal/kpi-cards', { kind: 'kpi_cards', cards: [{ label: 'Revenue', value: '12.4', unit: 'B', delta: '+8%', status: 'good', comparison: 'Plan 12' }], columns: null }],
@@ -2709,7 +2721,7 @@ test('MCP open list recommendations render native text and keep failed edits ato
   try {
     await client.connect(transport);
     const catalog = await call('part_catalog');
-    assert.equal(catalog.presets.length, 132);
+    assert.equal(catalog.presets.length, 138);
     for (const id of ['list/rows', 'list-horizontal/columns', 'list-enumeration/grid']) {
       const preset = catalog.presets.find(entry => entry.id === id);
       assert.equal(preset.recommended, true);
@@ -2717,6 +2729,17 @@ test('MCP open list recommendations render native text and keep failed edits ato
       const element = await call('create_part', { id: 'open-list', spec: preset.example });
       assert.ok(element.children.every(child => child.type === 'text'));
       assert.ok(element.children.every(child => ['@dk1', '@dk2'].includes(child.color)));
+    }
+    for (const id of ['flow/open-steps', 'vertical-flow/rail', 'flow/roadmap', 'list-horizontal/icon-columns', 'list-horizontal/fact-columns', 'list-horizontal/image-columns']) {
+      const preset = catalog.presets.find(entry => entry.id === id);
+      assert.equal(preset.recommended, true, id);
+      assert.ok(preset.use_when && preset.avoid_when, id);
+      const element = await call('create_part', { id: 'editorial-part', spec: { ...preset.example, layout: { x: 48, y: 120, width: 1184, height: 540, show_title: false } } });
+      assert.equal(element.type, 'group', id);
+      assert.equal(element.width, element.view_width, id);
+      assert.equal(element.height, element.view_height, id);
+      assert.ok(element.children.length > 0, id);
+      assert.ok(element.children.every(child => child.type !== 'chart'), id);
     }
     const { deck_id } = await call('create_presentation', { title: 'Synthetic open lists' });
     const original = await call('get_document', { deck_id });
