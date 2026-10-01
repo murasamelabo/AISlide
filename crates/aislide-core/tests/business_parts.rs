@@ -88,6 +88,20 @@ fn assert_routes_clear_nodes(element: &Value, context: &str) {
     }
 }
 
+/// Custom routes leave and enter steps away from the points used by straight and elbow flows, so no two lines overlap there.
+fn assert_custom_ends_stay_apart(element: &Value, context: &str) {
+    let all = descendants(element);
+    let connectors: Vec<&&Value> = all.iter().filter(|child| child["type"] == "connector").collect();
+    let ends = |connector: &Value| { let points = route_points(connector); [points[0], *points.last().unwrap()] };
+    for custom in connectors.iter().filter(|connector| connector["routing"]["custom"] == true) {
+        for other in connectors.iter().filter(|connector| connector["routing"]["custom"] != true) {
+            for a in ends(custom) {
+                for b in ends(other) { assert!((a[0] - b[0]).hypot(a[1] - b[1]) > 4.0, "{context}: {} and {} meet at {a:?}", custom["id"], other["id"]); }
+            }
+        }
+    }
+}
+
 fn swimlane(lanes: &[&str], steps: Value, flows: Value) -> Value {
     json!({"version":1,"preset":"flow/swimlane","title":"Swimlane","subtitle":"","data":{"kind":"swimlane","lanes":lanes,"steps":steps,"flows":flows}})
 }
@@ -459,6 +473,7 @@ fn swimlane_returns_skips_and_blocked_columns_route_around_steps() {
     for (name, spec) in cases {
         let element = create(&spec).unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_routes_clear_nodes(&element, name);
+        assert_custom_ends_stay_apart(&element, name);
         let document = execute_request(json!({"op":"new_document","id":"swimlane-preflight","deck":deck(vec![element])})).unwrap();
         let preflight = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0],"min_font_size":12}})).unwrap();
         let findings: Vec<&Value> = preflight["findings"].as_array().unwrap().iter()
@@ -496,6 +511,7 @@ fn swimlane_routes_never_cross_steps_in_generated_processes() {
         let spec = swimlane(&names[..lanes], json!(steps), json!(flows));
         let element = create(&spec).unwrap_or_else(|error| panic!("case {case}: {error}\n{spec}"));
         assert_routes_clear_nodes(&element, &format!("case {case}: {spec}"));
+        assert_custom_ends_stay_apart(&element, &format!("case {case}: {spec}"));
     }
 }
 

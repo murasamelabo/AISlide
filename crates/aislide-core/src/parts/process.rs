@@ -495,9 +495,11 @@ fn swimlane(lanes: &[String], steps: &[SwimlaneStep], flows: &[SwimlaneFlow], th
         x
     };
     let center = |position: usize| [bounds[position][0] + bounds[position][2] / 2.0, bounds[position][1] + bounds[position][3] / 2.0];
-    // Pass 1: ports plus either an engine route or manual waypoints.
+    // Pass 1: ports plus either an engine route or manual waypoints. Manual routes leaving or entering a side port use its
+    // upper or lower part (toward the band they run in), so their stubs do not overlap straight flows at the side center.
+    let mut offsets: BTreeMap<(usize, usize), f64> = BTreeMap::new();
     let mut plans: Vec<([&str; 2], Option<&str>, Vec<[f64; 2]>)> = Vec::new();
-    for flow in flows {
+    for (position, flow) in flows.iter().enumerate() {
         let (from, to) = (index[flow.from.as_str()], index[flow.to.as_str()]);
         let (source_lane, target_lane, source_column, target_column) = (steps[from].lane, steps[to].lane, column[from], column[to]);
         let (low, high) = (source_lane.min(target_lane), source_lane.max(target_lane));
@@ -509,9 +511,14 @@ fn swimlane(lanes: &[String], steps: &[SwimlaneStep], flows: &[SwimlaneFlow], th
         } else if !flow.exception && target_column > source_column {
             // Pass occupied cells through the target lane's empty header band.
             let (exit, enter, y) = (gutter(source_column + 1, -1), gutter(target_column, 1), above(target_lane, slot('t', target_lane)));
+            offsets.insert((position, 0), if target_lane > source_lane { 0.3 } else { -0.3 });
+            offsets.insert((position, 1), -0.3);
             (["right", "left"], Some("manual"), vec![[exit, source[1]], [exit, y], [enter, y], [enter, target[1]]])
         } else if !flow.exception && target_column == source_column {
             let x = gutter(source_column + 1, -1);
+            let down = target_lane > source_lane;
+            offsets.insert((position, 0), if down { 0.3 } else { -0.3 });
+            offsets.insert((position, 1), if down { -0.3 } else { 0.3 });
             (["right", "right"], Some("manual"), vec![[x, source[1]], [x, target[1]]])
         } else {
             // Returns and exceptions drop into the source lane's bottom channel, cross lanes in the gutter beside the
@@ -540,7 +547,6 @@ fn swimlane(lanes: &[String], steps: &[SwimlaneStep], flows: &[SwimlaneFlow], th
             group.1.push((next[0] < bounds[node][0] + bounds[node][2] / 2.0, (stub[1] - edge).abs(), position, end));
         }
     }
-    let mut offsets: BTreeMap<(usize, usize), f64> = BTreeMap::new();
     for (straight, mut manual) in ends.into_values() {
         if manual.is_empty() || manual.len() == 1 && !straight { continue; }
         manual.sort_by(|left, right| left.1.total_cmp(&right.1).then(left.2.cmp(&right.2)));
@@ -553,7 +559,7 @@ fn swimlane(lanes: &[String], steps: &[SwimlaneStep], flows: &[SwimlaneFlow], th
             }
         }
     }
-    // Pass 3: the stub waypoint moves with its port, keeping both the stub and the channel segment axis-aligned.
+    // Pass 3: the stub waypoint moves with its port, keeping both the stub and the next segment axis-aligned.
     let mut edges = Vec::new();
     for (position, (flow, (ports, route, mut waypoints))) in flows.iter().zip(plans).enumerate() {
         let mut edge = json!({"id": format!("flow-{position}"), "source": flow.from, "target": flow.to, "label": flow.label, "label_font_size": 12,
@@ -563,7 +569,8 @@ fn swimlane(lanes: &[String], steps: &[SwimlaneStep], flows: &[SwimlaneFlow], th
             let Some(share) = offsets.get(&(position, end)).map(|share| round(*share)) else { continue };
             edge[field] = json!(share);
             let stub = if end == 0 { 0 } else { waypoints.len() - 1 };
-            waypoints[stub][0] = round(bounds[node][0]) + (0.5 + share) * round(bounds[node][2]);
+            if matches!(ports[end], "top" | "bottom") { waypoints[stub][0] = round(bounds[node][0]) + (0.5 + share) * round(bounds[node][2]); }
+            else { waypoints[stub][1] = round(bounds[node][1]) + (0.5 + share) * round(bounds[node][3]); }
         }
         if !waypoints.is_empty() { edge["waypoints"] = json!(waypoints.iter().map(|point| [round(point[0]), round(point[1])]).collect::<Vec<_>>()); }
         edges.push(edge);
