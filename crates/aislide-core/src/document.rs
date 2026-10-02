@@ -286,6 +286,12 @@ pub fn export(document: &Document) -> Result<Value> {
     export_internal(document, true)
 }
 
+// Checkpoints keep other metadata in JSON, but the PPTX record must follow the document so a removed origin record does not reopen.
+fn with_provenance(bytes: Vec<u8>, document: &Document, checkpoint: bool) -> Result<Vec<u8>> {
+    if !checkpoint || document.guided_record.is_some() || (document.origin.is_some() && crate::provenance::has_guided_record(&bytes)?) { crate::provenance::attach(bytes, document) }
+    else { Ok(bytes) }
+}
+
 fn export_internal(document: &Document, checkpoint: bool) -> Result<Value> {
     verify(document)?;
     if document.bindings.iter().any(|binding| binding.stale) { return Err(Error::Conflict("source bindings are stale; undo data edits or explicitly remove/rebind affected citations before export".into())); }
@@ -293,8 +299,7 @@ fn export_internal(document: &Document, checkpoint: bool) -> Result<Value> {
     if let Some(issue) = layout.as_ref().and_then(|report| report.issues.iter().find(|issue| issue.severity == "error")) {
         return Err(Error::Invalid(format!("project export blocked by {}: {}", issue.code, issue.message)));
     }
-    let mut bytes = presentation(document)?;
-    if !checkpoint || document.guided_record.is_some() { bytes = crate::provenance::attach(bytes, document)?; }
+    let bytes = with_provenance(presentation(document)?, document, checkpoint)?;
     if bytes.len() > document.capacity_profile.limits().archive_bytes { return Err(Error::Limit(format!("presentation exceeds {} byte binary budget", document.capacity_profile.limits().archive_bytes))); }
     let mut result = json!({"base64":STANDARD.encode(&bytes),"filename":"report.pptx","layout":layout});
     if checkpoint {
@@ -309,8 +314,7 @@ pub fn open(base64: &str, checkpoint: Checkpoint) -> Result<Document> {
     let bytes = STANDARD.decode(base64).map_err(|_| Error::Invalid("invalid project PPTX base64".into()))?;
     if digest(&bytes) != checkpoint.pptx_sha256 { return Err(Error::Conflict("PPTX does not match this checkpoint".into())); }
     verify(&checkpoint.document)?;
-    let mut reproduced = presentation(&checkpoint.document)?;
-    if checkpoint.document.guided_record.is_some() { reproduced = crate::provenance::attach(reproduced, &checkpoint.document)?; }
+    let reproduced = with_provenance(presentation(&checkpoint.document)?, &checkpoint.document, true)?;
     if reproduced != bytes { return Err(Error::Conflict("checkpoint scene does not reproduce its bound PPTX".into())); }
     Ok(checkpoint.document)
 }

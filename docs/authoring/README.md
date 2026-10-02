@@ -860,9 +860,19 @@ MCP `get_document({deck_id})` or SDK `session.document.guided_record` after crea
 or reopening. It is a creation snapshot, not continuously synchronized or proof
 that edited content remains supported. Existing `full` documents do not gain a
 new record automatically. Guided content checks run only at creation; stored or
-transactionally edited records are validated for structure, version, size and
-absence of duplicated speaker notes, so later rule changes do not make saved
-files unopenable.
+transactionally edited records are validated for structure, version, size,
+absence of duplicated speaker notes and storability: every string and object key
+must contain only XML 1.0 characters (no NUL, other C0 controls except tab/LF/CR,
+or U+FFFE/U+FFFF) and values may nest at most 30 levels below the provenance
+root (the record itself is level 1). Export additionally re-reads the generated
+provenance XML and rejects it unless it reproduces the metadata exactly, so a
+saved PPTX stays reopenable. CR, CRLF and whitespace in object keys are written
+as character references and roundtrip unchanged. These structural checks do not
+rerun content rules, so later rule changes do not make saved files unopenable.
+Removing `/guided_record` by transaction also removes it from both
+`export_presentation` and `export_project` PPTX output, including documents
+opened from a PPTX that carried a record; this reflects current state and does
+not erase earlier files or history.
 
 These modes change note presentation, **not privacy retention**. `none` still
 keeps source/assumption statements, original part input and possibly embedded

@@ -484,7 +484,7 @@ environment when needed, because the official SDK uses an environment allowlist.
 | `open_project` | `base64`, `checkpoint` | Verified document, only if the exact PPTX matches |
 | `import_document` | `id`, `base64` | Origin-bound document, warnings, per-object editable fields |
 
-Content JSON Patch paths start with `/deck`, `/sources`, `/bindings`, `/parts`, `/report` or the immutable import origin. A batch has 1-128 operations; a stale revision/hash, failed test/path, oversized intermediate result or invalid final state aborts the batch. Revisions increase on real changes and Undo/Redo; no-op transactions do not create history. Deleting a part root also removes its metadata in that transaction, so Undo restores both. Core receipts are not signed capabilities and undergo the same validation as edits.
+Content JSON Patch paths start with `/deck`, `/sources`, `/bindings`, `/parts`, `/report`, `/references`, `/guided_record` or the immutable import origin. A batch has 1-128 operations; a stale revision/hash, failed test/path, oversized intermediate result or invalid final state aborts the batch. Revisions increase on real changes and Undo/Redo; no-op transactions do not create history. Deleting a part root also removes its metadata in that transaction, so Undo restores both. Core receipts are not signed capabilities and undergo the same validation as edits.
 
 ### Authored Slide Import
 
@@ -570,8 +570,11 @@ MCP `get_document` or SDK `session.document.guided_record`; it also roundtrips
 through project checkpoints and the PPTX's AISlide Custom XML. The separate
 record is capped at 1 MiB serialized JSON; total provenance XML remains capped
 at 2 MiB, and summary/none creation rejects input whose escaped provenance would
-exceed it. Stored records are validated structurally; guided content checks run
-only at creation. `inspect_document` scans the record and `export_clean_copy`
+exceed it. Stored records are validated structurally (XML 1.0 characters in
+strings and keys, at most 30 nesting levels below the provenance root, exact
+reread of the generated XML including CR); guided content checks run
+only at creation. Removing `/guided_record` also removes it from project and
+presentation PPTX output. `inspect_document` scans the record and `export_clean_copy`
 removes it when `sources` or `notes` is selected. `none` does not redact evidence
 from the file. The record is captured at creation, not automatically updated
 after edits or authenticated as truth.

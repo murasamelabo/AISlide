@@ -7,6 +7,8 @@ use xmlwriter::{Options, XmlWriter};
 
 const NS: &str = "urn:aislide:provenance:1";
 const MAX_BYTES: usize = 2 * 1024 * 1024;
+// Each JSON level adds a value element and a field element below the root, so 30 levels fit the 64-level XML reader limit.
+pub(crate) const MAX_VALUE_DEPTH: usize = 30;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,12 +17,39 @@ pub(crate) struct Identity { pub part: String, pub id: String, pub objects: BTre
 #[serde(deny_unknown_fields)]
 pub(crate) struct Metadata { pub version: u32, pub sources: Vec<SourceDocument>, pub bindings: Vec<SourceBinding>, pub identities: Vec<Identity>, #[serde(default,skip_serializing_if="Vec::is_empty")] pub parts: Vec<crate::parts::state::PartInstance>, #[serde(default,skip_serializing_if="Option::is_none")] pub references: Option<crate::references::ReferenceState>, #[serde(default,skip_serializing_if="Option::is_none")] pub guided_record: Option<crate::guided::GuidedRecord> }
 
+// Character references keep CR, and whitespace in attributes, out of XML end-of-line and attribute-value normalization.
+fn escape(text: &str, attribute: bool) -> String {
+    let escaped = quick_xml::escape::escape(text);
+    let mut output = String::with_capacity(escaped.len());
+    for character in escaped.chars() {
+        match character {
+            '\r' => output.push_str("&#13;"),
+            '\n' if attribute => output.push_str("&#10;"),
+            '\t' if attribute => output.push_str("&#9;"),
+            character => output.push(character),
+        }
+    }
+    output
+}
+
 fn write_value(writer: &mut XmlWriter, value: &Value) {
     match value {
-        Value::Object(values) => { writer.start_element("m:object"); for (name, value) in values { writer.start_element("m:field"); writer.write_attribute("name", &quick_xml::escape::escape(name)); write_value(writer, value); writer.end_element(); } writer.end_element(); }
+        Value::Object(values) => { writer.start_element("m:object"); for (name, value) in values { writer.start_element("m:field"); writer.write_attribute("name", &escape(name, true)); write_value(writer, value); writer.end_element(); } writer.end_element(); }
         Value::Array(values) => { writer.start_element("m:array"); for value in values { write_value(writer, value); } writer.end_element(); }
         Value::Null => empty(writer, "m:null", &[]),
-        value => { writer.start_element(match value { Value::String(_) => "m:string", Value::Bool(_) => "m:boolean", _ => "m:number" }); let text = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()); writer.write_text(&quick_xml::escape::escape(&text)); writer.end_element(); }
+        value => { writer.start_element(match value { Value::String(_) => "m:string", Value::Bool(_) => "m:boolean", _ => "m:number" }); let text = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()); writer.write_text(&escape(&text, false)); writer.end_element(); }
+    }
+}
+
+/// Rejects values that the provenance XML writer cannot store for a later read; `depth` is the value's level below the metadata root.
+pub(crate) fn check_storable(value: &Value, depth: usize) -> Result<()> {
+    if depth > MAX_VALUE_DEPTH { return Err(Error::Limit(format!("provenance value nesting exceeds {MAX_VALUE_DEPTH} levels"))); }
+    let text = |text: &str| crate::model::valid_text(text, usize::MAX).map_err(|_| Error::Invalid("provenance value contains a character not permitted in XML 1.0".into()));
+    match value {
+        Value::String(value) => text(value),
+        Value::Object(values) => values.iter().try_for_each(|(name, value)| { text(name)?; check_storable(value, depth + 1) }),
+        Value::Array(values) => values.iter().try_for_each(|value| check_storable(value, depth + 1)),
+        _ => Ok(()),
     }
 }
 
@@ -60,11 +89,20 @@ fn validate_resources(metadata: &Metadata) -> Result<()> {
 
 fn encode(metadata: &Metadata) -> Result<Vec<u8>> {
     validate_resources(metadata)?;
+    let value = serde_json::to_value(metadata)?;
+    check_storable(&value, 0)?;
     let mut writer = XmlWriter::new(Options { indent: xmlwriter::Indent::None, ..Options::default() });
-    writer.start_element("m:provenance"); writer.write_attribute("xmlns:m", NS); write_value(&mut writer, &serde_json::to_value(metadata)?); writer.end_element();
-    let bytes = writer.end_document().into_bytes();
-    if bytes.len() > MAX_BYTES { return Err(Error::Limit("provenance XML > 2 MiB".into())); }
-    Ok(bytes)
+    writer.start_element("m:provenance"); writer.write_attribute("xmlns:m", NS); write_value(&mut writer, &value); writer.end_element();
+    let xml = writer.end_document();
+    if xml.len() > MAX_BYTES { return Err(Error::Limit("provenance XML > 2 MiB".into())); }
+    let document = parse(&xml).map_err(|error| Error::Limit(format!("provenance XML would not reopen: {error}")))?;
+    let children: Vec<_> = document.root_element().children().filter(|node| node.is_element()).collect();
+    if children.len() != 1 || read_value(children[0], 0)? != value { return Err(Error::Invalid("provenance XML does not preserve metadata exactly".into())); }
+    Ok(xml.into_bytes())
+}
+
+pub(crate) fn has_guided_record(bytes: &[u8]) -> Result<bool> {
+    Ok(read(&Package::open(bytes.to_vec())?)?.is_some_and(|(_, metadata)| metadata.guided_record.is_some()))
 }
 
 pub(crate) fn read(package: &Package) -> Result<Option<(String, Metadata)>> {

@@ -458,6 +458,85 @@ fn guided_record_edits_are_structural_and_do_not_rerun_creation_checks() {
 }
 
 #[test]
+fn guided_record_rejects_values_the_pptx_reader_cannot_reopen() {
+    use aislide_core::document::{self,Document,Transaction};
+    for mode in ["summary","none"] {
+        let mut input=authoring_brief("status-report");input["authoring"]=json!({"ledger_notes":mode});
+        input["slides"][0]["support"][0]["clause"]=json!("Review the evidence before proceeding.\u{b}");
+        let checked=execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+        assert_eq!(checked["ready"],false,"{checked}");
+        let error=execute_request(json!({"op":"create_guided_presentation","id":"record-control","input":input})).unwrap_err().to_string();
+        assert!(error.contains("guided creation record") && error.contains("XML 1.0"),"{error}");
+    }
+    let mut input=authoring_brief("status-report");input["authoring"]=json!({"ledger_notes":"summary"});
+    let created=execute_request(json!({"op":"create_guided_presentation","id":"record-storable","input":input})).unwrap();
+    let original:Document=serde_json::from_value(created["document"].clone()).unwrap();
+    let nested=|levels:usize|(0..levels).fold(json!("leaf"),|value,_|json!([value]));
+    let number=|value:Value|json!({"op":"add","path":"/guided_record/input/slides/0/numbers/-","value":{"path":"/data/items/0","value":value,"evidence_id":"source-a"}});
+    let edit=|operation:Value|document::transact(&original,Transaction{expected_revision:original.revision,expected_hash:original.hash.clone(),operations:serde_json::from_value(json!([operation])).unwrap()});
+    for operation in [
+        json!({"op":"replace","path":"/guided_record/input/title","value":"Before\u{0}After"}),
+        json!({"op":"replace","path":"/guided_record/input/audience","value":"Before\u{fffe}After"}),
+        number(json!({"bad\u{1}key":1})),
+        number(nested(24)),
+    ] {
+        let error=edit(operation.clone()).err().unwrap_or_else(||panic!("{operation}")).to_string();
+        assert!(error.contains("guided creation record"),"{operation}: {error}");
+    }
+    let deepest=edit(number(nested(23))).unwrap().document;
+    let exported=execute_request(json!({"op":"export_presentation","document":deepest})).unwrap();
+    let reopened=execute_request(json!({"op":"open_presentation","id":"record-deepest","base64":exported["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["guided_record"],serde_json::to_value(&deepest.guided_record).unwrap());
+}
+
+#[test]
+fn guided_record_preserves_carriage_returns_and_attribute_whitespace_exactly() {
+    use aislide_core::document::{self,Document,Transaction};
+    let mut input=authoring_brief("status-report");input["authoring"]=json!({"ledger_notes":"summary"});
+    input["audience"]=json!("Before\rAfter");
+    input["evidence"][0]["statement"]=json!("Line one\r\nLine two\n\rLine three\r");
+    let created=execute_request(json!({"op":"create_guided_presentation","id":"record-newlines","input":input})).unwrap();
+    assert_eq!(created["document"]["guided_record"]["input"]["audience"],"Before\rAfter");
+    let original:Document=serde_json::from_value(created["document"].clone()).unwrap();
+    let changed=document::transact(&original,Transaction{expected_revision:original.revision,expected_hash:original.hash.clone(),operations:serde_json::from_value(json!([
+        {"op":"add","path":"/guided_record/input/slides/0/numbers/-","value":{"path":"/data/items/0","value":{"tab\tline\nreturn\r end":"value\r\n\t kept"},"evidence_id":"source-a"}},
+    ])).unwrap()}).unwrap().document;
+    let record=serde_json::to_value(&changed.guided_record).unwrap();
+    let exported=execute_request(json!({"op":"export_presentation","document":changed})).unwrap();
+    let reopened=execute_request(json!({"op":"open_presentation","id":"record-newlines-reopened","base64":exported["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["guided_record"],record);
+    let checkpoint=document::export(&changed).unwrap();
+    let restored=document::open(checkpoint["base64"].as_str().unwrap(),serde_json::from_value(checkpoint["checkpoint"].clone()).unwrap()).unwrap();
+    assert_eq!(restored.hash,changed.hash);
+    let native=execute_request(json!({"op":"open_presentation","id":"record-newlines-checkpoint","base64":checkpoint["base64"]})).unwrap();
+    assert_eq!(native["document"]["guided_record"],record);
+}
+
+#[test]
+fn guided_record_removed_from_native_document_stays_removed_in_project_export() {
+    use aislide_core::document::{self,Document,Transaction};
+    let mut input=authoring_brief("status-report");input["authoring"]=json!({"ledger_notes":"none"});
+    let created=execute_request(json!({"op":"create_guided_presentation","id":"record-removal","input":input})).unwrap();
+    let exported=execute_request(json!({"op":"export_presentation","document":created["document"]})).unwrap();
+    let opened=execute_request(json!({"op":"open_presentation","id":"record-removal-native","base64":exported["base64"]})).unwrap();
+    let native:Document=serde_json::from_value(opened["document"].clone()).unwrap();
+    assert!(native.guided_record.is_some() && native.origin.is_some());
+    let removed=document::transact(&native,Transaction{expected_revision:native.revision,expected_hash:native.hash.clone(),operations:serde_json::from_value(json!([{"op":"remove","path":"/guided_record"}])).unwrap()}).unwrap().document;
+    let presentation=document::export_presentation(&removed).unwrap();
+    let project=document::export(&removed).unwrap();
+    for (label,base64) in [("presentation",&presentation["base64"]),("project",&project["base64"])] {
+        let reopened=execute_request(json!({"op":"open_presentation","id":"record-removal-reopened","base64":base64})).unwrap();
+        assert!(reopened["document"].get("guided_record").is_none(),"{label}");
+    }
+    let restored=document::open(project["base64"].as_str().unwrap(),serde_json::from_value(project["checkpoint"].clone()).unwrap()).unwrap();
+    assert_eq!(restored.hash,removed.hash);
+    assert!(restored.guided_record.is_none());
+    let unchanged=document::export(&native).unwrap();
+    let reopened=execute_request(json!({"op":"open_presentation","id":"record-removal-unchanged","base64":unchanged["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["guided_record"],opened["document"]["guided_record"]);
+}
+
+#[test]
 fn guided_authoring_invalid_settings_reject_without_fallback() {
     for settings in [json!({"context":"screen"}),json!({"density":"dense"}),json!({"spacing":"wide"}),json!({"extra":true}),json!({"body_font_min":11.99}),json!({"body_font_min":40.01}),json!({"headline_font_size":27.99}),json!({"headline_font_size":64.01}),json!({"font_family":""}),json!({"font_family":" "}),json!({"font_family":"a".repeat(101)}),json!({"font_family":"bad\nfont"}),json!({"body_font_min":"24"})] {
         let mut input=authoring_brief("status-report");input["authoring"]=settings.clone();
