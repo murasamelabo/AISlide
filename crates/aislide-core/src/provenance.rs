@@ -13,7 +13,7 @@ const MAX_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) struct Identity { pub part: String, pub id: String, pub objects: BTreeMap<String, String> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Metadata { pub version: u32, pub sources: Vec<SourceDocument>, pub bindings: Vec<SourceBinding>, pub identities: Vec<Identity>, #[serde(default,skip_serializing_if="Vec::is_empty")] pub parts: Vec<crate::parts::state::PartInstance>, #[serde(default,skip_serializing_if="Option::is_none")] pub references: Option<crate::references::ReferenceState> }
+pub(crate) struct Metadata { pub version: u32, pub sources: Vec<SourceDocument>, pub bindings: Vec<SourceBinding>, pub identities: Vec<Identity>, #[serde(default,skip_serializing_if="Vec::is_empty")] pub parts: Vec<crate::parts::state::PartInstance>, #[serde(default,skip_serializing_if="Option::is_none")] pub references: Option<crate::references::ReferenceState>, #[serde(default,skip_serializing_if="Option::is_none")] pub guided_record: Option<crate::guided::GuidedRecord> }
 
 fn write_value(writer: &mut XmlWriter, value: &Value) {
     match value {
@@ -54,6 +54,7 @@ fn validate_resources(metadata: &Metadata) -> Result<()> {
         || metadata.identities.iter().map(|entry| entry.objects.len()).sum::<usize>() > crate::limits::STANDARD.elements_total {
         return Err(Error::Limit("provenance resources".into()));
     }
+    if let Some(record)=&metadata.guided_record {crate::guided::validate_record(record)?;}
     Ok(())
 }
 
@@ -93,7 +94,7 @@ pub(crate) fn attach(bytes: Vec<u8>, document: &Document) -> Result<Vec<u8>> {
     let native = crate::native::read(&package)?;
     let different_ids = native.deck.slides.iter().map(|slide| &slide.id).ne(document.deck.slides.iter().map(|slide| &slide.id))
         || document.deck.design.as_ref().is_some_and(|design| native.masters.iter().map(|master| &master.id).ne(design.masters.iter().map(|master| &master.id)) || native.layouts.iter().map(|layout| &layout.id).ne(design.layouts.iter().map(|layout| &layout.id)));
-    if document.sources.is_empty() && document.bindings.is_empty() && document.parts.is_empty() && document.references.is_none() && existing.is_none() && !different_ids { return Ok(bytes); }
+    if document.sources.is_empty() && document.bindings.is_empty() && document.parts.is_empty() && document.references.is_none() && document.guided_record.is_none() && existing.is_none() && !different_ids { return Ok(bytes); }
     let mut identities = Vec::new();
     for (part, slide) in native.slides.iter().zip(&document.deck.slides) { identities.push(Identity { part: part.path.clone(), id: slide.id.clone(), objects: part.nodes.iter().map(|(id, numeric)| (numeric.clone(), id.clone())).collect() }); }
     if let Some(design) = document.deck.design.as_ref().or(native.deck.design.as_ref()) {
@@ -111,7 +112,7 @@ pub(crate) fn attach(bytes: Vec<u8>, document: &Document) -> Result<Vec<u8>> {
         } else if let Some(old)=existing.as_ref().and_then(|(_,metadata)|metadata.parts.iter().find(|old|old.slide_id==part.slide_id && old.element_id==part.element_id)) {part.stale=old.stale;}
     }
     let references = document.references.as_ref().map(|state| crate::references::exported_state(state, &document.deck, &native.deck)).transpose()?;
-    let metadata = Metadata { version: 1, sources: document.sources.clone(), bindings: document.bindings.clone(), identities, parts, references };
+    let metadata = Metadata { version: 1, sources: document.sources.clone(), bindings: document.bindings.clone(), identities, parts, references, guided_record: document.guided_record.clone() };
     if existing.as_ref().is_some_and(|(_, old)| crate::canonical::bytes(old).ok() == crate::canonical::bytes(&metadata).ok()) { return Ok(bytes); }
     let encoded = encode(&metadata)?;
     if let Some((path, _)) = existing { package.replace_part(&path, encoded)?; return package.save(); }

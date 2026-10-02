@@ -95,7 +95,7 @@ fn guided_authoring_keyword_headlines_keep_support_and_numeric_checks() {
 fn guided_authoring_validation_options_preserve_legacy_typography() {
     let input=authoring_brief("status-report");
     let original=execute_request(json!({"op":"create_guided_presentation","id":"validation-options","input":input})).unwrap();
-    for settings in [json!({"headline_style":"sentence"}),json!({"headline_style":"keyword"}),json!({"slide_limit":32}),json!({"slide_limit":128,"headline_style":"keyword"})] {
+    for settings in [json!({"headline_style":"sentence"}),json!({"headline_style":"keyword"}),json!({"slide_limit":32}),json!({"slide_limit":128,"headline_style":"keyword"}),json!({"ledger_notes":"full"}),json!({"ledger_notes":"full","slide_limit":32,"headline_style":"sentence"})] {
         let mut input=input.clone();input["authoring"]=settings;
         let created=execute_request(json!({"op":"create_guided_presentation","id":"validation-options","input":input})).unwrap();
         assert_eq!(created,original);
@@ -277,6 +277,115 @@ fn guided_authoring_speaker_notes_append_once_and_preserve_evidence() {
 }
 
 #[test]
+fn guided_ledger_notes_none_keeps_speaker_text_and_legacy_slide_geometry() {
+    let mut input=authoring_brief("status-report");
+    input["slides"][0]["speaker_notes"]=json!("Explain the evidence first.\nKeep the original caveat.");
+    let legacy=execute_request(json!({"op":"create_guided_presentation","id":"notes-mode","input":input})).unwrap();
+    input["authoring"]=json!({"ledger_notes":"none"});
+    let created=execute_request(json!({"op":"create_guided_presentation","id":"notes-mode","input":input})).unwrap();
+    assert_eq!(created["document"]["deck"]["slides"][0]["notes"],input["slides"][0]["speaker_notes"]);
+    assert_eq!(created["document"]["deck"]["slides"][0]["elements"],legacy["document"]["deck"]["slides"][0]["elements"]);
+    assert_eq!(created["document"]["parts"],legacy["document"]["parts"]);
+}
+
+#[test]
+fn guided_ledger_notes_records_roundtrip_outside_presenter_notes() {
+    for mode in ["summary","none"] {
+        let mut input=brief("status-report");
+        input["authoring"]=json!({"ledger_notes":mode});
+        input["evidence"][0]["reference"]=json!("Approved synthetic & illustrative <fixture> \"reference\"");
+        input["slides"][0]["speaker_notes"]=json!("Explain the synthetic comparison first.\nPause before the recommendation.");
+        let created=execute_request(json!({"op":"create_guided_presentation","id":"notes-record","input":input})).unwrap();
+        let document=&created["document"];
+        let notes=document["deck"]["slides"][0]["notes"].as_str().unwrap();
+        assert!(notes.starts_with(input["slides"][0]["speaker_notes"].as_str().unwrap()));
+        assert!(!notes.contains("\"body_paths\"") && !notes.contains("\"statement\""),"{notes}");
+        if mode=="summary" {assert!(notes.contains("Authoring summary") && notes.contains("source-a"),"{notes}");}
+        let record=&document["guided_record"];
+        assert_eq!(record["version"],1);
+        assert_eq!(record["input"]["evidence"],input["evidence"]);
+        assert_eq!(record["input"]["slides"][0]["support"],input["slides"][0]["support"]);
+        assert_eq!(record["input"]["slides"][0]["numbers"],input["slides"][0]["numbers"]);
+        assert!(record["input"]["slides"][0].get("speaker_notes").is_none());
+        let exported=execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+        let reopened=execute_request(json!({"op":"open_presentation","id":"notes-record-reopened","base64":exported["base64"]})).unwrap();
+        assert_eq!(reopened["document"]["guided_record"],*record);
+        assert_eq!(reopened["document"]["deck"]["slides"][0]["notes"],notes);
+        assert_eq!(reopened["document"]["parts"][0]["stale"],false);
+    }
+}
+
+#[test]
+fn guided_ledger_notes_budgets_remain_independent_and_reject_invalid_modes() {
+    let mut input=authoring_brief("status-report");
+    let speaker="\u{1f4ac}".repeat(4000);
+    input["slides"][0]["speaker_notes"]=json!(speaker);
+    input["evidence"]=json!((0..4).map(|index|json!({"id":format!("source-{index}"),"kind":"source","reference":"Synthetic fixture","statement":"s".repeat(1200)})).collect::<Vec<_>>());
+    input["slides"][0]["support"][0]["evidence_ids"]=json!(["source-0","source-1","source-2","source-3"]);
+    assert_eq!(execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap()["ready"],false);
+    for mode in ["summary","none"] {
+        input["authoring"]=json!({"ledger_notes":mode});
+        let created=execute_request(json!({"op":"create_guided_presentation","id":"notes-budgets","input":input})).unwrap();
+        let notes=created["document"]["deck"]["slides"][0]["notes"].as_str().unwrap();
+        assert!(notes.starts_with(&speaker) && notes.chars().count()<=8000);
+        if mode=="none" {assert_eq!(notes,speaker);}
+        assert_eq!(created["document"]["guided_record"]["input"]["evidence"],input["evidence"]);
+        input["slides"][0]["speaker_notes"]=json!(format!("{speaker}x"));
+        let checked=execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+        assert_eq!(checked["ready"],false);
+        assert!(checked["issues"].to_string().contains("4000"),"{checked}");
+        input["slides"][0]["speaker_notes"]=json!(speaker);
+    }
+    for mode in [json!("private"),json!(true),json!(1),json!({}),json!([])] {
+        input["authoring"]["ledger_notes"]=mode;
+        assert!(execute_request(json!({"op":"create_guided_presentation","id":"invalid-notes-mode","input":input})).is_err());
+    }
+    for mode in ["summary","none"] {
+        let mut empty=authoring_brief("status-report");empty["authoring"]=json!({"ledger_notes":mode});
+        let created=execute_request(json!({"op":"create_guided_presentation","id":"empty-speaker","input":empty})).unwrap();
+        let notes=created["document"]["deck"]["slides"][0]["notes"].as_str().unwrap();
+        if mode=="none" {assert_eq!(notes,"");} else {assert!(notes.starts_with("Authoring summary"));}
+    }
+    input["language"]=json!("ja");input["authoring"]=json!({"ledger_notes":"summary"});
+    let created=execute_request(json!({"op":"create_guided_presentation","id":"japanese-notes","input":input})).unwrap();
+    assert!(created["document"]["deck"]["slides"][0]["notes"].as_str().unwrap().contains("作成根拠の要約"));
+}
+
+#[test]
+fn guided_ledger_notes_record_is_bounded_hashed_and_recoverable() {
+    use aislide_core::document::{self,Document,SessionRecovery,Transaction};
+    let mut input=authoring_brief("status-report");input["authoring"]=json!({"ledger_notes":"none"});
+    let created=execute_request(json!({"op":"create_guided_presentation","id":"record-lifecycle","input":input})).unwrap();
+    let original:Document=serde_json::from_value(created["document"].clone()).unwrap();
+    let checkpoint=document::export(&original).unwrap();
+    let restored=document::open(checkpoint["base64"].as_str().unwrap(),serde_json::from_value(checkpoint["checkpoint"].clone()).unwrap()).unwrap();
+    assert_eq!(restored.hash,original.hash);
+    let reopened=document::open_presentation("checkpoint-native".into(),base64::Engine::decode(&base64::engine::general_purpose::STANDARD,checkpoint["base64"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(reopened["document"]["guided_record"],created["document"]["guided_record"]);
+    let changed=document::transact(&original,Transaction{expected_revision:original.revision,expected_hash:original.hash.clone(),operations:serde_json::from_value(json!([
+        {"op":"replace","path":"/deck/slides/0/notes","value":"Later human explanation"},
+        {"op":"replace","path":"/guided_record/input/title","value":"Explicitly corrected creation record"},
+    ])).unwrap()}).unwrap();
+    let receipt=changed.receipt.clone().unwrap();
+    assert_eq!(changed.document.guided_record.as_ref().unwrap().input.slides[0].headline,original.guided_record.as_ref().unwrap().input.slides[0].headline);
+    document::verify_session_recovery(SessionRecovery{format:"aislide.session".into(),version:1,capacity_profile:original.capacity_profile,document:changed.document.clone(),past:vec![receipt.clone()],future:Vec::new(),history_boundary:None}).unwrap();
+    let undone=document::undo(&changed.document,changed.document.revision,receipt).unwrap();
+    assert_eq!(undone.document.hash,original.hash);
+    let mut tampered=original.clone();tampered.guided_record.as_mut().unwrap().input.title="Tampered outside a transaction".into();
+    assert!(document::verify(&tampered).is_err());
+    for (path,value) in [
+        ("/guided_record/version",json!(2)),
+        ("/guided_record/input/slides/0/speaker_notes",json!("Duplicated human text")),
+        ("/guided_record/input/title",json!("s".repeat(aislide_core::guided::MAX_RECORD_BYTES))),
+    ] {
+        let result=document::transact(&original,Transaction{expected_revision:original.revision,expected_hash:original.hash.clone(),operations:serde_json::from_value(json!([{"op":"add","path":path,"value":value}])).unwrap()});
+        assert!(result.is_err(),"{path}");
+        assert!(result.err().unwrap().to_string().contains("guided creation record"),"{path}");
+        document::verify(&original).unwrap();
+    }
+}
+
+#[test]
 fn guided_authoring_invalid_settings_reject_without_fallback() {
     for settings in [json!({"context":"screen"}),json!({"density":"dense"}),json!({"spacing":"wide"}),json!({"extra":true}),json!({"body_font_min":11.99}),json!({"body_font_min":40.01}),json!({"headline_font_size":27.99}),json!({"headline_font_size":64.01}),json!({"font_family":""}),json!({"font_family":" "}),json!({"font_family":"a".repeat(101)}),json!({"font_family":"bad\nfont"}),json!({"body_font_min":"24"})] {
         let mut input=authoring_brief("status-report");input["authoring"]=settings.clone();
@@ -325,12 +434,17 @@ fn guided_authoring_schema_exposes_only_the_locked_settings() {
     let definitions=schema.get("$defs").or_else(||schema.get("definitions")).unwrap();
     let settings=&definitions["Authoring"];
     assert_eq!(settings["additionalProperties"],false);
-    assert_eq!(settings["properties"].as_object().unwrap().len(),8);
+    assert_eq!(settings["properties"].as_object().unwrap().len(),9);
     assert_eq!(settings["properties"]["slide_limit"]["minimum"],32);
     assert_eq!(settings["properties"]["slide_limit"]["maximum"],128);
     assert_eq!(definitions["HeadlineStyle"]["enum"],json!(["sentence","keyword"]));
+    assert_eq!(definitions["LedgerNotes"]["enum"],json!(["full","summary","none"]));
     assert_eq!(guide["limits"]["slides"],32);
     assert_eq!(guide["limits"]["maximum_slides"],128);
+    assert_eq!(guide["limits"]["speaker_notes_scalars"],4000);
+    assert_eq!(guide["limits"]["slide_notes_scalars"],8000);
+    assert_eq!(guide["limits"]["guided_record_bytes"],1048576);
+    assert!(guide["markdown"].as_str().unwrap().contains("not privacy redaction"));
     assert_eq!(settings["properties"]["body_font_min"]["minimum"],12);
     assert_eq!(settings["properties"]["body_font_min"]["maximum"],40);
     assert_eq!(settings["properties"]["headline_font_size"]["minimum"],28);

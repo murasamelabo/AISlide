@@ -127,7 +127,9 @@ const exported = await created.session.exportPresentation();
 
 Creation uses the shared core and returns a new session only on success. Early and late cancellation are rejected. Existing documents are never replaced, and file output is separate. `validation.ready` means compilable input, not verified source truth or a semantically justified conclusion. Review requirements and `model_inference:false` are explicit. The guide's 48 consulting patterns include manual/composed designs; only `native-part` and the consulting-specific `C02`/`C03` templates are automatic.
 
-The complete ledger and source/assumption declarations are stored in notes and need privacy review before redistribution. They are distinct from the live source bindings API. Subsequent normal edits can invalidate reasoning without rerunning guided validation. Part geometry and data remain editable through the usual native metadata and Undo safeguards.
+`input.authoring.ledger_notes` defaults to `full`, preserving the existing note text. `summary` puts supplied speaker text before a readable question/claim/evidence-reference summary; `none` includes only speaker text. Both retain the complete typed creation input (except duplicated speaker notes) in `created.session.document.guided_record` and PPTX Custom XML, including after native reopening. Speaker text is capped at 4000 Unicode scalars and complete notes at 8000; the separate record is capped at 1 MiB JSON and total provenance XML at 2 MiB. Overflow rejects without truncation.
+
+Notes and complete creation records need privacy review before redistribution: `none` does not redact evidence from the file. They are distinct from the live source bindings API. Subsequent normal edits can invalidate reasoning without rerunning guided validation or updating the creation snapshot. Part geometry and data remain editable through the usual native metadata and Undo safeguards.
 
 ## Metadata Parts
 
