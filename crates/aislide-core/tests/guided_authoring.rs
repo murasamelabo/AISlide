@@ -536,6 +536,66 @@ fn guided_record_removed_from_native_document_stays_removed_in_project_export() 
     assert_eq!(reopened["document"]["guided_record"],opened["document"]["guided_record"]);
 }
 
+fn plain_pptx()->Vec<u8> {
+    aislide_core::pptx::export_pptx(&serde_json::from_value(json!({"version":1,"title":"Synthetic custom XML fixture","width":1280,"height":720,"slides":[{"id":"slide-1","title":"Synthetic","background":"FFFFFF","notes":"","elements":[
+        {"type":"text","id":"title","x":40,"y":40,"width":1000,"height":80,"text":"Synthetic fixture","font_size":20,"color":"333333","bold":false},
+    ]}]})).unwrap()).unwrap()
+}
+
+fn with_custom_xml(bytes:Vec<u8>,path:&str,xml:Vec<u8>)->Vec<u8> {
+    use aislide_core::package::Package;
+    let mut parts=Package::open(bytes).unwrap().parts().clone();
+    let relations="ppt/_rels/presentation.xml.rels";
+    let text=String::from_utf8(parts[relations].clone()).unwrap().replace("</Relationships>",&format!("<Relationship Id=\"rIdSyntheticCustom\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml\" Target=\"/{path}\"/></Relationships>"));
+    parts.insert(relations.into(),text.into_bytes());
+    let types=String::from_utf8(parts["[Content_Types].xml"].clone()).unwrap().replace("</Types>",&format!("<Override PartName=\"/{path}\" ContentType=\"application/xml\"/></Types>"));
+    parts.insert("[Content_Types].xml".into(),types.into_bytes());
+    parts.insert(path.into(),xml);
+    Package::from_parts(parts).unwrap().save().unwrap()
+}
+
+#[test]
+fn unrelated_custom_xml_stays_opaque_for_project_export_and_native_open() {
+    use aislide_core::{document::{self,Document},package::Package};
+    use base64::{Engine,engine::general_purpose::STANDARD};
+    let plain=plain_pptx();
+    let vendor=format!("<v:data xmlns:v=\"urn:synthetic:vendor\">{}</v:data>","x".repeat(2*1024*1024+64)).into_bytes();
+    let bytes=with_custom_xml(plain,"customXml/vendor1.xml",vendor.clone());
+    let imported:Document=serde_json::from_value(document::import_document("vendor-import".into(),bytes.clone()).unwrap()["document"].clone()).unwrap();
+    assert!(imported.guided_record.is_none());
+    let project=document::export(&imported).unwrap();
+    let restored=document::open(project["base64"].as_str().unwrap(),serde_json::from_value(project["checkpoint"].clone()).unwrap()).unwrap();
+    assert_eq!(restored.hash,imported.hash);
+    assert_eq!(Package::open(STANDARD.decode(project["base64"].as_str().unwrap()).unwrap()).unwrap().part("customXml/vendor1.xml").unwrap(),vendor.as_slice());
+
+    let mut input=authoring_brief("status-report");input["authoring"]=json!({"ledger_notes":"none"});
+    let created=execute_request(json!({"op":"create_guided_presentation","id":"vendor-record","input":input})).unwrap();
+    let exported=STANDARD.decode(execute_request(json!({"op":"export_presentation","document":created["document"]})).unwrap()["base64"].as_str().unwrap()).unwrap();
+    let opened=document::open_presentation("vendor-native".into(),with_custom_xml(exported,"customXml/vendor1.xml",vendor.clone())).unwrap();
+    assert_eq!(opened["document"]["guided_record"],created["document"]["guided_record"]);
+    let native:Document=serde_json::from_value(opened["document"].clone()).unwrap();
+    let project=document::export(&native).unwrap();
+    assert_eq!(document::open(project["base64"].as_str().unwrap(),serde_json::from_value(project["checkpoint"].clone()).unwrap()).unwrap().hash,native.hash);
+    assert_eq!(Package::open(STANDARD.decode(project["base64"].as_str().unwrap()).unwrap()).unwrap().part("customXml/vendor1.xml").unwrap(),vendor.as_slice());
+}
+
+#[test]
+fn invalid_aislide_owned_custom_xml_is_still_rejected() {
+    use aislide_core::document;
+    let plain=plain_pptx();
+    let oversized=format!("<m:provenance xmlns:m=\"urn:aislide:provenance:1\"><m:null/>{}</m:provenance>"," ".repeat(2*1024*1024)).into_bytes();
+    for (path,xml,message) in [
+        ("customXml/item1.xml",oversized,"2 MiB"),
+        ("customXml/aislide-provenance1.xml",b"not xml".to_vec(),""),
+    ] {
+        let bytes=with_custom_xml(plain.clone(),path,xml);
+        let error=document::open_presentation("owned-invalid".into(),bytes.clone()).unwrap_err().to_string();
+        assert!(error.contains(message),"{path}: {error}");
+        let imported:document::Document=serde_json::from_value(document::import_document("owned-invalid-import".into(),bytes).unwrap()["document"].clone()).unwrap();
+        assert!(document::export(&imported).is_err(),"{path}");
+    }
+}
+
 #[test]
 fn guided_authoring_invalid_settings_reject_without_fallback() {
     for settings in [json!({"context":"screen"}),json!({"density":"dense"}),json!({"spacing":"wide"}),json!({"extra":true}),json!({"body_font_min":11.99}),json!({"body_font_min":40.01}),json!({"headline_font_size":27.99}),json!({"headline_font_size":64.01}),json!({"font_family":""}),json!({"font_family":" "}),json!({"font_family":"a".repeat(101)}),json!({"font_family":"bad\nfont"}),json!({"body_font_min":"24"})] {

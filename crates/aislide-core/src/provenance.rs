@@ -105,12 +105,35 @@ pub(crate) fn has_guided_record(bytes: &[u8]) -> Result<bool> {
     Ok(read(&Package::open(bytes.to_vec())?)?.is_some_and(|(_, metadata)| metadata.guided_record.is_some()))
 }
 
+// Finds the root element namespace without loading the whole part, so unrelated Custom XML stays opaque regardless of size.
+fn root_namespace(bytes: &[u8]) -> Option<Vec<u8>> {
+    use quick_xml::{events::Event, name::ResolveResult};
+    let mut reader = quick_xml::NsReader::from_reader(bytes);
+    let mut buffer = Vec::new();
+    loop {
+        match reader.read_resolved_event_into(&mut buffer) {
+            Ok((namespace, Event::Start(_) | Event::Empty(_))) => return Some(match namespace { ResolveResult::Bound(namespace) => namespace.as_ref().to_vec(), _ => Vec::new() }),
+            Ok((_, Event::Eof)) | Err(_) => return None,
+            Ok(_) => buffer.clear(),
+        }
+    }
+}
+
+fn is_aislide_part(path: &str, bytes: &[u8]) -> bool {
+    match root_namespace(bytes) {
+        Some(namespace) => namespace == NS.as_bytes(),
+        // An unreadable part still counts as AISlide-owned when it uses the name AISlide writes, so corrupt metadata is reported.
+        None => path.to_ascii_lowercase().starts_with("customxml/aislide-provenance"),
+    }
+}
+
 pub(crate) fn read(package: &Package) -> Result<Option<(String, Metadata)>> {
     let roots = relationship_targets(package, "", "officeDocument")?;
     let main = roots.values().next().ok_or_else(|| Error::Invalid("presentation missing".into()))?;
     let targets = relationship_targets(package, main, "customXml")?;
     let mut found = None;
     for path in targets.values() {
+        if !is_aislide_part(path, package.part(path)?) { continue; }
         let xml = package.text(path)?;
         if xml.len() > MAX_BYTES { return Err(Error::Limit("custom provenance XML > 2 MiB".into())); }
         let document = parse(xml)?;
