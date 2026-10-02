@@ -569,8 +569,12 @@ speaker notes, in `document.guided_record:{version:1,input}`. Retrieve it via
 MCP `get_document` or SDK `session.document.guided_record`; it also roundtrips
 through project checkpoints and the PPTX's AISlide Custom XML. The separate
 record is capped at 1 MiB serialized JSON; total provenance XML remains capped
-at 2 MiB. `none` does not redact evidence from the file. The record is captured
-at creation, not automatically updated after edits or authenticated as truth.
+at 2 MiB, and summary/none creation rejects input whose escaped provenance would
+exceed it. Stored records are validated structurally; guided content checks run
+only at creation. `inspect_document` scans the record and `export_clean_copy`
+removes it when `sources` or `notes` is selected. `none` does not redact evidence
+from the file. The record is captured at creation, not automatically updated
+after edits or authenticated as truth.
 
 `authoring.headline_style` is `sentence` (default) or `keyword`.
 Keyword mode waives only Japanese consulting headline length and adjacent

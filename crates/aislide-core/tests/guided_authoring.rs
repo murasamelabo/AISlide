@@ -386,6 +386,78 @@ fn guided_ledger_notes_record_is_bounded_hashed_and_recoverable() {
 }
 
 #[test]
+fn guided_record_is_inspected_and_removed_by_explicit_clean_copy() {
+    for mode in ["summary","none"] {
+        let mut input=brief("status-report");
+        input["authoring"]=json!({"ledger_notes":mode});
+        input["evidence"][0]["statement"]=json!("The fixture values are 12 and 24. Contact synthetic.reviewer@example.com.");
+        let created=execute_request(json!({"op":"create_guided_presentation","id":"record-inspection","input":input})).unwrap();
+        let document=&created["document"];
+        assert!(!document["deck"]["slides"][0]["notes"].as_str().unwrap().contains("@example.com"));
+        let found=|inspection:&serde_json::Value,scope:&str|inspection["candidates"].as_array().unwrap().iter().any(|candidate|candidate["rule"]=="email_candidate" && candidate["surface"]=="guided_record" && candidate["scope"]==scope);
+        let inspection=execute_request(json!({"op":"inspect_document","document":document})).unwrap();
+        assert!(found(&inspection,"current_deck"),"{inspection}");
+        assert!(!inspection.to_string().contains("synthetic.reviewer"));
+        let exported=execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+        let reopened=execute_request(json!({"op":"open_presentation","id":"record-inspection-native","base64":exported["base64"]})).unwrap();
+        let native=execute_request(json!({"op":"inspect_document","document":reopened["document"]})).unwrap();
+        assert!(found(&native,"current_deck") && found(&native,"embedded_origin"),"{native}");
+        for category in ["sources","notes"] {
+            let clean=execute_request(json!({"op":"export_clean_copy","document":document,"options":{"new_document_id":"record-clean","categories":[category],"confirmed":true}})).unwrap();
+            assert!(clean["document"].get("guided_record").is_none(),"{category}");
+            let opened=execute_request(json!({"op":"open_presentation","id":"record-clean-reopened","base64":clean["base64"]})).unwrap();
+            assert!(opened["document"].get("guided_record").is_none(),"{category}");
+            let rescanned=execute_request(json!({"op":"inspect_document","document":opened["document"]})).unwrap();
+            assert!(!found(&rescanned,"current_deck") && !found(&rescanned,"embedded_origin"),"{category}: {rescanned}");
+        }
+        let kept=execute_request(json!({"op":"export_clean_copy","document":document,"options":{"new_document_id":"record-kept","categories":["comments"],"confirmed":true}})).unwrap();
+        assert_eq!(kept["document"]["guided_record"],document["guided_record"]);
+    }
+}
+
+#[test]
+fn guided_record_rejects_xml_escaping_beyond_provenance_limit_at_creation() {
+    let mut input=authoring_brief("status-report");
+    let id="'".repeat(40);
+    input["evidence"]=json!([{"id":id,"kind":"source","reference":"Synthetic escaping fixture","statement":"Synthetic fixture for XML escaping only."}]);
+    let template=input["slides"][0].clone();
+    input["slides"]=json!((0..96).map(|index| {
+        let mut slide=template.clone();
+        slide["id"]=json!(format!("slide-{index}"));
+        slide["question"]=json!("'".repeat(240));
+        slide["transition"]=json!("'".repeat(80));
+        slide["parallel_basis"]=json!("'".repeat(80));
+        slide["support"]=json!(["Review","the","evidence","before","proceeding."].iter().map(|clause|json!({"clause":clause,"body_paths":["/data/items"],"evidence_ids":vec![id.clone();16]})).collect::<Vec<_>>());
+        slide
+    }).collect::<Vec<_>>());
+    input["authoring"]=json!({"slide_limit":96,"ledger_notes":"summary"});
+    assert!(serde_json::to_vec(&input).unwrap().len()<aislide_core::guided::MAX_RECORD_BYTES);
+    let checked=execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"],false);
+    assert!(checked["issues"].to_string().contains("provenance XML"),"{checked}");
+    assert!(execute_request(json!({"op":"create_guided_presentation","id":"escaping-record","input":input})).is_err());
+    input["authoring"]["ledger_notes"]=json!("full");
+    let created=execute_request(json!({"op":"create_guided_presentation","id":"escaping-full","input":input})).unwrap();
+    assert!(execute_request(json!({"op":"export_presentation","document":created["document"]})).is_ok());
+}
+
+#[test]
+fn guided_record_edits_are_structural_and_do_not_rerun_creation_checks() {
+    use aislide_core::document::{self,Document,Transaction};
+    let mut input=authoring_brief("status-report");input["authoring"]=json!({"ledger_notes":"summary"});
+    let created=execute_request(json!({"op":"create_guided_presentation","id":"record-structure","input":input})).unwrap();
+    let original:Document=serde_json::from_value(created["document"].clone()).unwrap();
+    let changed=document::transact(&original,Transaction{expected_revision:original.revision,expected_hash:original.hash.clone(),operations:serde_json::from_value(json!([
+        {"op":"replace","path":"/guided_record/input/slides/0/support","value":[]},
+    ])).unwrap()}).unwrap().document;
+    let exported=execute_request(json!({"op":"export_presentation","document":changed})).unwrap();
+    let reopened=execute_request(json!({"op":"open_presentation","id":"record-structure-reopened","base64":exported["base64"]})).unwrap();
+    assert_eq!(reopened["document"]["guided_record"]["input"]["slides"][0]["support"],json!([]));
+    let checkpoint=document::export(&changed).unwrap();
+    assert_eq!(document::open(checkpoint["base64"].as_str().unwrap(),serde_json::from_value(checkpoint["checkpoint"].clone()).unwrap()).unwrap().hash,changed.hash);
+}
+
+#[test]
 fn guided_authoring_invalid_settings_reject_without_fallback() {
     for settings in [json!({"context":"screen"}),json!({"density":"dense"}),json!({"spacing":"wide"}),json!({"extra":true}),json!({"body_font_min":11.99}),json!({"body_font_min":40.01}),json!({"headline_font_size":27.99}),json!({"headline_font_size":64.01}),json!({"font_family":""}),json!({"font_family":" "}),json!({"font_family":"a".repeat(101)}),json!({"font_family":"bad\nfont"}),json!({"body_font_min":"24"})] {
         let mut input=authoring_brief("status-report");input["authoring"]=settings.clone();

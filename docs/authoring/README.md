@@ -844,7 +844,11 @@ budget with the full JSON, `summary` with the readable summary, and `none` uses
 only the supplied text. Validation rejects overflow without truncation or
 dropping evidence. The full creation record uses a separate **1 MiB serialized
 JSON** budget; the existing **2 MiB total provenance XML** export/read limit also
-applies. Record storage does not consume the note budget.
+applies. XML escaping can make a record much larger than its JSON form, so
+summary/none creation encodes the actual provenance (record, part metadata and
+object identities) and rejects input that would exceed 2 MiB instead of creating
+an unsavable document. Later edits that enlarge part metadata still meet the same
+limit at export. Record storage does not consume the note budget.
 
 `guided_record:{version:1,input}` contains the complete typed creation input
 except duplicated `speaker_notes`. Its `input.slides` holds the original
@@ -855,7 +859,10 @@ Undo, recovery, and checkpoint save/open. Native PPTX save/open retains it in
 MCP `get_document({deck_id})` or SDK `session.document.guided_record` after creation
 or reopening. It is a creation snapshot, not continuously synchronized or proof
 that edited content remains supported. Existing `full` documents do not gain a
-new record automatically.
+new record automatically. Guided content checks run only at creation; stored or
+transactionally edited records are validated for structure, version, size and
+absence of duplicated speaker notes, so later rule changes do not make saved
+files unopenable.
 
 These modes change note presentation, **not privacy retention**. `none` still
 keeps source/assumption statements, original part input and possibly embedded
@@ -865,6 +872,10 @@ hiding notes or choosing `none` is not redaction. The minimal delivery
 For documents with a record, the delivery manifest explicitly sets
 `privacy.pptx_includes_guided_record:true`; the minimal source report also
 identifies that retention without duplicating the complete input.
+`inspect_document` scans record text for masked candidates (`surface:
+"guided_record"`, current deck and embedded origin) and counts the record under
+`sources`. An explicitly confirmed `export_clean_copy` removes the record when
+`sources` or `notes` is selected, because `full` notes carry the same evidence.
 
 Support entries contain `clause`, `body_paths` and `evidence_ids`. Ordered clauses must reconstruct the whole headline after whitespace normalization. Native-part paths refer to populated `/data` within `PartSpec`, not its title. C02/C03 paths refer to populated `/issues`. Pointers select the actual content offered as support; their existence does not prove the claim.
 
