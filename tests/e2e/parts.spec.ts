@@ -55,6 +55,28 @@ test('specialized analysis presets stay listed without replacing category defaul
   }
 });
 
+test('editorial fact values stay text and incompatible presets get their matching data', async ({ page }) => {
+  await openSample(page);
+  await page.getByRole('button', { name: 'Parts library', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Parts library', exact: true });
+  await dialog.getByLabel('Part category', { exact: true }).selectOption('list-horizontal');
+  await dialog.getByRole('button', { name: 'Open fact columns', exact: true }).click();
+  const value = dialog.getByLabel('items 1 value', { exact: true });
+  await expect(value).toHaveAttribute('type', 'text');
+  await value.fill('85%');
+  await dialog.getByLabel('Part title', { exact: true }).fill('Retained editorial title');
+  await expect(dialog.getByRole('button', { name: 'Insert part', exact: true })).toBeEnabled();
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  const metadata = dialog.getByLabel('Part metadata JSON', { exact: true });
+  expect(JSON.parse(await metadata.inputValue()).items[0].value).toBe('85%');
+  await dialog.getByRole('button', { name: 'Open icon columns', exact: true }).click();
+  expect(JSON.parse(await metadata.inputValue()).kind).toBe('icon_columns');
+  await expect(dialog.getByLabel('Part title', { exact: true })).toHaveValue('Retained editorial title');
+  await dialog.getByRole('tab', { name: 'Data', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: 'Insert part', exact: true })).toBeEnabled();
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+});
+
 test('parts library inserts, updates and reopens editable metadata from one PPTX', async ({ page }) => {
   await openSample(page);
   await page.getByRole('button', { name: 'Parts library', exact: true }).click();

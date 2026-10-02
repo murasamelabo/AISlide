@@ -26,6 +26,24 @@ pub(super) const PRESETS: &[Preset] = &[
     Preset { id: "list-enumeration/screenshot-callouts", kind: "screenshot_callouts", name: "Screenshot with numbered callouts", specialized: false,
         use_when: "One approved screenshot with 1-6 numbered UI callouts explained beside it. Callout x/y are 0-1 fractions of the source image, so badges stay on the picture; legend numbers share one uniform pitch.",
         avoid_when: "Decorative photos, more than six callouts, or explanations unrelated to screen positions; use flow/cards images or list/icon-rows instead. Never hand-place numbered legends." },
+    Preset { id: "flow/open-steps", kind: "open_steps", name: "Open horizontal steps", specialized: false,
+        use_when: "2-5 ordered stages with short labels and explanations beneath one native axis and numbered milestones; no enclosing cards. Fixed typography rejects overflow.",
+        avoid_when: "Unordered peers, branching processes or time-proportional schedules; choose open columns, diagram/custom or a Gantt chart." },
+    Preset { id: "vertical-flow/rail", kind: "rail_steps", name: "Vertical rail steps", specialized: false,
+        use_when: "2-5 ordered stages with one numbered vertical rail and aligned explanations on its right, without enclosing cards. Fixed typography rejects overflow.",
+        avoid_when: "Unordered topics or processes with decisions and handoffs; use open lists or flow/swimlane." },
+    Preset { id: "flow/roadmap", kind: "roadmap", name: "Phase roadmap", specialized: false,
+        use_when: "2-4 successive phases with supplied period labels, priorities and outcomes on one milestone axis. Equal phase spacing is categorical, never proportional to elapsed time.",
+        avoid_when: "Date-accurate schedules, parallel workstreams or unconfirmed durations; use a Gantt chart or swimlane. Keep each phase to four short points." },
+    Preset { id: "list-horizontal/icon-columns", kind: "icon_columns", name: "Open icon columns", specialized: false,
+        use_when: "2-4 equal-status concepts with meaningful supplied icons, headings and short explanations grouped by whitespace, not cards.",
+        avoid_when: "Ordered stages or concepts without a meaningful icon; use open steps or list-horizontal/columns. Do not add decorative icons." },
+    Preset { id: "list-horizontal/fact-columns", kind: "fact_columns", name: "Open fact columns", specialized: false,
+        use_when: "2-6 supplied headline facts with large verbatim value/unit text, a short interpretation and a qualifier preserving each denominator or condition. Values can have different units and are never compared by area or length.",
+        avoid_when: "Trends, comparable series or KPI status/change against a target; use a chart or kpi-cards. Never invent, normalize or infer numbers." },
+    Preset { id: "list-horizontal/image-columns", kind: "image_columns", name: "Open image columns", specialized: false,
+        use_when: "2-4 approved screenshots, product images or evidence figures, fully contained above captions, headings and short explanations; every source image keeps its aspect ratio.",
+        avoid_when: "Decorative stock imagery, missing approved images or a process whose sequence matters more than pictures; use open columns or open steps." },
     Preset { id: "list-horizontal/kpi-cards", kind: "kpi_cards", name: "KPI cards", specialized: true,
         use_when: "1-8 headline metrics, each with a large supplied value, unit, change versus a baseline and a good, bad or neutral status. Values are text, so round and format them first.",
         avoid_when: "Trends over time or many comparable numbers; use a chart or table. Do not assign good or bad without an agreed target or baseline." },
@@ -153,6 +171,12 @@ pub(super) fn kind(data: &PartData) -> Option<&'static str> {
         PartData::IconRows { .. } => "icon_rows",
         PartData::ShiftRows { .. } => "shift_rows",
         PartData::StepCards { .. } => "step_cards",
+        PartData::OpenSteps { .. } => "open_steps",
+        PartData::RailSteps { .. } => "rail_steps",
+        PartData::Roadmap { .. } => "roadmap",
+        PartData::IconColumns { .. } => "icon_columns",
+        PartData::FactColumns { .. } => "fact_columns",
+        PartData::ImageColumns { .. } => "image_columns",
         PartData::Agenda { .. } => "agenda",
         PartData::ScreenshotCallouts { .. } => "screenshot_callouts",
         PartData::KpiCards { .. } => "kpi_cards",
@@ -267,6 +291,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
             }
             colors(&[accent])?; body_size(*size)?; message(band)?;
         }
+        PartData::OpenSteps { .. } | PartData::RailSteps { .. } | PartData::Roadmap { .. } | PartData::IconColumns { .. } | PartData::FactColumns { .. } | PartData::ImageColumns { .. } => super::editorial::validate(data)?,
         _ => super::business::validate(data)?,
     }
     Ok(())
@@ -319,6 +344,7 @@ fn render(drawing: &mut Drawing, data: &PartData, body: [f64; 4], theme: &Theme,
         PartData::StepCards { steps, step_label, accent, body_size, .. } => step_cards(drawing, steps, if step_label.is_empty() { "STEP" } else { step_label }, accent.as_deref().unwrap_or("@accent1"), body_size.unwrap_or(BODY), content, theme, shrink)?,
         PartData::Agenda { items, accent } => agenda(drawing, items, accent.as_deref().unwrap_or("@dk1"), content, theme)?,
         PartData::ScreenshotCallouts { image, callouts, accent, body_size, .. } => screenshot_callouts(drawing, image, callouts, accent.as_deref().unwrap_or("@accent1"), body_size.unwrap_or(BODY), content, theme, shrink)?,
+        PartData::OpenSteps { .. } | PartData::RailSteps { .. } | PartData::Roadmap { .. } | PartData::IconColumns { .. } | PartData::FactColumns { .. } | PartData::ImageColumns { .. } => super::editorial::render(drawing, data, content, theme)?,
         other => super::business::render(drawing, other, content, theme)?,
     };
     if let (Some(band), Some(band_height)) = (band, band_height) { message_band(drawing, band, [left, drawn.bottom + GAP, width, band_height]); }
@@ -341,7 +367,7 @@ pub(super) struct Rich(Vec<RichParagraph>);
 
 impl Rich {
     pub(super) fn add(&mut self, value: &str, size: f64, color: &str, bold: bool, after: u32) -> &mut Self { self.lines(value, size, color, bold, after, false) }
-    fn bullet(&mut self, value: &str, size: f64, color: &str, after: u32) -> &mut Self { self.lines(value, size, color, false, after, true) }
+    pub(super) fn bullet(&mut self, value: &str, size: f64, color: &str, after: u32) -> &mut Self { self.lines(value, size, color, false, after, true) }
     /// One paragraph of differently styled runs, such as a KPI value followed by its unit; empty runs are skipped.
     pub(super) fn runs(&mut self, runs: &[(&str, f64, &str, bool)], after: u32) -> &mut Self {
         let runs: Vec<RichRun> = runs.iter().filter(|run| !run.0.is_empty()).map(|&(value, size, color, bold)| RichRun { text: value.into(), style: RunStyle { bold: Some(bold), font_size: Some(size), color: Some(color.into()), font_family: Some("@minor".into()), ..Default::default() }, field: None }).collect();
@@ -420,7 +446,7 @@ fn icon(drawing: &mut Drawing, icon: &GraphIcon, center: [f64; 2], size: f64) ->
     Ok(())
 }
 
-fn badge(drawing: &mut Drawing, value: &GraphIcon, origin: [f64; 2], diameter: f64, fill: &str) -> Result<()> {
+pub(super) fn badge(drawing: &mut Drawing, value: &GraphIcon, origin: [f64; 2], diameter: f64, fill: &str) -> Result<()> {
     shape(drawing, Fill::solid("ellipse", fill), [origin[0], origin[1], diameter, diameter], None);
     icon(drawing, value, [origin[0] + diameter / 2.0, origin[1] + diameter / 2.0], diameter * 0.58)
 }

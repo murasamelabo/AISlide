@@ -212,6 +212,10 @@ export type IconCard = { label: string; caption?: string; detail?: string; point
 export type IconRow = { label: string; detail?: string; icon?: GraphIcon | null; accent?: string | null }
 export type ShiftRow = { from: string; to: string; caption?: string; detail?: string }
 export type StepCard = { label: string; detail?: string; points?: string[]; outcome?: string; image?: GraphIcon | null; icon?: GraphIcon | null }
+export type EditorialStep = { label: string; detail?: string }
+export type RoadmapPhase = { period: string; label: string; detail?: string; points?: string[]; outcome?: string }
+export type FactColumn = { value: string; label: string; unit?: string; detail?: string; qualifier?: string }
+export type ImageColumn = { image: GraphIcon; label: string; detail?: string; caption?: string }
 export type AgendaItem = { label: string; detail?: string; meta?: string }
 export type Callout = { x: number; y: number; label: string; detail?: string }
 export type KpiCard = { label: string; value: string; unit?: string; delta?: string; status?: 'neutral' | 'good' | 'bad'; comparison?: string }
@@ -238,6 +242,12 @@ export type PartData =
   | { kind: 'icon_rows'; rows: IconRow[]; boxed?: boolean; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'shift_rows'; from_label?: string; to_label?: string; rows: ShiftRow[]; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'step_cards'; steps: StepCard[]; step_label?: string; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
+  | { kind: 'open_steps'; steps: EditorialStep[]; accent?: string | null }
+  | { kind: 'rail_steps'; steps: EditorialStep[]; accent?: string | null }
+  | { kind: 'roadmap'; phases: RoadmapPhase[]; accent?: string | null }
+  | { kind: 'icon_columns'; items: IconRow[] }
+  | { kind: 'fact_columns'; items: FactColumn[]; columns?: number | null; accent?: string | null }
+  | { kind: 'image_columns'; items: ImageColumn[] }
   | { kind: 'agenda'; items: AgendaItem[]; accent?: string | null }
   | { kind: 'screenshot_callouts'; image: GraphIcon; callouts: Callout[]; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'kpi_cards'; cards: KpiCard[]; columns?: number | null; message?: PartMessage | null }
@@ -264,10 +274,19 @@ export type PartData =
   | { kind: 'waterfall'; steps: { label: string; value: number; total?: boolean }[]; unit?: string }
   | { kind: 'map'; points: { label: string; longitude: number; latitude: number; value?: number | null }[] }
   | { kind: 'diagram'; graph: GraphSpec }
-export type PartLayout = Frame & { show_title?: boolean }
+export type PartLayout = Frame & { show_title?: boolean; fit?: 'stretch' | 'contain' }
 export type PartSpec = { version: 1; preset: string; title: string; subtitle?: string; data: PartData; layout?: PartLayout | null }
 export type PartPreset = { id: string; category: string; category_name: string; name: string; family: 'Charts' | 'Diagrams'; example: PartSpec; recommended?: boolean; specialized?: boolean; use_when?: string; avoid_when?: string }
 export type PartCatalog = { version: 1; presets: PartPreset[]; schema: unknown; style: string; default_bounds: Omit<Bounds, 'id'> }
+export type LayoutSlotKind = 'visual' | 'thumbnail' | 'panel' | 'card' | 'text' | 'statement' | 'band' | 'tile' | 'label' | 'marker'
+export type LayoutPattern = { id: string; family: string; name: string; ratio: string; relationships: string[]; use_when: string; avoid_when: string; parts: string[]; fallback: string | null; full_page: boolean; message_band: boolean; count: { min: number; max: number; default: number } | null }
+export type LayoutPatternCatalog = { version: 1; canvas_default: { width: number; height: number }; tokens: Record<string, unknown>; guidance: string[]; patterns: (LayoutPattern & { slots: { id: string; kind: LayoutSlotKind }[] })[] }
+export type LayoutPatternRequest = { pattern_id: string; canvas?: { width: number; height: number }; body?: Frame; options?: { mirror?: boolean; message_band?: boolean; reference_band?: boolean; count?: number; body_size?: number; part?: string; part_title?: boolean } }
+export type PartAspectProfile = { layout: 'canvas' | 'native'; canvas: [number, number]; sensitivity: 'free' | 'tolerant' | 'strict'; encoding: 'none' | 'area' | 'count' | 'geography'; markers: number; tolerance: number | null; reasons: string[] }
+export type PartFitAdvice = { distortion: number; fit: 'stretch' | 'contain' | 'native'; area_used: number; tolerance: number | null }
+export type LayoutPatternRanking = { version: 1; part: PartAspectProfile; canvas: { width: number; height: number }; patterns: { pattern_id: string; name: string; slot: string; frame: Frame; fit: PartFitAdvice['fit']; distortion: number; area_used: number; slot_share: number }[] }
+export type LayoutSlot = { id: string; kind: LayoutSlotKind; frame: Frame; accepts: string[]; min: { width: number; height: number }; fits: boolean; capacity: { font_size: number; padding: number; cjk_chars_per_line: number; lines: number } | null; part_fit: PartFitAdvice | null }
+export type LayoutPatternResolution = { version: 1; pattern: LayoutPattern; canvas: { width: number; height: number }; body: Frame; options: { mirror: boolean; message_band: boolean; reference_band: boolean; count: number | null; body_size: number }; gaps: Record<'tight' | 'peer' | 'support' | 'contrast', number>; slots: LayoutSlot[]; fits: boolean; issues: string[]; fallback: string | null; part: PartAspectProfile | null }
 export type PartInstance = { slide_id: string; element_id: string; spec: PartSpec; render_sha256: string; native_sha256?: string | null; stale: boolean }
 
 export type AuthoringProfile = 'consulting-decision' | 'technical-explainer' | 'event-talk' | 'status-report'

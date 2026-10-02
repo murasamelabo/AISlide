@@ -81,6 +81,34 @@ pub fn catalog() -> Value {
 
 fn briefing_example(kind: &str) -> PartData {
     let value = match kind {
+        "open_steps" | "rail_steps" => json!({"kind":kind,"steps":[
+            {"label":"Collect","detail":"Gather the approved evidence."},
+            {"label":"Assess","detail":"Choose the next action."},
+            {"label":"Respond","detail":"Record the outcome."}
+        ]}),
+        "roadmap" => json!({"kind":"roadmap","phases":[
+            {"period":"Now","label":"Measure the baseline","detail":"Start with the highest-impact gaps.","points":["Confirm owners","Check exposure"],"outcome":"Baseline agreed"},
+            {"period":"Next quarter","label":"Build the capability","detail":"Extend the same controls to more teams.","points":["Deploy controls","Rehearse recovery"],"outcome":"Repeatable operations"},
+            {"period":"Later","label":"Make improvement routine","detail":"Review changes with leadership.","points":["Track evidence","Revisit priorities"],"outcome":"Continuous improvement"}
+        ]}),
+        "icon_columns" => json!({"kind":"icon_columns","items":[
+            {"label":"Exposure","detail":"Understand the assets and gaps."},
+            {"label":"Identity","detail":"Protect access at every boundary."},
+            {"label":"Recovery","detail":"Practice restoring service safely."}
+        ]}),
+        "fact_columns" => json!({"kind":"fact_columns","items":[
+            {"value":"24","unit":"teams","label":"Coverage","detail":"Teams included in this synthetic example.","qualifier":"Not a measured production value."},
+            {"value":"85","unit":"%","label":"Completion","detail":"A separate illustrative measure.","qualifier":"Its denominator differs from coverage."},
+            {"value":"12","unit":"days","label":"Elapsed time","detail":"An independently supplied duration.","qualifier":"Not visually compared with the other facts."}
+        ]}),
+        "image_columns" => {
+            let PartData::ScreenshotCallouts { image, .. } = briefing_example("screenshot_callouts") else { unreachable!("built-in image example") };
+            json!({"kind":"image_columns","items":[
+                {"image":image,"label":"Evidence A","detail":"Approved source image kept in full.","caption":"Synthetic sample image"},
+                {"image":image,"label":"Evidence B","detail":"A separate observation, not a stage.","caption":"Synthetic sample image"},
+                {"image":image,"label":"Evidence C","detail":"Explain the visible evidence.","caption":"Synthetic sample image"}
+            ]})
+        },
         "icon_cards" => json!({"kind":"icon_cards","numbered":true,"message":{"text":"People set direction; automation extends reach."},"cards":[
             {"label":"Unified operations","caption":"Shared platform","detail":"Signals, context and controls are managed together.","tag":"Part 2"},
             {"label":"Continuous protection","caption":"Closed loop","detail":"Detection, response and prevention reinforce each other.","tag":"Part 3"},

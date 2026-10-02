@@ -267,6 +267,12 @@ test('briefing parts MCP keeps strict data and Lucide assets return reusable ico
       { ...spec, preset: 'flow/cards', data: { kind: 'step_cards', step_label: 'PHASE', steps: [{ label: 'A', outcome: 'Result', image: icon }, { label: 'B', points: ['One'] }] } },
       { ...spec, preset: 'list/agenda', data: { kind: 'agenda', items: [{ label: 'A', meta: '10 min' }, { label: 'B', detail: 'Detail' }] } },
       { ...spec, preset: 'list-enumeration/screenshot-callouts', data: { kind: 'screenshot_callouts', image: icon, callouts: [{ x: 0.2, y: 0.4, label: 'Enable', detail: 'Detail' }, { x: 1, y: 0, label: 'Assign' }] } },
+      { ...spec, preset: 'flow/open-steps', data: { kind: 'open_steps', steps: [{ label: 'A' }, { label: 'B', detail: 'Explain' }] } },
+      { ...spec, preset: 'vertical-flow/rail', data: { kind: 'rail_steps', steps: [{ label: 'A' }, { label: 'B' }], accent: '@accent1' } },
+      { ...spec, preset: 'flow/roadmap', data: { kind: 'roadmap', phases: [{ period: 'Now', label: 'A', points: ['One'], outcome: 'Done' }, { period: 'Later', label: 'B' }] } },
+      { ...spec, preset: 'list-horizontal/icon-columns', data: { kind: 'icon_columns', items: [{ label: 'A', icon }, { label: 'B' }] } },
+      { ...spec, preset: 'list-horizontal/fact-columns', data: { kind: 'fact_columns', items: [{ value: '0.04', unit: '%', label: 'A', qualifier: 'Own denominator' }, { value: 'Slow', label: 'B' }], columns: 2 } },
+      { ...spec, preset: 'list-horizontal/image-columns', data: { kind: 'image_columns', items: [{ image: icon, label: 'A', caption: 'Evidence' }, { image: icon, label: 'B' }] } },
     ];
     for (const candidate of valid) assert.equal(schema.safeParse({ ...input, spec: candidate }).success, true, candidate.preset);
     const card = { label: 'Topic' };
@@ -278,6 +284,12 @@ test('briefing parts MCP keeps strict data and Lucide assets return reusable ico
       { kind: 'shift_rows', rows: Array(6).fill({ from: 'A', to: 'B' }) }, { kind: 'icon_rows', rows: [{ label: 'A' }] },
       { kind: 'screenshot_callouts', image: icon, callouts: [{ x: 1.2, y: 0.5, label: 'A' }] }, { kind: 'screenshot_callouts', image: icon, callouts: Array(7).fill({ x: 0.5, y: 0.5, label: 'A' }) },
       { kind: 'screenshot_callouts', callouts: [{ x: 0.5, y: 0.5, label: 'A' }] },
+      { kind: 'open_steps', steps: [{ label: 'Only' }] },
+      { kind: 'rail_steps', steps: Array(6).fill({ label: 'Too many' }) },
+      { kind: 'roadmap', phases: [{ period: 'Now\nLater', label: 'A' }, { period: 'Later', label: 'B' }] },
+      { kind: 'fact_columns', items: [{ value: '1\n2', label: 'A' }, { value: '3', label: 'B' }] },
+      { kind: 'fact_columns', items: Array(6).fill({ value: '1', label: 'A' }), columns: 2 },
+      { kind: 'image_columns', items: [{ label: 'A' }, { image: icon, label: 'B' }] },
     ]) assert.equal(schema.safeParse({ ...input, spec: { ...spec, data } }).success, false, JSON.stringify(data).slice(0, 80));
     const business = [
       ['list-horizontal/kpi-cards', { kind: 'kpi_cards', cards: [{ label: 'Revenue', value: '12.4', unit: 'B', delta: '+8%', status: 'good', comparison: 'Plan 12' }], columns: null }],
@@ -2709,7 +2721,7 @@ test('MCP open list recommendations render native text and keep failed edits ato
   try {
     await client.connect(transport);
     const catalog = await call('part_catalog');
-    assert.equal(catalog.presets.length, 132);
+    assert.equal(catalog.presets.length, 138);
     for (const id of ['list/rows', 'list-horizontal/columns', 'list-enumeration/grid']) {
       const preset = catalog.presets.find(entry => entry.id === id);
       assert.equal(preset.recommended, true);
@@ -2717,6 +2729,17 @@ test('MCP open list recommendations render native text and keep failed edits ato
       const element = await call('create_part', { id: 'open-list', spec: preset.example });
       assert.ok(element.children.every(child => child.type === 'text'));
       assert.ok(element.children.every(child => ['@dk1', '@dk2'].includes(child.color)));
+    }
+    for (const id of ['flow/open-steps', 'vertical-flow/rail', 'flow/roadmap', 'list-horizontal/icon-columns', 'list-horizontal/fact-columns', 'list-horizontal/image-columns']) {
+      const preset = catalog.presets.find(entry => entry.id === id);
+      assert.equal(preset.recommended, true, id);
+      assert.ok(preset.use_when && preset.avoid_when, id);
+      const element = await call('create_part', { id: 'editorial-part', spec: { ...preset.example, layout: { x: 48, y: 120, width: 1184, height: 540, show_title: false } } });
+      assert.equal(element.type, 'group', id);
+      assert.equal(element.width, element.view_width, id);
+      assert.equal(element.height, element.view_height, id);
+      assert.ok(element.children.length > 0, id);
+      assert.ok(element.children.every(child => child.type !== 'chart'), id);
     }
     const { deck_id } = await call('create_presentation', { title: 'Synthetic open lists' });
     const original = await call('get_document', { deck_id });
@@ -2732,6 +2755,57 @@ test('MCP open list recommendations render native text and keep failed edits ato
     await call('undo', { deck_id });
     assert.equal((await call('get_document', { deck_id })).hash, original.hash);
   } finally { await client.close(); }
+});
+
+test('MCP layout patterns are opt-in and resolve frames for the deck canvas', async () => {
+  const connect = async (args, name) => {
+    const client = new Client({ name, version: '1.0.0' });
+    await client.connect(new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), ...args], stderr: 'pipe', env: coreEnvironment }));
+    const call = async (tool, input = {}) => {
+      const result = await client.callTool({ name: tool, arguments: input });
+      assert.ok(!result.isError, JSON.stringify(result.content));
+      return JSON.parse(result.content[0].text);
+    };
+    return { client, call };
+  };
+  const disabled = await connect([], 'layout-patterns-off-test');
+  try {
+    assert.equal((await disabled.client.listTools()).tools.some(tool => tool.name === 'layout_patterns'), false);
+    assert.equal((await disabled.call('discover_tools', { query: 'layout pattern' })).tools.some(tool => tool.name === 'layout_patterns'), false);
+    assert.equal((await disabled.client.callTool({ name: 'get_tool_schema', arguments: { name: 'layout_patterns' } })).isError, true);
+    assert.doesNotMatch(disabled.client.getInstructions(), /layout_patterns/);
+  } finally { await disabled.client.close(); }
+  const enabled = await connect(['--layout-patterns', 'on'], 'layout-patterns-on-test');
+  try {
+    assert.ok((await enabled.client.listTools()).tools.some(tool => tool.name === 'layout_patterns'));
+    assert.match(enabled.client.getInstructions(), /layout_patterns/);
+    const contrast = await enabled.call('layout_patterns', { relationship: 'contrast' });
+    assert.ok(contrast.patterns.some(pattern => pattern.id === 'split/1-1'));
+    assert.equal(contrast.patterns[0].slots, undefined);
+    assert.equal(contrast.guidance.length, 8);
+    const all = await enabled.call('layout_patterns', { limit: 50, offset: 50 });
+    assert.equal(all.total, 54);
+    assert.equal(all.next_offset, null);
+    const standard = await enabled.call('layout_patterns', { pattern_id: 'columns/4', canvas: { width: 960, height: 720 } });
+    assert.equal(standard.fits, false);
+    assert.equal(standard.fallback, 'grid/2x2');
+    const { deck_id } = await enabled.call('create_presentation', { title: 'Synthetic layout pattern canvas' });
+    const resolved = await enabled.call('layout_patterns', { pattern_id: 'split/2-1', deck_id, message_band: true });
+    assert.deepEqual(resolved.slots.map(slot => [slot.id, slot.frame]), [
+      ['primary', { x: 48, y: 120, width: 768, height: 444 }],
+      ['support', { x: 848, y: 120, width: 384, height: 444 }],
+      ['message', { x: 48, y: 588, width: 1184, height: 72 }],
+    ]);
+    const ranked = await enabled.call('layout_patterns', { part_preset: 'cycle/balanced' });
+    assert.equal(ranked.part.sensitivity, 'strict');
+    assert.equal(ranked.patterns[0].fit, 'stretch');
+    const fitted = await enabled.call('layout_patterns', { pattern_id: 'sequence/cycle', deck_id, part_preset: 'cycle/balanced' });
+    assert.equal(fitted.slots[0].part_fit.fit, 'contain');
+    assert.equal(fitted.slots[1].part_fit, null);
+    for (const input of [{ pattern_id: 'split/1-1', query: 'contrast' }, { mirror: true }, { pattern_id: 'split/1-1', deck_id, canvas: { width: 1280, height: 720 } }, { pattern_id: 'columns/3', count: 3 }]) {
+      assert.equal((await enabled.client.callTool({ name: 'layout_patterns', arguments: input })).isError, true, JSON.stringify(input));
+    }
+  } finally { await enabled.client.close(); }
 });
 
 test('MCP bounded graph annotations honor small fonts and report actionable group bounds', async () => {

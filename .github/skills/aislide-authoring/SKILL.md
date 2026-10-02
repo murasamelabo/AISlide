@@ -29,6 +29,8 @@ Skill installation does not connect MCP.
 	empty slides, `compose_slide` accepts 1-3 blocks: cards, callout, text, steps,
 	comparison, part or graph. Reuse `style`; default card padding is 24px. Existing
 	native/nonempty slides reject. Use explicit editing to preserve templates.
+	If `layout_patterns` exists and the user has not opted out, resolve one per
+	slide for the deck, use its frames and follow `fallback` when `fits` is false.
 5. For an icon-led briefing style read `references/technical-panels.md`
 	(panels, icon cards/rows, shifts, steps, agenda, screenshot callouts, Lucide icons) only on request.
 	Prefer managed parts/graphs. A composition graph block takes coordinate-free

@@ -2,16 +2,19 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod aspect;
 mod briefing;
 mod business;
 mod catalog;
 mod charts;
 mod diagrams;
+mod editorial;
 mod process;
 pub mod state;
 pub use briefing::{AgendaItem, Callout, IconCard, IconRow, PartMessage, ShiftRow, StepCard};
 pub use business::{BulletRow, HarveyRow, HeatmapRow, KpiCard, KpiStatus, ParetoItem, RaciTask, Risk, VarianceRow};
 pub use catalog::catalog;
+pub use editorial::{EditorialStep, FactColumn, ImageColumn, RoadmapPhase};
 pub use process::{ArchitectureElement, ArchitectureKind, ArchitectureRelation, FishboneCategory, FishboneCause, JourneyRow, SankeyLink, SankeyNode, StepShape, SwimlaneFlow, SwimlaneStep};
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -33,6 +36,15 @@ pub struct PartLayout {
     pub width: f64,
     pub height: f64,
     #[serde(default = "show_part_title")] pub show_title: bool,
+    #[serde(default, skip_serializing_if = "PartFit::is_stretch")] pub fit: PartFit,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PartFit { #[default] Stretch, Contain }
+
+impl PartFit {
+    fn is_stretch(&self) -> bool { *self == PartFit::Stretch }
 }
 
 fn show_part_title() -> bool { true }
@@ -55,6 +67,12 @@ pub enum PartData {
     IconRows { rows: Vec<IconRow>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] boxed: bool, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     ShiftRows { #[serde(default, skip_serializing_if = "String::is_empty")] from_label: String, #[serde(default, skip_serializing_if = "String::is_empty")] to_label: String, rows: Vec<ShiftRow>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     StepCards { steps: Vec<StepCard>, #[serde(default, skip_serializing_if = "String::is_empty")] step_label: String, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    OpenSteps { steps: Vec<EditorialStep>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    RailSteps { steps: Vec<EditorialStep>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    Roadmap { phases: Vec<RoadmapPhase>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    IconColumns { items: Vec<IconRow> },
+    FactColumns { items: Vec<FactColumn>, #[serde(default, skip_serializing_if = "Option::is_none")] columns: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    ImageColumns { items: Vec<ImageColumn> },
     Agenda { items: Vec<AgendaItem>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
     ScreenshotCallouts { image: crate::graphs::GraphIcon, callouts: Vec<Callout>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     KpiCards { cards: Vec<KpiCard>, #[serde(default, skip_serializing_if = "Option::is_none")] columns: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
@@ -187,6 +205,7 @@ fn validate_data(data: &PartData) -> Result<()> {
             }
         }
         PartData::IconCards { .. } | PartData::IconRows { .. } | PartData::ShiftRows { .. } | PartData::StepCards { .. } | PartData::Agenda { .. } | PartData::ScreenshotCallouts { .. }
+        | PartData::OpenSteps { .. } | PartData::RailSteps { .. } | PartData::Roadmap { .. } | PartData::IconColumns { .. } | PartData::FactColumns { .. } | PartData::ImageColumns { .. }
         | PartData::KpiCards { .. } | PartData::BulletGraphs { .. } | PartData::Variance { .. } | PartData::HarveyMatrix { .. } | PartData::Heatmap { .. } | PartData::Raci { .. }
         | PartData::RiskMatrix { .. } | PartData::Pareto { .. } | PartData::ControlChart { .. } | PartData::Fishbone { .. } | PartData::Swimlane { .. } | PartData::Sankey { .. }
         | PartData::Journey { .. } | PartData::Architecture { .. } => briefing::validate(data)?,
@@ -323,22 +342,6 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
         }
         let content_top = if layout.show_title { 0.0 } else if category == "venn" && variant == 1 { 80.0 } else { 88.0 };
         adopt_layout(&mut result, layout, content_top, 512.0 - content_top, theme, &BTreeSet::new())?;
-        if category == "contrast" && variant == 3 {
-            let horizontal = layout.width / 1152.0;
-            let vertical = layout.height / (512.0 - content_top);
-            let scale = horizontal.min(vertical);
-            if let Element::Group { children, .. } = &mut result {
-                for child in children {
-                    if !matches!(child, Element::Picture { .. }) && !matches!(child, Element::Shape { preset, .. } if preset == "ellipse") { continue; }
-                    if let Element::Picture { x, y, width, height, .. } | Element::Shape { x, y, width, height, .. } = child {
-                        let fitted_width = *width * scale / horizontal;
-                        let fitted_height = *height * scale / vertical;
-                        *x += (*width - fitted_width) / 2.0; *y += (*height - fitted_height) / 2.0;
-                        *width = fitted_width; *height = fitted_height;
-                    }
-                }
-            }
-        }
     }
     for element in crate::model::element_list(std::slice::from_ref(&result)) {
         if let Element::Text { id, font_size, .. } = element {
@@ -392,6 +395,14 @@ fn transform_layout_element(element: &mut Element, horizontal: f64, vertical: f6
     Ok(())
 }
 
+fn offset_layout_element(element: &mut Element, dx: f64, dy: f64) {
+    match element {
+        Element::Text { x, y, .. } | Element::Rect { x, y, .. } | Element::Polygon { x, y, .. } | Element::Shape { x, y, .. }
+        | Element::Table { x, y, .. } | Element::Chart { x, y, .. } | Element::Picture { x, y, .. } | Element::Connector { x, y, .. }
+        | Element::Group { x, y, .. } => { *x += dx; *y += dy; }
+    }
+}
+
 fn minimum_layout_text(text: &str, size: f64, format: &TextFormat, minimum: f64) -> Result<()> {
     if !text.is_empty() && (size < minimum || format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs)
         .any(|run| !run.text.is_empty() && run.style.font_size.unwrap_or(size) < minimum)) {
@@ -405,7 +416,17 @@ fn adopt_layout(element: &mut Element, layout: &PartLayout, content_top: f64, co
     let Element::Group { x, y, width, height, view_width, view_height, children, .. } = element else {
         return Err(Error::Invalid("part layout requires a group".into()));
     };
-    for child in children.iter_mut() { transform_layout_element(child, layout.width / *view_width, layout.height / content_height, content_top)?; }
+    let (horizontal, vertical) = (layout.width / *view_width, layout.height / content_height);
+    let markers: Vec<bool> = children.iter().map(|child| aspect::is_marker(child, *view_width * content_height)).collect();
+    let (horizontal, vertical, offset_x, offset_y) = if layout.fit == PartFit::Contain {
+        let scale = horizontal.min(vertical);
+        (scale, scale, (layout.width - *view_width * scale) / 2.0, (layout.height - content_height * scale) / 2.0)
+    } else { (horizontal, vertical, 0.0, 0.0) };
+    for (child, marker) in children.iter_mut().zip(markers) {
+        transform_layout_element(child, horizontal, vertical, content_top)?;
+        offset_layout_element(child, offset_x, offset_y);
+        if marker { aspect::restore_marker(child, horizontal, vertical); }
+    }
     *x = layout.x; *y = layout.y; *width = layout.width; *height = layout.height;
     *view_width = layout.width; *view_height = layout.height;
     crate::layout::fit_part_text_with_small_annotations(children, theme, small_annotations)?;
@@ -517,11 +538,11 @@ mod tests {
             let original = create("venn", &spec).unwrap();
             assert_eq!(fingerprint(&original), expected_default, "{variant}: default compatibility");
             let mut visible = spec.clone();
-            visible.layout = Some(PartLayout { x: 40.0, y: 160.0, width: 1152.0, height: 512.0, show_title: true });
+            visible.layout = Some(PartLayout { x: 40.0, y: 160.0, width: 1152.0, height: 512.0, show_title: true, fit: PartFit::Stretch });
             assert_eq!(fingerprint(&create("venn", &visible).unwrap()), expected_visible, "{variant}: title-visible compatibility");
             let Element::Group { children: original_children, .. } = &original else { panic!("expected a group") };
             let mut positioned = spec.clone();
-            positioned.layout = Some(PartLayout { x: 40.0, y: 160.0, width: 1152.0, height: 424.0, show_title: false });
+            positioned.layout = Some(PartLayout { x: 40.0, y: 160.0, width: 1152.0, height: 424.0, show_title: false, fit: PartFit::Stretch });
             let Element::Group { x, y, width, height, children, .. } = create("venn", &positioned).unwrap() else { panic!("expected a group") };
             assert_eq!([x, y, width, height], [40.0, 160.0, 1152.0, 424.0]);
             assert_eq!(children.len(), original_children.len() - 2);
@@ -551,7 +572,7 @@ mod tests {
         let nested = json!({"type":"group","id":"nested","x":100,"y":100,"width":400,"height":200,"view_width":800,"view_height":400,"children":[rich,table,source,target,edge]});
         let mut element: Element = serde_json::from_value(json!({"type":"group","id":"root","x":64,"y":144,"width":1152,"height":512,"view_width":1152,"view_height":512,"children":[nested]})).unwrap();
         let original = serde_json::to_value(&element).unwrap();
-        let layout = PartLayout { x: 20.0, y: 30.0, width: 576.0, height: 512.0, show_title: true };
+        let layout = PartLayout { x: 20.0, y: 30.0, width: 576.0, height: 512.0, show_title: true, fit: PartFit::Stretch };
         adopt_layout(&mut element, &layout, 0.0, 512.0, &crate::design::Theme::default(), &BTreeSet::new()).unwrap();
         let result = serde_json::to_value(element).unwrap();
         let nested = &result["children"][0];
@@ -591,7 +612,7 @@ mod tests {
             json!({"type":"text","id":"small","x":0,"y":88,"width":600,"height":20,"text":"X","font_size":11,"color":"@dk1","bold":false}),
         ] {
             let mut element: Element = serde_json::from_value(json!({"type":"group","id":"root","x":64,"y":144,"width":1152,"height":512,"view_width":1152,"view_height":512,"children":[child]})).unwrap();
-            let layout = PartLayout { x: 0.0, y: 0.0, width: 1152.0, height: 424.0, show_title: false };
+            let layout = PartLayout { x: 0.0, y: 0.0, width: 1152.0, height: 424.0, show_title: false, fit: PartFit::Stretch };
             assert!(adopt_layout(&mut element, &layout, 88.0, 424.0, &crate::design::Theme::default(), &BTreeSet::new()).is_err(), "{child}");
         }
     }

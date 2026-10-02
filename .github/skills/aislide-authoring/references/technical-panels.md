@@ -73,6 +73,18 @@ shifts, steps, graphs and required tables. Do not convert every page to cards.
 In `compose_slide`, the `comparison` block remains a matrix. To request these
 visuals, use a `part` block with the preset, or insert it with managed `add_part`.
 
+When the server exposes `layout_patterns` and the user has not asked for free
+placement, no layout patterns or an existing template, choose the body pattern
+by relationship: `split/1-1` for two approaches, `split/2-1` for a main
+image/diagram with explanation, `focus/full` for one overview, `columns/3` for
+three peers, `media/screenshot-callouts` for numbered UI screenshots. Resolve it
+with `deck_id` and pass slot frames unchanged as `PartSpec.layout` or element
+frames. When a slot holds a part, add `part_preset` and copy `part_fit.fit` to
+`layout.fit`; to choose a pattern for a shape-sensitive part (cycle, radial,
+pyramid, map), search with `part_preset` and prefer the top-ranked stretch
+slot. A multi-panel part such as `contrast/panels` fills one slot; do not split
+it across slots. When `fits` is false, follow `fallback` or split the content.
+
 ## Icons
 
 1. `lucide_icons({query})` searches the installed Lucide library (ISC) by name,
@@ -122,6 +134,30 @@ Never hand-place numbered badges or numbered legend rows next to a screenshot:
 use `screenshot-callouts`, read callout `x`/`y` from the image itself, and
 preview once. Preflight `NUMBERED_SEQUENCE_UNEVEN` flags hand-placed numbered
 columns or rows with uneven pitch or left edges.
+
+## Non-Card Part Contracts
+
+Select the information relationship before selecting a container. Use native
+frame rendering and fixed typography; enlarge or split a part that rejects
+overflow. Do not replace facts or drop qualifiers to make a layout fit.
+
+| Preset | `data.kind` and fields |
+| --- | --- |
+| `flow/open-steps` | `open_steps`: 2-5 `steps:{label<=48, detail<=160}`, optional `accent`; common horizontal axis |
+| `vertical-flow/rail` | `rail_steps`: the same fields and count; vertical rail with aligned explanations |
+| `flow/roadmap` | `roadmap`: 2-4 `phases:{period<=24 (one line), label<=48, detail<=160, points<=4x80, outcome<=64}`, optional `accent` |
+| `list-horizontal/icon-columns` | `icon_columns`: 2-4 `items:{label<=48, detail<=200, icon?, accent?}`; no enclosing cards |
+| `list-horizontal/fact-columns` | `fact_columns`: 2-6 `items:{value<=24 (text), label<=48, unit<=12, detail<=160, qualifier<=100}`, optional `columns` 2-3 (max two rows) and `accent` |
+| `list-horizontal/image-columns` | `image_columns`: 2-4 `items:{image, label<=48, detail<=160, caption<=80}`; approved images contain without cropping |
+
+Milestones, qualifiers and captions use 14px, headings/body use 18/16px;
+headline facts use 44px with 22px units. Roadmap spacing is categorical, never
+elapsed-time proportion. Keep denominators/conditions with each supplied fact;
+mixed units are not quantitatively compared. Register source images once and
+pass the handles. Do not turn unrelated facts into a causal flow or add icons
+for decoration. Reconsider repeated card compositions only when relationships
+differ; preserve deliberate comparison consistency. If `part_fit.fit` is
+`native`, use the returned frame and omit `PartSpec.layout.fit`.
 
 ## Business Analysis Part Contracts
 
