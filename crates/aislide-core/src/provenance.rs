@@ -7,20 +7,49 @@ use xmlwriter::{Options, XmlWriter};
 
 const NS: &str = "urn:aislide:provenance:1";
 const MAX_BYTES: usize = 2 * 1024 * 1024;
+// Each JSON level adds a value element and a field element below the root, so 30 levels fit the 64-level XML reader limit.
+pub(crate) const MAX_VALUE_DEPTH: usize = 30;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Identity { pub part: String, pub id: String, pub objects: BTreeMap<String, String> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Metadata { pub version: u32, pub sources: Vec<SourceDocument>, pub bindings: Vec<SourceBinding>, pub identities: Vec<Identity>, #[serde(default,skip_serializing_if="Vec::is_empty")] pub parts: Vec<crate::parts::state::PartInstance>, #[serde(default,skip_serializing_if="Option::is_none")] pub references: Option<crate::references::ReferenceState> }
+pub(crate) struct Metadata { pub version: u32, pub sources: Vec<SourceDocument>, pub bindings: Vec<SourceBinding>, pub identities: Vec<Identity>, #[serde(default,skip_serializing_if="Vec::is_empty")] pub parts: Vec<crate::parts::state::PartInstance>, #[serde(default,skip_serializing_if="Option::is_none")] pub references: Option<crate::references::ReferenceState>, #[serde(default,skip_serializing_if="Option::is_none")] pub guided_record: Option<crate::guided::GuidedRecord> }
+
+// Character references keep CR, and whitespace in attributes, out of XML end-of-line and attribute-value normalization.
+fn escape(text: &str, attribute: bool) -> String {
+    let escaped = quick_xml::escape::escape(text);
+    let mut output = String::with_capacity(escaped.len());
+    for character in escaped.chars() {
+        match character {
+            '\r' => output.push_str("&#13;"),
+            '\n' if attribute => output.push_str("&#10;"),
+            '\t' if attribute => output.push_str("&#9;"),
+            character => output.push(character),
+        }
+    }
+    output
+}
 
 fn write_value(writer: &mut XmlWriter, value: &Value) {
     match value {
-        Value::Object(values) => { writer.start_element("m:object"); for (name, value) in values { writer.start_element("m:field"); writer.write_attribute("name", &quick_xml::escape::escape(name)); write_value(writer, value); writer.end_element(); } writer.end_element(); }
+        Value::Object(values) => { writer.start_element("m:object"); for (name, value) in values { writer.start_element("m:field"); writer.write_attribute("name", &escape(name, true)); write_value(writer, value); writer.end_element(); } writer.end_element(); }
         Value::Array(values) => { writer.start_element("m:array"); for value in values { write_value(writer, value); } writer.end_element(); }
         Value::Null => empty(writer, "m:null", &[]),
-        value => { writer.start_element(match value { Value::String(_) => "m:string", Value::Bool(_) => "m:boolean", _ => "m:number" }); let text = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()); writer.write_text(&quick_xml::escape::escape(&text)); writer.end_element(); }
+        value => { writer.start_element(match value { Value::String(_) => "m:string", Value::Bool(_) => "m:boolean", _ => "m:number" }); let text = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()); writer.write_text(&escape(&text, false)); writer.end_element(); }
+    }
+}
+
+/// Rejects values that the provenance XML writer cannot store for a later read; `depth` is the value's level below the metadata root.
+pub(crate) fn check_storable(value: &Value, depth: usize) -> Result<()> {
+    if depth > MAX_VALUE_DEPTH { return Err(Error::Limit(format!("provenance value nesting exceeds {MAX_VALUE_DEPTH} levels"))); }
+    let text = |text: &str| crate::model::valid_text(text, usize::MAX).map_err(|_| Error::Invalid("provenance value contains a character not permitted in XML 1.0".into()));
+    match value {
+        Value::String(value) => text(value),
+        Value::Object(values) => values.iter().try_for_each(|(name, value)| { text(name)?; check_storable(value, depth + 1) }),
+        Value::Array(values) => values.iter().try_for_each(|value| check_storable(value, depth + 1)),
+        _ => Ok(()),
     }
 }
 
@@ -54,16 +83,57 @@ fn validate_resources(metadata: &Metadata) -> Result<()> {
         || metadata.identities.iter().map(|entry| entry.objects.len()).sum::<usize>() > crate::limits::STANDARD.elements_total {
         return Err(Error::Limit("provenance resources".into()));
     }
+    if let Some(record)=&metadata.guided_record {crate::guided::validate_record(record)?;}
     Ok(())
 }
 
 fn encode(metadata: &Metadata) -> Result<Vec<u8>> {
     validate_resources(metadata)?;
+    let value = serde_json::to_value(metadata)?;
+    check_storable(&value, 0)?;
     let mut writer = XmlWriter::new(Options { indent: xmlwriter::Indent::None, ..Options::default() });
-    writer.start_element("m:provenance"); writer.write_attribute("xmlns:m", NS); write_value(&mut writer, &serde_json::to_value(metadata)?); writer.end_element();
-    let bytes = writer.end_document().into_bytes();
-    if bytes.len() > MAX_BYTES { return Err(Error::Limit("provenance XML > 2 MiB".into())); }
-    Ok(bytes)
+    writer.start_element("m:provenance"); writer.write_attribute("xmlns:m", NS); write_value(&mut writer, &value); writer.end_element();
+    let xml = writer.end_document();
+    if xml.len() > MAX_BYTES { return Err(Error::Limit("provenance XML > 2 MiB".into())); }
+    let document = parse(&xml).map_err(|error| Error::Limit(format!("provenance XML would not reopen: {error}")))?;
+    let children: Vec<_> = document.root_element().children().filter(|node| node.is_element()).collect();
+    if children.len() != 1 || read_value(children[0], 0)? != value { return Err(Error::Invalid("provenance XML does not preserve metadata exactly".into())); }
+    Ok(xml.into_bytes())
+}
+
+pub(crate) fn has_guided_record(bytes: &[u8]) -> Result<bool> {
+    Ok(read(&Package::open(bytes.to_vec())?)?.is_some_and(|(_, metadata)| metadata.guided_record.is_some()))
+}
+
+// Finds the root element namespace without loading the whole part, so unrelated Custom XML stays opaque regardless of size.
+// The declaration is unescaped like an XML parser would, so `&#49;` or `&#x31;` spellings of the same URI still match.
+fn root_namespace(bytes: &[u8]) -> Option<String> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_reader(bytes);
+    let mut buffer = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                let declaration = match element.name().prefix() { Some(prefix) => [b"xmlns:".as_slice(), prefix.as_ref()].concat(), None => b"xmlns".to_vec() };
+                let mut namespace = String::new();
+                for attribute in element.attributes() {
+                    let attribute = attribute.ok()?;
+                    if attribute.key.as_ref() == declaration.as_slice() { namespace = attribute.decode_and_unescape_value(reader.decoder()).ok()?.into_owned(); }
+                }
+                return Some(namespace);
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            Ok(_) => buffer.clear(),
+        }
+    }
+}
+
+fn is_aislide_part(path: &str, bytes: &[u8]) -> bool {
+    match root_namespace(bytes) {
+        Some(namespace) => namespace == NS,
+        // An unreadable part still counts as AISlide-owned when it uses the name AISlide writes, so corrupt metadata is reported.
+        None => path.to_ascii_lowercase().starts_with("customxml/aislide-provenance"),
+    }
 }
 
 pub(crate) fn read(package: &Package) -> Result<Option<(String, Metadata)>> {
@@ -72,6 +142,7 @@ pub(crate) fn read(package: &Package) -> Result<Option<(String, Metadata)>> {
     let targets = relationship_targets(package, main, "customXml")?;
     let mut found = None;
     for path in targets.values() {
+        if !is_aislide_part(path, package.part(path)?) { continue; }
         let xml = package.text(path)?;
         if xml.len() > MAX_BYTES { return Err(Error::Limit("custom provenance XML > 2 MiB".into())); }
         let document = parse(xml)?;
@@ -93,7 +164,7 @@ pub(crate) fn attach(bytes: Vec<u8>, document: &Document) -> Result<Vec<u8>> {
     let native = crate::native::read(&package)?;
     let different_ids = native.deck.slides.iter().map(|slide| &slide.id).ne(document.deck.slides.iter().map(|slide| &slide.id))
         || document.deck.design.as_ref().is_some_and(|design| native.masters.iter().map(|master| &master.id).ne(design.masters.iter().map(|master| &master.id)) || native.layouts.iter().map(|layout| &layout.id).ne(design.layouts.iter().map(|layout| &layout.id)));
-    if document.sources.is_empty() && document.bindings.is_empty() && document.parts.is_empty() && document.references.is_none() && existing.is_none() && !different_ids { return Ok(bytes); }
+    if document.sources.is_empty() && document.bindings.is_empty() && document.parts.is_empty() && document.references.is_none() && document.guided_record.is_none() && existing.is_none() && !different_ids { return Ok(bytes); }
     let mut identities = Vec::new();
     for (part, slide) in native.slides.iter().zip(&document.deck.slides) { identities.push(Identity { part: part.path.clone(), id: slide.id.clone(), objects: part.nodes.iter().map(|(id, numeric)| (numeric.clone(), id.clone())).collect() }); }
     if let Some(design) = document.deck.design.as_ref().or(native.deck.design.as_ref()) {
@@ -111,7 +182,7 @@ pub(crate) fn attach(bytes: Vec<u8>, document: &Document) -> Result<Vec<u8>> {
         } else if let Some(old)=existing.as_ref().and_then(|(_,metadata)|metadata.parts.iter().find(|old|old.slide_id==part.slide_id && old.element_id==part.element_id)) {part.stale=old.stale;}
     }
     let references = document.references.as_ref().map(|state| crate::references::exported_state(state, &document.deck, &native.deck)).transpose()?;
-    let metadata = Metadata { version: 1, sources: document.sources.clone(), bindings: document.bindings.clone(), identities, parts, references };
+    let metadata = Metadata { version: 1, sources: document.sources.clone(), bindings: document.bindings.clone(), identities, parts, references, guided_record: document.guided_record.clone() };
     if existing.as_ref().is_some_and(|(_, old)| crate::canonical::bytes(old).ok() == crate::canonical::bytes(&metadata).ok()) { return Ok(bytes); }
     let encoded = encode(&metadata)?;
     if let Some((path, _)) = existing { package.replace_part(&path, encoded)?; return package.save(); }

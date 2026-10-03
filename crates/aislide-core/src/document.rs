@@ -22,6 +22,8 @@ pub struct Document {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<ReportInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guided_record: Option<crate::guided::GuidedRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<ImportedOrigin>,
 }
 
@@ -31,7 +33,7 @@ pub struct ImportedOrigin { pub base64: String, pub sha256: String, #[serde(defa
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Content { deck: Deck, sources: Vec<SourceDocument>, bindings: Vec<SourceBinding>, #[serde(default, skip_serializing_if = "Option::is_none")] references: Option<crate::references::ReferenceState>, #[serde(default, skip_serializing_if = "Vec::is_empty")] parts: Vec<crate::parts::state::PartInstance>, #[serde(default, skip_serializing_if = "Option::is_none")] report: Option<ReportInput>, #[serde(default, skip_serializing_if = "Option::is_none")] origin: Option<ImportedOrigin> }
+struct Content { deck: Deck, sources: Vec<SourceDocument>, bindings: Vec<SourceBinding>, #[serde(default, skip_serializing_if = "Option::is_none")] references: Option<crate::references::ReferenceState>, #[serde(default, skip_serializing_if = "Vec::is_empty")] parts: Vec<crate::parts::state::PartInstance>, #[serde(default, skip_serializing_if = "Option::is_none")] report: Option<ReportInput>, #[serde(default, skip_serializing_if = "Option::is_none")] guided_record: Option<crate::guided::GuidedRecord>, #[serde(default, skip_serializing_if = "Option::is_none")] origin: Option<ImportedOrigin> }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,7 +78,7 @@ pub fn verify_session_recovery(mut envelope: SessionRecovery) -> Result<SessionR
                 let operation = serde_json::to_value(operation)?;
                 for field in ["path", "from"] {
                     if let Some(path) = operation.get(field).and_then(Value::as_str) {
-                        if !["/deck", "/sources", "/bindings", "/parts", "/report", "/references"].iter().any(|root| path == *root || path.strip_prefix(root).is_some_and(|suffix|suffix.starts_with('/'))) {
+                        if !["/deck", "/sources", "/bindings", "/parts", "/report", "/references", "/guided_record"].iter().any(|root| path == *root || path.strip_prefix(root).is_some_and(|suffix|suffix.starts_with('/'))) {
                             return Err(Error::Unsupported("recovery receipt path cannot access origin or document identity".into()));
                         }
                     }
@@ -111,12 +113,14 @@ struct ContentRef<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     report: &'a Option<ReportInput>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    guided_record: &'a Option<crate::guided::GuidedRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     origin: &'a Option<ImportedOrigin>,
 }
 
 fn content_ref(document: &Document) -> ContentRef<'_> {
     ContentRef { deck: &document.deck, sources: &document.sources, bindings: &document.bindings,
-        references: &document.references, parts: &document.parts, report: &document.report, origin: &document.origin }
+        references: &document.references, parts: &document.parts, report: &document.report, guided_record: &document.guided_record, origin: &document.origin }
 }
 
 fn seal(document: &mut Document) -> Result<()> {
@@ -126,6 +130,7 @@ fn seal(document: &mut Document) -> Result<()> {
     crate::preflight::deck(&document.deck, document.capacity_profile.limits())?;
     validate_deck(&document.deck)?;
     if let Some(state) = &document.references { crate::references::validate(state)?; }
+    if let Some(record) = &document.guided_record { crate::guided::validate_record(record)?; }
     crate::parts::state::refresh(&mut document.parts,&document.deck,document.origin.as_ref())?;
     if let Some(origin) = &document.origin {
         let bytes = crate::preflight::decode_archive(&origin.base64, document.capacity_profile.limits().archive_bytes)?;
@@ -185,7 +190,7 @@ pub fn create(id: String, deck: Deck, sources: Vec<SourceDocument>, bindings: Ve
 }
 
 pub fn create_with_profile(id: String, deck: Deck, sources: Vec<SourceDocument>, bindings: Vec<SourceBinding>, report: Option<ReportInput>, capacity_profile: crate::limits::CapacityProfile) -> Result<Document> {
-    let mut document = Document { capacity_profile, version: 1, id, revision: 0, hash: String::new(), deck, sources, bindings, references: None, parts: Vec::new(), report, origin: None };
+    let mut document = Document { capacity_profile, version: 1, id, revision: 0, hash: String::new(), deck, sources, bindings, references: None, parts: Vec::new(), report, guided_record: None, origin: None };
     seal(&mut document)?; Ok(document)
 }
 
@@ -196,7 +201,7 @@ pub fn import_document(id: String, bytes: Vec<u8>) -> Result<Value> {
 pub fn import_document_with_profile(id: String, bytes: Vec<u8>, capacity_profile: crate::limits::CapacityProfile) -> Result<Value> {
     if bytes.len() > capacity_profile.limits().archive_bytes { return Err(Error::Limit("selected profile archive budget".into())); }
     let imported = crate::import::import_pptx(bytes.clone())?;
-    let mut document = Document { capacity_profile, version: 1, id, revision: 0, hash: String::new(), deck: imported.deck, sources: Vec::new(), bindings: Vec::new(), references: None, parts: Vec::new(), report: None,
+    let mut document = Document { capacity_profile, version: 1, id, revision: 0, hash: String::new(), deck: imported.deck, sources: Vec::new(), bindings: Vec::new(), references: None, parts: Vec::new(), report: None, guided_record: None,
         origin: Some(ImportedOrigin { base64: STANDARD.encode(&bytes), sha256: digest(&bytes), native: false }) };
     seal(&mut document)?;
     Ok(json!({"document":document,"warnings":imported.warnings,"objects":imported.objects}))
@@ -210,8 +215,8 @@ pub fn open_presentation_with_profile(id: String, bytes: Vec<u8>, capacity_profi
     if bytes.len() > capacity_profile.limits().archive_bytes { return Err(Error::Limit("selected profile archive budget".into())); }
     let package = crate::package::Package::open(bytes.clone())?;
     let imported = crate::native::read(&package)?;
-    let (sources, bindings, parts, references) = imported.metadata.map(|metadata| (metadata.sources, metadata.bindings, metadata.parts, metadata.references)).unwrap_or_default();
-    let mut document = Document { capacity_profile, version: 1, id, revision: 0, hash: String::new(), deck: imported.deck, sources, bindings, references, parts, report: None,
+    let (sources, bindings, parts, references, guided_record) = imported.metadata.map(|metadata| (metadata.sources, metadata.bindings, metadata.parts, metadata.references, metadata.guided_record)).unwrap_or_default();
+    let mut document = Document { capacity_profile, version: 1, id, revision: 0, hash: String::new(), deck: imported.deck, sources, bindings, references, parts, report: None, guided_record,
         origin: Some(ImportedOrigin { base64: STANDARD.encode(&bytes), sha256: digest(&bytes), native: true }) };
     seal(&mut document)?;
     Ok(json!({"document":document,"warnings":imported.warnings,"objects":[],"format":"open_xml_pptx"}))
@@ -233,7 +238,7 @@ pub fn transact(document: &Document, transaction: Transaction) -> Result<Transac
         }
     }
     let next: Content = serde_json::from_value(working)?;
-    let mut updated = Document { capacity_profile: document.capacity_profile, version: document.version, id: document.id.clone(), revision: document.revision, hash: String::new(), deck: next.deck, sources: next.sources, bindings: next.bindings, references: next.references, parts: next.parts, report: next.report, origin: next.origin };
+    let mut updated = Document { capacity_profile: document.capacity_profile, version: document.version, id: document.id.clone(), revision: document.revision, hash: String::new(), deck: next.deck, sources: next.sources, bindings: next.bindings, references: next.references, parts: next.parts, report: next.report, guided_record: next.guided_record, origin: next.origin };
     if crate::canonical::bytes(&document.origin)? != crate::canonical::bytes(&updated.origin)? { return Err(Error::Unsupported("import origin cannot be attached, detached or replaced inside an edit transaction".into())); }
     updated.parts.retain(|part| {
         let contains = |deck: &Deck| deck.slides.iter().any(|slide| slide.id == part.slide_id && slide.elements.iter().any(|element| element.bounds().0 == part.element_id));
@@ -281,6 +286,12 @@ pub fn export(document: &Document) -> Result<Value> {
     export_internal(document, true)
 }
 
+// Checkpoints keep other metadata in JSON, but the PPTX record must follow the document so a removed origin record does not reopen.
+fn with_provenance(bytes: Vec<u8>, document: &Document, checkpoint: bool) -> Result<Vec<u8>> {
+    if !checkpoint || document.guided_record.is_some() || (document.origin.is_some() && crate::provenance::has_guided_record(&bytes)?) { crate::provenance::attach(bytes, document) }
+    else { Ok(bytes) }
+}
+
 fn export_internal(document: &Document, checkpoint: bool) -> Result<Value> {
     verify(document)?;
     if document.bindings.iter().any(|binding| binding.stale) { return Err(Error::Conflict("source bindings are stale; undo data edits or explicitly remove/rebind affected citations before export".into())); }
@@ -288,8 +299,7 @@ fn export_internal(document: &Document, checkpoint: bool) -> Result<Value> {
     if let Some(issue) = layout.as_ref().and_then(|report| report.issues.iter().find(|issue| issue.severity == "error")) {
         return Err(Error::Invalid(format!("project export blocked by {}: {}", issue.code, issue.message)));
     }
-    let mut bytes = presentation(document)?;
-    if !checkpoint { bytes = crate::provenance::attach(bytes, document)?; }
+    let bytes = with_provenance(presentation(document)?, document, checkpoint)?;
     if bytes.len() > document.capacity_profile.limits().archive_bytes { return Err(Error::Limit(format!("presentation exceeds {} byte binary budget", document.capacity_profile.limits().archive_bytes))); }
     let mut result = json!({"base64":STANDARD.encode(&bytes),"filename":"report.pptx","layout":layout});
     if checkpoint {
@@ -304,7 +314,8 @@ pub fn open(base64: &str, checkpoint: Checkpoint) -> Result<Document> {
     let bytes = STANDARD.decode(base64).map_err(|_| Error::Invalid("invalid project PPTX base64".into()))?;
     if digest(&bytes) != checkpoint.pptx_sha256 { return Err(Error::Conflict("PPTX does not match this checkpoint".into())); }
     verify(&checkpoint.document)?;
-    if presentation(&checkpoint.document)? != bytes { return Err(Error::Conflict("checkpoint scene does not reproduce its bound PPTX".into())); }
+    let reproduced = with_provenance(presentation(&checkpoint.document)?, &checkpoint.document, true)?;
+    if reproduced != bytes { return Err(Error::Conflict("checkpoint scene does not reproduce its bound PPTX".into())); }
     Ok(checkpoint.document)
 }
 

@@ -7,6 +7,7 @@ const COMMON: &str = include_str!("../../../docs/authoring/common.md");
 const PATTERNS: &str = include_str!("../../../docs/authoring/consulting-patterns.json");
 const DEFAULT_SLIDE_LIMIT: usize = 32;
 const MAX_SLIDE_LIMIT: usize = 128;
+pub const MAX_RECORD_BYTES: usize = crate::limits::MIB;
 const PROFILES: &[(&str, &str, &str)] = &[
     ("consulting-decision", "Consulting and decision meetings", include_str!("../../../docs/authoring/consulting-decision.md")),
     ("technical-explainer", "Technical explanation", include_str!("../../../docs/authoring/technical-explainer.md")),
@@ -24,6 +25,23 @@ pub struct GuidedInput {
     pub evidence: Vec<Evidence>,
     #[serde(default)] pub issues: Vec<DecisionIssue>,
     pub slides: Vec<GuidedSlide>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GuidedRecord { pub version: u32, pub input: GuidedInput }
+
+pub(crate) fn validate_record(record:&GuidedRecord)->Result<()> {
+    crate::preflight::serialized_bytes(record,MAX_RECORD_BYTES,"guided creation record")?;
+    if record.version!=1 {return Err(Error::Unsupported("guided creation record version".into()));}
+    if record.input.slides.iter().any(|slide|slide.speaker_notes.is_some()) {return Err(Error::Invalid("guided creation record must not duplicate speaker_notes".into()));}
+    crate::provenance::check_storable(&serde_json::to_value(record)?,1).map_err(|error|match error {
+        Error::Limit(message)=>Error::Limit(format!("guided creation record: {message}")),
+        Error::Invalid(message)=>Error::Invalid(format!("guided creation record: {message}")),
+        error=>error,
+    })?;
+    // Content checks run only at creation so stored snapshots stay readable as rules evolve.
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -46,7 +64,12 @@ pub struct Authoring {
     #[serde(skip_serializing_if="Option::is_none")] pub headline_style: Option<HeadlineStyle>,
     #[serde(skip_serializing_if="Option::is_none")]
     #[schemars(range(min=32, max=128))] pub slide_limit: Option<usize>,
+    #[serde(skip_serializing_if="Option::is_none")] pub ledger_notes: Option<LedgerNotes>,
 }
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all="snake_case")]
+pub enum LedgerNotes { #[default] Full, Summary, None }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all="snake_case")]
@@ -73,7 +96,7 @@ impl Authoring {
     fn has_typography(&self) -> bool {
         self.context.is_some() || self.density.is_some() || self.spacing.is_some()
             || self.body_font_min.is_some() || self.headline_font_size.is_some() || self.font_family.is_some()
-            || (self.headline_style.is_none() && self.slide_limit.is_none())
+            || (self.headline_style.is_none() && self.slide_limit.is_none() && self.ledger_notes.is_none())
     }
 
     fn resolve(&self, profile: &str) -> ResolvedAuthoring<'_> {
@@ -132,7 +155,7 @@ pub fn guide(id: &str) -> Result<Value> {
     let (_,title,content)=PROFILES.iter().find(|entry|entry.0==id).ok_or_else(||Error::Unsupported("unknown authoring profile".into()))?;
     let patterns:Value=if id=="consulting-decision" {serde_json::from_str(PATTERNS)?} else {json!([])};
     let automatic_patterns=if id=="consulting-decision" {vec!["native-part","C02","C03"]} else {vec!["native-part"]};
-    Ok(json!({"version":1,"profile_id":id,"title":title,"language":"en","markdown":format!("{}\n\n{}\n\nAuthoring overrides: authoring.slide_limit explicitly selects {DEFAULT_SLIDE_LIMIT}..{MAX_SLIDE_LIMIT} slides (default {DEFAULT_SLIDE_LIMIT}); resource capacity limits still apply. authoring.headline_style defaults to sentence. keyword waives Japanese decision headline length and adjacent sentence-form variation only; supported sentence_form names, logical support, evidence and numeric declarations remain required. These validation-only options do not activate typography overrides.",COMMON.trim_start_matches('\u{feff}'),content.trim_start_matches('\u{feff}')),"patterns":patterns,"input_schema":schemars::schema_for!(GuidedInput),"automatic_patterns":automatic_patterns,"semantic_truth_verified":false,"limits":{"slides":DEFAULT_SLIDE_LIMIT,"maximum_slides":MAX_SLIDE_LIMIT,"evidence":64,"issues":6},"creation":"Supply a structured, evidence-linked input; validate_guided_presentation before create_guided_presentation. No model call or file write."}))
+    Ok(json!({"version":1,"profile_id":id,"title":title,"language":"en","markdown":format!("{}\n\n{}\n\nAuthoring overrides: authoring.slide_limit explicitly selects {DEFAULT_SLIDE_LIMIT}..{MAX_SLIDE_LIMIT} slides (default {DEFAULT_SLIDE_LIMIT}); resource capacity limits still apply. authoring.headline_style defaults to sentence. keyword waives Japanese decision headline length and adjacent sentence-form variation only; supported sentence_form names, logical support, evidence and numeric declarations remain required. These validation-only options do not activate typography overrides. authoring.ledger_notes selects full (default, unchanged legacy notes), summary (speaker text first, readable question/claim/evidence references), or none (speaker text only). A notes-mode-only override does not activate typography. Summary/none preserve the complete creation input except duplicated speaker_notes in document.guided_record and PPTX Custom XML; retrieve the record with MCP get_document or the SDK session.document. It is a creation snapshot, not proof of current content, and these modes are not privacy redaction. speaker_notes allows 4000 Unicode scalars; complete slide notes allow 8000 including separators and summaries. No text is truncated. The independent creation-record JSON budget is {MAX_RECORD_BYTES} bytes; total provenance XML remains limited to 2 MiB and summary/none creation rejects input that would exceed it after XML escaping. Stored records are validated structurally (XML 1.0 characters in strings and keys, at most {} nesting levels below the provenance root, exact XML reread); content checks run only at creation. inspect_document scans the record and export_clean_copy removes it when sources or notes is selected.",COMMON.trim_start_matches('\u{feff}'),content.trim_start_matches('\u{feff}'),crate::provenance::MAX_VALUE_DEPTH),"patterns":patterns,"input_schema":schemars::schema_for!(GuidedInput),"automatic_patterns":automatic_patterns,"semantic_truth_verified":false,"limits":{"slides":DEFAULT_SLIDE_LIMIT,"maximum_slides":MAX_SLIDE_LIMIT,"evidence":64,"issues":6,"speaker_notes_scalars":4000,"slide_notes_scalars":8000,"guided_record_bytes":MAX_RECORD_BYTES},"creation":"Supply a structured, evidence-linked input; validate_guided_presentation before create_guided_presentation. No model call or file write."}))
 }
 
 fn required(value:&str, maximum:usize, field:&str, issues:&mut Vec<String>) {
@@ -342,6 +365,30 @@ fn measurement_cells(element: &mut Element) -> Result<()> {
     Ok(())
 }
 
+fn slide_notes(input:&GuidedInput,slide:&GuidedSlide,citations:&[&Evidence])->Result<String> {
+    let mode=input.authoring.as_ref().and_then(|settings|settings.ledger_notes).unwrap_or_default();
+    let notes=match mode {
+        LedgerNotes::Full=>{
+            let mut ledger=slide.clone();ledger.speaker_notes=None;
+            let mut notes=format!("Profile: {}\nAudience: {}\nPurpose: {}\nGoverning message: {}\nLedger: {}\nEvidence: {}\nSemantic truth and Office parity require human review.",input.profile_id,input.audience,input.purpose,input.governing_message,serde_json::to_string(&ledger)?,serde_json::to_string(&citations)?);
+            if let Some(speaker_notes)=&slide.speaker_notes {notes.push_str("\nSpeaker notes:\n");notes.push_str(speaker_notes);}
+            notes
+        }
+        LedgerNotes::Summary=>{
+            let (heading,question,claim,evidence)=if input.language=="ja" {("作成根拠の要約","問い","主張","根拠")} else {("Authoring summary","Question","Claim","Evidence")};
+            let references=citations.iter().map(|entry|format!("[{}] {} ({})",entry.id,entry.reference,match entry.kind {EvidenceKind::Source=>"source",EvidenceKind::Assumption=>"assumption",EvidenceKind::Unknown=>"unknown"})).collect::<Vec<_>>().join("\n");
+            let summary=format!("{heading}\n{question}: {}\n{claim}: {}\n{evidence}:\n{references}\nSemantic truth and Office parity require human review.",slide.question,slide.headline);
+            match slide.speaker_notes.as_deref().filter(|notes|!notes.is_empty()) {Some(notes)=>format!("{notes}\n\n---\n{summary}"),None=>summary}
+        }
+        LedgerNotes::None=>slide.speaker_notes.clone().unwrap_or_default(),
+    };
+    valid_text(&notes,8000).map_err(|_|Error::Limit(match mode {
+        LedgerNotes::Full=>format!("{}: combined ledger, evidence and speaker notes exceed 8000 valid Unicode scalars",slide.id),
+        _=>format!("{}: speaker text, authoring summary and separators exceed 8000 valid Unicode scalars; speaker_notes allows at most 4000",slide.id),
+    }))?;
+    Ok(notes)
+}
+
 fn build(input:&GuidedInput,id:&str)->Result<Document> {
     let authoring=input.authoring.as_ref().filter(|settings|settings.has_typography()).map(|settings|settings.resolve(&input.profile_id));
     let primary=input.brand_color.as_deref().unwrap_or("1976D2");
@@ -418,10 +465,7 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
         if slide.part.is_none() {if let Some(settings)=&authoring {
             for element in &mut elements[4..] {let bounds=element.bounds();author_body(element,settings,1.0,bounds.4);}
         }}
-        let mut ledger=slide.clone();ledger.speaker_notes=None;
-        let mut notes=format!("Profile: {}\nAudience: {}\nPurpose: {}\nGoverning message: {}\nLedger: {}\nEvidence: {}\nSemantic truth and Office parity require human review.",input.profile_id,input.audience,input.purpose,input.governing_message,serde_json::to_string(&ledger)?,serde_json::to_string(&citations)?);
-        if let Some(speaker_notes)=&slide.speaker_notes {notes.push_str("\nSpeaker notes:\n");notes.push_str(speaker_notes);}
-        valid_text(&notes,8000).map_err(|_|Error::Limit(format!("{}: combined ledger, evidence and speaker notes exceed 8000 valid Unicode scalars",slide.id)))?;
+        let notes=slide_notes(input,slide,&citations)?;
         slides.push(json!({"id":slide.id,"title":slide.headline,"background":"@lt1","layout_id":"guided-content","inherit_background":true,"elements":elements,"notes":notes}));
     }
     let deck:Deck=serde_json::from_value(json!({"version":1,"title":input.title,"width":1280,"height":720,"design":design_value,"slides":slides}))?;
@@ -435,8 +479,24 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
     let errors:Vec<_>=measured["issues"].as_array().unwrap().iter().filter(|issue|issue["severity"]=="error").collect();
     if !errors.is_empty() {return Err(Error::Invalid(format!("guided layout does not fit: {}",serde_json::to_string(&errors)?)));}
     let document=crate::document::create(id.into(),deck,Vec::new(),Vec::new(),None)?;
-    if parts.is_empty() {return Ok(document);}
-    Ok(crate::document::transact(&document,crate::document::Transaction{expected_revision:document.revision,expected_hash:document.hash.clone(),operations:serde_json::from_value(json!([{"op":"add","path":"/parts","value":parts}]))?})?.document)
+    let mut operations=Vec::new();
+    if !parts.is_empty() {operations.push(json!({"op":"add","path":"/parts","value":parts}));}
+    if input.authoring.as_ref().and_then(|settings|settings.ledger_notes).unwrap_or_default()!=LedgerNotes::Full {
+        let mut snapshot=input.clone();
+        for slide in &mut snapshot.slides {slide.speaker_notes=None;}
+        let record=GuidedRecord{version:1,input:snapshot};
+        validate_record(&record)?;
+        operations.push(json!({"op":"add","path":"/guided_record","value":record}));
+    }
+    if operations.is_empty() {return Ok(document);}
+    let document=crate::document::transact(&document,crate::document::Transaction{expected_revision:document.revision,expected_hash:document.hash.clone(),operations:serde_json::from_value(json!(operations))?})?.document;
+    if document.guided_record.is_some() {
+        crate::provenance::attach(crate::pptx::export_pptx(&document.deck)?,&document).map_err(|error|match error {
+            Error::Limit(message)=>Error::Limit(format!("guided creation record and native metadata exceed provenance XML limits after XML escaping ({message}); shorten ledger/evidence text or use ledger_notes full")),
+            error=>error,
+        })?;
+    }
+    Ok(document)
 }
 
 fn evaluate(input:&GuidedInput,id:&str)->(Option<Document>,Review) {

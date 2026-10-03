@@ -415,6 +415,19 @@ impl CandidateScan {
             }
         }
         self.sources(&document.sources, scope);
+        if let Some(record) = &document.guided_record { self.guided_record(record, scope); }
+    }
+
+    fn guided_record(&mut self, record: &crate::guided::GuidedRecord, scope: &str) {
+        fn strings(scan: &mut CandidateScan, value: &serde_json::Value, scope: &str, index: &mut usize) {
+            match value {
+                serde_json::Value::String(text) => { scan.text(text, scope, "guided_record", &[*index]); *index += 1; }
+                serde_json::Value::Array(values) => for value in values { strings(scan, value, scope, index); },
+                serde_json::Value::Object(values) => for value in values.values() { strings(scan, value, scope, index); },
+                _ => {},
+            }
+        }
+        if let Ok(value) = serde_json::to_value(record) { strings(self, &value, scope, &mut 0); }
     }
 
     fn sources(&mut self, sources: &[crate::sources::SourceDocument], scope: &str) {
@@ -457,7 +470,10 @@ impl CandidateScan {
                 }
             }
         }
-        if !properties_only { if let Some((_, provenance)) = crate::provenance::read(package)? { self.sources(&provenance.sources, scope); } }
+        if !properties_only { if let Some((_, provenance)) = crate::provenance::read(package)? {
+            self.sources(&provenance.sources, scope);
+            if let Some(record) = &provenance.guided_record { self.guided_record(record, scope); }
+        } }
         Ok(())
     }
 }
@@ -588,6 +604,7 @@ fn inspect_document_inner(document: &crate::document::Document) -> Result<Inspec
     candidates.document(document);
     let mut found: BTreeMap<InspectionCategory, BTreeSet<String>> = [Sources, CustomXml, Comments, Notes, UnusedMedia, OffSlide, Invisible].into_iter().map(|category| (category, BTreeSet::new())).collect();
     for index in 0..document.sources.len() { found.entry(Sources).or_default().insert(format!("document/sources/{index}")); }
+    if document.guided_record.is_some() { found.entry(Sources).or_default().insert("document/guided_record".into()); }
     for (index, slide) in document.deck.slides.iter().enumerate() {
         if !slide.notes.is_empty() { found.entry(Notes).or_default().insert(format!("document/deck/slides/{index}/notes")); }
         for position in 0..slide.review.as_ref().map_or(0, |review| review.comments.len()) { found.entry(Comments).or_default().insert(format!("document/deck/slides/{index}/review/comments/{position}")); }
@@ -597,7 +614,7 @@ fn inspect_document_inner(document: &crate::document::Document) -> Result<Inspec
     for (scope, package) in packages {
         candidates.package(&package, if scope == "current" { "current_deck" } else { "embedded_origin" }, scope == "current")?;
         let relations = relationships(&package)?; let reached = reachable(&relations, &BTreeSet::new());
-        let source = crate::provenance::read(&package)?.map(|(path, metadata)| (path, !metadata.sources.is_empty() || !metadata.bindings.is_empty()));
+        let source = crate::provenance::read(&package)?.map(|(path, metadata)| (path, !metadata.sources.is_empty() || !metadata.bindings.is_empty() || metadata.guided_record.is_some()));
         for (path, kind) in content_types(&package)? {
             let category = if source.as_ref().is_some_and(|(source, evidence)| source == &path && *evidence) { Some(Sources) }
                 else if comment_type(&kind) { Some(Comments) }
@@ -674,6 +691,8 @@ pub fn export_clean_copy(document: &crate::document::Document, options: &CleanCo
     ensure_unprotected(&package)?;
     let mut sanitized = document.clone();
     if options.categories.contains(&Sources) { sanitized.sources.clear(); sanitized.bindings.clear(); sanitized.report = None; }
+    // Full ledger notes carry the same evidence, so either category removes the guided record.
+    if options.categories.contains(&Sources) || options.categories.contains(&Notes) { sanitized.guided_record = None; }
     let removed_elements = remove_shapes(&mut package, &options.categories, document)?;
     sanitized.parts.retain(|part| !removed_elements.contains(&(part.slide_id.clone(), part.element_id.clone())));
     let types = content_types(&package)?; let relations = relationships(&package)?;

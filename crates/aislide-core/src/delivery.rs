@@ -121,11 +121,11 @@ pub fn prepare_delivery(document: &Document, expected_revision: u64, expected_ha
             "sources":document.sources.iter().map(|source| json!({"id":source.id,"name":source.name,"format":source.format,"sha256":source.sha256,"content_sha256":source.content_sha256,"byte_length":source.byte_length,"attribution":source.attribution,"warnings":source.warnings})).collect::<Vec<_>>(),
             "bindings":document.bindings.iter().map(|binding| json!({"slide_id":binding.slide_id,"element_id":binding.element_id,"field":binding.field,"source_id":binding.source_id,"source_sha256":binding.source_sha256,"locator":binding.locator,"transform":binding.transform,"stale":binding.stale})).collect::<Vec<_>>(),
             "source_authenticity_verified":false,"source_freshness_verified":false,"semantic_truth_verified":false,
-            "limitations":["Source text, table rows, raw values and original bytes are excluded from this report; locators and citation metadata can still be sensitive", "Guided evidence declarations remain in slide notes and are not authenticated source records", "No URL was fetched or revalidated"]});
+            "limitations":["Source text, table rows, raw values and original bytes are excluded from this report; locators and citation metadata can still be sensitive", if document.guided_record.is_some() {"Guided evidence declarations remain in the PPTX creation record and are not authenticated source records; this minimal report does not contain that record"} else {"Guided evidence declarations remain in slide notes and are not authenticated source records"}, "No URL was fetched or revalidated"]});
         bundle.add("source_report", "-sources.json".into(), "application/json", all_pages.clone(), serde_json::to_vec_pretty(&report)?, None)?;
     }
     let files: Vec<_> = bundle.files.iter().map(|file| json!({"kind":file.kind,"suffix":file.suffix,"mime_type":file.mime_type,"page_indices":file.page_indices,"byte_length":file.byte_length,"sha256":file.sha256,"width":file.width,"height":file.height})).collect();
-    let manifest = json!({"format":"aislide.delivery","version":1,
+    let mut manifest = json!({"format":"aislide.delivery","version":1,
         "producer":{"name":"aislide-core","version":env!("CARGO_PKG_VERSION"),"engine":"aislide-core","contract_version":1},
         "document":{"id":document.id,"revision":document.revision,"hash":document.hash,"title":document.deck.title,"slide_count":document.deck.slides.len()},
         "options":options,"files":files,"preview_pages":preview_pages,"multi_file_atomic":false,
@@ -138,6 +138,7 @@ pub fn prepare_delivery(document: &Document, expected_revision: u64, expected_ha
         "preflight":preflight,"render_warnings":render_warnings,
         "privacy":{"pptx_includes_notes":true,"pptx_may_include_sources_and_bindings":true,"separate_notes_requested":options.notes,"separate_source_report_requested":options.source_report},
         "limitations":["A completed delivery is not a visual, accessibility or factual approval", "Static rendering and diagnostic scope are the recorded selected pages, not necessarily the complete PPTX", "No Office application, model inference, source URL fetch or freshness verification", "No files are published by core preparation; hosts must publish exclusively and write this manifest last", "Multiple files are not crash-atomic; a manifest identifies hashes, not a cryptographic signature"]});
+    if document.guided_record.is_some() {manifest["privacy"]["pptx_includes_guided_record"]=json!(true);}
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?.len();
     if manifest_bytes > bundle.remaining { return Err(Error::Limit("delivery manifest exceeds combined output byte budget".into())); }
     let result = PreparedDelivery { revision: document.revision, hash: document.hash.clone(), files: bundle.files, manifest };

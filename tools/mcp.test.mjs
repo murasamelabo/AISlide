@@ -1738,16 +1738,19 @@ function assertGuidedFeedbackSchema(schema) {
   const authoring = input.properties.authoring.anyOf.find(branch => branch.type === 'object');
   const limit = authoring.properties.slide_limit.anyOf.find(branch => branch.type === 'integer');
   const headline = authoring.properties.headline_style.anyOf.find(branch => branch.type === 'string');
+  const notes = authoring.properties.ledger_notes.anyOf.find(branch => branch.type === 'string');
   assert.equal(input.properties.slides.maxItems, 128);
   assert.equal(limit.minimum, 32);
   assert.equal(limit.maximum, 128);
   assert.deepEqual(headline.enum, ['sentence', 'keyword']);
+  assert.deepEqual(notes.enum, ['full', 'summary', 'none']);
 }
 
 test('feedback MCP stub discovery shares reasoned authoring choices without core calls', async () => {
   await feedbackMcpFixture(async ({ registrations, resources, prompts, calls }) => {
     assertFeedbackWorkflow(await prompts.get('author_presentation').callback(), await resources.get('aislide://authoring/workflow').callback());
     assert.match(registrations.get('create_guided_presentation').config.description, /32 slides.*headline_style="keyword".*32\.\.128.*Evidence and numeric checks/);
+    assert.match(registrations.get('create_guided_presentation').config.description, /ledger_notes.*full.*summary.*none.*Custom XML/);
     assert.match(registrations.get('compile_report').config.description, /fixed structured layouts.*exact recreation/);
     assert.equal(calls.length, 0);
   });
@@ -2987,6 +2990,65 @@ test('P0 MCP guided options, diagnostics and staged revisions form a guarded vis
     for (const name of ['preflight_presentation', 'preview_slide_revision']) assert.equal(tools.find(tool => tool.name === name).annotations.readOnlyHint, true);
     assert.equal(tools.find(tool => tool.name === 'apply_slide_revision').annotations.readOnlyHint, false);
   } finally { await client.close(); }
+});
+
+test('MCP guided ledger notes separate presenter text and preserve native creation records', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-guided-notes-mcp-'));
+  const client = new Client({ name: 'guided-notes-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory, '--asset-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
+    return JSON.parse(result.content[0].text);
+  };
+  const template = structuredClone(guidedExamples().find(input => input.profile_id === 'status-report'));
+  template.slides = [template.slides[0]];
+  const speaker = 'Synthetic comparison only.\nExplain the evidence before the recommendation.';
+  try {
+    await client.connect(transport);
+    for (const mode of ['full', 'summary', 'none']) {
+      const input = { ...structuredClone(template), authoring: { ledger_notes: mode } };
+      input.slides[0].speaker_notes = speaker;
+      assert.equal((await call('validate_guided_presentation', { input })).ready, true);
+      const { deck_id } = await call('create_guided_presentation', { input });
+      const original = await call('get_document', { deck_id });
+      const notes = original.deck.slides[0].notes;
+      if (mode === 'full') {
+        assert.match(notes, /^Profile:/);
+        assert.match(notes, /\nLedger:.*\nEvidence:/);
+        assert.equal(Object.hasOwn(original, 'guided_record'), false);
+      } else {
+        assert.ok(notes.startsWith(speaker));
+        assert.doesNotMatch(notes, /"body_paths"|"evidence_ids"/);
+        if (mode === 'none') assert.equal(notes, speaker);
+        assert.deepEqual(original.guided_record.input.evidence, input.evidence);
+        assert.deepEqual(original.guided_record.input.slides[0].numbers, input.slides[0].numbers);
+        assert.equal(Object.hasOwn(original.guided_record.input.slides[0], 'speaker_notes'), false);
+      }
+      const filename = `guided-notes-${mode}.pptx`;
+      const saved = await call('export_pptx', { deck_id, filename });
+      const bytes = await readFile(saved.path);
+      assert.equal(bytes.subarray(0, 2).toString(), 'PK');
+      const asset = await call('register_asset', { path: filename });
+      const reopened = await call('open_pptx', { asset_id: asset.asset_id });
+      const native = await call('get_document', { deck_id: reopened.deck_id });
+      assert.equal(native.deck.slides[0].notes, notes);
+      assert.deepEqual(native.guided_record, original.guided_record);
+      assert.deepEqual(await readFile(saved.path), bytes);
+      await call('apply_operations', { deck_id, expected_revision: original.revision, expected_hash: original.hash, operations: [{ op: 'update_notes', slide_id: original.deck.slides[0].id, notes: 'Later presenter edit' }] });
+      assert.deepEqual((await call('get_document', { deck_id })).guided_record, original.guided_record);
+      await call('undo', { deck_id });
+      assert.equal((await call('get_document', { deck_id })).hash, original.hash);
+      await call('close_deck', { deck_id: reopened.deck_id });
+      await call('close_deck', { deck_id });
+    }
+    for (const mode of ['private', true, 1, {}, []]) {
+      const input = { ...structuredClone(template), authoring: { ledger_notes: mode } };
+      for (const name of ['validate_guided_presentation', 'create_guided_presentation']) {
+        assert.equal((await client.callTool({ name, arguments: { input } })).isError, true);
+      }
+    }
+  } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
 test('P0 MCP previews return bounded images without changing documents or writing files', async () => {
