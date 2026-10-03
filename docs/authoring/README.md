@@ -804,7 +804,7 @@ automatic local persistence is created by importing.
 
 `GuidedInput` contains `version:1`, `profile_id`, `title`, `audience`, `purpose`, `governing_message`, `language` (`ja` or `en`), optional six-digit `brand_color`, optional `authoring`, `evidence`, optional `issues`, and `slides`.
 
-Omitting `authoring` retains the previous layout and typography. Supplying `{}` enables contextual defaults: projection for `event-talk`, reading for the other profiles. Supplying only `headline_style` and/or `slide_limit` changes validation without activating typography overrides. All sizes below are scene pixels, not PowerPoint points.
+Omitting `authoring` retains the previous layout and typography. Supplying `{}` enables contextual defaults: projection for `event-talk`, reading for the other profiles. Supplying only `headline_style`, `slide_limit` and/or a `ledger_notes` mode does not activate typography overrides. All sizes below are scene pixels, not PowerPoint points.
 
 | Authoring setting | Values | Default when authoring is supplied |
 | --- | --- | --- |
@@ -816,12 +816,81 @@ Omitting `authoring` retains the previous layout and typography. Supplying `{}` 
 | `font_family` | Explicit nonempty family, at most 100 characters | Existing Yu Gothic theme |
 | `headline_style` | `sentence`, `keyword` | Sentence; keyword waives Japanese consulting headline length and adjacent sentence-form variation only |
 | `slide_limit` | Integer 32-128 | 32; actual slide count must be 1 through the selected ceiling |
+| `ledger_notes` | `full`, `summary`, `none` | Full; legacy note text is unchanged |
 
 The effective body floor applies recursively to text, shape labels and table text, including rich runs and scaled groups. Citations, section labels, page numbers and chart-internal labels are not governed by that floor. Dense content that does not fit rejects instead of silently shrinking below the floor. Large headlines reserve two lines; decision tables and schedules reserve the citation region. These settings apply at guided creation, not as a persistent restyling policy for later `update_part` calls. Use previews and diagnostics after edits.
 
 Evidence entries have `id`, `kind` (`source`, `assumption`, `unknown`), `reference` and `statement`. Put a precise source locator or an assumption's method in `reference`; use a concise supporting statement, especially when it must fit an executive-summary cell. These declarations are not authenticated source documents or the SDK's live data bindings.
 
-Each slide contains `id`, `section`, `headline`, `sentence_form`, `pattern_id`, `question`, `parent_message`, `transition`, `parallel_basis`, `support`, optional `numbers`, optional `speaker_notes`, and a `part` for `native-part`. Speaker notes accept at most 4000 Unicode scalars and append to the evidence/ledger notes; the combined 8000-scalar notes limit still applies. The parent is `governing` or an earlier slide ID. Supported sentence forms are causal, conditional, contrast, causal-focus, evaluation, proposal, explanation, comparison and outcome.
+Each slide contains `id`, `section`, `headline`, `sentence_form`, `pattern_id`, `question`, `parent_message`, `transition`, `parallel_basis`, `support`, optional `numbers`, optional `speaker_notes`, and a `part` for `native-part`. The parent is `governing` or an earlier slide ID. Supported sentence forms are causal, conditional, contrast, causal-focus, evaluation, proposal, explanation, comparison and outcome.
+
+### Presenter Notes And Creation Records
+
+| `authoring.ledger_notes` | Presenter note order | Complete ledger and evidence |
+| --- | --- | --- |
+| `full` (default) | Existing profile/audience/purpose, JSON ledger/evidence, caution, then speaker text | Existing notes; output remains unchanged |
+| `summary` | Speaker text first, separator, readable question/claim/evidence references and human-review caution | `document.guided_record` and PPTX Custom XML |
+| `none` | Only the supplied speaker text; empty if absent | `document.guided_record` and PPTX Custom XML |
+
+For example, use `authoring:{ledger_notes:"summary"}` with your own per-slide
+`speaker_notes`. Summary headings follow `language`; references preserve the
+declared `source`, `assumption` or `unknown` classification. Raw ledger/evidence
+JSON is not placed in summary/none notes.
+
+The per-slide speaker-text budget is **4000 valid Unicode scalars**, not UTF-16
+code units or UTF-8 bytes. The completed note budget is **8000 scalars**, including
+generated summaries, labels, line breaks and separators. `full` shares this
+budget with the full JSON, `summary` with the readable summary, and `none` uses
+only the supplied text. Validation rejects overflow without truncation or
+dropping evidence. The full creation record uses a separate **1 MiB serialized
+JSON** budget; the existing **2 MiB total provenance XML** export/read limit also
+applies. XML escaping can make a record much larger than its JSON form, so
+summary/none creation encodes the actual provenance (record, part metadata and
+object identities) and rejects input that would exceed 2 MiB instead of creating
+an unsavable document. Later edits that enlarge part metadata still meet the same
+limit at export. Record storage does not consume the note budget.
+
+`guided_record:{version:1,input}` contains the complete typed creation input
+except duplicated `speaker_notes`. Its `input.slides` holds the original
+per-slide ledger, including support and numeric declarations; `input.evidence`
+holds all declared evidence. It participates in document hashing, transactions,
+Undo, recovery, and checkpoint save/open. Native PPTX save/open retains it in
+`customXml/aislide-provenanceN.xml` (`urn:aislide:provenance:1`). Retrieve it via
+MCP `get_document({deck_id})` or SDK `session.document.guided_record` after creation
+or reopening. It is a creation snapshot, not continuously synchronized or proof
+that edited content remains supported. Existing `full` documents do not gain a
+new record automatically. Guided content checks run only at creation; stored or
+transactionally edited records are validated for structure, version, size,
+absence of duplicated speaker notes and storability: every string and object key
+must contain only XML 1.0 characters (no NUL, other C0 controls except tab/LF/CR,
+or U+FFFE/U+FFFF) and values may nest at most 30 levels below the provenance
+root (the record itself is level 1). Export additionally re-reads the generated
+provenance XML and rejects it unless it reproduces the metadata exactly, so a
+saved PPTX stays reopenable. CR, CRLF and whitespace in object keys are written
+as character references and roundtrip unchanged. These structural checks do not
+rerun content rules, so later rule changes do not make saved files unopenable.
+Removing `/guided_record` by transaction also removes it from both
+`export_presentation` and `export_project` PPTX output, including documents
+opened from a PPTX that carried a record; this reflects current state and does
+not erase earlier files or history. Only Custom XML whose root element uses the
+AISlide provenance namespace (compared after XML character-reference decoding,
+so `urn:aislide:provenance:&#49;` matches; or an unreadable part named
+`customXml/aislide-provenanceN.xml`) is treated as AISlide metadata and validated;
+unrelated Custom XML stays opaque, is preserved and does not count toward the
+2 MiB provenance limit.
+
+These modes change note presentation, **not privacy retention**. `none` still
+keeps source/assumption statements, original part input and possibly embedded
+media inside the PPTX. Review the complete file and record before redistribution;
+hiding notes or choosing `none` is not redaction. The minimal delivery
+`source_report` is not a replacement for retrieving this creation record.
+For documents with a record, the delivery manifest explicitly sets
+`privacy.pptx_includes_guided_record:true`; the minimal source report also
+identifies that retention without duplicating the complete input.
+`inspect_document` scans record text for masked candidates (`surface:
+"guided_record"`, current deck and embedded origin) and counts the record under
+`sources`. An explicitly confirmed `export_clean_copy` removes the record when
+`sources` or `notes` is selected, because `full` notes carry the same evidence.
 
 Support entries contain `clause`, `body_paths` and `evidence_ids`. Ordered clauses must reconstruct the whole headline after whitespace normalization. Native-part paths refer to populated `/data` within `PartSpec`, not its title. C02/C03 paths refer to populated `/issues`. Pointers select the actual content offered as support; their existence does not prove the claim.
 
@@ -878,7 +947,7 @@ The returned `candidate_id` refers to at most 128KiB of immutable edit instructi
 
 Actual charts retain their existing renderer's conventions. Common-axis small multiples, forecast line styles, direct end labels and quantitative area plots may require manual composition. An arbitrary part is not automatically transformed into a fully compliant consulting compound visual. Follow the capability metadata and inspect the actual PPTX.
 
-The complete ledger and evidence text are preserved in slide notes, including assumptions and source references. Review them before redistribution. Subsequent manual edits can invalidate the original reasoning or source declarations; they are not continuously revalidated by the guided compiler. Existing native part fingerprints continue to protect manual changes from destructive regeneration.
+The complete ledger and evidence text are preserved in notes for `full`, and in the separate creation record for `summary`/`none`, including assumptions and source references. Review them before redistribution. Subsequent manual edits can invalidate the original reasoning or source declarations; they are not continuously revalidated by the guided compiler. Existing native part fingerprints continue to protect manual changes from destructive regeneration.
 
 ### Remaining Limits
 
@@ -911,7 +980,7 @@ automatic quality verdict. These are future candidates, not delivered features.
 }
 ```
 
-Only enable `notes` / `source_report` when separate plaintext exports are intended. Both default off. The PPTX itself still retains notes and may include sources/bindings; finalization is not a redaction tool.
+Only enable `notes` / `source_report` when separate plaintext exports are intended. Both default off. The PPTX itself still retains notes and may include sources/bindings and complete guided creation records; finalization is not a redaction tool.
 
 | Output | Scope and default |
 | --- | --- |
@@ -926,7 +995,7 @@ PDF, images and visual preflight select 1-8 unique zero-based pages. Compact MCP
 
 All artifact generation, hashes and response sizing finish before filesystem publication. Every destination is checked first, all files are staged with exclusive temporary creation, and outputs are hardlinked in order with the manifest last. This is **not crash-atomic** or a guarantee against hostile local directory replacement. No published file is removed on failure. `BUNDLE_PUBLICATION_FAILED` returns `not_published`, `partially_published` or `published_with_error`, exact `published_paths`, `pending_filenames` and cleanup diagnostics. Inspect existing files/manifest hashes; use a new name for another complete delivery. Cancellation can occur after publication, so never assume a cancelled request wrote nothing. There is no automatic retry or resume.
 
-`status:"complete"` means requested files were generated and published, not that preflight found no warnings/errors. Inspect `checks` and the full manifest. Structural/native preservation, renderer findings, source-binding consistency and their page scopes are distinct from Office visual parity, source authenticity/freshness, semantic truth and accessibility certification. The latter are not performed. Source attributions and locators can still be sensitive even without raw content. Guided declarations remain in notes, not authenticated source records.
+`status:"complete"` means requested files were generated and published, not that preflight found no warnings/errors. Inspect `checks` and the full manifest. Structural/native preservation, renderer findings, source-binding consistency and their page scopes are distinct from Office visual parity, source authenticity/freshness, semantic truth and accessibility certification. The latter are not performed. Source attributions and locators can still be sensitive even without raw content. Guided declarations remain in notes or creation records, not authenticated source records.
 
 Core `prepare_delivery` and SDK `session.prepareDelivery(options,{expectedRevision?,expectedHash?,signal?})` return an in-memory bundle only. File publication belongs to the MCP host; no new filesystem or network authority is added to core or SDK.
 

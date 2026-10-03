@@ -46,7 +46,7 @@ test('lightweight SDK summary is paginated, detached and excludes source and ima
       { type: 'picture', id: `image-${index}`, x: 100, y: 0, width: 100, height: 100, base64: 'PRIVATE_IMAGE_BYTES', mime_type: 'image/png', alt: 'Image' },
     ] },
   ] }));
-  const document = { id: 'summary', revision: 3, hash: 'a'.repeat(64), origin: { base64: 'PRIVATE_ORIGIN_BYTES' }, sources: [{ text: 'PRIVATE_SOURCE_TEXT' }], deck: { title: 'Synthetic summary', width: 1280, height: 720, slides } };
+  const document = { id: 'summary', revision: 3, hash: 'a'.repeat(64), origin: { base64: 'PRIVATE_ORIGIN_BYTES' }, sources: [{ text: 'PRIVATE_SOURCE_TEXT' }], guided_record: { input: { evidence: 'PRIVATE_GUIDED_EVIDENCE' } }, deck: { title: 'Synthetic summary', width: 1280, height: 720, slides } };
   const session = new DocumentSession(() => { throw new Error('Summary must not call core'); }, document);
   Object.defineProperty(session, 'document', { get() { throw new Error('Summary must not clone the full document'); } });
   const summary = session.getSummary();
@@ -344,7 +344,7 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
   const filename = fileURLToPath(new URL('../packages/client/feedback-types.mts', import.meta.url)).replaceAll('\\', '/');
   const preamble = `
     import type { AislideClient, DocumentSession, AislideDocument, Element, GraphCreation, GraphDiagnostics, GraphDiagnosticsSnapshot, GraphNode, AuthoringOptions, AuthoringOperation, Frame, Crop,
-      Connection, ConnectorRouting, ConnectorSettings, VisualStyle, GraphEdge, GraphGroup, PictureInput, SlideImportInput, GraphSpec, PartSpec, PartPreset, GuidedAuthoring, PreflightFinding, PreviewOptions, PreviewImage, PresentationPreview } from './index.mjs';
+      Connection, ConnectorRouting, ConnectorSettings, VisualStyle, GraphEdge, GraphGroup, PictureInput, SlideImportInput, GraphSpec, PartSpec, PartPreset, GuidedAuthoring, GuidedRecord, PreflightFinding, PreviewOptions, PreviewImage, PresentationPreview } from './index.mjs';
     declare const session: DocumentSession;
     import type { DeliveryChecks } from './index.mjs';
     declare const client: AislideClient;
@@ -442,7 +442,9 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
     results.push(session.applyOperations(managed, options), session.addPart('slide-1', { id: 'part', spec: part }),
       session.updatePart('slide-1', { id: 'part', spec: part }), session.addGraph('slide-1', { id: 'graph', spec: graph }),
       session.updateGraph('slide-1', { id: 'graph', spec: graph }));
-    const authoring: GuidedAuthoring = { headline_style: 'keyword', slide_limit: 128 };
+    const authoring: GuidedAuthoring = { headline_style: 'keyword', slide_limit: 128, ledger_notes: 'summary' };
+    const noteModes: GuidedAuthoring['ledger_notes'][] = ['full', 'summary', 'none', null, undefined];
+    const record: GuidedRecord | null | undefined = source.guided_record;
     const diagnosticLevels: PreflightFinding['severity'][] = ['info', 'warning', 'error'];
     const previewOptions: PreviewOptions = { format: 'jpeg', overflow: 'shrink', max_dimension: 1280 };
     const strictOptions: PreviewOptions = { format: 'png', overflow: 'error' };
@@ -452,7 +454,7 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
     edge.label_placement = { position: 0.5, on_overlap: 'error' };
     const recommendation: Pick<PartPreset, 'recommended' | 'use_when' | 'avoid_when'> = { recommended: true, use_when: 'Parallel concepts', avoid_when: 'Ordered stages' };
     const legacyRecommendation: typeof recommendation = {};
-    void [results, part, authoring, diagnosticLevels, previewOptions, strictOptions, jpeg, quality, recommendation, legacyRecommendation];
+    void [results, part, authoring, noteModes, record, diagnosticLevels, previewOptions, strictOptions, jpeg, quality, recommendation, legacyRecommendation];
   `);
   assert.deepEqual(diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')), []);
   for (const invalid of [
@@ -484,6 +486,8 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
     "session.applyOperations([{ op: 'replace', path: '/deck', value: {} }]);",
     "session.setTextStyle('slide-1', { ids: ['text'], style: { font_size: 'large' } });",
     "const invalid: GuidedAuthoring = { headline_style: 'freeform' };",
+    "const invalid: GuidedAuthoring = { ledger_notes: 'private' };",
+    "const invalid: GuidedAuthoring = { ledger_notes: false };",
     "session.addPicture('slide-1', { ...picture, mime_type: 'image/svg+xml' });",
     "session.addPicture('slide-1', { ...picture, fit: 'fill' });",
     "session.applyOperations([{ op: 'add_part', slide_id: 'slide-1', id: 'part', spec: {} }]);",
@@ -1059,6 +1063,35 @@ test('guided SDK profiles create editable documents and reject early or late can
   late.abort(); finish({ document: { version: 1, id: 'late', revision: 0, hash: 'unused' }, validation: { ready: true } });
   await rejected;
   assert.equal(calls, 1);
+});
+
+test('guided SDK ledger notes expose detached creation records after native reopening', async () => {
+  const client = new AislideClient(requestCore);
+  for (const mode of ['summary', 'none']) {
+    const input = structuredClone(guidedExamples().find(input => input.profile_id === 'technical-explainer'));
+    input.authoring = { ledger_notes: mode };
+    input.slides[0].speaker_notes = 'Synthetic SDK speaker text comes first.';
+    const { session } = await client.createGuidedPresentation(`sdk-notes-${mode}`, input);
+    const original = session.document;
+    assert.ok(original.deck.slides[0].notes.startsWith(input.slides[0].speaker_notes));
+    assert.equal(original.guided_record.version, 1);
+    assert.deepEqual(original.guided_record.input.evidence, input.evidence);
+    assert.equal(Object.hasOwn(original.guided_record.input.slides[0], 'speaker_notes'), false);
+    const detached = session.document;
+    detached.guided_record.input.evidence[0].statement = 'Changed outside the session';
+    assert.deepEqual(session.document.guided_record, original.guided_record);
+    const exported = await session.exportPresentation();
+    const reopened = (await client.openPresentation(`sdk-notes-${mode}-reopened`, exported.base64)).session.document;
+    assert.deepEqual(reopened.guided_record, original.guided_record);
+    assert.equal(reopened.deck.slides[0].notes, original.deck.slides[0].notes);
+    assert.ok(reopened.parts.every(part => !part.stale));
+    const delivery = await requestCore({ op: 'prepare_delivery', document: original, expected_revision: original.revision, expected_hash: original.hash, options: { preview: 'none', preflight: false, source_report: true } });
+    assert.equal(delivery.manifest.privacy.pptx_includes_guided_record, true);
+    const sourceFile = delivery.files.find(file => file.kind === 'source_report');
+    const sourceReport = JSON.parse(Buffer.from(sourceFile.base64, 'base64').toString('utf8'));
+    assert.ok(sourceReport.limitations.some(limitation => limitation.includes('creation record')));
+    assert.equal(Object.hasOwn(sourceReport, 'guided_record'), false);
+  }
 });
 
 test('design preset SDK shares native layouts, preservation, revision guards and undo', async () => {

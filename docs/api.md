@@ -484,7 +484,7 @@ environment when needed, because the official SDK uses an environment allowlist.
 | `open_project` | `base64`, `checkpoint` | Verified document, only if the exact PPTX matches |
 | `import_document` | `id`, `base64` | Origin-bound document, warnings, per-object editable fields |
 
-Content JSON Patch paths start with `/deck`, `/sources`, `/bindings`, `/parts`, `/report` or the immutable import origin. A batch has 1-128 operations; a stale revision/hash, failed test/path, oversized intermediate result or invalid final state aborts the batch. Revisions increase on real changes and Undo/Redo; no-op transactions do not create history. Deleting a part root also removes its metadata in that transaction, so Undo restores both. Core receipts are not signed capabilities and undergo the same validation as edits.
+Content JSON Patch paths start with `/deck`, `/sources`, `/bindings`, `/parts`, `/report`, `/references`, `/guided_record` or the immutable import origin. A batch has 1-128 operations; a stale revision/hash, failed test/path, oversized intermediate result or invalid final state aborts the batch. Revisions increase on real changes and Undo/Redo; no-op transactions do not create history. Deleting a part root also removes its metadata in that transaction, so Undo restores both. Core receipts are not signed capabilities and undergo the same validation as edits.
 
 ### Authored Slide Import
 
@@ -555,9 +555,29 @@ SDK: `client.createPresentation(id,title?,options?)`, `session.editSlides(operat
 | `validate_guided_presentation` | `input: GuidedInput` | Pure preflight `{ready,issues,review_required,semantic_truth_verified:false,office_visual_parity:false}` |
 | `create_guided_presentation` | `id`, `input: GuidedInput` | New `{document,validation,profile_id,model_inference:false}`; no existing document or file is replaced |
 
-Profiles are `consulting-decision`, `technical-explainer`, `event-talk`, and `status-report`. The [guided authoring contract](authoring/README.md) defines the evidence, headline ledger, numeric JSON pointers and decision issue fields. All actual document behavior is computed in Rust; no model or source URL is contacted. `ready` means compilable input and measured text layout, not factual or semantic verification. Complete notes retain the supplied ledger/evidence and require privacy review before redistribution.
+Profiles are `consulting-decision`, `technical-explainer`, `event-talk`, and `status-report`. The [guided authoring contract](authoring/README.md) defines the evidence, headline ledger, numeric JSON pointers and decision issue fields. All actual document behavior is computed in Rust; no model or source URL is contacted. `ready` means compilable input and measured text layout, not factual or semantic verification. Notes and creation records require privacy review before redistribution.
 
-Optional `input.authoring` controls reading/projection context, comfortable/compact density, standard/relaxed spacing, body font floor (12-40 scene pixels), headline size (28-64) and font family. Omission preserves legacy rendering; `{}` opts into profile defaults. Supplying only `headline_style` and/or `slide_limit` does not activate typography overrides. Existing `brand_color` remains the palette override. Per-slide `speaker_notes` append up to 4000 Unicode scalars without dropping the evidence ledger, subject to the combined 8000-scalar limit. These are creation settings, not a retained styling policy for later part regeneration.
+Optional `input.authoring` controls reading/projection context, comfortable/compact density, standard/relaxed spacing, body font floor (12-40 scene pixels), headline size (28-64) and font family. Omission preserves legacy rendering; `{}` opts into profile defaults. Supplying only `headline_style`, `slide_limit` and/or a `ledger_notes` mode does not activate typography overrides. Existing `brand_color` remains the palette override. These are creation settings, not a retained styling policy for later part regeneration.
+
+`authoring.ledger_notes` is `full` (default, byte-for-byte legacy note text),
+`summary` (speaker text first, separator, readable question/claim/evidence
+references), or `none` (speaker text only, empty when not supplied).
+`speaker_notes` allows 4000 Unicode scalars per slide; complete notes allow
+8000 including all generated text and separators, with no silent truncation.
+Summary/none preserve the complete typed creation input, excluding duplicated
+speaker notes, in `document.guided_record:{version:1,input}`. Retrieve it via
+MCP `get_document` or SDK `session.document.guided_record`; it also roundtrips
+through project checkpoints and the PPTX's AISlide Custom XML. The separate
+record is capped at 1 MiB serialized JSON; total provenance XML remains capped
+at 2 MiB, and summary/none creation rejects input whose escaped provenance would
+exceed it. Stored records are validated structurally (XML 1.0 characters in
+strings and keys, at most 30 nesting levels below the provenance root, exact
+reread of the generated XML including CR); guided content checks run
+only at creation. Removing `/guided_record` also removes it from project and
+presentation PPTX output. `inspect_document` scans the record and `export_clean_copy`
+removes it when `sources` or `notes` is selected. `none` does not redact evidence
+from the file. The record is captured at creation, not automatically updated
+after edits or authenticated as truth.
 
 `authoring.headline_style` is `sentence` (default) or `keyword`.
 Keyword mode waives only Japanese consulting headline length and adjacent
