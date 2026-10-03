@@ -1,4 +1,4 @@
-﻿use crate::{model::{Deck, validate_deck}, package::Package, pptx::{export_pptx, inspect_pptx, patch_text}, report::{ReportInput, compile_report, sample_report}, Error, Result};
+﻿use crate::{model::{Deck, validate_deck}, package::Package, pptx::{export_pptx, inspect_pptx, patch_text}, report::{ReportInput, compile_report_with, sample_report}, Error, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -20,7 +20,7 @@ enum Request {
     Generate { input: GenerationInput },
     TextAssist { input: crate::text_assist::Input },
     ApplyTextAssist { document: crate::document::Document, expected_revision: u64, slide_id: String, id: String, expected_text: String, candidate: crate::text_assist::Candidate },
-    Compile { report: ReportInput },
+    Compile { report: ReportInput, #[serde(default)] options: crate::report::CompileOptions },
     CreatePicture { id: String, base64: String, mime_type: String, alt: String },
     InspectRaster { base64: String, mime_type: String },
     CreateAsset { id: String, base64: String, mime_type: String, alt: String, size: f64 },
@@ -39,6 +39,7 @@ enum Request {
     OcrStatus {},
     DesignDefaults {},
     DesignPresets {},
+    DesignTokens { deck: Deck },
     ApplyDesignPreset { deck: Deck, preset_id: String },
     ObjectCatalog {},
     ComputeChartPresentation { kind: crate::model::ChartKind, categories: Vec<String>, series: Vec<crate::model::ChartSeries>, #[serde(default)] options: crate::model::ChartOptions },
@@ -214,7 +215,7 @@ fn execute(request: Request, profile: crate::limits::CapacityProfile) -> Result<
         Request::Generate { input } => Ok(serde_json::to_value(generate_configured(&input)?)?),
         Request::TextAssist { input } => Ok(serde_json::to_value(crate::text_assist::configured(&input, CancellationToken::new())?)?),
         Request::ApplyTextAssist { document, expected_revision, slide_id, id, expected_text, candidate } => Ok(serde_json::to_value(crate::text_assist::apply(&document, expected_revision, &slide_id, &id, &expected_text, &candidate)?)?),
-        Request::Compile { report } => Ok(serde_json::to_value(compile_report(&report)?)?),
+        Request::Compile { report, options } => Ok(serde_json::to_value(compile_report_with(&report, &options)?)?),
         Request::CreatePicture { id, base64, mime_type, alt } => Ok(serde_json::to_value(crate::media::create_picture(&id, base64, &mime_type, &alt)?)?),
         Request::InspectRaster { base64, mime_type } => Ok(serde_json::to_value(crate::media::inspect_raster(&base64, &mime_type)?)?),
         Request::CreateAsset { id, base64, mime_type, alt, size } => Ok(serde_json::to_value(crate::media::create_asset(&id, base64, &mime_type, &alt, size)?)?),
@@ -238,6 +239,7 @@ fn execute(request: Request, profile: crate::limits::CapacityProfile) -> Result<
         Request::OcrStatus {} => Ok(serde_json::to_value(crate::extraction::ocr_status())?),
         Request::DesignDefaults {} => Ok(serde_json::to_value(crate::design::Design::default())?),
         Request::DesignPresets {} => Ok(serde_json::to_value(crate::design_presets::catalog()?)?),
+        Request::DesignTokens { deck } => { validate_deck(&deck)?; Ok(serde_json::to_value(crate::design_tokens::resolve(&deck)?)?) }
         Request::ApplyDesignPreset { deck, preset_id } => Ok(serde_json::to_value(crate::design_presets::apply(deck, &preset_id)?)?),
         Request::ObjectCatalog {} => Ok(crate::objects::catalog()),
         Request::ComputeChartPresentation { kind, categories, series, options } => Ok(serde_json::to_value(crate::model::chart_format::compute_chart_presentation(kind, &categories, &series, &options)?)?),

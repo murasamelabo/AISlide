@@ -52,6 +52,14 @@ pub struct Metric { pub label: String, pub value: String }
 #[derive(Debug, Serialize)]
 pub struct CompiledReport { pub deck: Deck, pub issues: Vec<Issue> }
 
+/// Compilation options. Without a design preset the fixed legacy report layout is produced.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CompileOptions {
+    /// Design preset whose tokens and layout patterns place each section; see `design_presets`.
+    #[serde(skip_serializing_if = "Option::is_none")] pub design_preset: Option<String>,
+}
+
 const INK: &str = "202525";
 const MUTED: &str = "586563";
 const TEAL: &str = "087F73";
@@ -73,7 +81,7 @@ fn validate_text_at(value: &str, limit: usize, path: &str) -> Result<()> {
     })
 }
 
-pub fn compile_report(report: &ReportInput) -> Result<CompiledReport> {
+pub(crate) fn validate_header(report: &ReportInput) -> Result<()> {
     validate_text_at(&report.title, 120, "report.title")?;
     validate_text_at(&report.subtitle, 200, "report.subtitle")?;
     validate_text_at(&report.period, 80, "report.period")?;
@@ -81,20 +89,42 @@ pub fn compile_report(report: &ReportInput) -> Result<CompiledReport> {
     if report.title.trim().is_empty() || report.sections.is_empty() || report.sections.len() > crate::limits::LARGE.slides {
         return Err(Error::Invalid("a title and 1-128 sections are required".into()));
     }
+    Ok(())
+}
+
+pub(crate) fn validate_section(index: usize, section: &Section) -> Result<()> {
+    let path = format!("report.sections[{index}]");
+    validate_text_at(&section.title, 100, &format!("{path}.title"))?;
+    if section.body.len() > 4 { return Err(Error::Limit(format!("{path}.body: actual={} blocks, limit=4", section.body.len()))); }
+    if section.metrics.len() > 4 { return Err(Error::Limit(format!("{path}.metrics: actual={} metrics, limit=4", section.metrics.len()))); }
+    if section.layout == Layout::Process && section.body.len() < 2 { return Err(Error::Invalid(format!("{path}.body: process requires 2-4 steps; actual={}", section.body.len()))); }
+    let body_limit = if section.layout == Layout::Process { 80 } else { 240 };
+    for (body_index, body) in section.body.iter().enumerate() { validate_text_at(body, body_limit, &format!("{path}.body[{body_index}]"))?; }
+    for (metric_index, metric) in section.metrics.iter().enumerate() {
+        validate_text_at(&metric.label, 48, &format!("{path}.metrics[{metric_index}].label"))?;
+        validate_text_at(&metric.value, 20, &format!("{path}.metrics[{metric_index}].value"))?;
+    }
+    if !section.rows.is_empty() { validate_rows(&section.rows)?; }
+    Ok(())
+}
+
+pub(crate) fn font_parity_issue() -> Issue {
+    Issue { severity: "warning".into(), code: "FONT_PARITY_UNVERIFIED".into(), message: "PowerPoint text wrapping depends on installed fonts. Native Office parity has not been established.".into() }
+}
+
+/// Compiles with options; without a design preset this is exactly `compile_report`.
+pub fn compile_report_with(report: &ReportInput, options: &CompileOptions) -> Result<CompiledReport> {
+    match options.design_preset.as_deref() {
+        None => compile_report(report),
+        Some(preset) => crate::report_design::compile(report, preset),
+    }
+}
+
+pub fn compile_report(report: &ReportInput) -> Result<CompiledReport> {
+    validate_header(report)?;
     let mut slides = Vec::new();
     for (index, section) in report.sections.iter().enumerate() {
-        let path = format!("report.sections[{index}]");
-        validate_text_at(&section.title, 100, &format!("{path}.title"))?;
-        if section.body.len() > 4 { return Err(Error::Limit(format!("{path}.body: actual={} blocks, limit=4", section.body.len()))); }
-        if section.metrics.len() > 4 { return Err(Error::Limit(format!("{path}.metrics: actual={} metrics, limit=4", section.metrics.len()))); }
-        if section.layout == Layout::Process && section.body.len() < 2 { return Err(Error::Invalid(format!("{path}.body: process requires 2-4 steps; actual={}", section.body.len()))); }
-        let body_limit = if section.layout == Layout::Process { 80 } else { 240 };
-        for (body_index, body) in section.body.iter().enumerate() { validate_text_at(body, body_limit, &format!("{path}.body[{body_index}]"))?; }
-        for (metric_index, metric) in section.metrics.iter().enumerate() {
-            validate_text_at(&metric.label, 48, &format!("{path}.metrics[{metric_index}].label"))?;
-            validate_text_at(&metric.value, 20, &format!("{path}.metrics[{metric_index}].value"))?;
-        }
-        if !section.rows.is_empty() { validate_rows(&section.rows)?; }
+        validate_section(index, section)?;
         let mut elements = vec![
             rect("accent", [64.0, 52.0, 40.0, 5.0], TEAL),
             text("period", [122.0, 42.0, 1050.0, 30.0], &report.period, 16.0, MUTED, false),
@@ -158,7 +188,7 @@ pub fn compile_report(report: &ReportInput) -> Result<CompiledReport> {
     }
     let deck = Deck { version: 1, title: report.title.clone(), width: 1280, height: 720, slides, design: None, embedded_fonts: Vec::new(), auxiliary_design: None };
     validate_deck(&deck)?;
-    Ok(CompiledReport { deck, issues: vec![Issue { severity: "warning".into(), code: "FONT_PARITY_UNVERIFIED".into(), message: "PowerPoint text wrapping depends on installed fonts. Native Office parity has not been established.".into() }] })
+    Ok(CompiledReport { deck, issues: vec![font_parity_issue()] })
 }
 
 pub fn sample_report() -> ReportInput {

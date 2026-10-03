@@ -67,6 +67,8 @@ export class AislideClient {
   designDefaults(options?: RequestOptions): Promise<Design>
   designCapabilities(options?: RequestOptions): Promise<import('./types').DesignCapabilities>
   designPresets(options?: RequestOptions): Promise<DesignPreset[]>
+  /** Frames, spacing, type scale and color roles derived from the deck design; not persisted. */
+  designTokens(deck: Deck, options?: RequestOptions): Promise<import('./types').DesignTokens>
   objectCatalog(options?: RequestOptions): Promise<ObjectCatalog>
   partCatalog(options?: RequestOptions): Promise<PartCatalog>
   layoutPatterns(options?: RequestOptions): Promise<import('./types').LayoutPatternCatalog>

@@ -13,7 +13,7 @@ if (fontPath) assert.match(readFileSync(fontPath.replace('NotoSans-Regular.ttf',
 
 const cjkPath = resolve('.tools/fonts/phase5/NotoSansJP-Regular.ttf');
 test('phase5 MCP accepts full CJK font bytes without raising the image schema and reports a history boundary', { skip: !existsSync(cjkPath), timeout: 90000 }, async () => {
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe' });
   const client = new Client({ name: 'phase5-cjk-mcp', version: '1.0.0' });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
@@ -22,8 +22,9 @@ test('phase5 MCP accepts full CJK font bytes without raising the image schema an
   try {
     await client.connect(transport);
     const tools = (await client.listTools()).tools;
-    assert.equal(tools.find(tool => tool.name === 'inspect_font').inputSchema.properties.base64.maxLength, 16777216);
-    assert.equal(tools.find(tool => tool.name === 'add_picture').inputSchema.properties.base64.maxLength, 1398104);
+    const base64Limit = (name) => { const schema = tools.find(tool => tool.name === name).inputSchema; const property = schema.properties.base64; return (property.$ref ? schema.$defs[property.$ref.split('/').pop()] : property).maxLength; };
+    assert.equal(base64Limit('inspect_font'), 16777216);
+    assert.equal(base64Limit('add_picture'), 1398104);
     const base64 = readFileSync(cjkPath).toString('base64');
     assert.equal((await call('inspect_font', { base64 })).family, 'Noto Sans JP');
     const { deck_id } = await call('create_presentation', { title: 'Japanese MCP', capacity_profile: 'large' });
@@ -110,7 +111,7 @@ test('font SDK uses consent, explicit assignment, bounded inspection and Undo', 
 });
 
 test('font MCP tools are strict and use the same revision history', { skip: !fontPath }, async () => {
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs')], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe' });
   const client = new Client({ name: 'font-tests', version: '1.0.0' });
   const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, JSON.stringify(result.content)); return JSON.parse(result.content[0].text); };
   try {

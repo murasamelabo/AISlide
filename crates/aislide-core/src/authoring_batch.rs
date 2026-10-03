@@ -287,11 +287,7 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
     }).collect();
     for operation in operations {
         if let Operation::ComposeSlide { slide_id, id, spec } = operation {
-            for (index, block) in spec.blocks.iter().enumerate() {
-                if matches!(block, crate::composition::CompositionBlock::Graph { .. }) || matches!(block, crate::composition::CompositionBlock::Part { spec } if matches!(spec.data, crate::parts::PartData::Diagram { .. })) {
-                    targets.insert((slide_id.clone(), format!("{id}-b{index}")));
-                }
-            }
+            for element_id in spec.diagram_ids(id) { targets.insert((slide_id.clone(), element_id)); }
         }
     }
     Ok(crate::graphs::annotate_transaction(result, &targets))
