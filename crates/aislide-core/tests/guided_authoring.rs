@@ -583,9 +583,11 @@ fn unrelated_custom_xml_stays_opaque_for_project_export_and_native_open() {
 fn invalid_aislide_owned_custom_xml_is_still_rejected() {
     use aislide_core::document;
     let plain=plain_pptx();
-    let oversized=format!("<m:provenance xmlns:m=\"urn:aislide:provenance:1\"><m:null/>{}</m:provenance>"," ".repeat(2*1024*1024)).into_bytes();
+    let oversized=|namespace:&str|format!("<m:provenance xmlns:m=\"{namespace}\"><m:null/>{}</m:provenance>"," ".repeat(2*1024*1024)).into_bytes();
     for (path,xml,message) in [
-        ("customXml/item1.xml",oversized,"2 MiB"),
+        ("customXml/item1.xml",oversized("urn:aislide:provenance:1"),"2 MiB"),
+        ("customXml/item1.xml",oversized("urn:aislide:provenance:&#49;"),"2 MiB"),
+        ("customXml/item1.xml",oversized("&#x75;rn:aislide:provenance:1"),"2 MiB"),
         ("customXml/aislide-provenance1.xml",b"not xml".to_vec(),""),
     ] {
         let bytes=with_custom_xml(plain.clone(),path,xml);
@@ -593,6 +595,29 @@ fn invalid_aislide_owned_custom_xml_is_still_rejected() {
         assert!(error.contains(message),"{path}: {error}");
         let imported:document::Document=serde_json::from_value(document::import_document("owned-invalid-import".into(),bytes).unwrap()["document"].clone()).unwrap();
         assert!(document::export(&imported).is_err(),"{path}");
+    }
+}
+
+#[test]
+fn aislide_namespace_written_with_character_references_is_still_restored() {
+    use aislide_core::{document,package::Package};
+    use base64::{Engine,engine::general_purpose::STANDARD};
+    let mut input=authoring_brief("status-report");input["authoring"]=json!({"ledger_notes":"none"});
+    let created=execute_request(json!({"op":"create_guided_presentation","id":"namespace-spelling","input":input})).unwrap();
+    let bytes=STANDARD.decode(execute_request(json!({"op":"export_presentation","document":created["document"]})).unwrap()["base64"].as_str().unwrap()).unwrap();
+    let expected=document::open_presentation("namespace-plain".into(),bytes.clone()).unwrap()["document"].clone();
+    assert!(expected["guided_record"].is_object() && !expected["parts"].as_array().unwrap().is_empty());
+    let mut parts=Package::open(bytes).unwrap().parts().clone();
+    let path=parts.keys().find(|path|path.starts_with("customXml/aislide-provenance")).unwrap().clone();
+    let original=String::from_utf8(parts[&path].clone()).unwrap();
+    let declaration="xmlns:m=\"urn:aislide:provenance:1\"";
+    assert!(original.contains(declaration),"{original:.200}");
+    for spelling in ["urn:aislide:provenance:&#49;","urn:aislide:provenance:&#x31;","&#x75;rn&#58;aislide:provenance:1"] {
+        parts.insert(path.clone(),original.replacen(declaration,&format!("xmlns:m=\"{spelling}\""),1).into_bytes());
+        let opened=document::open_presentation("namespace-reference".into(),Package::from_parts(parts.clone()).unwrap().save().unwrap()).unwrap()["document"].clone();
+        for field in ["guided_record","parts","references"] {assert_eq!(opened[field],expected[field],"{spelling}: {field}");}
+        let ids=|document:&Value|document["deck"]["slides"].as_array().unwrap().iter().map(|slide|slide["id"].clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&opened),ids(&expected),"{spelling}");
     }
 }
 

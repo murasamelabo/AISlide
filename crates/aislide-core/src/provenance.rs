@@ -106,14 +106,23 @@ pub(crate) fn has_guided_record(bytes: &[u8]) -> Result<bool> {
 }
 
 // Finds the root element namespace without loading the whole part, so unrelated Custom XML stays opaque regardless of size.
-fn root_namespace(bytes: &[u8]) -> Option<Vec<u8>> {
-    use quick_xml::{events::Event, name::ResolveResult};
-    let mut reader = quick_xml::NsReader::from_reader(bytes);
+// The declaration is unescaped like an XML parser would, so `&#49;` or `&#x31;` spellings of the same URI still match.
+fn root_namespace(bytes: &[u8]) -> Option<String> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_reader(bytes);
     let mut buffer = Vec::new();
     loop {
-        match reader.read_resolved_event_into(&mut buffer) {
-            Ok((namespace, Event::Start(_) | Event::Empty(_))) => return Some(match namespace { ResolveResult::Bound(namespace) => namespace.as_ref().to_vec(), _ => Vec::new() }),
-            Ok((_, Event::Eof)) | Err(_) => return None,
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                let declaration = match element.name().prefix() { Some(prefix) => [b"xmlns:".as_slice(), prefix.as_ref()].concat(), None => b"xmlns".to_vec() };
+                let mut namespace = String::new();
+                for attribute in element.attributes() {
+                    let attribute = attribute.ok()?;
+                    if attribute.key.as_ref() == declaration.as_slice() { namespace = attribute.decode_and_unescape_value(reader.decoder()).ok()?.into_owned(); }
+                }
+                return Some(namespace);
+            }
+            Ok(Event::Eof) | Err(_) => return None,
             Ok(_) => buffer.clear(),
         }
     }
@@ -121,7 +130,7 @@ fn root_namespace(bytes: &[u8]) -> Option<Vec<u8>> {
 
 fn is_aislide_part(path: &str, bytes: &[u8]) -> bool {
     match root_namespace(bytes) {
-        Some(namespace) => namespace == NS.as_bytes(),
+        Some(namespace) => namespace == NS,
         // An unreadable part still counts as AISlide-owned when it uses the name AISlide writes, so corrupt metadata is reported.
         None => path.to_ascii_lowercase().starts_with("customxml/aislide-provenance"),
     }

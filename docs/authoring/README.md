@@ -873,7 +873,8 @@ Removing `/guided_record` by transaction also removes it from both
 `export_presentation` and `export_project` PPTX output, including documents
 opened from a PPTX that carried a record; this reflects current state and does
 not erase earlier files or history. Only Custom XML whose root element uses the
-AISlide provenance namespace (or an unreadable part named
+AISlide provenance namespace (compared after XML character-reference decoding,
+so `urn:aislide:provenance:&#49;` matches; or an unreadable part named
 `customXml/aislide-provenanceN.xml`) is treated as AISlide metadata and validated;
 unrelated Custom XML stays opaque, is preserved and does not count toward the
 2 MiB provenance limit.
