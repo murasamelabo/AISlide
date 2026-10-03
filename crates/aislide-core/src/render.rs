@@ -1162,7 +1162,11 @@ impl Scene<'_> {
                 .fonts
                 .db()
                 .with_face_data(glyph.font_id, |data, index| {
-                    let face = ttf_parser::Face::parse(data, index).ok()?;
+                    let mut face = ttf_parser::Face::parse(data, index).ok()?;
+                    // Shaping already used this weight; outlines must not fall back to the default instance.
+                    if face.is_variable() {
+                        face.set_variation(ttf_parser::Tag::from_bytes(b"wght"), glyph.font_weight.0 as f32);
+                    }
                     let units = face.units_per_em() as f64;
                     let mut builder = Outline {
                         path: String::new(),
