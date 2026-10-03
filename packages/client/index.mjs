@@ -90,6 +90,7 @@ export class AislideClient {
   designDefaults(options) { return this.request({ op: 'design_defaults' }, options); }
   designCapabilities(options) { return this.request({ op: 'design_capabilities' }, options); }
   designPresets(options) { return this.request({ op: 'design_presets' }, options); }
+  designTokens(deck, options) { return this.request({ op: 'design_tokens', deck }, options); }
   objectCatalog(options) { return this.request({ op: 'object_catalog' }, options); }
   partCatalog(options) { return this.request({ op: 'part_catalog' }, options); }
   layoutPatterns(options) { return this.request({ op: 'layout_patterns' }, options); }

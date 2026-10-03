@@ -91,12 +91,22 @@ impl Kind {
 #[derive(Clone, Copy)]
 enum Gap { None, Tight, Peer, Support, Contrast }
 
+/// Pixel distances for the four spacing relationships between slots.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct GapScale { pub tight: f64, pub peer: f64, pub support: f64, pub contrast: f64 }
+
+impl GapScale {
+    /// Pattern defaults: wide canvases separate supporting and contrasting regions further.
+    pub fn standard(wide: bool) -> Self {
+        Self { tight: 16.0, peer: 24.0, support: if wide { 32.0 } else { 24.0 }, contrast: if wide { 48.0 } else { 40.0 } }
+    }
+}
+
 impl Gap {
-    fn px(self, wide: bool) -> f64 {
+    fn px(self, scale: &GapScale) -> f64 {
         match self {
-            Gap::None => 0.0, Gap::Tight => 16.0, Gap::Peer => 24.0,
-            Gap::Support => if wide { 32.0 } else { 24.0 },
-            Gap::Contrast => if wide { 48.0 } else { 40.0 },
+            Gap::None => 0.0, Gap::Tight => scale.tight, Gap::Peer => scale.peer,
+            Gap::Support => scale.support, Gap::Contrast => scale.contrast,
         }
     }
 }
@@ -384,7 +394,7 @@ fn patterns() -> Vec<Pattern> {
 
 struct Placed { id: String, kind: Kind, frame: [f64; 4] }
 
-struct Context { wide: bool, count: usize }
+struct Context { gaps: GapScale, count: usize }
 
 fn place(node: &Node, frame: [f64; 4], context: &Context, suffix: &str, out: &mut Vec<Placed>) -> Result<()> {
     match node {
@@ -392,7 +402,7 @@ fn place(node: &Node, frame: [f64; 4], context: &Context, suffix: &str, out: &mu
         Node::Slot(id, kind) => { out.push(Placed { id: format!("{id}{suffix}"), kind: *kind, frame }); Ok(()) }
         Node::Split { vertical, gap, children } => {
             let items: Vec<(Size, &Node, String)> = children.iter().map(|(size, child)| (*size, child, suffix.to_owned())).collect();
-            divide(frame, *vertical, gap.px(context.wide), &items, context, out)
+            divide(frame, *vertical, gap.px(&context.gaps), &items, context, out)
         }
         Node::Repeat { vertical, gap, count, marker, child } => {
             let total = match count { Count::Fixed(value) => *value, Count::Variable => context.count };
@@ -402,7 +412,7 @@ fn place(node: &Node, frame: [f64; 4], context: &Context, suffix: &str, out: &mu
                 if let (Some(size), true) = (marker, index > 1) { items.push((Size::Fixed(*size), &connector, format!("{suffix}-{}", index - 1))); }
                 items.push((Size::Weight(1.0), child.as_ref(), format!("{suffix}-{index}")));
             }
-            divide(frame, *vertical, gap.px(context.wide), &items, context, out)
+            divide(frame, *vertical, gap.px(&context.gaps), &items, context, out)
         }
     }
 }
@@ -459,10 +469,10 @@ fn capacity(kind: Kind, frame: [f64; 4], wide: bool, body_size: f64) -> Value {
     json!({"font_size": font_size, "padding": padding, "cjk_chars_per_line": per_line, "lines": lines})
 }
 
-fn arrange(pattern: &Pattern, body: [f64; 4], wide: bool, count: usize, message_band: bool) -> Result<Vec<Placed>> {
+fn arrange(pattern: &Pattern, body: [f64; 4], gaps: GapScale, count: usize, message_band: bool) -> Result<Vec<Placed>> {
     let root = if message_band { col(Gap::Peer, vec![w(1.0, pattern.root.clone()), fx(MESSAGE_BAND, slot("message", Kind::Band))]) } else { pattern.root.clone() };
     let mut placed = Vec::new();
-    place(&root, body, &Context { wide, count }, "", &mut placed)?;
+    place(&root, body, &Context { gaps, count }, "", &mut placed)?;
     Ok(placed)
 }
 
@@ -470,7 +480,7 @@ pub fn catalog() -> Result<Value> {
     let canvas = Canvas::default();
     let entries = patterns().iter().map(|pattern| {
         let count = pattern.count.map_or(0, |[_, _, default]| default);
-        let placed = arrange(pattern, default_body(canvas, pattern.full_page, false), true, count, false)?;
+        let placed = arrange(pattern, default_body(canvas, pattern.full_page, false), GapScale::standard(true), count, false)?;
         let mut entry = summary(pattern);
         entry["slots"] = placed.iter().map(|slot| json!({"id": slot.id, "kind": slot.kind.name()})).collect();
         Ok(entry)
@@ -490,9 +500,10 @@ pub fn catalog() -> Result<Value> {
     }))
 }
 
-pub fn resolve(pattern_id: &str, canvas: Option<Canvas>, body: Option<Frame>, options: &ResolveOptions) -> Result<Value> {
+struct Prepared { pattern: Pattern, wide: bool, body: [f64; 4], count: usize, gaps: GapScale, body_size: f64, placed: Vec<Placed> }
+
+fn prepare(pattern_id: &str, canvas: Canvas, body: Option<Frame>, gaps: Option<GapScale>, options: &ResolveOptions) -> Result<Prepared> {
     let pattern = find(pattern_id)?;
-    let canvas = canvas.unwrap_or_default();
     crate::canvas::validate_size(canvas.width, canvas.height)?;
     let (width, height) = (canvas.width as f64, canvas.height as f64);
     let wide = width / height >= WIDE_ASPECT;
@@ -526,10 +537,17 @@ pub fn resolve(pattern_id: &str, canvas: Option<Canvas>, body: Option<Frame>, op
             value
         }
     };
-    let mut placed = arrange(&pattern, body, wide, count, options.message_band)?;
+    let gaps = gaps.unwrap_or_else(|| GapScale::standard(wide));
+    let mut placed = arrange(&pattern, body, gaps, count, options.message_band)?;
     if options.mirror {
         for slot in &mut placed { slot.frame[0] = body[0] * 2.0 + body[2] - slot.frame[0] - slot.frame[2]; }
     }
+    Ok(Prepared { pattern, wide, body, count, gaps, body_size, placed })
+}
+
+pub fn resolve(pattern_id: &str, canvas: Option<Canvas>, body: Option<Frame>, options: &ResolveOptions) -> Result<Value> {
+    let canvas = canvas.unwrap_or_default();
+    let Prepared { pattern, wide, body, count, gaps, body_size, placed } = prepare(pattern_id, canvas, body, None, options)?;
     let profile = options.part.as_deref().map(|preset| crate::parts::aspect::profile_for_preset(preset, options.part_title)).transpose()?;
     let mut issues = Vec::new();
     let slots: Vec<Value> = placed.iter().map(|slot| {
@@ -548,11 +566,32 @@ pub fn resolve(pattern_id: &str, canvas: Option<Canvas>, body: Option<Frame>, op
     Ok(json!({
         "version": VERSION, "pattern": summary(&pattern), "canvas": canvas, "body": frame_json(body),
         "options": {"mirror": options.mirror, "message_band": options.message_band, "reference_band": options.reference_band, "count": pattern.count.map(|_| count), "body_size": body_size},
-        "gaps": {"tight": Gap::Tight.px(wide), "peer": Gap::Peer.px(wide), "support": Gap::Support.px(wide), "contrast": Gap::Contrast.px(wide)},
+        "gaps": {"tight": gaps.tight, "peer": gaps.peer, "support": gaps.support, "contrast": gaps.contrast},
         "slots": slots, "fits": fits, "issues": issues,
         "fallback": if fits { None } else { pattern.fallback },
         "part": profile,
     }))
+}
+
+/// Static traits of a pattern that decide how a caller frames it before placement.
+pub(crate) struct Traits { pub full_page: bool, pub count: Option<[usize; 3]>, pub fallback: Option<&'static str> }
+
+pub(crate) fn traits(pattern_id: &str) -> Result<Traits> {
+    let pattern = find(pattern_id)?;
+    Ok(Traits { full_page: pattern.full_page, count: pattern.count, fallback: pattern.fallback })
+}
+
+/// A slot frame resolved for deterministic composition.
+pub(crate) struct PlacedSlot { pub id: String, pub kind: &'static str, pub accepts: &'static [&'static str], pub frame: [f64; 4], pub min: [f64; 2] }
+
+impl PlacedSlot {
+    pub(crate) fn fits(&self) -> bool { self.frame[2] >= self.min[0] && self.frame[3] >= self.min[1] }
+}
+
+/// Typed placement shared with composition; frames are identical to `resolve` for the same inputs.
+pub(crate) fn placement(pattern_id: &str, canvas: Canvas, body: Option<Frame>, gaps: Option<GapScale>, options: &ResolveOptions) -> Result<Vec<PlacedSlot>> {
+    let prepared = prepare(pattern_id, canvas, body, gaps, options)?;
+    Ok(prepared.placed.into_iter().map(|slot| PlacedSlot { id: slot.id, kind: slot.kind.name(), accepts: slot.kind.accepts(), frame: slot.frame, min: slot.kind.min() }).collect())
 }
 
 /// Patterns ordered by how well their best part slot holds the preset without distortion or wasted area.
@@ -564,7 +603,7 @@ pub fn rank(part: &str, canvas: Option<Canvas>, part_title: bool) -> Result<Valu
     let mut ranked = Vec::new();
     for pattern in patterns().iter().filter(|pattern| !pattern.full_page) {
         let count = pattern.count.map_or(0, |[_, _, default]| default);
-        let Ok(placed) = arrange(pattern, default_body(canvas, false, false), wide, count, false) else { continue };
+        let Ok(placed) = arrange(pattern, default_body(canvas, false, false), GapScale::standard(wide), count, false) else { continue };
         let best = placed.iter().filter(|slot| slot.kind.accepts().contains(&"part") && slot.frame[2] >= slot.kind.min()[0] && slot.frame[3] >= slot.kind.min()[1])
             .map(|slot| (slot, crate::parts::aspect::fit_in(&profile, slot.frame[2], slot.frame[3])))
             .max_by(|(left_slot, left), (right_slot, right)| {

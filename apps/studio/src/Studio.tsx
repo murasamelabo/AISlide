@@ -43,7 +43,7 @@ import { chartNames } from './design'
 import { AislideClient, DocumentSession } from '../../../packages/client/index.mjs'
 import type { CapacityProfile, SessionRecovery } from '../../../packages/client/index.mjs'
 import type { ReplaceOptions } from '../../../packages/client/index.mjs'
-import type { AislideDocument, Deck, Element, Compiled, Exported, Report, Inspection, ProviderStatus, LayoutReport, Design, ObjectCatalog, Theme } from './types'
+import type { AislideDocument, Deck, Element, Compiled, Exported, Report, Inspection, ProviderStatus, LayoutReport, Design, DesignPreset, ObjectCatalog, Theme } from './types'
 
 const client = new AislideClient(core)
 type PanelSizes = { slides: number; inspector: number; notes: number }
@@ -213,6 +213,7 @@ export default function Studio() {
   const [layoutReport, setLayoutReport] = useState<LayoutReport | null>(null)
   const [importWarnings, setImportWarnings] = useState<string[]>([])
   const [provider, setProvider] = useState<ProviderStatus | null>(null)
+  const [designChoices, setDesignChoices] = useState<Pick<DesignPreset, 'id' | 'name'>[]>([])
   const [reportJson, setReportJson] = useState('')
   const [inspection, setInspection] = useState<Inspection | null>(null)
   const [imported, setImported] = useState('')
@@ -747,7 +748,7 @@ export default function Studio() {
         <Tool label="File operations" disabled={disable} onClick={() => { const anchor = document.activeElement as HTMLElement; const bounds = anchor.getBoundingClientRect(); openContext('file', { x: bounds.left, y: bounds.bottom, anchor }) }}><Menu size={18} /></Tool>
         <Tool label="New presentation" disabled={disable} onClick={() => replacePresentation(newPresentation)}><FilePlus2 size={18} /></Tool>
         <Tool label="Sources" disabled={disable || importedMode} onClick={() => setModal('sources')}><Database size={18} /></Tool>
-        <Tool className="secondary" label="Generate with AI" disabled={disable || hasOrigin} onClick={() => void run(async () => { setProvider(await core<ProviderStatus>({ op: 'provider_status' })); setModal('generate') })}><Sparkles size={20} /><span>Generate</span></Tool>
+        <Tool className="secondary" label="Generate with AI" disabled={disable || hasOrigin} onClick={() => void run(async () => { setProvider(await core<ProviderStatus>({ op: 'provider_status' })); if (!designChoices.length) setDesignChoices((await core<DesignPreset[]>({ op: 'design_presets' })).map(({ id, name }) => ({ id, name }))); setModal('generate') })}><Sparkles size={20} /><span>Generate</span></Tool>
         <Tool className="secondary" label="Report data" disabled={disable || hasOrigin || !report} onClick={() => { setReportJson(JSON.stringify(report, null, 2)); setError(''); setModal('report') }}><FileJson2 size={20} /><span>Report data</span></Tool>
         <Tool label="Open PPTX" disabled={disable} onClick={() => nativeInput.current?.click()}><FolderOpen size={19} /></Tool>
         <Tool label="Inspect PPTX" disabled={disable} onClick={() => pptxInput.current?.click()}><FileInput size={19} /></Tool>
@@ -916,7 +917,7 @@ export default function Studio() {
     }}><label className="field">{nameDialog.kind === 'save' ? 'PPTX filename' : nameDialog.kind === 'slide' ? 'Slide title' : 'Presentation title'}<input autoFocus aria-label={nameDialog.kind === 'save' ? 'PPTX filename' : nameDialog.kind === 'slide' ? 'Slide title' : 'Presentation title'} value={nameDialog.value} required maxLength={nameDialog.kind === 'save' ? 180 : 120} disabled={busy} onChange={(event) => setNameDialog({ ...nameDialog, value: event.target.value })} /></label>{error && <p role="alert" className="error">{error}</p>}<div className="form-actions"><button type="button" className="secondary" disabled={busy} onClick={() => setNameDialog(null)}>Cancel</button><button type="submit" className="primary" disabled={busy}>{nameDialog.kind === 'save' ? 'Save PPTX' : 'Apply'}</button></div></form></Modal>}
 
     {modal === 'generate' && provider && <Modal title="Generate report" onClose={closeModal}>
-      <GenerationPanel provider={provider} onBusy={setBusy} onApply={(draft) => void run(async () => {
+      <GenerationPanel provider={provider} designs={designChoices} onBusy={setBusy} onApply={(draft) => void run(async () => {
         await apply(draft.compiled.deck, { report: draft.report, sources: [], bindings: [] })
         changeSlide(0)
         setStatus('AI draft / Content unverified')

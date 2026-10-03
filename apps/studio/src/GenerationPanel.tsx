@@ -2,12 +2,16 @@
 import { AlertCircle, Check, LoaderCircle, Sparkles, Square } from 'lucide-react'
 import { core } from './api'
 import { SlideSurface } from './SlideSurface'
-import type { GeneratedReport, ProviderStatus } from './types'
+import type { DesignPreset, GeneratedReport, ProviderStatus } from './types'
 
-export function GenerationPanel({ provider, onApply, onBusy }: { provider: ProviderStatus; onApply: (draft: GeneratedReport) => void; onBusy: (busy: boolean) => void }) {
+type OutputLanguage = '' | 'ja' | 'en'
+
+export function GenerationPanel({ provider, designs, onApply, onBusy }: { provider: ProviderStatus; designs: Pick<DesignPreset, 'id' | 'name'>[]; onApply: (draft: GeneratedReport) => void; onBusy: (busy: boolean) => void }) {
   const [prompt, setPrompt] = useState('')
   const [source, setSource] = useState('')
   const [slideCount, setSlideCount] = useState(12)
+  const [designPreset, setDesignPreset] = useState('')
+  const [language, setLanguage] = useState<OutputLanguage>('')
   const [consent, setConsent] = useState(false)
   const [repair, setRepair] = useState(false)
   const [outline, setOutline] = useState('')
@@ -28,7 +32,8 @@ export function GenerationPanel({ provider, onApply, onBusy }: { provider: Provi
     setError('')
     setMessage('Waiting for model response')
     try {
-      const result = await core<GeneratedReport>({ op: 'generate', input: { prompt, source_text: source, slide_count: slideCount, allow_remote: consent, max_repairs: repair ? 1 : 0, outline: outline.trim() ? JSON.parse(outline) : [] } }, { signal: controller.signal })
+      const input = { prompt, source_text: source, slide_count: slideCount, allow_remote: consent, max_repairs: repair ? 1 : 0, outline: outline.trim() ? JSON.parse(outline) : [], ...(designPreset ? { design_preset: designPreset } : {}), ...(language ? { language } : {}) }
+      const result = await core<GeneratedReport>({ op: 'generate', input }, { signal: controller.signal })
       if (controller.signal.aborted) { setMessage('Generation cancelled'); return }
       setDraft(result)
       setMessage('Draft ready for review')
@@ -48,7 +53,18 @@ export function GenerationPanel({ provider, onApply, onBusy }: { provider: Provi
     <fieldset disabled={busy} className="generation-fields">
       <label className="field generation-wide">Brief<textarea aria-label="Brief" rows={3} required maxLength={8000} value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label>
       <label className="field generation-wide">Source text<textarea aria-label="Source text" rows={5} maxLength={24000} value={source} onChange={(event) => setSource(event.target.value)} /></label>
-      <label className="field generation-count">Slide count<input aria-label="Slide count" type="number" min={1} max={32} step={1} required value={slideCount} onChange={(event) => setSlideCount(event.currentTarget.valueAsNumber)} /></label>
+      <div className="generation-options">
+        <label className="field generation-count">Slide count<input aria-label="Slide count" type="number" min={1} max={32} step={1} required value={slideCount} onChange={(event) => setSlideCount(event.currentTarget.valueAsNumber)} /></label>
+        <label className="field generation-select">Design<select aria-label="Design" value={designPreset} onChange={(event) => setDesignPreset(event.target.value)}>
+          <option value="">Fixed report layout</option>
+          {designs.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
+        </select></label>
+        <label className="field generation-select">Language<select aria-label="Output language" value={language} onChange={(event) => setLanguage(event.target.value as OutputLanguage)}>
+          <option value="">Follow brief</option>
+          <option value="ja">Japanese</option>
+          <option value="en">English</option>
+        </select></label>
+      </div>
       <label className="checkbox"><input type="checkbox" checked={repair} onChange={(event) => setRepair(event.target.checked)} />Allow one validation repair</label>
       <details><summary>Approved outline</summary><label className="field">Outline JSON<textarea aria-label="Outline JSON" className="code-input" rows={5} value={outline} onChange={(event) => setOutline(event.target.value)} /></label></details>
       {provider.remote && <label className="checkbox generation-wide remote-consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} /><span>I approve sending this brief and source text to the remote endpoint shown above.</span></label>}
@@ -58,7 +74,7 @@ export function GenerationPanel({ provider, onApply, onBusy }: { provider: Provi
     {draft && <section className="generation-review" aria-label="Generated draft">
       <div className="draft-heading"><h3>{draft.report.title}</h3><span>{draft.compiled.deck.slides.length} slides</span></div>
       <p className="draft-warning"><AlertCircle size={16} />AI content unverified</p>
-      <div className="draft-preview"><SlideSurface slide={draft.compiled.deck.slides[0]} /></div>
+      <div className="draft-preview"><SlideSurface slide={draft.compiled.deck.slides[0]} design={draft.compiled.deck.design} width={draft.compiled.deck.width} height={draft.compiled.deck.height} /></div>
       <ol className="draft-outline">{draft.compiled.deck.slides.map((slide) => <li key={slide.id}>{slide.title}</li>)}</ol>
       <p className="warning">{draft.compiled.issues.find((issue) => issue.code === 'AI_CONTENT_UNVERIFIED')?.message}</p>
     </section>}

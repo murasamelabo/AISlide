@@ -182,6 +182,8 @@ button svg { flex: 0 0 auto; }
 .generation-fields { margin: 0; padding: 0; border: 0; min-width: 0; display: grid; gap: 16px; }
 .generation-wide { width: 100%; }
 .generation-count { width: 110px; }
+.generation-options { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; }
+.generation-select { flex: 1 1 180px; min-width: 0; }
 .remote-consent { align-items: flex-start; line-height: 1.6; }
 .remote-consent input { flex-shrink: 0; margin-top: 5px; }
 .generation-status { display: flex; gap: 8px; align-items: center; font-size: 16px; color: var(--muted); }

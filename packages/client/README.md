@@ -97,6 +97,30 @@ const graph = await client.layoutGraph({ version: 1, title: 'Synthetic flow', co
 
 Use a `composeSlide` block `{kind:'graph',input:...}` to lay out and insert
 the graph in one mutation without sending the resulting coordinates back.
+
+Pattern mode fills a layout pattern instead of stacking blocks. Frames, type
+sizes, spacing and theme colors come from `client.designTokens(deck)`, so a
+preset deck keeps its master decorations and scale in Japanese or English:
+
+```js
+const tokens = await client.designTokens(session.document.deck); // source: 'preset:trust' after setup
+await session.composeSlide('slide-2', {
+  id: 'pillars',
+  spec: {
+    title: '計画を支える三つの柱', footer: 'Synthetic example',
+    pattern: { id: 'columns/3' },
+    slots: {
+      'column-1': { kind: 'cards', items: [{ label: '明確さ', detail: '1枚に1メッセージ。' }] },
+      'column-2': { kind: 'metric', value: '42%', label: 'Synthetic share' },
+      'column-3': { kind: 'text', paragraphs: [{ runs: [{ text: 'Start with the conclusion.' }] }] },
+    },
+  },
+});
+```
+
+Undersized slots and overflowing text reject with the pattern fallback; text is
+never shrunk. Marker slots such as step arrows and numbers are drawn by core.
+
 Grid layout is not hierarchical; groups are unsupported. Parts keep their
 existing fitting rules; ordinary composition text rejects overflow without
 shrinking. `setRichText` derives plain text and retains strict canonical

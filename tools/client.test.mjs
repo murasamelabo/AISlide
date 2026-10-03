@@ -1061,6 +1061,28 @@ test('guided SDK profiles create editable documents and reject early or late can
   assert.equal(calls, 1);
 });
 
+test('design tokens and pattern composition share one preset scale through the SDK', async () => {
+  const client = new AislideClient(requestCore);
+  const session = await client.createPresentation('tokens', 'Synthetic tokens', { setup: { design_preset: 'trust' } });
+  const tokens = await client.designTokens(session.document.deck);
+  assert.equal(tokens.source, 'preset:trust');
+  assert.equal(tokens.scripts.east_asian.language, 'ja-JP');
+  await session.composeSlide('slide-1', { id: 'pillars', spec: { title: '\u4e09\u3064\u306e\u67f1', footer: 'Synthetic example', pattern: { id: 'columns/3' }, slots: {
+    'column-1': { kind: 'cards', items: [{ label: '\u660e\u78ba\u3055', detail: '1\u679a\u306b1\u30e1\u30c3\u30bb\u30fc\u30b8\u3002' }] },
+    'column-2': { kind: 'metric', value: '42%', label: 'Synthetic share' },
+    'column-3': { kind: 'text', paragraphs: [{ runs: [{ text: 'Start with the conclusion.' }] }] },
+  } } });
+  const slide = session.document.deck.slides[0];
+  assert.equal(slide.layout_id, 'preset-blank');
+  const title = slide.elements.find((element) => element.id === 'pillars-title');
+  assert.equal(title.font_size, tokens.type_scale.title);
+  assert.equal(title.format.paragraphs[0].runs[0].style.language, 'ja-JP');
+  assert.equal(slide.elements.find((element) => element.id === 'pillars-column-3').format.paragraphs[0].runs[0].style.language, 'en-US');
+  await assert.rejects(() => session.composeSlide('slide-1', { id: 'again', spec: { title: 'Again', pattern: { id: 'focus/statement' }, slots: { statement: { kind: 'statement', text: 'Synthetic' } } } }), /new empty slide/);
+  await session.undo();
+  assert.equal(session.document.deck.slides[0].elements.length, 0);
+});
+
 test('design preset SDK shares native layouts, preservation, revision guards and undo', async () => {
   const client = new AislideClient(requestCore);
   const presets = await client.designPresets();

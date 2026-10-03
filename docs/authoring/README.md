@@ -28,11 +28,13 @@ The [48-pattern consulting catalog](consulting-patterns.json) preserves the supp
 | Common charts, processes and described architecture nodes | Parts with typed `data`; native graphs with node `detail` | Inspect catalog capabilities and fit; descriptions remain editable text |
 | Reusable parts and graphs across existing slides | One mixed `apply_operations` with `add_part` / `add_graph` | Retains editable objects and managed metadata; supply final layouts before insertion |
 | Exact freeform layout or polygons | `create_presentation`, then complete `add_elements` / `apply_operations` at final frames | Supported native objects, not arbitrary PPTX replication; batch before selected-page preview/preflight |
-| A structured report | `compile_report` | Deterministic fixed seven layouts: cover, metrics, table, columns, statement, chart, process; not a general PPTX replication engine |
+| A structured report | `compile_report` | Deterministic fixed seven layouts: cover, metrics, table, columns, statement, chart, process; with `design_preset`, each section becomes a layout-pattern slide in that preset's design tokens. Not a general PPTX replication engine |
 | Reuse authored slides | `import_slides` with an existing authored source handle | Same canvas, current metadata and licensed fonts; native cross-package slide copying is unsupported |
 
 Design presets are optional styles, not a prerequisite for these paths. The
-seven presets are unchanged. Direct part insertion with `PartSpec.layout`
+seven presets are unchanged; `design_tokens` derives their frames, spacing,
+type scale and color roles for `compose_slide` pattern mode and preset report
+compilation. Direct part insertion with `PartSpec.layout`
 bypasses automatic preset-region fitting; guided creation still fits its
 part into the guided body region. Use direct `addPart` or typed elements when
 absolute slide placement is the requirement.

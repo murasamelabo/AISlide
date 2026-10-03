@@ -36,11 +36,31 @@ fn layout(id: &str, name: &str, background: Option<&str>, elements: Vec<Element>
     SlideLayout { id: format!("preset-{id}"), name: name.into(), master_id: "preset-master".into(), background: background.map(str::to_owned), elements }
 }
 
+/// Geometry a preset shares between its layouts and design tokens.
+pub(crate) struct Geometry { pub id: &'static str, pub margin: f64, pub gutter: f64, pub heading: f64, pub body: f64, pub body_top: f64, pub rule: f64 }
+
+fn geometry(style: &Style) -> Geometry {
+    Geometry { id: style.id, margin: style.margin, gutter: style.gutter, heading: style.heading, body: style.body,
+        body_top: if style.id == "dynamic" { 208.0 } else { 192.0 }, rule: if style.id == "pop" { 8.0 } else { 3.0 } }
+}
+
+/// Geometry of the preset whose unmodified master and layouts the design carries.
+pub(crate) fn recognize(design: &Design) -> Option<Geometry> {
+    let preset = identify(design).ok().flatten()?;
+    STYLES.iter().find(|style| style.id == preset.id).map(geometry)
+}
+
+/// Catalog preset by ID.
+pub(crate) fn preset(id: &str) -> Result<Preset> {
+    build(STYLES.iter().find(|style| style.id == id).ok_or_else(|| Error::Invalid(format!("design preset {id} not found; call design_presets for preset IDs")))?)
+}
+
 fn build(style: &Style) -> Result<Preset> {
     let margin = style.margin;
     let width = 1280.0 - margin * 2.0;
     let column = (width - style.gutter) / 2.0;
-    let body_top = if style.id == "dynamic" { 208.0 } else { 192.0 };
+    let shared = geometry(style);
+    let body_top = shared.body_top;
     let body_height = 640.0 - body_top;
     let title = || text("title", [margin, 64.0, width, 112.0], style.heading, "Key message", PlaceholderKind::Title, 0);
     let mut master = Master { id: "preset-master".into(), name: style.name.into(), background: "@lt1".into(), elements: Vec::new(), theme: None };
@@ -113,7 +133,7 @@ fn build(style: &Style) -> Result<Preset> {
     for index in 0..3 {
         let horizontal = margin + index as f64 * (card_width + style.gutter);
         cards.push(rectangle(&format!("preset-panel-{index}"), [horizontal, body_top, card_width, body_height], "@lt2"));
-        cards.push(rectangle(&format!("preset-panel-rule-{index}"), [horizontal, body_top, card_width, if style.id == "pop" { 8.0 } else { 3.0 }], ["@accent1", "@accent2", "@accent3"][index]));
+        cards.push(rectangle(&format!("preset-panel-rule-{index}"), [horizontal, body_top, card_width, shared.rule], ["@accent1", "@accent2", "@accent3"][index]));
         cards.push(text(&format!("body-{index}"), [horizontal + 20.0, body_top + 32.0, card_width - 40.0, body_height - 56.0], style.body, ["First point", "Second point", "Third point"][index], PlaceholderKind::Body, index as u32 + 1));
     }
     let visual_x = margin + column + style.gutter;

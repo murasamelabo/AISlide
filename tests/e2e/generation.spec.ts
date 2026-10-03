@@ -25,6 +25,22 @@ test('a model draft is reviewed before application and can be undone', async ({ 
   await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(12);
 });
 
+test('a design preset and output language reach generation and the draft keeps its design', async ({ page }) => {
+  await page.getByLabel('Brief', { exact: true }).fill('Prepare a concise data report');
+  await page.getByLabel('Design', { exact: true }).selectOption('trust');
+  await page.getByLabel('Output language', { exact: true }).selectOption('en');
+  const sent = page.waitForRequest((request) => request.url().endsWith('/api/core') && request.postDataJSON()?.op === 'generate');
+  await page.getByRole('button', { name: 'Generate draft', exact: true }).click();
+  const input = (await sent).postDataJSON().input;
+  expect(input.design_preset).toBe('trust');
+  expect(input.language).toBe('en');
+  await expect(page.locator('.generation-review')).toBeVisible();
+  await expect(page.locator('.draft-preview')).toContainText('Fixture-generated analysis');
+  await page.getByRole('button', { name: 'Apply draft', exact: true }).click();
+  await expect(page.getByRole('button', { name: /^Slide \d+:/ })).toHaveCount(3);
+  await expect(page.locator('.document-name strong')).toHaveText('Fixture-generated analysis');
+});
+
 test('invalid model output preserves the existing presentation', async ({ page }) => {
   await page.getByLabel('Brief', { exact: true }).fill('FAIL_INVALID_JSON');
   await page.getByRole('button', { name: 'Generate draft', exact: true }).click();

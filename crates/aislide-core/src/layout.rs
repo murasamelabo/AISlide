@@ -204,6 +204,38 @@ pub(crate) fn fit_metric_size(text: &str, width: f64, height: f64) -> Result<f64
     Err(Error::Invalid("metric value does not fit its minimum font size".into()))
 }
 
+fn installed_fonts() -> Result<std::sync::MutexGuard<'static, FontSystem>> {
+    let fonts = FONTS.get_or_init(|| Mutex::new(FontSystem::new())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
+    if fonts.db().faces().next().is_none() { return Err(Error::Unsupported("installed fonts are required for text fitting".into())); }
+    Ok(fonts)
+}
+
+/// Largest size from `maximum` down to `minimum` in 2px steps at which the text fits the frame.
+pub(crate) fn fit_size(text: &str, width: f64, height: f64, range: [f64; 2], bold: bool, format: &TextFormat, theme: &Theme) -> Result<Option<f64>> {
+    let mut fonts = installed_fonts()?;
+    let [maximum, minimum] = range;
+    let mut size = maximum;
+    while size >= minimum - 1e-9 {
+        if !measure(&mut fonts, "fit", "text", text, width, height, size, bold, format, theme).overflow { return Ok(Some(size)); }
+        size -= 2.0;
+    }
+    Ok(None)
+}
+
+/// Height the text needs at the given width and size.
+pub(crate) fn text_height(text: &str, width: f64, size: f64, bold: bool, format: &TextFormat, theme: &Theme) -> Result<f64> {
+    let mut fonts = installed_fonts()?;
+    Ok(f64::from(measure(&mut fonts, "fit", "text", text, width, 4096.0, size, bold, format, theme).measured_height))
+}
+
+/// ID of the first text frame (including table cells and group children) that overflows.
+pub(crate) fn first_overflow(elements: &[Element], theme: &Theme) -> Result<Option<String>> {
+    let mut fonts = installed_fonts()?;
+    let (mut measurements, mut characters) = (Vec::new(), 0);
+    visit(&mut fonts, "probe", elements, &mut measurements, &mut characters, theme, false)?;
+    Ok(measurements.into_iter().find(|measurement| measurement.overflow).map(|measurement| measurement.element_id))
+}
+
 pub(crate) fn fit_part_text(elements: &mut [Element], theme: &Theme) -> Result<()> {
     fit_part_text_with_small_annotations(elements, theme, &BTreeSet::new())
 }

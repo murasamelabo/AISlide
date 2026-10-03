@@ -60,7 +60,35 @@ export type CompositionBlock =
   | { kind: 'comparison'; rows: string[]; columns: string[]; cells: string[][]; corner_label?: string }
   | { kind: 'graph'; input: GraphLayoutInput }
   | { kind: 'part'; spec: Omit<PartSpec, 'layout'> }
-export type CompositionSpec = { title: string; subtitle?: string; footer?: string; style?: CompositionStyle; blocks: CompositionBlock[] }
+/** Pattern-mode blocks; legacy `blocks` stacking rejects them. */
+export type PatternBlock =
+  | CompositionBlock
+  | { kind: 'statement'; text: string }
+  | { kind: 'quote'; text: string; attribution?: string }
+  | { kind: 'metric'; value: string; label: string; detail?: string }
+  | { kind: 'label'; text: string }
+  | { kind: 'image'; base64: string; mime_type: 'image/png' | 'image/jpeg'; alt: string; fit?: 'contain' | 'cover' }
+  | { kind: 'table'; rows: string[][] }
+  | { kind: 'chart'; chart: ChartData }
+export type PatternChoice = { id: string; count?: number; mirror?: boolean; message_band?: boolean }
+/** Either stack 1-3 `blocks`, or fill the slots of a layout `pattern` sized by the deck's design tokens. */
+export type CompositionSpec =
+  | { title: string; subtitle?: string; footer?: string; style?: CompositionStyle; blocks: CompositionBlock[]; pattern?: never; slots?: never }
+  | { title: string; footer?: string; pattern: PatternChoice; slots: Record<string, PatternBlock>; blocks?: never; subtitle?: never; style?: never }
+export type TokenFrame = { x: number; y: number; width: number; height: number }
+export type ScriptTokens = { language: 'en-US' | 'ja-JP'; advance_em: number; reading_measure: number; title_line: number; title_lines: number }
+/** Derived from the deck design on demand; never persisted. `source` is `preset:<id>` or `default`. */
+export type DesignTokens = {
+  version: 1; source: string; canvas: { width: number; height: number }; grid: number; margin: number; gutter: number
+  gaps: { tight: number; peer: number; support: number; contrast: number }
+  frames: { title: TokenFrame; body: TokenFrame; footer: TokenFrame; full_page: TokenFrame }
+  type_scale: { title: number; statement: number; metric: number; body: number; caption: number; minimum: number; line_spacing: number }
+  scripts: { latin: ScriptTokens; east_asian: ScriptTokens }
+  colors: { ink: string; muted: string; background: string; surface: string; accent: string; accent_alt: string; on_accent: string }
+  card: { fill: string; rule: number; padding: number; band_padding: number }
+  layout_id: string | null; master_graphics: boolean
+}
+export type CompileOptions = { design_preset?: PresentationSetup['design_preset'] }
 export type Master = { id: string; name: string; background: string; elements: Element[]; theme?: Theme | null }
 export type AuxiliaryMaster = { name: string; background: string; theme: Theme; elements: Element[] }
 export type AuxiliaryDesign = { width: number; height: number; notes_master?: AuxiliaryMaster | null; handout_master?: AuxiliaryMaster | null }

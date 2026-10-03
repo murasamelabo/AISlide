@@ -342,6 +342,60 @@ test('semantic authoring MCP forwards composition and single-source text with st
   });
 });
 
+test('semantic authoring MCP forwards pattern compositions, design tokens and preset report options', async () => {
+  await feedbackMcpFixture(async ({ call, calls, registrations, fixture }) => {
+    const created = await call('create_presentation', { title: 'Synthetic patterns', setup: { design_preset: 'trust' } });
+    const spec = { title: '\u4e09\u3064\u306e\u67f1', footer: 'Synthetic', pattern: { id: 'columns/3' }, slots: {
+      'column-1': { kind: 'cards', items: [{ label: 'Clarity', detail: 'One message' }] },
+      'column-2': { kind: 'metric', value: '42%', label: 'Synthetic share' },
+      'column-3': { kind: 'text', paragraphs: [{ runs: [{ text: '\u5408\u6210\u30c7\u30fc\u30bf' }] }] },
+    } };
+    await call('compose_slide', { deck_id: created.deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'pattern', spec });
+    assert.deepEqual(calls.at(-1).request.operations, [{ op: 'compose_slide', slide_id: 'slide-1', id: 'pattern', spec }]);
+    const schema = registrations.get('compose_slide').config.inputSchema;
+    const input = { deck_id: created.deck_id, expected_revision: 1, slide_id: 'slide-1', id: 'pattern', spec };
+    for (const valid of [
+      { title: 'Quote', pattern: { id: 'text/quote' }, slots: { quote: { kind: 'quote', text: 'Synthetic words.', attribution: 'Synthetic source' } } },
+      { title: 'Flow', pattern: { id: 'sequence/steps-h', count: 2, message_band: true }, slots: { 'step-1': { kind: 'cards', items: [{ label: 'A' }] }, 'step-2': { kind: 'cards', items: [{ label: 'B' }] }, message: { kind: 'label', text: 'Synthetic' } } },
+      { title: 'Data', pattern: { id: 'compare/table-full' }, slots: { table: { kind: 'table', rows: [['A', 'B'], ['1', '2']] }, decision: { kind: 'callout', text: 'Synthetic' } } },
+      { title: 'Chart', pattern: { id: 'focus/full' }, slots: { primary: { kind: 'chart', chart: { kind: 'column', categories: ['A'], series: [{ name: 'Synthetic', values: [1], color: '@accent1' }] } } } },
+      { title: 'Image', pattern: { id: 'focus/image-caption' }, slots: { image: { kind: 'image', asset_id: randomUUID(), alt: 'Synthetic' }, caption: { kind: 'label', text: 'Synthetic' } } },
+    ]) assert.equal(schema.safeParse({ ...input, spec: valid }).success, true, JSON.stringify(valid).slice(0, 120));
+    for (const invalid of [
+      { ...spec, blocks: [{ kind: 'callout', text: 'Both modes' }] },
+      { title: 'No slots', pattern: { id: 'columns/3' } },
+      { title: 'No pattern', slots: spec.slots },
+      { title: 'Legacy', blocks: [{ kind: 'statement', text: 'Pattern-only block' }] },
+      { ...spec, slots: { 'Column 1': spec.slots['column-1'] } },
+      { ...spec, slots: { image: { kind: 'image', base64: 'AAAA', mime_type: 'image/png', alt: '' } } },
+      { ...spec, slots: { image: { kind: 'image', base64: 'AAAA', mime_type: 'image/png', alt: 'Both', asset_id: randomUUID() } } },
+      { ...spec, slots: { metric: { kind: 'metric', value: '', label: 'Empty value' } } },
+      { ...spec, pattern: { id: 'columns/3', unknown: true } },
+    ]) assert.equal(schema.safeParse({ ...input, spec: invalid }).success, false, JSON.stringify(invalid).slice(0, 120));
+
+    fixture.onRequest = request => request.op === 'design_tokens' ? { version: 1, source: 'preset:trust' } : { ready: true, op: request.op };
+    assert.equal((await call('design_tokens', { deck_id: created.deck_id })).source, 'preset:trust');
+    assert.equal(calls.at(-1).request.op, 'design_tokens');
+    assert.equal(calls.at(-1).request.deck.title, 'Synthetic patterns');
+    assert.equal(registrations.get('design_tokens').config.annotations.readOnlyHint, true);
+
+    const generate = registrations.get('generate_report').config.inputSchema;
+    assert.equal(generate.safeParse({ prompt: 'Synthetic', slide_count: 3, design_preset: 'trust', language: 'ja' }).success, true);
+    for (const invalid of [{ design_preset: 'unknown' }, { language: 'fr' }]) assert.equal(generate.safeParse({ prompt: 'Synthetic', slide_count: 3, ...invalid }).success, false, JSON.stringify(invalid));
+    fixture.onRequest = request => {
+      if (request.op === 'compile') return { deck: { version: 1, title: 'Synthetic', width: 1280, height: 720, slides: [{ id: 'slide-1', title: 'Synthetic', background: 'FFFFFF', elements: [], notes: '' }] }, issues: [] };
+      if (request.op === 'new_document') return { version: 1, id: request.id, revision: 0, hash: 'c'.repeat(64), sources: [], bindings: [], parts: [], deck: request.deck };
+      return { ready: true, op: request.op };
+    };
+    const report = { title: 'Synthetic', subtitle: '', period: '', source: 'Synthetic fixture', sections: [{ title: 'Statement', layout: 'statement', body: ['Synthetic'] }] };
+    await call('compile_report', { report, design_preset: 'minimal' });
+    assert.deepEqual(calls.filter(entry => entry.request.op === 'compile').at(-1).request.options, { design_preset: 'minimal' });
+    await call('compile_report', { report });
+    assert.equal('options' in calls.filter(entry => entry.request.op === 'compile').at(-1).request, false, 'the fixed layout sends no options');
+    assert.equal(registrations.get('compile_report').config.inputSchema.safeParse({ report, design_preset: 'unknown' }).success, false);
+  });
+});
+
 test('semantic authoring MCP forwards initial setup in one core request', async () => {
   await feedbackMcpFixture(async ({ call, calls, registrations }) => {
     const setup = { design_preset: 'minimal', font_family: 'Noto Sans CJK JP' };
