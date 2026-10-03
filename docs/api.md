@@ -83,8 +83,9 @@ Pattern mode replaces `blocks` with `pattern:{id,count?,mirror?,message_band?}`
 and `slots:{<slot id>:block}`. Core resolves the [layout pattern](#layout-patterns)
 inside the deck's [design tokens](#design-tokens) and places one block per
 non-marker slot; marker slots (step connectors, numbers, the timeline axis)
-are drawn automatically. `count` is inferred from the supplied slot IDs for
-variable patterns. Full-page patterns fill their own `title` slot from
+are drawn automatically, and arrows point from each slot to the next (right
+to left when `mirror` is set). `count` is inferred from the supplied slot IDs
+for variable patterns. Full-page patterns fill their own `title` slot from
 `spec.title` unless one is supplied. Pattern mode adds `statement:{text}`,
 `quote:{text,attribution?}`, `metric:{value,label,detail?}`, `label:{text}`,
 `image:{base64,mime_type,alt,fit?}` (PNG/JPEG, `contain` default or `cover`),

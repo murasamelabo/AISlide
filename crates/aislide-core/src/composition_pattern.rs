@@ -200,7 +200,7 @@ fn part(block: &CompositionBlock, frame: [f64; 4]) -> Result<PartSpec> {
     Ok(spec)
 }
 
-fn marker(id: &str, slot: &PlacedSlot, tokens: &DesignTokens) -> Result<Vec<Element>> {
+fn marker(id: &str, slot: &PlacedSlot, tokens: &DesignTokens, mirror: bool) -> Result<Vec<Element>> {
     let [x, y, width, height] = slot.frame;
     let element_id = format!("{id}-{}", slot.id);
     let role = slot.id.split('-').next().unwrap_or_default();
@@ -214,7 +214,9 @@ fn marker(id: &str, slot: &PlacedSlot, tokens: &DesignTokens) -> Result<Vec<Elem
         "connector" | "arrow" => {
             let arrow_width = (width * 0.75).min(48.0).floor();
             let arrow_height = (arrow_width * 0.75).floor();
-            vec![shape("rightArrow", [x + ((width - arrow_width) / 2.0).round(), y + ((height - arrow_height) / 2.0).round(), arrow_width, arrow_height], "", tokens.type_scale.caption)]
+            // Mirroring reverses the horizontal slot order, so arrows must point right to left.
+            let preset = if mirror { "leftArrow" } else { "rightArrow" };
+            vec![shape(preset, [x + ((width - arrow_width) / 2.0).round(), y + ((height - arrow_height) / 2.0).round(), arrow_width, arrow_height], "", tokens.type_scale.caption)]
         }
         "marker" | "number" => {
             let diameter = width.min(height).min(48.0).floor();
@@ -294,7 +296,7 @@ pub(crate) fn build(tokens: &DesignTokens, theme: &Theme, id: &str, chrome: &Chr
     }
     let body_frame = frame_of(body);
     for slot in &placed {
-        if slot.kind == "marker" { elements.extend(marker(id, slot, tokens)?); continue; }
+        if slot.kind == "marker" { elements.extend(marker(id, slot, tokens, choice.mirror)?); continue; }
         let element_id = format!("{id}-{}", slot.id);
         let frame = slot.frame;
         let padding = if slot.kind == "tile" { tokens.card.band_padding } else { tokens.card.padding };

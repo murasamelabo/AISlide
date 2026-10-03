@@ -148,6 +148,35 @@ fn visual_metric_quote_and_flow_patterns_fill_slots_from_tokens() {
 }
 
 #[test]
+fn arrows_point_from_each_slot_to_the_next_when_patterns_are_mirrored() {
+    let image = png(64, 48);
+    let screen = |alt: &str| json!({"kind":"image","base64":image,"mime_type":"image/png","alt":alt});
+    let cases = [
+        ("split/1-arrow-1", json!({"before":card("Before", "First state"),"after":card("After", "Next state")}), vec![("arrow", "before", "after")]),
+        ("sequence/steps-h", json!({"step-1":card("Collect", "Record the source."),"step-2":card("Check", "Reconcile totals."),"step-3":card("Share", "State uncertainty.")}),
+            vec![("connector-1", "step-1", "step-2"), ("connector-2", "step-2", "step-3")]),
+        ("media/image-steps", json!({"image-1":screen("Synthetic first screen"),"step-1":card("Open", "Start the sample."),"image-2":screen("Synthetic second screen"),"step-2":card("Save", "Keep the result.")}),
+            vec![("connector-1", "step-1", "step-2")]),
+    ];
+    for (pattern, slots, arrows) in &cases {
+        for mirror in [false, true] {
+            let result = compose(&document(Some("trust")), json!({"title":"Synthetic direction","pattern":{"id":pattern,"mirror":mirror},"slots":slots})).unwrap();
+            let composed = slide(&result);
+            let center = |id: &str| { let bounds = frame(element(composed, &format!("c-{id}"))); bounds[0] + bounds[2] / 2.0 };
+            for (arrow, from, to) in arrows {
+                assert_eq!(center(from) > center(to), mirror, "{pattern} mirror={mirror} orders {from} and {to}");
+                assert!(center(arrow) > center(from).min(center(to)) && center(arrow) < center(from).max(center(to)), "{pattern} {arrow} sits between {from} and {to}");
+                let shape = element(composed, &format!("c-{arrow}"));
+                let expected = if mirror { "leftArrow" } else { "rightArrow" };
+                assert_eq!((shape["preset"].as_str(), shape["rotation"].as_f64()), (Some(expected), Some(0.0)), "{pattern} mirror={mirror} {arrow} must point from {from} to {to}");
+            }
+            no_preflight_errors(&result);
+            if mirror { assert_round_trip(&result); }
+        }
+    }
+}
+
+#[test]
 fn tables_images_bands_and_full_page_patterns_compose_natively() {
     let rows = json!([["\u{9805}\u{76ee}","\u{73fe}\u{72b6}","\u{5bfe}\u{5fdc}"],["\u{54c1}\u{8cea}","\u{672a}\u{6e2c}\u{5b9a}","\u{8a08}\u{6e2c}\u{3059}\u{308b}"],["\u{901f}\u{5ea6}","\u{4e0d}\u{660e}","\u{6bd4}\u{8f03}\u{3059}\u{308b}"]]);
     let result = compose(&document(Some("dynamic")), json!({"title":"\u{6bd4}\u{8f03}","pattern":{"id":"compare/table-full"},"slots":{
