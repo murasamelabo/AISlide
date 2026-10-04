@@ -126,6 +126,46 @@ fn graph_child<'a>(rendered: &'a Value, suffix: &str) -> &'a Value {
     rendered["children"].as_array().unwrap().iter().find(|child| child["id"].as_str().unwrap().ends_with(suffix)).unwrap()
 }
 
+fn nested_child<'a>(rendered: &'a Value, suffix: &str) -> &'a Value {
+    fn walk<'a>(children: &'a [Value], suffix: &str) -> Option<&'a Value> {
+        children.iter().find_map(|child| if child["id"].as_str().unwrap().ends_with(suffix) { Some(child) } else { child["children"].as_array().and_then(|nested| walk(nested, suffix)) })
+    }
+    walk(rendered["children"].as_array().unwrap(), suffix).unwrap_or_else(|| panic!("missing {suffix}"))
+}
+
+// Text frame of a shape after its embedded padding, in the shape's coordinate space.
+fn text_frame(shape: &Value) -> [f64; 4] {
+    let [left, top, width, height] = graph_rect(shape);
+    let padding = &shape["format"]["padding"];
+    let [pad_left, pad_top, pad_right, pad_bottom] = ["left", "top", "right", "bottom"].map(|side| padding[side].as_f64().unwrap());
+    [left + pad_left, top + pad_top, width - pad_left - pad_right, height - pad_top - pad_bottom]
+}
+
+// Node headings ("-nt-"), node details ("-nd-") and group headers ("-gt-") are embedded as paragraphs of
+// their frame shape; the detail starts at the first later paragraph with spacing before it.
+fn embedded_label(rendered: &Value, suffix: &str) -> Value {
+    let (role, entity) = suffix[1..].split_once('-').unwrap();
+    let shape = nested_child(rendered, &format!("-{}-{entity}", if role == "gt" { "g" } else { "n" }));
+    let Some(paragraphs) = shape["format"]["paragraphs"].as_array() else {
+        // Native reopen keeps a single uniformly styled paragraph as plain shape text.
+        assert_ne!(role, "nd", "{suffix} detail requires paragraphs: {shape}");
+        return json!({"text":shape["text"],"font_size":shape["font_size"],"color":shape["color"],"bold":shape["bold"],"alignment":shape["format"]["alignment"],"lines":1,"shape":shape["id"]});
+    };
+    let split = paragraphs.iter().skip(1).position(|paragraph| paragraph.get("space_before").is_some()).map_or(paragraphs.len(), |index| index + 1);
+    let selected = if role == "nd" { &paragraphs[split..] } else { &paragraphs[..split] };
+    assert!(!selected.is_empty(), "{suffix} has no embedded paragraphs");
+    let style = &selected[0]["runs"][0]["style"];
+    let text = selected.iter().map(|paragraph| paragraph["runs"].as_array().unwrap().iter().map(|run| run["text"].as_str().unwrap()).collect::<String>()).collect::<Vec<_>>().join("\n");
+    json!({"text":text,"font_size":style["font_size"],"color":style["color"],"bold":style["bold"],"alignment":selected[0]["alignment"],"lines":selected.len(),"shape":shape["id"]})
+}
+
+fn measured_lines(rendered: &Value, suffix: &str) -> (usize, bool, usize) {
+    let typed: aislide_core::model::Deck = serde_json::from_value(deck(rendered.clone())).unwrap();
+    let report = aislide_core::layout::measure_layout(&typed).unwrap();
+    let measured = report.measurements.iter().find(|entry| entry.element_id.ends_with(suffix)).unwrap_or_else(|| panic!("no measurement for {suffix}"));
+    (measured.lines, measured.overflow, measured.missing_glyphs)
+}
+
 fn boundary_feedback_graph() -> Value {
     json!({"version":1,"title":"Boundary clearance","show_title":false,
         "groups":[{"id":"left","label":"Left","x":0,"y":20,"width":480,"height":300},{"id":"right","label":"Right","x":560,"y":20,"width":560,"height":300}],
@@ -165,11 +205,12 @@ fn feedback_boundary_lines_are_avoided_by_automatic_labels() {
 fn feedback_group_header_color_is_optional_validated_and_theme_linked() {
     let mut spec = boundary_feedback_graph();
     let original = execute_request(json!({"op":"create_graph","id":"header-color","spec":spec})).unwrap();
-    assert_eq!(graph_child(&original, "-gt-left")["color"], "@dk1");
+    assert_eq!(embedded_label(&original, "-gt-left")["color"], "@dk1");
     spec["groups"][0]["header_color"] = json!("@accent2");
     let colored = execute_request(json!({"op":"create_graph","id":"header-color","spec":spec})).unwrap();
-    assert_eq!(graph_child(&colored, "-gt-left")["color"], "@accent2");
-    assert_eq!(graph_rect(graph_child(&colored, "-gt-left")), graph_rect(graph_child(&original, "-gt-left")));
+    assert_eq!(embedded_label(&colored, "-gt-left")["color"], "@accent2");
+    assert_eq!(nested_child(&colored, "-g-left")["color"], "@accent2");
+    assert_eq!(text_frame(nested_child(&colored, "-g-left")), text_frame(nested_child(&original, "-g-left")));
     for value in [json!("none"), json!("red"), json!(17)] {
         spec["groups"][0]["header_color"] = value;
         assert!(execute_request(json!({"op":"create_graph","id":"header-color","spec":spec})).is_err());
@@ -188,18 +229,52 @@ fn feedback_single_line_fit_is_opt_in_bounded_and_preserves_hard_breaks() {
         assert_eq!(execute_request(json!({"op":"create_graph","id":"label-fit","spec":spec})).unwrap(), legacy);
         spec["nodes"][0]["label_fit"] = json!("shrink");
         let fitted = execute_request(json!({"op":"create_graph","id":"label-fit","spec":spec})).unwrap();
-        let label = graph_child(&fitted, "-nt-service");
+        let label = embedded_label(&fitted, "-nt-service");
         assert_eq!(label["text"], "Microsoft Graph");
         assert!((12.0..=18.0).contains(&label["font_size"].as_f64().unwrap()));
-        let measured = execute_request(json!({"op":"measure_layout","deck":deck(fitted.clone())})).unwrap();
-        let measured = measured["measurements"].as_array().unwrap().iter().find(|entry| entry["element_id"].as_str().unwrap().ends_with("-nt-service")).unwrap();
-        if label["font_size"].as_f64().unwrap() < 18.0 { assert_eq!(measured["lines"], 1); single_line_cases += 1; }
+        let (lines, _, _) = measured_lines(&fitted, "-n-service");
+        if label["font_size"].as_f64().unwrap() < 18.0 { assert_eq!(lines, 1); single_line_cases += 1; }
         spec["nodes"][0]["label"] = json!("Microsoft\nGraph");
         let hard_break = execute_request(json!({"op":"create_graph","id":"label-fit","spec":spec})).unwrap();
-        assert_eq!(graph_child(&hard_break, "-nt-service")["text"], "Microsoft\nGraph");
-        assert_eq!(graph_child(&hard_break, "-nt-service")["font_size"], 18.0);
+        assert_eq!(embedded_label(&hard_break, "-nt-service")["text"], "Microsoft\nGraph");
+        assert_eq!(embedded_label(&hard_break, "-nt-service")["font_size"], 18.0);
     }
     assert!(single_line_cases > 0);
+}
+
+#[test]
+fn graph_labels_are_embedded_in_their_shapes_and_preflight_reads_the_text_frames() {
+    let mut spec = boundary_feedback_graph();
+    spec["nodes"][0]["detail"] = json!("Checked");
+    spec["nodes"][0]["width"] = json!(112); spec["nodes"][0]["height"] = json!(140);
+    let mut cramped = spec.clone(); cramped["nodes"][0]["height"] = json!(72); cramped["nodes"][0]["detail"] = json!("Inspected source");
+    let error = execute_request(json!({"op":"create_graph","id":"embedded","spec":cramped})).unwrap_err().to_string();
+    assert!(error.contains("-n-source") && !error.contains("-nd-source"), "{error}");
+    spec["groups"][0]["icon"] = node_icon("#0017c1");
+    let rendered = execute_request(json!({"op":"create_graph","id":"embedded","spec":spec})).unwrap();
+    let ids: Vec<_> = rendered["children"].as_array().unwrap().iter().map(|child| child["id"].as_str().unwrap()).collect();
+    assert!(ids.iter().all(|id| !id.contains("-nt-") && !id.contains("-nd-") && !id.contains("-gt-")), "{ids:?}");
+    let source = graph_child(&rendered, "-n-source");
+    assert_eq!(source["text"], "Source\nChecked");
+    assert_eq!(source["format"]["paragraphs"][0]["runs"][0]["style"]["bold"], true);
+    assert_eq!(source["format"]["paragraphs"][1]["runs"][0]["style"]["bold"], false);
+    let left = graph_child(&rendered, "-gg-left");
+    assert_eq!(left["type"], "group");
+    assert_eq!(left["children"].as_array().unwrap().iter().map(|child| child["type"].as_str().unwrap()).collect::<Vec<_>>(), ["shape", "picture"]);
+    assert_eq!(nested_child(&rendered, "-g-left")["text"], "Left");
+    assert_eq!(graph_child(&rendered, "-g-right")["text"], "Right");
+    let document = execute_request(json!({"op":"create_presentation","id":"embedded-preflight","title":"Embedded labels"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_graph","document":document,"expected_revision":0,"slide_id":"slide-1","id":"flow","spec":spec})).unwrap();
+    let preflight = execute_request(json!({"op":"preflight_presentation","document":inserted["document"]})).unwrap();
+    let frame_findings: Vec<_> = preflight["findings"].as_array().unwrap().iter().filter(|finding| ["TEXT_OVERLAP", "CONNECTOR_LABEL_INTERFERENCE"].contains(&finding["code"].as_str().unwrap())
+        && finding["element_ids"].as_array().unwrap().iter().any(|id| id.as_str().unwrap().contains("-g-"))).collect();
+    assert!(frame_findings.is_empty(), "boundary bodies are not text frames: {frame_findings:?}");
+    let saved = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"embedded-open","base64":saved["base64"]})).unwrap();
+    assert_eq!(opened["document"]["parts"][0]["stale"], false);
+    let restored = &opened["document"]["deck"]["slides"][0]["elements"][0];
+    assert_eq!(graph_child(restored, "-n-source")["text"], "Source\nChecked");
+    assert_eq!(graph_child(restored, "-gg-left")["type"], "group");
 }
 
 #[test]
@@ -378,7 +453,7 @@ fn feedback_strict_labels_accept_clear_frames_and_report_headers_and_prior_label
     spec["groups"] = json!([{"id":"boundary","label":"Boundary","x":0,"y":88,"width":1000,"height":400}]);
     spec["edges"][0]["label_placement"]["offset"] = json!(80);
     let error = execute_request(json!({"op":"create_graph","id":"header-collision","spec":spec})).unwrap_err().to_string();
-    assert!(error.contains("request") && error.contains("-gt-boundary"), "{error}");
+    assert!(error.contains("request") && error.contains("-g-boundary"), "{error}");
 }
 
 #[test]
@@ -389,10 +464,12 @@ fn feedback_strict_icon_labels_ignore_transparent_anchors_but_check_visible_text
     spec["nodes"][1]["height"] = json!(160); spec["nodes"][1]["y"] = json!(160);
     spec["edges"][0]["label_placement"] = json!({"position":0,"side":"above","offset":8,"on_overlap":"error"});
     let rendered = execute_request(json!({"op":"create_graph","id":"icon-clear","spec":spec})).unwrap();
-    assert!(rects_overlap(graph_rect(graph_child(&rendered, "-et-request")), graph_rect(graph_child(&rendered, "-n-client"))));
+    let anchor = graph_child(&rendered, "-n-client");
+    assert!(rects_overlap(graph_rect(graph_child(&rendered, "-et-request")), graph_rect(anchor)));
+    assert!(!rects_overlap(graph_rect(graph_child(&rendered, "-et-request")), text_frame(anchor)));
     spec["edges"][0]["label_placement"] = json!({"position":0,"side":"below","offset":20,"on_overlap":"error"});
     let error = execute_request(json!({"op":"create_graph","id":"icon-text","spec":spec})).unwrap_err().to_string();
-    assert!(error.contains("-nt-client") && !error.contains("-n-client"), "{error}");
+    assert!(error.contains("-n-client") && !error.contains("-nt-client"), "{error}");
 }
 
 #[test]
@@ -440,11 +517,18 @@ fn feedback_native_roundtrip_undo_and_strict_failure_are_atomic() {
     let original = &before["deck"]["slides"][0]["elements"][0];
     let restored = &opened["document"]["deck"]["slides"][0]["elements"][0];
     assert_eq!(original["children"].as_array().unwrap().iter().filter(|child| child["id"].as_str().unwrap().contains("-eb-")).count(), 5);
-    for suffix in ["-nt-ws", "-nd-ws", "-nt-lake", "-nd-isoc", "-et-e1", "-et-e3", "-et-e5"] {
+    for suffix in ["-et-e1", "-et-e3", "-et-e5"] {
         let source = graph_child(original, suffix); let native = graph_child(restored, suffix);
         assert_eq!(source["text"], native["text"]);
         for (expected, actual) in graph_rect(source).iter().zip(graph_rect(native)) { assert!((expected - actual).abs() <= 1.0 / 9525.0); }
         assert!((source["font_size"].as_f64().unwrap() - native["font_size"].as_f64().unwrap()).abs() <= 0.02);
+    }
+    for suffix in ["-nt-ws", "-nd-ws", "-nt-lake", "-nd-isoc", "-gt-portal"] {
+        let source = embedded_label(original, suffix); let native = embedded_label(restored, suffix);
+        assert_eq!(source["text"], native["text"]);
+        assert!((source["font_size"].as_f64().unwrap() - native["font_size"].as_f64().unwrap()).abs() <= 0.02, "{suffix}");
+        let (source_shape, native_shape) = (nested_child(original, source["shape"].as_str().unwrap()), nested_child(restored, source["shape"].as_str().unwrap()));
+        for (expected, actual) in text_frame(source_shape).iter().zip(text_frame(native_shape)) { assert!((expected - actual).abs() <= 2.0 / 9525.0, "{suffix}"); }
     }
     let mut updated_spec = spec.clone(); updated_spec["nodes"][4]["detail"] = json!("確認待ち");
     let updated = execute_request(json!({"op":"update_graph","document":opened["document"],"expected_revision":0,"slide_id":"slide-1","id":"flow","spec":updated_spec})).unwrap();
@@ -563,13 +647,10 @@ fn feedback_cylinder_text_excludes_the_cap_without_moving_nodes_or_connections()
         let node = graph_child(&rendered, &format!("-n-{node_id}"));
         let [left, top, width, height] = graph_rect(node);
         assert_eq!([top, width, height], [84.0, 180.0, 96.0]);
-        for role in ["nt", "nd"] {
-            let label = graph_child(&rendered, &format!("-{role}-{node_id}"));
-            let [text_left, text_top, text_width, text_height] = graph_rect(label);
-            assert!(text_top >= top + height * 0.3, "text overlaps cylinder cap: {label}");
-            assert!(text_left >= left && text_left + text_width <= left + width && text_top + text_height <= top + height);
-            assert!(label["font_size"].as_f64().unwrap() >= 12.0);
-        }
+        let [text_left, text_top, text_width, text_height] = text_frame(node);
+        assert!(text_top >= top + height * 0.3, "text overlaps cylinder cap: {node}");
+        assert!(text_left >= left && text_left + text_width <= left + width && text_top + text_height <= top + height);
+        for role in ["nt", "nd"] { assert!(embedded_label(&rendered, &format!("-{role}-{node_id}"))["font_size"].as_f64().unwrap() >= 12.0); }
     }
     let typed: aislide_core::graphs::GraphSpec = serde_json::from_value(spec).unwrap();
     assert_eq!(aislide_core::graphs::endpoint(&typed.nodes[3], aislide_core::graphs::Port::Bottom, &typed.nodes[5]), (814.0, 180.0, 3));
@@ -578,15 +659,12 @@ fn feedback_cylinder_text_excludes_the_cap_without_moving_nodes_or_connections()
 #[test]
 fn feedback_cjk_soft_widow_is_fitted_without_changing_text_or_heading() {
     let rendered = execute_request(json!({"op":"create_graph","id":"feedback-widow","spec":feedback_graph()})).unwrap();
-    let detail = graph_child(&rendered, "-nd-isoc");
+    let detail = embedded_label(&rendered, "-nd-isoc");
     assert_eq!(detail["text"], "ケース・自動化・ワークブック");
-    assert_eq!(graph_child(&rendered, "-nt-isoc")["font_size"], 18.0);
+    assert_eq!(embedded_label(&rendered, "-nt-isoc")["font_size"], 18.0);
     assert!((12.0..14.4).contains(&detail["font_size"].as_f64().unwrap()), "single soft glyph should be reflowed: {detail}");
-    let typed: aislide_core::model::Deck = serde_json::from_value(deck(rendered.clone())).unwrap();
-    let report = aislide_core::layout::measure_layout(&typed).unwrap();
-    let measured = report.measurements.iter().find(|entry| entry.element_id.ends_with("-nd-isoc")).unwrap();
-    assert_eq!(measured.lines, 1); assert!(!measured.overflow);
-    println!("ISOC detail: {detail}; lines={}", measured.lines);
+    let (lines, overflow, _) = measured_lines(&rendered, "-n-isoc");
+    assert_eq!(lines, 2, "heading plus a one-line detail"); assert!(!overflow);
 }
 
 #[test]
@@ -594,7 +672,7 @@ fn feedback_cjk_intentional_newline_short_details_and_floor_are_retained() {
     for (detail, width, size) in [("ケース・自動化・ワークブッ\nク",240,14.4), ("未確認",240,14.4), ("Short detail",240,14.4), ("ワークブッ",64,12.0)] {
         let spec = json!({"version":1,"title":"Detail boundary","nodes":[{"id":"detail","label":"A","detail":detail,"detail_font_size":size,"x":80,"y":100,"width":width,"height":120}]});
         let rendered = execute_request(json!({"op":"create_graph","id":"feedback-detail","spec":spec})).unwrap();
-        let body = graph_child(&rendered, "-nd-detail");
+        let body = embedded_label(&rendered, "-nd-detail");
         assert_eq!(body["text"], detail); assert_eq!(body["font_size"], size);
     }
 }
@@ -604,7 +682,7 @@ fn review_bounded_layout_refits_cjk_soft_widow_after_final_geometry() {
     let spec = json!({"version":1,"title":"Final detail fitting","show_title":false,
         "nodes":[{"id":"detail","label":"A","detail":"ケース・自動化・ワークブック","x":80,"y":100,"width":240,"height":120}]});
     let original = execute_request(json!({"op":"create_graph","id":"review-widow","spec":spec})).unwrap();
-    let original_size = graph_child(&original, "-nd-detail")["font_size"].as_f64().unwrap();
+    let original_size = embedded_label(&original, "-nd-detail")["font_size"].as_f64().unwrap();
     let layout = json!({"x":24,"y":36,"width":1080,"height":512,"show_title":false});
     let part = json!({"version":1,"preset":"diagram/custom","title":spec["title"],"data":{"kind":"diagram","graph":spec},"layout":layout});
     let bounded = execute_request(json!({"op":"create_part","id":"review-widow","spec":part})).unwrap();
@@ -613,21 +691,21 @@ fn review_bounded_layout_refits_cjk_soft_widow_after_final_geometry() {
         "op":"add_graph","slide_id":"slide-1","id":"review-widow","spec":spec,"layout":layout
     }]})).unwrap();
     for rendered in [&bounded, &inserted["document"]["deck"]["slides"][0]["elements"][0]] {
-        let detail = graph_child(rendered, "-nd-detail");
-        let heading = graph_child(rendered, "-nt-detail");
+        let detail = embedded_label(rendered, "-nd-detail");
+        let heading = embedded_label(rendered, "-nt-detail");
         assert_eq!(detail["text"], spec["nodes"][0]["detail"]);
-        assert_eq!(heading["font_size"], graph_child(&original, "-nt-detail")["font_size"]);
+        assert_eq!(heading["font_size"], embedded_label(&original, "-nt-detail")["font_size"]);
         let size = detail["font_size"].as_f64().unwrap();
         assert!((12.0..original_size).contains(&size), "final soft widow was not refitted: {detail}");
         assert!(size <= heading["font_size"].as_f64().unwrap());
-        for suffix in ["-n-detail", "-nt-detail", "-nd-detail"] {
-            let [left, top, width, height] = graph_rect(graph_child(&original, suffix));
-            assert_eq!(graph_rect(graph_child(rendered, suffix)), [left * 1080.0 / 1152.0, top, width * 1080.0 / 1152.0, height]);
+        let shape = graph_child(rendered, "-n-detail");
+        let original_shape = graph_child(&original, "-n-detail");
+        for (rect, expected) in [(graph_rect(shape), graph_rect(original_shape)), (text_frame(shape), text_frame(original_shape))] {
+            let [left, top, width, height] = expected;
+            for (actual, expected) in rect.iter().zip([left * 1080.0 / 1152.0, top, width * 1080.0 / 1152.0, height]) { assert!((actual - expected).abs() < 1e-9, "{rect:?}"); }
         }
-        let typed: aislide_core::model::Deck = serde_json::from_value(deck(rendered.clone())).unwrap();
-        let report = aislide_core::layout::measure_layout(&typed).unwrap();
-        let measured = report.measurements.iter().find(|entry| entry.element_id.ends_with("-nd-detail")).unwrap();
-        assert_eq!(measured.lines, 1); assert!(!measured.overflow); assert_eq!(measured.missing_glyphs, 0);
+        let (lines, overflow, missing) = measured_lines(rendered, "-n-detail");
+        assert_eq!(lines, 2); assert!(!overflow); assert_eq!(missing, 0);
     }
 }
 
@@ -641,16 +719,14 @@ fn review_cjk_early_paragraph_widow_is_fitted_and_hard_lines_keep_their_size() {
         let spec = json!({"version":1,"title":"Paragraph tails","show_title":false,
             "nodes":[{"id":"detail","label":"A","detail":detail,"detail_font_size":size,"x":80,"y":100,"width":width,"height":160}]});
         let rendered = execute_request(json!({"op":"create_graph","id":"review-paragraph","spec":spec})).unwrap();
-        let body = graph_child(&rendered, "-nd-detail");
+        let body = embedded_label(&rendered, "-nd-detail");
         let fitted_size = body["font_size"].as_f64().unwrap();
         assert_eq!(body["text"], detail);
-        assert_eq!(graph_child(&rendered, "-nt-detail")["font_size"], 18.0);
+        assert_eq!(embedded_label(&rendered, "-nt-detail")["font_size"], 18.0);
         if shrink { assert!((12.0..size).contains(&fitted_size), "early paragraph widow was lost: {body}"); }
         else { assert_eq!(fitted_size, size); }
-        let typed: aislide_core::model::Deck = serde_json::from_value(deck(rendered)).unwrap();
-        let report = aislide_core::layout::measure_layout(&typed).unwrap();
-        let measured = report.measurements.iter().find(|entry| entry.element_id.ends_with("-nd-detail")).unwrap();
-        assert_eq!(measured.lines, expected_lines); assert!(!measured.overflow); assert_eq!(measured.missing_glyphs, 0);
+        let (lines, overflow, missing) = measured_lines(&rendered, "-n-detail");
+        assert_eq!(lines, expected_lines + 1, "heading plus detail lines"); assert!(!overflow); assert_eq!(missing, 0);
     }
 }
 
@@ -667,9 +743,9 @@ fn review_bounded_layout_preserves_hard_lines_font_floor_and_unaffected_details(
             "op":"add_graph","slide_id":"slide-1","id":"flow","spec":spec,"layout":{"x":24,"y":36,"width":layout_width,"height":424,"show_title":false}
         }]})).unwrap();
         let rendered = &inserted["document"]["deck"]["slides"][0]["elements"][0];
-        let body = graph_child(rendered, "-nd-detail");
+        let body = embedded_label(rendered, "-nd-detail");
         assert_eq!(body["text"], detail); assert_eq!(body["font_size"], size);
-        assert_eq!(graph_child(rendered, "-nt-detail")["font_size"], 18.0);
+        assert_eq!(embedded_label(rendered, "-nt-detail")["font_size"], 18.0);
         let typed: aislide_core::model::Deck = serde_json::from_value(deck(rendered.clone())).unwrap();
         let report = aislide_core::layout::measure_layout(&typed).unwrap();
         assert!(report.measurements.iter().all(|entry| !entry.overflow && entry.missing_glyphs == 0));
@@ -749,10 +825,11 @@ fn graph_bounded_annotations_honor_declared_font_minimum_and_reopen() {
             "op":"add_graph","slide_id":"slide-1","id":"architecture","spec":spec,"layout":{"x":64,"y":144,"width":1152,"height":512,"show_title":true}
         }]})).unwrap();
         let children = inserted["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap();
-        for suffix in ["-et-request", "-eb-request", "-gt-boundary"] {
+        for suffix in ["-et-request", "-eb-request"] {
             let annotation = children.iter().find(|child| child["id"].as_str().unwrap().ends_with(suffix)).unwrap();
             assert_eq!(annotation["font_size"].as_f64(), Some(f64::from(size)), "{suffix}");
         }
+        assert_eq!(embedded_label(&inserted["document"]["deck"]["slides"][0]["elements"][0], "-gt-boundary")["font_size"].as_f64(), Some(f64::from(size)));
         let mut bounded = json!({"version":1,"preset":"diagram/custom","title":spec["title"],"subtitle":spec["subtitle"],"data":{"kind":"diagram","graph":spec},"layout":{"x":64,"y":144,"width":576,"height":512,"show_title":true}});
         bounded["data"]["graph"]["edges"][0]["badge"] = Value::Null;
         let compact = execute_request(json!({"op":"create_part","id":"compact-annotations","spec":bounded})).unwrap();
@@ -761,7 +838,7 @@ fn graph_bounded_annotations_honor_declared_font_minimum_and_reopen() {
         let compact_size = compact_label["font_size"].as_f64().unwrap();
         assert!((8.0..=f64::from(size)).contains(&compact_size));
         if size == 11 { assert!(compact_size < 11.0, "fixture must exercise fitting below 12px"); }
-        for node in compact_children.iter().filter(|child| child["id"].as_str().unwrap().contains("-nt-")) { assert!(node["font_size"].as_f64().unwrap() >= 12.0); }
+        for node in compact_children.iter().filter(|child| child["id"].as_str().unwrap().contains("-n-")) { assert!(node["font_size"].as_f64().unwrap() >= 12.0); }
         bounded["data"]["graph"]["nodes"][0]["label"] = json!("M".repeat(60));
         let error = execute_request(json!({"op":"create_part","id":"body-floor","spec":bounded})).unwrap_err().to_string();
         assert!(error.contains("12px"), "{error}");
@@ -781,8 +858,10 @@ fn graph_group_spacing_controls_containment_header_and_layout() {
     spec["nodes"][0]["y"] = json!(144);
     for node in spec["nodes"].as_array_mut().unwrap() { node["group"] = json!("boundary"); }
     let rendered = execute_request(json!({"op":"create_graph","id":"spacing","spec":spec})).unwrap();
-    let header = rendered["children"].as_array().unwrap().iter().find(|child| child["id"].as_str().unwrap().ends_with("-gt-boundary")).unwrap();
-    assert_eq!(header["x"], 44.0); assert_eq!(header["y"], 128.0); assert_eq!(header["height"], 12.0); assert_eq!(header["font_size"], 8.0);
+    let frame = graph_child(&rendered, "-g-boundary");
+    assert_eq!(text_frame(frame), [44.0, 128.0, 960.0, 12.0]);
+    assert_eq!(frame["font_size"], 8.0); assert_eq!(embedded_label(&rendered, "-gt-boundary")["font_size"], 8.0);
+    assert_eq!(frame["format"]["vertical"], "middle");
     let layout = execute_request(json!({"op":"transform_graph","spec":spec,"operations":[{"op":"layout","columns":2}]})).unwrap();
     assert_eq!(layout["nodes"][0]["x"], 182.0);
     assert_eq!(layout["nodes"][0]["y"], 260.0);
@@ -984,9 +1063,10 @@ fn graph_layout_updates_reject_unrelated_stale_and_invalid_metadata() {
     let inserted = execute_request(json!({"op":"insert_part","document":inserted["document"],"expected_revision":2,"slide_id":"slide","id":"architecture","spec":part})).unwrap();
     let before = &inserted["document"];
     let children = before["deck"]["slides"][0]["elements"][1]["children"].as_array().unwrap();
-    let heading = children.iter().position(|child| child["id"].as_str().unwrap().ends_with("-nt-client")).unwrap();
+    let heading = children.iter().position(|child| child["id"].as_str().unwrap().ends_with("-n-client")).unwrap();
     let stale = execute_request(json!({"op":"transaction","document":before,"transaction":{"expected_revision":3,"expected_hash":before["hash"],"operations":[
-        {"op":"replace","path":format!("/deck/slides/0/elements/1/children/{heading}/text"),"value":"Manual edit"}
+        {"op":"replace","path":format!("/deck/slides/0/elements/1/children/{heading}/text"),"value":"Manual edit"},
+        {"op":"replace","path":format!("/deck/slides/0/elements/1/children/{heading}/format/paragraphs/0/runs/0/text"),"value":"Manual edit"}
     ]}})).unwrap();
     assert_eq!(stale["document"]["parts"][2]["stale"], true);
     let mut invalid = before.clone(); invalid["parts"][2]["spec"]["layout"]["width"] = json!(-1);
@@ -1072,18 +1152,16 @@ fn graph_node_detail_defaults_and_fitting_preserve_font_hierarchy() {
         let mut spec=detailed_graph(presentation);
         spec["nodes"][0].as_object_mut().unwrap().remove("detail_font_size");
         let element=execute_request(json!({"op":"create_graph","id":"detail-defaults","spec":spec})).unwrap();
-        let children=element["children"].as_array().unwrap();
-        let heading=children.iter().find(|child|child["id"].as_str().unwrap().ends_with("-nt-client")).unwrap();
-        let detail=children.iter().find(|child|child["id"].as_str().unwrap().ends_with("-nd-client")).unwrap();
+        let heading=embedded_label(&element,"-nt-client");
+        let detail=embedded_label(&element,"-nd-client");
         assert_eq!(heading["bold"],true);
         assert!((detail["font_size"].as_f64().unwrap()-19.2).abs()<0.001);
         spec["nodes"][0]["label"]=json!("A longer heading needs to fit");
         spec["nodes"][0]["width"]=json!(200);
         spec["nodes"][0]["detail"]=json!("Detail");
         let fitted=execute_request(json!({"op":"create_graph","id":"detail-fitting","spec":spec})).unwrap();
-        let children=fitted["children"].as_array().unwrap();
-        let heading=children.iter().find(|child|child["id"].as_str().unwrap().ends_with("-nt-client")).unwrap();
-        let detail=children.iter().find(|child|child["id"].as_str().unwrap().ends_with("-nd-client")).unwrap();
+        let heading=embedded_label(&fitted,"-nt-client");
+        let detail=embedded_label(&fitted,"-nd-client");
         assert!(heading["font_size"].as_f64().unwrap()<24.0);
         assert!(detail["font_size"].as_f64().unwrap()<=heading["font_size"].as_f64().unwrap());
     }
@@ -1110,25 +1188,23 @@ fn bounded_graph_part_font_hierarchy(presentation: &str) {
     let find = |group: &Value, suffix: &str| -> Value {
         group["children"].as_array().unwrap().iter().find(|child| child["id"].as_str().unwrap().ends_with(suffix)).unwrap().clone()
     };
-    assert_eq!(find(&original, "-nt-client")["font_size"], 24.0);
-    assert_eq!(find(&original, "-nd-client")["font_size"], 16.0);
+    assert_eq!(embedded_label(&original, "-nt-client")["font_size"], 24.0);
+    assert_eq!(embedded_label(&original, "-nd-client")["font_size"], 16.0);
     let layout = json!({"x":24,"y":36,"width":1152,"height":256,"show_title":false});
     let part = json!({"version":1,"preset":"diagram/custom","title":spec["title"],"subtitle":spec["subtitle"],"data":{"kind":"diagram","graph":spec},"layout":layout});
     let bounded = execute_request(json!({"op":"create_part","id":"hierarchy","spec":part})).unwrap();
     let assert_hierarchy = |group: &Value| {
-        let heading = find(group, "-nt-client");
-        let detail = find(group, "-nd-client");
+        let heading = embedded_label(group, "-nt-client");
+        let detail = embedded_label(group, "-nd-client");
         let heading_size = heading["font_size"].as_f64().unwrap();
         let detail_size = detail["font_size"].as_f64().unwrap();
         assert!((12.0..16.0).contains(&heading_size), "expected final heading to shrink: {heading_size}");
         assert!(detail_size >= 12.0 && detail_size <= heading_size, "{presentation}: detail {detail_size} exceeds final heading {heading_size}");
-        for child in [heading, detail] {
-            let preview = execute_request(json!({"op":"render_element_preview","element":child})).unwrap();
-            assert!(preview["warnings"].as_array().unwrap().iter().all(|warning| !warning["code"].as_str().unwrap().contains("OVERFLOW")));
-        }
+        let preview = execute_request(json!({"op":"render_element_preview","element":find(group, "-n-client")})).unwrap();
+        assert!(preview["warnings"].as_array().unwrap().iter().all(|warning| !warning["code"].as_str().unwrap().contains("OVERFLOW")), "{preview}");
     };
     assert_hierarchy(&bounded);
-    assert_eq!(find(&bounded, "-nt-client")["height"].as_f64().unwrap(), find(&original, "-nt-client")["height"].as_f64().unwrap() / 2.0);
+    assert_eq!(text_frame(&find(&bounded, "-n-client"))[3], text_frame(&find(&original, "-n-client"))[3] / 2.0);
     assert_eq!(find(&bounded, "-n-client")["stroke_width"], find(&original, "-n-client")["stroke_width"]);
     let document = execute_request(json!({"op":"create_presentation","id":"bounded-hierarchy","title":"Hierarchy"})).unwrap();
     let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":"hierarchy","spec":part})).unwrap();
@@ -1163,26 +1239,29 @@ fn graph_node_details_are_native_bounded_and_aligned_for_cards_and_icons() {
             let element=execute_request(json!({"op":"create_graph","id":"details","spec":spec})).unwrap();
             let children=element["children"].as_array().unwrap();
             let find=|suffix:&str|children.iter().find(|child|child["id"].as_str().unwrap().ends_with(suffix)).unwrap();
-            let heading=find("-nt-client");let detail=find("-nd-client");
-            assert_eq!(heading["type"],"text");assert_eq!(detail["type"],"text");
+            assert!(children.iter().all(|child|!child["id"].as_str().unwrap().contains("-nt-") && !child["id"].as_str().unwrap().contains("-nd-")));
+            let shape=find("-n-client");
+            let heading=embedded_label(&element,"-nt-client");let detail=embedded_label(&element,"-nd-client");
+            assert_eq!(shape["type"],"shape");
             assert_eq!(heading["text"],"Client");assert_eq!(detail["text"],spec["nodes"][0]["detail"]);
             assert_eq!(heading["bold"],false);assert_eq!(detail["bold"],false);
-            assert_eq!(heading["format"]["alignment"],alignment.unwrap_or("left"));
-            assert_eq!(detail["format"]["alignment"],alignment.unwrap_or("left"));
-            assert_eq!(heading["format"]["vertical"],"top");assert_eq!(detail["format"]["vertical"],"top");
+            assert_eq!(heading["alignment"],alignment.unwrap_or("left"));
+            assert_eq!(detail["alignment"],alignment.unwrap_or("left"));
+            assert_eq!(shape["format"]["alignment"],alignment.unwrap_or("left"));
+            assert_eq!(shape["format"]["vertical"],"top");
             assert!(detail["font_size"].as_f64().unwrap()>=12.0);
             assert!(detail["font_size"].as_f64().unwrap()<=heading["font_size"].as_f64().unwrap());
-            assert_eq!(heading["x"],detail["x"]);assert_eq!(heading["width"],detail["width"]);
-            assert!(heading["y"].as_f64().unwrap()+heading["height"].as_f64().unwrap()+8.0<=detail["y"].as_f64().unwrap());
-            assert!(detail["y"].as_f64().unwrap()+detail["height"].as_f64().unwrap()<=240.0);
+            let gap=&shape["format"]["paragraphs"][1]["space_before"];
+            assert_eq!(gap,&json!({"kind":"points","value":600}),"8px gap between heading and detail");
+            let [frame_left,frame_top,frame_width,frame_height]=text_frame(shape);
+            let [node_left,node_top,node_width,node_height]=graph_rect(shape);
+            assert!(frame_left>=node_left && frame_top>=node_top && frame_left+frame_width<=node_left+node_width && frame_top+frame_height<=node_top+node_height);
             let picture=find("-ni-client");
-            if presentation=="icon" {assert!(picture["y"].as_f64().unwrap()+picture["height"].as_f64().unwrap()+8.0<=heading["y"].as_f64().unwrap());}
-            else {assert!(picture["x"].as_f64().unwrap()+picture["width"].as_f64().unwrap()<heading["x"].as_f64().unwrap());}
-            let edge=find("-e-request");assert_eq!(edge["start"]["element_id"],find("-n-client")["id"]);
-            for label in [heading,detail] {
-                let preview=execute_request(json!({"op":"render_element_preview","element":label})).unwrap();
-                assert!(preview["warnings"].as_array().unwrap().iter().all(|warning|!warning["code"].as_str().unwrap().contains("OVERFLOW")));
-            }
+            if presentation=="icon" {assert!(picture["y"].as_f64().unwrap()+picture["height"].as_f64().unwrap()+8.0<=frame_top);}
+            else {assert!(picture["x"].as_f64().unwrap()+picture["width"].as_f64().unwrap()<frame_left);}
+            let edge=find("-e-request");assert_eq!(edge["start"]["element_id"],shape["id"]);
+            let preview=execute_request(json!({"op":"render_element_preview","element":shape})).unwrap();
+            assert!(preview["warnings"].as_array().unwrap().iter().all(|warning|!warning["code"].as_str().unwrap().contains("OVERFLOW")),"{preview}");
         }
     }
 }
@@ -1225,11 +1304,13 @@ fn graph_node_details_and_hidden_title_roundtrip_update_and_undo() {
         assert_eq!(opened["document"]["parts"][0]["stale"],false);
         assert_eq!(opened["document"]["parts"][0]["spec"],inserted["document"]["parts"][0]["spec"]);
         let children=opened["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap();
-        assert!(children.iter().any(|child|child["type"]=="text" && child["text"]=="Validate access\nRecord outcome"));
+        let restored_shape=children.iter().find(|child|child["id"].as_str().unwrap().ends_with("-n-client")).unwrap();
+        assert_eq!(restored_shape["text"],"Client\nValidate access\nRecord outcome","{restored_shape}");
         assert!(children.iter().all(|child|!child["id"].as_str().unwrap().ends_with("-title")));
+        let restored_group=&opened["document"]["deck"]["slides"][0]["elements"][0];
         for (suffix,bold) in [("-nt-client",true),("-nd-client",false)] {
-            let restored=children.iter().find(|child|child["id"].as_str().unwrap().ends_with(suffix)).unwrap();
-            assert_eq!(restored["bold"],bold);assert_eq!(restored["format"]["alignment"],"left");
+            let restored=embedded_label(restored_group,suffix);
+            assert_eq!(restored["bold"],bold);assert_eq!(restored["alignment"],"left");
         }
         let mut node=spec["nodes"][0].clone();node["detail"]=json!("Updated detail");node["text_align"]=json!("right");
         let updated=execute_request(json!({"op":"apply_graph","document":opened["document"],"expected_revision":0,"slide_id":"slide-1","id":"architecture","operations":[{"op":"put_node","node":node}]})).unwrap();
@@ -1325,28 +1406,36 @@ fn cloud_graph() -> Value {
 fn cloud_graph_icon_presentation_and_nested_boundaries() {
     use sha2::{Digest, Sha256};
     let legacy = execute_request(json!({"op":"create_graph","id":"legacy","spec":graph()})).unwrap();
-    assert_eq!(format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap())), "256f078a12873dfc67e884507ea071a9ab1f8dcb7ffee599aa4bd8f5806e02ea");
+    assert_eq!(format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap())), "49aeffe4dfb70a63961e00a45ff50b2ac6222908639168f849a3381b5720b600");
     let spec = cloud_graph();
     let element = execute_request(json!({"op":"create_graph","id":"cloud-test","spec":spec})).unwrap();
     let children = element["children"].as_array().unwrap();
     let find = |suffix: &str| children.iter().find(|child| child["id"].as_str().unwrap().ends_with(suffix)).unwrap();
     let picture = find("-ni-service");
-    let label = find("-nt-service");
     let anchor = find("-n-service");
+    let label = embedded_label(&element, "-nt-service");
+    let [_, frame_top, _, frame_height] = text_frame(anchor);
+    assert_eq!(label["text"], "Service\ninstance");
     assert_eq!(picture["base64"], spec["nodes"][0]["icon"]["base64"]);
     assert_eq!(picture["width"], picture["height"]);
     assert!((56.0..=96.0).contains(&picture["height"].as_f64().unwrap()));
-    assert!(picture["y"].as_f64().unwrap() + picture["height"].as_f64().unwrap() + 8.0 <= label["y"].as_f64().unwrap());
-    assert!(label["height"].as_f64().unwrap() >= 38.4);
+    assert!(picture["y"].as_f64().unwrap() + picture["height"].as_f64().unwrap() + 8.0 <= frame_top);
+    assert!(frame_height >= 38.4);
     assert_eq!(anchor["fill"], "none");
     assert_eq!(anchor["stroke_width"], 0.0);
     let edge = find("-e-traffic");
     assert_eq!(edge["start"]["element_id"], anchor["id"]);
-    let order: Vec<_> = children.iter().filter_map(|child| child["id"].as_str()).filter(|id| id.contains("-g-")).map(|id| id.rsplit("-g-").next().unwrap()).collect();
+    let order: Vec<_> = children.iter().filter_map(|child| child["id"].as_str()).filter_map(|id| id.rsplit_once("-g-").or_else(|| id.rsplit_once("-gg-")).map(|(_, entity)| entity)).collect();
     assert_eq!(order, ["cloud", "region", "vpc", "subnet"]);
-    let header = find("-gi-cloud");
+    let cloud = find("-gg-cloud");
+    assert_eq!(cloud["type"], "group");
+    assert_eq!(graph_rect(cloud), [16.0, 96.0, 1000.0, 408.0]);
+    let header = nested_child(&element, "-gi-cloud");
+    let frame = nested_child(&element, "-g-cloud");
+    assert_eq!(graph_rect(frame), [0.0, 0.0, 1000.0, 408.0]);
     assert_eq!(header["width"].as_f64().unwrap() / header["height"].as_f64().unwrap(), 2.0);
-    assert!(header["x"].as_f64().unwrap() + header["width"].as_f64().unwrap() < find("-gt-cloud")["x"].as_f64().unwrap());
+    assert!(header["x"].as_f64().unwrap() + header["width"].as_f64().unwrap() < text_frame(frame)[0]);
+    assert_eq!(embedded_label(&element, "-gt-cloud")["text"], "Cloud");
 }
 
 #[test]
@@ -1582,7 +1671,9 @@ fn graph_node_icons_render_as_native_pictures_with_separate_labels_and_connectio
     let element = execute_request(json!({"op":"create_graph","id":"icons","spec":spec})).unwrap();
     let children = element["children"].as_array().unwrap();
     let picture = children.iter().find(|child| child["type"] == "picture").unwrap();
-    let label = children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-nt-client")).unwrap();
+    let shape = children.iter().find(|child| child["id"].as_str().unwrap().ends_with("-n-client")).unwrap();
+    let [label_x, _, label_width, _] = text_frame(shape);
+    assert_eq!(shape["text"], "Client");
     let connector = children.iter().find(|child| child["type"] == "connector").unwrap();
     assert_eq!(picture["base64"], spec["nodes"][0]["icon"]["base64"]);
     assert_eq!(picture["alt"], "Client icon");
@@ -1590,8 +1681,8 @@ fn graph_node_icons_render_as_native_pictures_with_separate_labels_and_connectio
     assert!(picture["x"].as_f64().unwrap() >= 48.0);
     assert!(picture["y"].as_f64().unwrap() >= 160.0);
     assert!(picture["y"].as_f64().unwrap() + picture["height"].as_f64().unwrap() <= 256.0);
-    assert!(picture["x"].as_f64().unwrap() + picture["width"].as_f64().unwrap() < label["x"].as_f64().unwrap());
-    assert!(label["x"].as_f64().unwrap() + label["width"].as_f64().unwrap() <= 248.0);
+    assert!(picture["x"].as_f64().unwrap() + picture["width"].as_f64().unwrap() < label_x);
+    assert!(label_x + label_width <= 248.0);
     assert!(connector["start"]["element_id"].as_str().unwrap().ends_with("-n-client"));
     let saved = execute_request(json!({"op":"export","deck":deck(element)})).unwrap();
     let bytes = STANDARD.decode(saved["base64"].as_str().unwrap()).unwrap();
@@ -1606,8 +1697,8 @@ fn graph_node_icons_render_as_native_pictures_with_separate_labels_and_connectio
     default_width["nodes"][0]["label"] = json!("Application");
     default_width["nodes"][0]["icon"] = node_icon("#0017c1");
     let compact = execute_request(json!({"op":"create_graph","id":"compact","spec":default_width})).unwrap();
-    let compact_label = compact["children"].as_array().unwrap().iter().find(|child| child["id"].as_str().unwrap().ends_with("-nt-client")).unwrap();
-    assert!(compact_label["width"].as_f64().unwrap() >= 97.0);
+    let compact_shape = compact["children"].as_array().unwrap().iter().find(|child| child["id"].as_str().unwrap().ends_with("-n-client")).unwrap();
+    assert!(text_frame(compact_shape)[2] >= 97.0);
 }
 
 #[test]

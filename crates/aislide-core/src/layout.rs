@@ -58,6 +58,12 @@ pub(crate) fn graph_text_metrics(text: &str, width: f64, height: f64, size: f64,
     Ok(measure_plain(&mut fonts, "graph", "text", text, width, height, size, bold, &TextFormat::default(), theme))
 }
 
+pub(crate) fn graph_rich_metrics(text: &str, width: f64, height: f64, size: f64, bold: bool, format: &TextFormat, theme: &Theme) -> Result<Measurement> {
+    let mut fonts = FONTS.get_or_init(|| Mutex::new(FontSystem::new())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
+    if fonts.db().faces().next().is_none() { return Err(Error::Unsupported("installed fonts are required for graph text fitting".into())); }
+    Ok(measure(&mut fonts, "graph", "text", text, width, height, size, bold, format, theme))
+}
+
 fn measure_rich(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width: f64, height: f64, size: f64, bold: bool, format: &TextFormat, theme: &Theme) -> Measurement {
     use crate::rich_text::{RunStyle, Spacing};
     let mut measured_width = 0.0f32; let mut measured_height = 0.0f32; let mut lines = 0; let mut missing = 0;

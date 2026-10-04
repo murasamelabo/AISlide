@@ -354,15 +354,21 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
 fn graph_part(id: &str, spec: &PartSpec, graph: &crate::graphs::GraphSpec, theme: &crate::design::Theme) -> Result<Element> {
     let Some(layout) = &spec.layout else { return crate::graphs::create(id, graph, theme); };
     let (graph_id, rendered_graph, content_height) = graph_context(id, spec, graph)?;
-    let mut result = crate::graphs::create(&graph_id, &rendered_graph, theme)?;
-    if let Element::Group { id: root_id, .. } = &mut result { *root_id = id.into(); }
-    adopt_layout(&mut result, layout, 0.0, content_height, theme, &crate::graphs::small_annotation_ids(&graph_id, &rendered_graph)?)?;
-    if let Element::Group { children, .. } = &mut result {
-        crate::graphs::fit_node_labels(&graph_id, &rendered_graph, children, theme)?;
-        crate::graphs::cap_detail_fonts(&graph_id, &rendered_graph, children)?;
-        crate::graphs::fit_detail_widows(&graph_id, &rendered_graph, children, theme)?;
-        crate::graphs::validate_label_overlaps(&graph_id, &rendered_graph, children)?;
-    }
+    let fitted = (|| -> Result<Element> {
+        let mut result = crate::graphs::create_with_label_boxes(&graph_id, &rendered_graph, theme)?;
+        if let Element::Group { id: root_id, .. } = &mut result { *root_id = id.into(); }
+        adopt_layout(&mut result, layout, 0.0, content_height, theme, &crate::graphs::small_annotation_ids(&graph_id, &rendered_graph)?)?;
+        if let Element::Group { children, .. } = &mut result {
+            crate::graphs::fit_node_labels(&graph_id, &rendered_graph, children, theme)?;
+            crate::graphs::cap_detail_fonts(&graph_id, &rendered_graph, children)?;
+            crate::graphs::fit_detail_widows(&graph_id, &rendered_graph, children, theme)?;
+            crate::graphs::validate_label_overlaps(&graph_id, &rendered_graph, children)?;
+        }
+        Ok(result)
+    })();
+    let mut result = fitted.map_err(|error| crate::graphs::public_label_error(&graph_id, &rendered_graph, error))?;
+    if let Element::Group { children, .. } = &mut result { crate::graphs::embed_text(&graph_id, &rendered_graph, children, theme)?; }
+    validate_elements(std::slice::from_ref(&result), (1280.0, 720.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
     Ok(result)
 }
 

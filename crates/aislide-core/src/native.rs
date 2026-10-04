@@ -266,6 +266,10 @@ fn read_element(package: &Package, part: &str, node: Node<'_, '_>, scale: (f64, 
         if visual.as_ref() == Some(&crate::visual::VisualStyle::default()) { visual = None; }
     }
     if let Some(target) = element.visual_mut() { *target = visual; }
+    // bodyPr insets are relative to the preset text rectangle; the model stores frame-relative padding.
+    // A tiny shape whose insets already fill its text rectangle keeps the raw insets so it stays editable.
+    let converted = match &element { Element::Shape { format: crate::model::TextFormat { padding: Some(insets), .. }, width, height, .. } => crate::model::frame_text_padding(&element, insets).filter(|padding| padding.validate(*width, *height).is_ok()), _ => None };
+    if let (Some(converted), Element::Shape { format, .. }) = (converted, &mut element) { format.padding = Some(converted); }
     Ok(element)
 }
 

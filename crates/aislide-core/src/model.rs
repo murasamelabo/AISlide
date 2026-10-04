@@ -101,6 +101,47 @@ impl TextPadding {
         Ok(())
     }
 }
+
+// AISlide padding is measured from the shape frame, while DrawingML bodyPr insets are measured from the
+// preset geometry's own text rectangle (ECMA-376 presetShapeDefinitions). Returns that rectangle's
+// left/top/right/bottom distance from the frame for presets written as prstGeom, or None when unmodelled.
+pub(crate) fn preset_text_inset(element: &Element) -> Option<TextPadding> {
+    let Element::Shape { preset, width, height, visual, .. } = element else { return None; };
+    // Custom connection sites are written as custGeom whose text rectangle is the whole frame.
+    if visual.as_ref().is_some_and(|style| !style.connection_sites.is_empty()) { return Some(TextPadding::default()); }
+    let (width, height) = (*width, *height);
+    let short = width.min(height);
+    let adjustment = |default: f64| visual.as_ref().and_then(|style| style.adjustments.iter().find(|adjustment| adjustment.name == "adj")).map_or(default, |adjustment| f64::from(adjustment.value));
+    let uniform = |inset: f64| TextPadding { left: inset, right: inset, top: inset, bottom: inset };
+    Some(match preset.as_str() {
+        "rect" => TextPadding::default(),
+        "roundRect" => uniform(short * adjustment(16667.0).clamp(0.0, 50000.0) / 100000.0 * 29289.0 / 100000.0),
+        "ellipse" => {
+            let (horizontal, vertical) = (width / 2.0 * (1.0 - std::f64::consts::FRAC_1_SQRT_2), height / 2.0 * (1.0 - std::f64::consts::FRAC_1_SQRT_2));
+            TextPadding { left: horizontal, right: horizontal, top: vertical, bottom: vertical }
+        }
+        "diamond" => TextPadding { left: width / 4.0, right: width / 4.0, top: height / 4.0, bottom: height / 4.0 },
+        "can" => { let cap = short * 25000f64.min(50000.0 * height / short) / 200000.0; TextPadding { left: 0.0, right: 0.0, top: 2.0 * cap, bottom: cap } }
+        "cloud" => TextPadding { left: width * 2977.0 / 21600.0, right: width * 4513.0 / 21600.0, top: height * 3262.0 / 21600.0, bottom: height * 4263.0 / 21600.0 },
+        _ => return None,
+    })
+}
+
+// DrawingML insets for an explicit frame-relative padding; negative values are valid OOXML coordinates.
+// Both sides are rounded to whole EMU so writing and reading back reproduce the padding exactly.
+pub(crate) fn drawing_text_insets(element: &Element) -> Option<TextPadding> {
+    let (Element::Text { format, .. } | Element::Shape { format, .. }) = element else { return None; };
+    let padding = format.padding.clone()?;
+    let Some(inset) = preset_text_inset(element) else { return Some(padding); };
+    let shift = |value: f64, inset: f64| ((value * 9525.0).round() - (inset * 9525.0).round()) / 9525.0;
+    Some(TextPadding { left: shift(padding.left, inset.left), right: shift(padding.right, inset.right), top: shift(padding.top, inset.top), bottom: shift(padding.bottom, inset.bottom) })
+}
+
+pub(crate) fn frame_text_padding(element: &Element, insets: &TextPadding) -> Option<TextPadding> {
+    let inset = preset_text_inset(element)?;
+    let shift = |value: f64, inset: f64| ((value * 9525.0).round() + (inset * 9525.0).round()) / 9525.0;
+    Some(TextPadding { left: shift(insets.left, inset.left), right: shift(insets.right, inset.right), top: shift(insets.top, inset.top), bottom: shift(insets.bottom, inset.bottom) })
+}
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TextFormat {

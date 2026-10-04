@@ -24,7 +24,9 @@ fn explicit_text_padding_is_native_and_survives_reopening() {
         let bytes = export_deck(deck(input));
         let package = Package::open(bytes.clone()).unwrap();
         let xml = package.text("ppt/slides/slide1.xml").unwrap();
-        for attribute in ["lIns=\"228600\"", "rIns=\"228600\"", "tIns=\"152400\"", "bIns=\"152400\""] { assert!(xml.contains(attribute), "{attribute}"); }
+        // Shape insets are measured from the roundRect text rectangle (16.667% corner, 29.289% of it inset).
+        let inset = if shape { (600.0_f64 * 16667.0 / 100000.0 * 29289.0 / 100000.0 * 9525.0).round() as i64 } else { 0 };
+        for (name, value) in [("lIns", 228600), ("rIns", 228600), ("tIns", 152400), ("bIns", 152400)] { let attribute = format!("{name}=\"{}\"", value - inset); assert!(xml.contains(&attribute), "{attribute}"); }
         let document = open(&bytes);
         assert_eq!(document["deck"]["slides"][0]["elements"][0]["format"]["padding"], padding);
         assert_eq!(export_document(&document), bytes);

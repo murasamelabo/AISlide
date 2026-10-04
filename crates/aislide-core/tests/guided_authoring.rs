@@ -155,7 +155,10 @@ fn guided_authoring_graph_detail_typography_is_not_a_factual_number() {
     assert_eq!(created["document"]["parts"][0]["stale"],false);
     assert_eq!(created["document"]["parts"][0]["spec"]["data"]["graph"]["nodes"][0]["detail_font_size"],16.0);
     let children=created["document"]["deck"]["slides"][0]["elements"][4]["children"].as_array().unwrap();
-    assert!(children.iter().any(|child|child["id"].as_str().unwrap().ends_with("-nd-review")));
+    let node=children.iter().find(|child|child["id"].as_str().unwrap().ends_with("-n-review")).unwrap();
+    assert_eq!(node["text"],"Review\nCheck evidence\nConfirm scope");
+    assert_eq!(node["format"]["paragraphs"][1]["runs"][0]["style"]["font_size"],16.0);
+    assert!(children.iter().all(|child|!child["id"].as_str().unwrap().ends_with("-nd-review")));
     assert!(children.iter().all(|child|!child["id"].as_str().unwrap().ends_with("-title")));
 }
 

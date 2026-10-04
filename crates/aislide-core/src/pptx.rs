@@ -375,7 +375,10 @@ fn shape(writer: &mut XmlWriter, element: &Element, id: usize, ids: &BTreeMap<&s
     writer.end_element();
     }
     writer.end_element();
-    if let Element::Text { text, font_size, color, bold, format, .. } | Element::Shape { text, font_size, color, bold, format, .. } = element { formatted_text_body(writer, "p:txBody", text, *font_size, color, *bold, format, format.hyperlink.as_ref().map(|_| format!("rIdLink{id}")).as_deref(), theme); }
+    if let Element::Text { text, font_size, color, bold, format, .. } | Element::Shape { text, font_size, color, bold, format, .. } = element {
+        let mut written = format.clone(); written.padding = crate::model::drawing_text_insets(element);
+        formatted_text_body(writer, "p:txBody", text, *font_size, color, *bold, &written, format.hyperlink.as_ref().map(|_| format!("rIdLink{id}")).as_deref(), theme);
+    }
     writer.end_element();
 }
 
