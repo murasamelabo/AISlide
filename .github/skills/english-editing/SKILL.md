@@ -19,9 +19,10 @@ speaker notes. Use [meaning checks and sources](./references/checks-and-sources.
 when a change could alter meaning or when reviewing the skill's rationale.
 These are guidance, not rewriting scripts.
 
-Return edits with the supplied purpose and voice. Wording-only edits skip
-`slide-planning`. `aislide-authoring` owns PPTX operations; never invoke
-`tech-deck-ja` for English. Other documents need no MCP.
+Return edits to the caller with the supplied purpose and voice; start no other
+deck or research. Wording-only edits skip `slide-planning`. `aislide-authoring`
+owns PPTX operations; never invoke `tech-deck-ja` for English. Other documents
+need no MCP.
 
 ## Preserve before polishing
 

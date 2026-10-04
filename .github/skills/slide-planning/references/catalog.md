@@ -41,6 +41,7 @@
 | `incident-briefing` | public | 障害・危機対応の説明・incident briefing | [発信](public.md#incident-briefing) |
 | `creative-proposal` | public | デザイン・クリエイティブ提案・creative pitch | [発信](public.md#creative-proposal) |
 
-「セミナー」「webinar」「LT」は開催形式、「スマホ版」は閲覧条件として別途記録する。
-統合報告書などの冊子全体を扱う分類ではなく、その内容を説明するスライドも含む。
+「セミナー」「webinar」「LT」「ワークショップ形式」は開催形式、「スマホ版」は閲覧条件として別途記録する。
+開催名だけで用途を決めず、参加者が成果物や合意を作る場合だけ `workshop` を用途にする。
+統合報告書などの冊子そのものではなく、その内容を説明するスライドを対象とする。
 この表はスキル用の編集指針であり、決定論的な分類器や新しい core/MCP API ではない。

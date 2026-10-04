@@ -182,6 +182,54 @@ test('slide planning covers 33 purposes with bounded routing and portable refere
   assert.ok(guide.includes('slide-planning/SKILL.md'));
 });
 
+for (const [name, rules] of [
+  ['tech-deck-ja', [
+    /description:.*採用・営業提案・会社紹介.*技術が題材にすぎない.*slide-planning/,
+    /読者の到達点が技術の理解・判断ではなく/,
+    /`slide-planning` へ一度だけ渡す/,
+    /未配置なら用途の不一致を伝えて確認する/,
+  ]],
+  ['english-editing', [
+    /Return edits to the caller with the supplied purpose and voice/,
+    /start no other\s+deck or research/,
+  ]],
+  ['aislide-authoring', [
+    /Reuse supplied ledgers without replanning/,
+    /For new structure without a ledger, use `slide-planning` once; ask if absent/,
+  ]],
+  ['slide-planning', [
+    /Specify delivery separately: live talk, read-alone PDF, hands-on session or recorded talk/,
+    /not\s+new MCP parameters or guided `profile_id` values/,
+  ]],
+]) {
+  test(`${name} retains its purpose and handoff boundary when selected directly`, async () => {
+    const entry = await readFile(new URL(`../.github/skills/${name}/SKILL.md`, import.meta.url), 'utf8');
+    for (const rule of rules) assert.match(entry, rule);
+    const windowsBytes = Buffer.byteLength(entry.replace(/\r?\n/g, '\r\n'));
+    if (name !== 'tech-deck-ja') assert.ok(windowsBytes <= 6000, `${name} exceeds the Windows checkout skill budget: ${windowsBytes}`);
+  });
+}
+
+test('purpose catalog distinguishes workshop delivery and slide-only scope', async () => {
+  const catalog = await readFile(new URL('../.github/skills/slide-planning/references/catalog.md', import.meta.url), 'utf8');
+  assert.match(catalog, /「ワークショップ形式」.*開催形式/);
+  assert.match(catalog, /参加者が成果物や合意を作る場合だけ `workshop` を用途にする/);
+  assert.match(catalog, /冊子そのものではなく、その内容を説明するスライドを対象とする/);
+});
+
+test('skill setup documentation includes purpose planning and the shared installation guide', async () => {
+  const guide = new URL('../.github/skills/README.md', import.meta.url);
+  for (const path of ['../README.md', '../docs/authoring/README.md']) {
+    const page = new URL(path, import.meta.url);
+    const content = await readFile(page, 'utf8');
+    assert.ok(content.includes('`slide-planning`'), `Missing planning setup in ${path}`);
+    assert.doesNotMatch(content, /両方をユーザースコープ|paired installation/);
+    const links = [...content.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)];
+    assert.ok(links.some(match => new URL(match[1], page).href === guide.href), `Missing shared installation guide in ${path}`);
+  }
+  await readFile(guide, 'utf8');
+});
+
 test('English editing skill covers English structure and presentation-specific meaning checks', async () => {
   const skillUrl = new URL('../.github/skills/english-editing/SKILL.md', import.meta.url);
   const skill = await readFile(skillUrl, 'utf8');

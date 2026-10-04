@@ -1,38 +1,38 @@
 ﻿---
 name: aislide-authoring
-description: 'AISlide MCP / SDK で編集可能な PowerPoint / PPTX を作成・編集・検証・書き出しするときに使う。画像、ノート、アクセシビリティ、型付きバッチ、検証・busy・revision エラーの回復を担当する。新規構成は slide-planning に任せ、同じ台帳で実行する。'
+description: 'AISlide MCP / SDK で編集可能な PowerPoint / PPTX を作成・編集・検証・書き出しするときに使う。画像、ノート、アクセシビリティ、型付きバッチ、検証・busy・revision エラーの回復を担当する。既存台帳を優先し、台帳のない新規構成だけを slide-planning に任せる。'
 ---
 
 # AISlide Authoring
 
 ## Scope
 
-Use AISlide core via MCP/SDK only. New structure: `slide-planning`; reuse ledgers.
+Use AISlide core via MCP/SDK only. Reuse supplied ledgers without replanning.
+For new structure without a ledger, use `slide-planning` once; ask if absent.
 Wording: [Japanese](../japanese-editing/SKILL.md), [English](../english-editing/SKILL.md).
 Bounded edits skip planning. Honor scope/language; distinguish facts and assumptions.
 Skills do not connect MCP. Label synthetic data.
 
 ## Short Workflow
 
-1. Confirm audience, purpose, required pages, evidence, original images and notes.
-	Never invent data or replace a required source image with a redraw.
-2. Resume with `list_decks` / `get_deck_summary`. Discover advanced tools and fetch
+1. Confirm audience, purpose, required pages, evidence, source images and notes.
+	Never invent data or redraw required source images.
+2. Use `list_decks` / `get_deck_summary` for IDs. Discover advanced tools; fetch
 	`get_tool_schema({name:"apply_operations"})` before advanced elements, rich text,
-	composition, parts or graphs. Avoid full-deck reads for IDs.
-3. Choose `compile_report` for its fixed layouts, guided authoring for evidence-led
-	outlines, or `create_presentation` for content-oriented/freeform work. Set
+	composition, parts or graphs.
+3. Choose fixed `compile_report` layouts, evidence-led guided authoring, or freeform
+	`create_presentation`. Set
 	`setup:{design_preset,font_family,theme?}` before inserting diagrams: preset,
 	explicit theme, then font override, at revision zero. Confirm installed Japanese
 	glyph coverage; naming a font does not install/embed it. On older servers,
 	set the theme before content.
-4. Establish reusable title/header/footer/body regions and styles. On generated
-	empty slides, `compose_slide` accepts 1-3 blocks: cards, callout, text, steps,
-	comparison, part or graph. Reuse `style`; default card padding is 24px. Existing
-	native/nonempty slides reject. Use explicit editing to preserve templates.
+4. Reuse title/header/footer/body regions and styles. On generated empty slides,
+	`compose_slide` accepts 1-3 blocks: cards, callout, text, steps, comparison, part
+	or graph. Reuse `style`; default card padding is 24px. Native/nonempty slides
+	reject; edit them explicitly to preserve templates.
 	If `layout_patterns` exists and the user has not opted out, resolve one per
 	slide for the deck, use its frames and follow `fallback` when `fits` is false.
-5. For an icon-led briefing style read `references/technical-panels.md`
-	(panels, icon cards/rows, shifts, steps, agenda, screenshot callouts, Lucide icons) only on request.
+5. For a requested icon-led briefing style, read `references/technical-panels.md`.
 	Prefer managed parts/graphs. A composition graph block takes coordinate-free
 	`input` and inserts managed metadata in one operation. `layout_graph` returns
 	a bounded grid GraphSpec, not a hierarchical layout: 1-48 nodes, 64 edges,
@@ -84,6 +84,5 @@ Skills do not connect MCP. Label synthetic data.
 
 ## Further Detail
 
-This workflow is portable after copying. When a source checkout is available,
-consult `<repo>/docs/api.md` and `<repo>/docs/authoring/README.md` as needed;
-never assume a fixed relative path from a user-level installation to the repo.
+With a source checkout, consult `<repo>/docs/api.md` and `<repo>/docs/authoring/README.md`.
+For user-level installs, do not assume a relative path to the repo.
