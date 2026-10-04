@@ -1,15 +1,21 @@
 ﻿# 再利用可能な資料作成スキル
 
-日本語の技術ストーリーと AISlide の PPTX 実行手順を分離した、リポジトリ管理のスキル例です。特定の業界、顧客、個人環境に依存しません。このページの導入手順は利用者向けの説明であり、スキル配置、MCP 設定、公開を自動実行するものではありません。
+日本語・英語の編集、技術ストーリーの構成、AISlide の PPTX 実行手順を分離した、リポジトリ管理のスキル例です。特定の業界、顧客、個人環境に依存しません。このページの導入手順は利用者向けの説明であり、スキル配置、MCP 設定、公開を自動実行するものではありません。
 
 ## 使い分け
 
 | スキル | 担当 | 入口 |
 | --- | --- | --- |
+| [japanese-editing](japanese-editing/SKILL.md) | 意味を保った日本語の推敲。プレゼンの見出し・本文・図表ラベル・ノート、提案、報告、メール、技術文書など | 日本語を読みやすくする依頼。文章のみでも単独使用可能 |
+| [english-editing](english-editing/SKILL.md) | 英語の語順・冠詞・法助動詞・修飾・並列性を踏まえた推敲。プレゼン、提案、報告、メールなど | 英文を明快で自然にする依頼。日本語ルールの翻訳ではない独立した編集手順 |
 | [tech-deck-ja](tech-deck-ja/SKILL.md) | 日本語の技術ストーリー、根拠台帳、説明順序、報告調の本文 | 日本語の技術説明資料を新規に構成するとき |
 | [aislide-authoring](aislide-authoring/SKILL.md) | AISlide core / MCP / SDK による編集可能な PPTX の作成、検証、納品 | PPTX の編集・書き出し、または構成後の実行 |
 
-既存の `aislide-authoring` を共通実行基盤として再利用し、`tech-deck-ja` は構成担当として追加します。HTML スライド用のスキルを複製して別の PPTX 実装を持たせる方式ではありません。外部スキルや PPTX エンジンは取り込みません。
+`japanese-editing` / `english-editing` は対象言語の文言、`tech-deck-ja` は日本語の技術的な構成、`aislide-authoring` は PPTX 実行を担当します。技術以外の提案・業務報告・案内にも編集スキルを使えます。混在資料は対象の文章・ページごとに言語を選び、同じ文章に両方の規則を重ねません。翻訳が必要な場合は推敲と分けます。構成が承認済みなら文言だけを整え、再構成しません。
+
+日本語編集では [nanaism/yomiyasu](https://github.com/nanaism/yomiyasu)（MIT）の意味保持・文脈に基づく推敲を参考に、独自の手順と架空例を記述しています。上流のスキル本文・文章例・検査スクリプトは複製・インストールしていません。箇条書き比率や文長を固定の合否基準にせず、投影・配布・ノートの役割に合わせます。これは AISlide 全体のライセンス選定ではありません。
+
+英語編集では、NARA の plain language 原則、Google の条件と指示の配置、assertion-evidence のプレゼン方針を参照し、Humanizer と既存の執筆スキルを比較しました。[調査元と意味保持の確認例](english-editing/references/checks-and-sources.md) に採用点と採用しなかった規則を記載しています。読み手に不要な推測をさせないことを目標にし、受動態・代名詞・長文・特定の単語を一律に禁止しません。AI検出器の回避や筆者の体験の創作は目的に含めません。
 
 ## 前提条件
 
@@ -28,27 +34,54 @@ node "<repo>/tools/mcp.mjs" --output-dir "<output>" --asset-dir "<assets>"
 
 ## 配置先を一つ選ぶ
 
-以下の二つのディレクトリを **同じスコープへ、名前を変えずディレクトリごと** コピーします。
+文章編集だけなら対象言語の編集スキルを単独で使えます。PPTX 作成には `aislide-authoring`、日本語の技術資料の構成も必要なら `tech-deck-ja` を加え、**同じスコープへ、名前を変えずディレクトリごと** コピーします。日英両方を扱う場合は両編集スキルを置き、必要な方だけ読み込みます。編集スキルの `references/` も含めます。
 
 | コピー元 | ユーザースコープ: 複数リポジトリで使用 | リポジトリスコープ: そのプロジェクトだけで使用 |
 | --- | --- | --- |
+| `<repo>/.github/skills/japanese-editing/` | `~/.copilot/skills/japanese-editing/` | `<project>/.github/skills/japanese-editing/` |
+| `<repo>/.github/skills/english-editing/` | `~/.copilot/skills/english-editing/` | `<project>/.github/skills/english-editing/` |
 | `<repo>/.github/skills/aislide-authoring/` | `~/.copilot/skills/aislide-authoring/` | `<project>/.github/skills/aislide-authoring/` |
 | `<repo>/.github/skills/tech-deck-ja/` | `~/.copilot/skills/tech-deck-ja/` | `<project>/.github/skills/tech-deck-ja/` |
 
-Windows の `~` は通常 `%USERPROFILE%` に相当します。ホストが対応する `~/.agents/skills/` 等を既に使っている場合は、その一つの探索先へ統一します。すべての探索先へ複製しません。この AISlide リポジトリ内で使う場合、二つとも既にリポジトリスコープにあるため、追加コピーは不要です。
+Windows の `~` は通常 `%USERPROFILE%` に相当します。ホストが対応する `~/.agents/skills/` 等を既に使っている場合は、その一つの探索先へ統一します。すべての探索先へ複製しません。この AISlide リポジトリ内では四つともリポジトリスコープにあるため、追加コピーは不要です。
 
 1. ユーザー用かリポジトリ用かを選び、ホストが読む他の探索先も含めて同名スキルの有無を確認します。既存の個人版・マーケットプレイス版を無断で上書き・削除しません。
-2. コピー先に同名のディレクトリがなければ親ディレクトリを用意し、上表の二つをコピーします。既存版があれば差分を確認し、どちらを有効にするか利用者が選びます。同名の複数版の読み込み優先順位に依存しません。
-3. `SKILL.md` の直上のディレクトリ名と frontmatter の `name` が一致することを確認します。`tech-deck-ja` から隣の `aislide-authoring` への参照を維持します。ファイルは UTF-8 BOM 一つを保ちます。
+2. コピー先に同名のディレクトリがなければ親ディレクトリを用意し、必要な役割のスキルをコピーします。既存版があれば差分を確認し、どちらを有効にするか利用者が選びます。同名の複数版の読み込み優先順位に依存しません。
+3. `SKILL.md` の直上のディレクトリ名と frontmatter の `name` が一致することを確認します。隣のスキルと `references/` への相対参照を維持します。ファイルは UTF-8 BOM 一つを保ちます。
 4. エージェントホストのスキル一覧・診断、または明示呼び出しで、各名前が意図した一つの配置先から認識されることを確認します。スキルを認識できることと MCP に接続できることは別々に確認します。
 
-二つの役割を読み込むこと自体は重複ではありません。`tech-deck-ja` が構成し、`aislide-authoring` が実行する一つの作業です。両者で別々に調査やスライド生成を開始せず、相互転送のループも作りません。既存の常時適用ルールに別エンジンへの指示がある場合は、利用者が矛盾を解消してください。
+役割を分けて読み込むこと自体は重複ではありません。構成、文言の編集、PPTX 実行を同じ台帳でつなぎます。編集担当は依頼元へ結果を返し、別々の調査やスライド生成、相互転送のループを始めません。既存の常時適用ルールに矛盾がある場合は、利用者が解消してください。
 
 コピー後の基本手順はスキル内で完結します。詳細な API 文書はコピー先からの固定相対リンクにせず、必要なときに `<repo>` のチェックアウトで確認します。上表の配置は公開・配布の許可を意味しません。プロジェクトのライセンスは未選定のため、再配布時は [ライセンスの状態](../../README.md#license) を確認してください。
 
 ## 明示的な呼び出し例
 
 自動認識だけに頼らず、最初の依頼で構成と実行の担当を明記できます。以下はすべて架空の依頼例です。
+
+### 技術以外のプレゼン・一般文書
+
+```text
+japanese-editing で、この架空の業務改善提案の日本語を整えてください。
+読者は現場責任者、用途は5分の説明とPDF配布です。
+見出し・本文・図表ラベル・ノートをページIDごとに示してください。
+提案と決定事項を混同せず、数値・母数・対象条件・未確認事項は残してください。
+今回は文言の編集だけで、PPTXの変更や公開は行わないでください。
+```
+
+メールや報告なら「japanese-editing で、次のメールを簡潔に。依頼の強さと期限は変えないでください」のように、用途と保持したい条件を指定します。
+
+### 英語のプレゼン・一般文書
+
+```text
+Use english-editing to revise this synthetic proposal for an international
+management audience. Use UK English. The deck supports a five-minute talk
+and must also make sense as a PDF without speaker notes.
+Keep the proposal status, figures, scope and uncertainty unchanged.
+Return headline, body, chart labels and speaker notes by slide ID.
+Do not change the PPTX or publish anything yet.
+```
+
+英語のメールなら「Use english-editing to make this request clearer. Keep the deadline and level of politeness unchanged.」のように指定できます。原文だけで `may not` の意味や日付の形式を判断できなければ、勝手に確定させず確認事項を返します。
 
 ### 新規の日本語技術資料
 
