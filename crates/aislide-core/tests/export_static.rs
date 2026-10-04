@@ -1467,6 +1467,25 @@ fn mixed_script_fallback_is_reported_even_when_requested_font_handles_latin() {
 }
 
 #[test]
+fn variable_font_outlines_follow_the_requested_weight() {
+    // Bahnschrift ships with Windows as a single variable face (wght 300-700, default 400).
+    let source = with_elements(json!([
+        {"type":"text","id":"regular","x":10,"y":10,"width":300,"height":140,"text":"HHHH","font_size":64,"color":"000000","bold":false,"format":{"font_family":"Bahnschrift"}},
+        {"type":"text","id":"bold","x":10,"y":170,"width":300,"height":140,"text":"HHHH","font_size":64,"color":"000000","bold":true,"format":{"font_family":"Bahnschrift"}}
+    ]));
+    let output = export_static(&source, &ExportOptions::default()).unwrap();
+    if output.warnings.iter().any(|warning| warning.code == "FONT_FALLBACK") {
+        eprintln!("skipped: the Bahnschrift variable font is not installed");
+        return;
+    }
+    let pixels = image::load_from_memory(&output.artifacts[0].bytes).unwrap().into_luma8();
+    let ink = |top: u32| pixels.enumerate_pixels().filter(|(_, y, pixel)| (top..top + 150).contains(y) && pixel[0] < 128).count();
+    let (regular, bold) = (ink(10), ink(170));
+    assert!(regular > 1000, "regular ink {regular}");
+    assert!(bold as f64 > regular as f64 * 1.2, "regular ink {regular}, bold ink {bold}");
+}
+
+#[test]
 fn sanitized_svg_renders_instead_of_stale_fallback_and_external_svg_is_rejected() {
     let fallback = image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 255, 255]));
     let mut bytes = std::io::Cursor::new(Vec::new());

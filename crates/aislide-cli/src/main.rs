@@ -1,4 +1,4 @@
-﻿use aislide_core::{Error, Result, execute_request, protocol::MAX_REQUEST_BYTES, report::{ReportInput, compile_report}, pptx::{export_pptx, inspect_pptx}};
+﻿use aislide_core::{Error, Result, execute_request, protocol::MAX_REQUEST_BYTES, report::{CompileOptions, ReportInput, compile_report_with}, pptx::{export_pptx, inspect_pptx}};
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -36,10 +36,10 @@ fn run() -> Result<()> {
             print_json(&response)
         }
         "sample" if args.len() == 1 => print_json(&execute_request(serde_json::json!({"op":"sample"}))?),
-        "generate" if args.len() == 3 => {
+        "generate" if args.len() == 3 || (args.len() == 5 && args[3] == "--design-preset") => {
             let input = bounded_read(std::fs::File::open(&args[1])?, MAX_REQUEST_BYTES)?;
             let report: ReportInput = serde_json::from_value(aislide_core::preflight::json(json_bytes(&input))?)?;
-            let compiled = compile_report(&report)?;
+            let compiled = compile_report_with(&report, &CompileOptions { design_preset: args.get(4).cloned() })?;
             let bytes = export_pptx(&compiled.deck)?;
             let destination = Path::new(&args[2]);
             let parent = destination.parent().filter(|value| !value.as_os_str().is_empty()).unwrap_or(Path::new("."));
@@ -54,7 +54,7 @@ fn run() -> Result<()> {
             print_json(&serde_json::to_value(inspect_pptx(bytes)?)?)
         }
         "--help" | "help" => {
-            println!("AISlide\n  request                       JSON stdin -> JSON stdout\n  sample                        print the synthetic report input\n  generate input.json out.pptx   create a new native PPTX (no overwrite)\n  inspect file.pptx             inspect simple top-level text runs");
+            println!("AISlide\n  request                       JSON stdin -> JSON stdout\n  sample                        print the synthetic report input\n  generate input.json out.pptx [--design-preset ID]\n                                create a new native PPTX (no overwrite)\n  inspect file.pptx             inspect simple top-level text runs");
             Ok(())
         }
         _ => Err(Error::Invalid("unknown command or arguments; use --help".into())),

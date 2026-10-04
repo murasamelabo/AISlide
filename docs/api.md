@@ -79,6 +79,45 @@ Headers, cards and callouts reject measured text overflow instead of shrinking;
 managed parts retain their existing bounded fitting rules. Missing fonts,
 glyphs and visual collisions still require preview/preflight review.
 
+Pattern mode replaces `blocks` with `pattern:{id,count?,mirror?,message_band?}`
+and `slots:{<slot id>:block}`. Core resolves the [layout pattern](#layout-patterns)
+inside the deck's [design tokens](#design-tokens) and places one block per
+non-marker slot; marker slots (step connectors, numbers, the timeline axis)
+are drawn automatically, and arrows point from each slot to the next (right
+to left when `mirror` is set). `count` is inferred from the supplied slot IDs
+for variable patterns. Full-page patterns fill their own `title` slot from
+`spec.title` unless one is supplied. Pattern mode adds `statement:{text}`,
+`quote:{text,attribution?}`, `metric:{value,label,detail?}`, `label:{text}`,
+`image:{base64,mime_type,alt,fit?}` (PNG/JPEG, `contain` default or `cover`),
+`table:{rows}` and `chart:{chart}` to the block kinds; legacy stacking rejects
+them. A block fits a slot when one of its content types appears in the slot's
+`accepts` list (metrics also fill card slots). Card slots hold one card; panel
+slots lay out several. Quotations require an attribution, which fills a
+pattern `attribution` slot when present; no quotation marks are inserted.
+Title, slot text and footer use token sizes, theme slot colors and a
+`language` on every run (`ja-JP`, `ko-KR` or `en-US`, chosen from the run's
+script). Preset decks keep the preset master decorations on `preset-blank`;
+other designs hide master graphics as block mode does. `subtitle` and
+`style` reject. Undersized slots, overflowing text and unmatched slots reject
+the whole batch and name the pattern fallback; fonts are never reduced.
+
+### Design Tokens
+
+`design_tokens:{deck}` returns frames (`title`, `body`, `footer`,
+`full_page`), `gaps` (tight/peer/support/contrast on the 8px grid), a
+`type_scale` (title, statement, metric, body, caption, minimum 16px, 115%
+line spacing), per-script budgets (`latin`/`east_asian`: language, average
+advance in em, comfortable reading measure, characters per title line and
+title lines), theme color roles, the card style, the layout composed slides
+use and whether master graphics stay visible. An unmodified design preset on
+a 1280x720 canvas yields `source:"preset:<id>"` with that preset's margins,
+heading/body sizes and gutter-derived gaps; any other or edited design yields
+`source:"default"` with the layout-pattern body and sizes scaled to the canvas
+height. Tokens are derived on demand and never stored, so theme or preset
+changes apply to later compositions. SDK: `client.designTokens(deck)`; MCP:
+read-only `design_tokens({deck_id})`. Character budgets are approximations;
+measured text and preview remain authoritative.
+
 `layout_graph({input})` is a pure core/MCP operation; SDK `client.layoutGraph(input)`
 returns a canonical `GraphSpec`. `input` has `version:1`, `title`, optional
 `subtitle`, `show_title`, `columns` (1-8, default 3), 1-48 nodes and up to 64
@@ -834,7 +873,9 @@ each operation, source bindings, hashes, native origins and resource limits.
 Requests still serialize complete documents and start a core process;
 latency remains workload-dependent, not constant-time.
 
-`generate` takes `input: {prompt, source_text?, slide_count, allow_remote?, max_repairs?, outline?}`. Each outline entry is `{title, layout}`. Model configuration comes only from the host environment. `max_repairs` accepts 0 or 1, default 0; repair is a separately authorized model call for report validation, not HTTP retry. Provenance includes model, local/remote mode, source hash, duration, attempts and `verified:false`. Model output never grants filesystem/network authority.
+`generate` takes `input: {prompt, source_text?, slide_count, allow_remote?, max_repairs?, outline?, design_preset?, language?}`. Each outline entry is `{title, layout}`. Model configuration comes only from the host environment. `max_repairs` accepts 0 or 1, default 0; repair is a separately authorized model call for report validation, not HTTP retry. Provenance includes model, local/remote mode, source hash, duration, attempts and `verified:false`. Model output never grants filesystem/network authority. `language` (`ja` or `en`) instructs the model to write all slide text in that language. `design_preset` compiles the draft as described for `compile` and adds a `layout_budget` with per-language section and cover title character budgets to the model request; a draft that still does not fit is a validation failure eligible for the single repair.
+
+`compile` takes `report` and optional `options:{design_preset?}`. Without a preset the fixed layouts above are produced unchanged. With a preset the deck carries only that preset's master and layouts; covers fill the `preset-cover` title/subtitle placeholders (period and label as captions), and every other section becomes a pattern composition: statements use `focus/statement` then `text/reading`; columns use `split/1-1`, `columns/3`, `grid/2x2` or `columns/4` cards with `text/label-detail` fallbacks; metrics use metric cards with the body in a message band (a single metric needs a body string); tables use `compare/table-full` or `focus/full`; charts use theme accents, a top legend when none is set and `split/2-1`, `stack/2-1` or `split/3-2`; processes use `sequence/steps-h` then `sequence/steps-v`. The first candidate whose slots and text fit at token sizes wins; otherwise the error names the section and the last candidate. CLI: `generate input.json out.pptx --design-preset <id>`.
 
 The core's report schema is generated from Rust types in schema mode and further constrained by the requested count/outline. Not every OpenAI-compatible server supports every JSON Schema keyword; runtime validation remains authoritative. The pinned local llama.cpp qualification includes a regression for `items` masking `prefixItems`.
 
@@ -846,6 +887,7 @@ Review operations `modern_comment`, `set_table_headers`, `check_accessibility`, 
 - `create_object`: `id`, `kind` (`text`, `shape`, `table`, `chart`, `line`, `arrow`), optional `preset`, `rows`, `columns`; returns a validated element. Shape presets are OOXML names from the catalog; chart presets are chart kinds. Tables are 1-12 rows by 1-8 columns. Factory chart values are synthetic.
 - `design_defaults`: no fields; returns a theme, one master and four layouts without changing a document.
 - `design_presets`: no fields; returns seven original `{id,name,design,rules}` presets. Rules include side margin, gutter, heading/body sizes and named layout regions.
+- `design_tokens`: `deck`; returns the derived [design tokens](#design-tokens) without changing the deck.
 - `apply_design_preset`: `deck`, `preset_id`; accepts `public`, `minimal`, `stylish`, `pop`, `dynamic`, `trust` or `luxury`. Adds or replaces a verified dedicated preset master and seven layouts, retaining original masters and slide content. Foreign/edited templates, conflicting IDs and insufficient capacity fail before commit.
 - `update_design`: `deck`, `design`; validates the complete design and propagates inherited placeholder geometry/style while preserving text.
 - `apply_theme`: `deck`, `theme`; binds previous-palette RGB values to theme slots and retains unrelated custom colors. Does not install fonts or fetch resources.
@@ -937,6 +979,6 @@ Existing top-level binary inputs accept exactly one of `base64` or `asset_id`; M
 
 MCP retains up to eight document and source handles. `ingest_source` returns a source handle; `compile_data_report` consumes it. `get_document` includes revision and sources, while `get_deck` retains the legacy scene-only shape. `apply_transaction` requires a revision. `update_text`, `undo`, `redo`, `add_picture`, `add_diagram`, `measure_layout`, `import_pptx`, `open_project`, `export_project` and legacy `export_pptx` use the shared document/session behavior.
 
-`object_catalog`, `design_defaults` and `design_presets` are read-only MCP tools; `design_presets` wraps its array in `{presets}` for MCP structured content. `add_object`, `update_design`, `apply_design_preset`, `apply_theme`, and `assign_layout` require `deck_id` and `expected_revision`, plus their operation-specific inputs. `add_object` also requires `slide_id`. `update_text` accepts top-level text boxes and preset-shape text. All these mutations are undoable and reject stale revisions.
+`object_catalog`, `design_defaults`, `design_presets` and `design_tokens` are read-only MCP tools; `design_presets` wraps its array in `{presets}` for MCP structured content and `design_tokens` takes `deck_id`. `add_object`, `update_design`, `apply_design_preset`, `apply_theme`, and `assign_layout` require `deck_id` and `expected_revision`, plus their operation-specific inputs. `add_object` also requires `slide_id`. `update_text` accepts top-level text boxes and preset-shape text. All these mutations are undoable and reject stale revisions.
 
 Only `--output-dir` enables MCP file output. Each export accepts a bounded plain filename with the exact extension required by its registered operation: `.pptx` for presentation and clean-copy exports, `.potx` or `.thmx` matching the template kind, and `.png`, `.jpg` or `.pdf` matching the static format. Legacy `export_project` accepts a `.pptx` name and derives its paired `.aislide.json` checkpoint name; it does not accept an arbitrary checkpoint path. No generic path or shell operation exists. Model tools declare external-world behavior because operator-approved remote inference is possible. Imported relationships remain inaccessible regardless of model permissions.

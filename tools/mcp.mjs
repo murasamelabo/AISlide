@@ -373,19 +373,34 @@ const partData = z.discriminatedUnion('kind', [
 ]);
 const partLayout = frameSchema.extend({ show_title: z.boolean().optional(), fit: z.enum(['stretch', 'contain']).optional().describe('stretch (default) scales each axis to the frame; contain scales uniformly and centers, keeping circles round') }).strict();
 const partSpec = z.object({ version: z.literal(1), preset: z.string().min(1).max(100), title: z.string().max(80), subtitle: z.string().max(120).optional(), data: partData, layout: optional(partLayout) }).strict();
+const compositionBlocks = [
+	z.object({ kind: z.literal('cards'), items: z.array(z.object({ label: z.string().max(80), detail: z.string().max(400).optional() }).strict()).min(1).max(6), columns: z.number().int().min(1).max(3).optional() }).strict(),
+	z.object({ kind: z.literal('callout'), text: z.string().max(400) }).strict(),
+	z.object({ kind: z.literal('text'), paragraphs: paragraphsSchema }).strict(),
+	z.object({ kind: z.literal('steps'), items: z.array(partItem).min(2).max(12) }).strict(),
+	z.object({ kind: z.literal('comparison'), rows: z.array(partLabel).min(2).max(4), columns: z.array(partLabel).min(2).max(4), cells: z.array(z.array(partLabel).min(2).max(4)).min(2).max(4), corner_label: partLabel.optional() }).strict(),
+	z.object({ kind: z.literal('part'), spec: partSpec.omit({ layout: true }) }).strict(),
+	z.object({ kind: z.literal('graph'), input: graphLayoutInput }).strict(),
+];
+const patternBlocks = [
+	z.object({ kind: z.literal('statement'), text: z.string().min(1).max(400) }).strict(),
+	z.object({ kind: z.literal('quote'), text: z.string().min(1).max(400), attribution: z.string().max(200).optional().describe('Fills the pattern attribution slot when it exists, otherwise renders below the quote. Quotations require an attribution here or in that slot; no quotation marks are added.') }).strict(),
+	z.object({ kind: z.literal('metric'), value: z.string().min(1).max(40), label: z.string().min(1).max(120), detail: z.string().max(240).optional() }).strict(),
+	z.object({ kind: z.literal('label'), text: z.string().min(1).max(200) }).strict(),
+	withAssetReference(z.object({ kind: z.literal('image'), base64: z.string().min(1).max(1398104), mime_type: z.enum(['image/png', 'image/jpeg']), alt: z.string().min(1).max(500), fit: z.enum(['contain', 'cover']).optional().describe('contain (default) keeps the whole image centered; cover crops symmetrically to fill the slot') }).strict()),
+	z.object({ kind: z.literal('table'), rows: z.array(z.array(z.string().max(200)).min(1).max(8)).min(1).max(12) }).strict(),
+	z.object({ kind: z.literal('chart'), chart: chartSchema }).strict(),
+];
+const designPresetId = z.enum(['public', 'minimal', 'stylish', 'pop', 'dynamic', 'trust', 'luxury']);
 const compositionSpec = z.object({
 	title: z.string().max(120), subtitle: z.string().max(160).optional(), footer: z.string().max(200).optional(),
 	style: z.object({ title_size: z.number().min(24).max(64).optional(), body_size: z.number().min(16).max(40).optional(), footer_size: z.number().min(10).max(24).optional(), padding: z.number().min(8).max(64).optional(), card_fill: colorSchema.optional(), accent: colorSchema.optional() }).strict().optional(),
-	blocks: z.array(z.discriminatedUnion('kind', [
-		z.object({ kind: z.literal('cards'), items: z.array(z.object({ label: z.string().max(80), detail: z.string().max(400).optional() }).strict()).min(1).max(6), columns: z.number().int().min(1).max(3).optional() }).strict(),
-		z.object({ kind: z.literal('callout'), text: z.string().max(400) }).strict(),
-		z.object({ kind: z.literal('text'), paragraphs: paragraphsSchema }).strict(),
-		z.object({ kind: z.literal('steps'), items: z.array(partItem).min(2).max(12) }).strict(),
-		z.object({ kind: z.literal('comparison'), rows: z.array(partLabel).min(2).max(4), columns: z.array(partLabel).min(2).max(4), cells: z.array(z.array(partLabel).min(2).max(4)).min(2).max(4), corner_label: partLabel.optional() }).strict(),
-		z.object({ kind: z.literal('part'), spec: partSpec.omit({ layout: true }) }).strict(),
-		z.object({ kind: z.literal('graph'), input: graphLayoutInput }).strict(),
-	])).min(1).max(3),
-}).strict();
+	blocks: z.array(z.discriminatedUnion('kind', compositionBlocks)).min(1).max(3).optional().describe('Block mode: 1-3 blocks stacked full width with style sizes. Omit when pattern is set.'),
+	pattern: z.object({ id: z.string().min(1).max(64).describe('Layout pattern ID, e.g. columns/3, split/2-1, focus/kpi-hero, text/quote, sequence/steps-h'), count: z.number().int().min(1).max(8).optional().describe('Repeat count for variable patterns; inferred from the supplied slot IDs when omitted'), mirror: z.boolean().optional(), message_band: z.boolean().optional().describe('Adds a message slot (callout or label) under the pattern') }).strict().optional()
+		.describe('Pattern mode: slot frames, type sizes, spacing and colors come from the deck design tokens (design_tokens). Preset decks keep master decorations. Subtitle and style are not accepted.'),
+	slots: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,47}$/), z.union([...compositionBlocks, ...patternBlocks])).optional()
+		.describe('Pattern mode: one block per non-marker slot ID (column-1, primary, message, ...). Marker slots (connectors, numbers, axes) are drawn automatically. Card slots hold one card; text is never shrunk.'),
+}).strict().refine(spec => spec.pattern ? spec.slots !== undefined && spec.blocks === undefined : spec.blocks !== undefined && spec.slots === undefined, 'Use blocks without pattern, or pattern with slots');
 const contentHash = z.string().regex(/^[a-f0-9]{64}$/);
 const masterSourceSchema = z.object({ kind: z.enum(['pptx', 'potx']), base64: archiveBase64.min(1) }).strict();
 const masterImportSchema = masterSourceSchema.extend({
@@ -1040,6 +1055,7 @@ for (const name of ['add_part', 'update_part']) {
 register('design_defaults', 'Return a theme and editable native master/layout templates. Does not mutate a document.', {}, true, async (_input, signal) => client.designDefaults({ signal }));
 register('design_capabilities', 'Read the implemented master-theme, native-field, Studio and preservation contract. Explicitly distinguishes supported slide fields from pending notes/handout masters and unverified Office recalculation.', {}, true, async (_input, signal) => client.designCapabilities({ signal }));
 register('design_presets', 'List seven original native master presets with theme fonts, color roles, margins, gutters and layout regions. These are deterministic designs, not AI generation or copied third-party templates.', {}, true, async (_input, signal) => ({ presets: await client.designPresets({ signal }) }));
+register('design_tokens', 'Resolve the design tokens of an open deck: title/body/footer/full-page frames, spacing gaps, type scale, per-script title budgets (en-US/ja-JP) and theme color roles. An unmodified design preset yields its own tokens; any other design yields neutral defaults. compose_slide pattern mode and preset report compilation use these values. Derived on demand, never stored.', { deck_id: handle }, true, async ({ deck_id }, signal) => client.designTokens(getDeck(deck_id).document.deck, { signal }));
 register('apply_design_preset', 'Apply a core-owned design preset with revision checking and Undo. Retains original masters and slide content; adds or replaces the dedicated preset master and layouts. Native packages that cannot add this structure are rejected. Does not automatically rearrange freeform objects or fetch fonts.', { deck_id: handle, expected_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), preset_id: z.enum(['public', 'minimal', 'stylish', 'pop', 'dynamic', 'trust', 'luxury']) }, false, async ({ deck_id, expected_revision, preset_id }, signal) => {
 	const state = getDeck(deck_id); await state.applyDesignPreset(preset_id, { signal, expectedRevision: expected_revision }); return { deck_id, revision: state.revision, hash: state.document.hash };
 });
@@ -1070,7 +1086,7 @@ const authoringDescriptions = {
 	set_text_style: 'Overlay supplied RunStyle fields on 1-128 distinct text/shape targets and their defaults. Retains unspecified paragraph/run attributes. Unlike apply_format, this is not format painting. One Undo.',
 	set_text_padding: 'Set inner text padding in slide pixels on 1-128 text/shape targets, or null for legacy defaults. Retains font sizes, rich runs, outer frames and native unknown content. Leaves a positive content area; validates locks and parent groups. One Undo.',
 	set_rich_text: 'Replace text/shape paragraphs from one source; core derives canonical plain text. Empty paragraphs clear the body. Keeps frame, padding and base text style. Uses field-specific operations for dynamic fields; does not relax canonical element validation. One Undo.',
-	compose_slide: 'Compose a new empty slide in a generated document from 1-3 coordinate-free blocks: cards, callout, rich text, steps, comparison, grid graph or a managed part. Shared title/body/footer style, 24px default card padding. Graph blocks position nodes and retain managed metadata without returning coordinates for another call. Existing/native content is refused. Text overflow rejects without shrinking text; managed parts keep their own layout rules. One Undo. Use edit_slides to create empty targets, then batch compose_slide operations.',
+	compose_slide: 'Compose a new empty slide in a generated document. Block mode stacks 1-3 coordinate-free blocks (cards, callout, rich text, steps, comparison, grid graph or a managed part) with a shared title/body/footer style and 24px default card padding. Pattern mode (pattern + slots) places blocks, including statement, quote, metric, label, image, table and chart, in the slots of a layout pattern resolved inside the deck design tokens: preset decks keep their master decorations, spacing, type scale and theme colors; runs are tagged ja-JP/en-US/ko-KR from their script. Graph blocks position nodes and retain managed metadata without returning coordinates for another call. Existing/native content is refused. Undersized slots and text overflow reject with the pattern fallback instead of shrinking text; managed parts keep their own layout rules. One Undo. Use edit_slides to create empty targets, then batch compose_slide operations.',
 	set_slide_background: 'Set one slide background color and detach background inheritance in one Undo.',
 	set_connector: 'Replace all connector settings, optionally its frame, in one Undo. Omitted start/end/routing clear existing values; omitted flip_v becomes false. Visual properties remain unchanged.',
 	set_picture_crop: 'Replace the crop of an existing picture in one Undo. Omitted crop edges become zero; core validates the visible region.',
@@ -1109,6 +1125,8 @@ register('generate_report', 'Ask the operator-configured OpenAI-compatible model
 	allow_remote: z.boolean().default(false),
     max_repairs: z.number().int().min(0).max(1).default(0),
 	outline: z.array(z.object({ title: z.string().min(1).max(100), layout: z.enum(['cover', 'metrics', 'table', 'columns', 'statement', 'chart', 'process']) }).strict()).max(32).default([]),
+	design_preset: designPresetId.optional().describe('Compile the draft with this design preset: sections become layout-pattern slides in its tokens and the model receives per-language title budgets. Omit for the fixed report layout.'),
+	language: z.enum(['ja', 'en']).optional().describe('Write all slide text in Japanese or English regardless of the brief language. Omit to follow the brief.'),
 }, false, async (input, signal) => {
 	if (decks.size >= 8) throw new Error('At most eight decks per session; close a deck first');
 	const result = await requestCore({ op: 'generate', input }, { signal });
@@ -1117,9 +1135,9 @@ register('generate_report', 'Ask the operator-configured OpenAI-compatible model
 	decks.set(id, await client.createDocument({ id, deck: result.compiled.deck, report: result.report }, { signal }));
 	return { deck_id: id, slides: result.compiled.deck.slides.length, revision: 0, issues: result.compiled.issues, provenance: result.provenance };
 });
-register('compile_report', 'Compile structured content into native text, rectangles, tables, charts and process groups using fixed structured layouts. A shortcut, not the best path for exact recreation: use complete add_elements/apply_operations for freeform final geometry. Returns a session document handle. Deterministic layout, not a model call.', { report: reportSchema }, false, async ({ report }, signal, options) => {
+register('compile_report', 'Compile structured content into native text, rectangles, tables, charts and process groups. Without design_preset the fixed structured layouts are used; with design_preset each section becomes a layout-pattern slide in that preset (master decorations, spacing, type scale, theme accents), trying deterministic fallbacks and rejecting text that would need shrinking. A shortcut, not the best path for exact recreation: use complete add_elements/apply_operations for freeform final geometry. Returns a session document handle. Deterministic layout, not a model call.', { report: reportSchema, design_preset: designPresetId.optional() }, false, async ({ report, design_preset }, signal, options) => {
 	if (decks.size >= 8) throw new Error('At most eight decks per session; close a deck first');
-	const result = await client.request({ op: 'compile', report }, options);
+	const result = await client.request({ op: 'compile', report, ...(design_preset ? { options: { design_preset } } : {}) }, options);
 	const id = randomUUID();
 	decks.set(id, await client.createDocument({ id, deck: result.deck, report }, options));
 	return { deck_id: id, slides: result.deck.slides.length, revision: 0, issues: result.issues };

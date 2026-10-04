@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::{io::{Read, Write}, net::TcpListener, sync::mpsc, thread};
 
 fn input() -> GenerationInput {
-    GenerationInput { prompt: "Create a report from the supplied notes".into(), source_text: "Example notes only, not verified facts.".into(), slide_count: 12, allow_remote: false, max_repairs: 0, outline: Vec::new() }
+    GenerationInput { prompt: "Create a report from the supplied notes".into(), source_text: "Example notes only, not verified facts.".into(), slide_count: 12, allow_remote: false, max_repairs: 0, outline: Vec::new(), design_preset: None, language: None }
 }
 
 fn serve_once(status: &str, body: String, extra_headers: &str) -> (String, mpsc::Receiver<Value>, thread::JoinHandle<()>) {
@@ -67,6 +67,34 @@ fn generated_report_is_validated_and_compiled_by_the_same_core() {
     assert!(result.compiled.issues.iter().any(|issue| issue.code == "AI_CONTENT_UNVERIFIED"));
 }
 
+#[test]
+fn design_preset_and_language_reach_the_model_and_compile_the_draft() {
+    use aislide_core::generation::Language;
+    let content = serde_json::to_string(&sample_report()).unwrap();
+    let (address, requests, server) = serve_once("200 OK", json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":content}}]}).to_string(), "");
+    let config = ProviderConfig::new(&address, "test-model", None, false).unwrap();
+    let mut request = input();
+    request.design_preset = Some("trust".into());
+    request.language = Some(Language::En);
+    let result = generate_report(&config, &request).unwrap();
+    server.join().unwrap();
+    let sent = requests.recv().unwrap();
+    let user: Value = serde_json::from_str(sent["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(user["language"], "en");
+    assert_eq!(user["layout_budget"]["design_preset"], "trust");
+    assert!(user["layout_budget"]["section_title_max_characters"]["en"].as_u64().unwrap() > 40);
+    assert!(user["layout_budget"]["section_title_max_characters"].get("ja").is_none(), "only the requested language budget is sent");
+    assert!(user["layout_budget"]["cover_title_max_characters"]["en"].as_u64().unwrap() > 20);
+    assert!(sent["messages"][0]["content"].as_str().unwrap().contains("If language is \"ja\" or \"en\""));
+    assert!(result.compiled.deck.design.is_some());
+    assert_eq!(result.compiled.deck.slides[0].layout_id.as_deref(), Some("preset-cover"));
+    assert_eq!(result.compiled.deck.slides[1].layout_id.as_deref(), Some("preset-blank"));
+    assert!(result.compiled.issues.iter().any(|issue| issue.code == "AI_CONTENT_UNVERIFIED"));
+    let offline = ProviderConfig::new("http://127.0.0.1:1/v1", "test-model", None, false).unwrap();
+    let mut invalid = input();
+    invalid.design_preset = Some("unknown".into());
+    assert!(generate_report(&offline, &invalid).unwrap_err().to_string().contains("design preset unknown not found"), "unknown presets fail before network access");
+}
 #[test]
 fn malformed_truncated_and_refused_model_outputs_never_become_a_deck() {
     for response in [

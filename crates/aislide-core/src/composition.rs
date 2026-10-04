@@ -1,6 +1,7 @@
 ﻿use crate::{model::{Deck, Element, valid_color, valid_text}, parts::{PartData, PartItem, PartLayout, PartSpec}, Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -9,10 +10,26 @@ pub struct CompositionSpec {
     #[serde(default)] pub subtitle: String,
     #[serde(default)] pub footer: String,
     #[serde(default)] pub style: CompositionStyle,
-    pub blocks: Vec<CompositionBlock>,
+    #[serde(default)] pub blocks: Vec<CompositionBlock>,
+    /// Layout pattern whose slots receive `slots`; frames, sizes and colors then come from design tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub pattern: Option<PatternChoice>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")] pub slots: BTreeMap<String, CompositionBlock>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PatternChoice {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub count: Option<usize>,
+    #[serde(default)] pub mirror: bool,
+    #[serde(default)] pub message_band: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFit { #[default] Contain, Cover }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CompositionStyle {
     pub title_size: f64,
@@ -37,6 +54,54 @@ pub enum CompositionBlock {
     Comparison { rows: Vec<String>, columns: Vec<String>, cells: Vec<Vec<String>>, #[serde(default)] corner_label: String },
     Graph { input: crate::graphs::GraphLayoutInput },
     Part { spec: PartSpec },
+    Statement { text: String },
+    Quote { text: String, #[serde(default)] attribution: String },
+    Metric { value: String, label: String, #[serde(default)] detail: String },
+    Label { text: String },
+    Image { base64: String, mime_type: String, alt: String, #[serde(default)] fit: ImageFit },
+    Table { rows: Vec<Vec<String>> },
+    Chart { chart: crate::report::ReportChart },
+}
+
+impl CompositionBlock {
+    pub(crate) fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Cards { .. } => "cards", Self::Callout { .. } => "callout", Self::Text { .. } => "text", Self::Steps { .. } => "steps",
+            Self::Comparison { .. } => "comparison", Self::Graph { .. } => "graph", Self::Part { .. } => "part", Self::Statement { .. } => "statement",
+            Self::Quote { .. } => "quote", Self::Metric { .. } => "metric", Self::Label { .. } => "label", Self::Image { .. } => "image",
+            Self::Table { .. } => "table", Self::Chart { .. } => "chart",
+        }
+    }
+
+    /// Content types matched against a layout-pattern slot's `accepts` list.
+    pub(crate) fn content(&self) -> &'static [&'static str] {
+        match self {
+            Self::Cards { .. } => &["card"],
+            Self::Callout { .. } => &["callout", "message"],
+            Self::Text { .. } => &["text", "rich_text", "list"],
+            Self::Steps { .. } | Self::Comparison { .. } | Self::Part { .. } => &["part"],
+            Self::Graph { .. } => &["graph", "diagram", "part"],
+            Self::Statement { .. } => &["statement", "title"],
+            Self::Quote { .. } => &["quote"],
+            Self::Metric { .. } => &["metric", "card"],
+            Self::Label { .. } => &["label", "heading", "caption", "short_label"],
+            Self::Image { .. } => &["image", "screenshot"],
+            Self::Table { .. } => &["table"],
+            Self::Chart { .. } => &["chart"],
+        }
+    }
+
+    fn diagram(&self) -> bool {
+        matches!(self, Self::Graph { .. }) || matches!(self, Self::Part { spec } if matches!(spec.data, PartData::Diagram { .. }))
+    }
+}
+
+impl CompositionSpec {
+    /// Managed diagram element IDs this composition creates, for graph diagnostics.
+    pub(crate) fn diagram_ids(&self, id: &str) -> Vec<String> {
+        if self.pattern.is_some() { return self.slots.iter().filter(|(_, block)| block.diagram()).map(|(slot, _)| format!("{id}-{slot}")).collect(); }
+        self.blocks.iter().enumerate().filter(|(_, block)| block.diagram()).map(|(index, _)| format!("{id}-b{index}")).collect()
+    }
 }
 
 fn text(id: &str, value: &str, frame: [f64; 4], size: f64, font: &str) -> Result<Element> {
@@ -57,6 +122,8 @@ fn card(id: &str, item: &PartItem, frame: [f64; 4], style: &CompositionStyle) ->
 
 pub(crate) fn compose(deck: &mut Deck, parts: &mut Vec<crate::parts::state::PartInstance>, slide_id: &str, id: &str, spec: &CompositionSpec, native_guard: &mut crate::parts::state::NativeRegenerationGuard<'_>) -> Result<()> {
     if id.is_empty() || id.len() > 24 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')) { return Err(Error::Invalid("composition ID requires 1-24 ASCII letters, digits, underscores or hyphens".into())); }
+    if let Some(pattern) = &spec.pattern { return crate::composition_pattern::compose(deck, parts, slide_id, id, spec, pattern, native_guard); }
+    if !spec.slots.is_empty() { return Err(Error::Invalid("composition slots require a pattern; set spec.pattern or use blocks".into())); }
     if spec.blocks.is_empty() || spec.blocks.len() > 3 { return Err(Error::Limit("composition requires 1-3 blocks".into())); }
     valid_text(&spec.title, 120)?; valid_text(&spec.subtitle, 160)?; valid_text(&spec.footer, 200)?;
     let style = &spec.style;
@@ -117,6 +184,7 @@ pub(crate) fn compose(deck: &mut Deck, parts: &mut Vec<crate::parts::state::Part
                 if part.layout.is_some() { return Err(Error::Invalid("composition supplies part layout; omit explicit part coordinates".into())); }
                 Some(part.clone())
             }
+            other => return Err(Error::Invalid(format!("{} blocks require a pattern; set spec.pattern and place blocks in slots", other.kind_name()))),
         };
         if let Some(mut part) = part {
             part.layout = Some(PartLayout { x: frame[0], y: frame[1], width: frame[2], height: frame[3], show_title: !part.title.is_empty(), fit: crate::parts::PartFit::Stretch });

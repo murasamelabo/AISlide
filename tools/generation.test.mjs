@@ -34,6 +34,37 @@ test('real CLI generation cancels network work and accepts the next request', { 
   }
 });
 
+test('preset generation sends the output language and title budgets and returns a designed deck', { timeout: 15_000 }, async () => {
+  const fixture = await startProviderFixture(await requestCore({ op: 'sample' }));
+  const environment = fixtureEnvironment(fixture.endpoint);
+  const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, environment);
+  try {
+    const generated = await requestCore({ op: 'generate', input: { prompt: 'Build a test report', slide_count: 3, design_preset: 'trust', language: 'en' } });
+    const observed = await fixture.nextRequest();
+    assert.equal(observed.input.language, 'en');
+    assert.equal(observed.input.layout_budget.design_preset, 'trust');
+    assert.ok(observed.input.layout_budget.section_title_max_characters.en > 0);
+    assert.equal(observed.input.layout_budget.section_title_max_characters.ja, undefined);
+    assert.ok(generated.compiled.deck.design.masters.some((master) => master.id === 'preset-master'));
+    assert.deepEqual(generated.compiled.deck.slides.map((slide) => slide.layout_id), ['preset-cover', 'preset-blank', 'preset-blank']);
+    assert.equal(generated.provenance.verified, false);
+    const legacy = await requestCore({ op: 'generate', input: { prompt: 'Build a test report', slide_count: 3 } });
+    const plain = await fixture.nextRequest();
+    assert.equal('language' in plain.input || 'layout_budget' in plain.input, false, 'legacy requests are unchanged');
+    assert.equal(legacy.compiled.deck.design, undefined);
+    await assert.rejects(() => requestCore({ op: 'generate', input: { prompt: 'Build a test report', slide_count: 3, language: 'fr' } }));
+    await assert.rejects(() => requestCore({ op: 'generate', input: { prompt: 'Build a test report', slide_count: 3, design_preset: 'unknown' } }), /design preset unknown not found/);
+    assert.equal(fixture.receivedCount(), 2, 'invalid options fail before network access');
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await fixture.close();
+  }
+});
+
 test('MCP model generation returns a validated draft and never accepts endpoint overrides', { timeout: 15_000 }, async () => {
   const report = await requestCore({ op: 'sample' });
   const fixture = await startProviderFixture(report);
