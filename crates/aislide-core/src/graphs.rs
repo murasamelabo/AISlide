@@ -10,7 +10,7 @@ pub const HEIGHT: f64 = 512.0;
 pub const CONTENT_TOP: f64 = 88.0;
 pub const MAX_GROUPS: usize = 16;
 pub const MAX_GROUP_DEPTH: usize = 4;
-const RENDER_LAYOUT_VERSION: u32 = 2;
+const RENDER_LAYOUT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -477,6 +477,105 @@ fn shape(id: String, rect: [f64; 4], preset: &str, fill: &str, stroke: &str) -> 
     Element::Shape { visual: None, id, x, y, width, height, preset: preset.into(), fill: fill.into(), stroke: stroke.into(), stroke_width: 1.5, rotation: 0.0, text: String::new(), font_size: 18.0, color: "@dk1".into(), bold: false, format: Default::default() }
 }
 
+// Returns elements with bounds in the caller's coordinate space, descending into nested groups.
+fn placed(elements: &[Element]) -> Vec<(&Element, [f64; 4])> {
+    let mut result = Vec::new();
+    for element in elements {
+        if let Element::Group { x, y, width, height, view_width, view_height, children, .. } = element {
+            let scale = [width / view_width, height / view_height];
+            result.extend(placed(children).into_iter().map(|(child, [left, top, child_width, child_height])| (child, [x + left * scale[0], y + top * scale[1], child_width * scale[0], child_height * scale[1]])));
+        } else {
+            let (_, left, top, width, height) = element.bounds();
+            result.push((element, [left, top, width, height]));
+        }
+    }
+    result
+}
+
+fn text_frame(element: &Element, bounds: [f64; 4]) -> Option<[f64; 4]> {
+    let Element::Shape { text, format, width, height, .. } = element else { return None; };
+    if text.is_empty() { return None; }
+    let [left, top, frame_width, frame_height] = format.content_frame(*width, *height, true);
+    let scale = [bounds[2] / width, bounds[3] / height];
+    Some([bounds[0] + left * scale[0], bounds[1] + top * scale[1], frame_width * scale[0], frame_height * scale[1]])
+}
+
+fn take_text(children: &mut Vec<Element>, id: &str) -> Option<Element> {
+    let index = children.iter().position(|element| matches!(element, Element::Text { .. }) && element.bounds().0 == id)?;
+    Some(children.remove(index))
+}
+
+fn paragraphs_of(element: &Element) -> Vec<crate::rich_text::RichParagraph> {
+    use crate::rich_text::{RichParagraph, RichRun, RunStyle};
+    let Element::Text { text, font_size, color, bold, format, .. } = element else { return Vec::new(); };
+    let style = RunStyle { font_size: Some(*font_size), color: Some(color.clone()), bold: Some(*bold), ..Default::default() };
+    text.replace("\r\n", "\n").replace('\r', "\n").split('\n').map(|line| RichParagraph {
+        runs: vec![RichRun { text: line.into(), style: style.clone(), field: None }], alignment: Some(format.alignment), ..Default::default()
+    }).collect()
+}
+
+// Moves label text boxes into their shape so the label follows the shape when it is moved or resized in PowerPoint.
+fn embed_labels(children: &mut Vec<Element>, shape_id: &str, labels: Vec<Element>, theme: &Theme) -> Result<()> {
+    // Matches the visual preflight card padding floor; centered labels gain it only where their text still fits.
+    const MINIMUM_PADDING: f64 = 8.0;
+    let labels: Vec<_> = labels.into_iter().filter(|label| matches!(label, Element::Text { text, .. } if !text.is_empty())).collect();
+    let Some(Element::Shape { x, y, width, height, text, font_size, color, bold, format, .. }) = children.iter_mut().find(|element| element.bounds().0 == shape_id) else {
+        return Err(Error::Invalid(format!("graph label target {shape_id} is missing")));
+    };
+    let Some(Element::Text { font_size: heading_size, color: heading_color, bold: heading_bold, format: heading_format, .. }) = labels.first() else { return Ok(()); };
+    let frames: Vec<_> = labels.iter().map(|label| { let (_, left, top, width, height) = label.bounds(); [left, top, left + width, top + height] }).collect();
+    let left = frames.iter().map(|frame| frame[0]).fold(f64::INFINITY, f64::min); let top = frames.iter().map(|frame| frame[1]).fold(f64::INFINITY, f64::min);
+    let right = frames.iter().map(|frame| frame[2]).fold(f64::NEG_INFINITY, f64::max); let bottom = frames.iter().map(|frame| frame[3]).fold(f64::NEG_INFINITY, f64::max);
+    let mut paragraphs = Vec::new();
+    for (index, label) in labels.iter().enumerate() {
+        let mut block = paragraphs_of(label);
+        if index > 0 {
+            let gap = (frames[index][1] - frames[index - 1][3]).max(0.0);
+            if let Some(first) = block.first_mut() { first.space_before = Some(crate::rich_text::Spacing::Points((gap * 75.0).round() as u32)); }
+        }
+        paragraphs.extend(block);
+    }
+    let mut padding = crate::model::TextPadding { left: (left - *x).max(0.0), top: (top - *y).max(0.0), right: (*x + *width - right).max(0.0), bottom: (*y + *height - bottom).max(0.0) };
+    *format = TextFormat { alignment: heading_format.alignment, vertical: heading_format.vertical, font_family: heading_format.font_family.clone(), paragraphs, ..Default::default() };
+    *text = crate::rich_text::plain_text(&format.paragraphs);
+    *font_size = *heading_size; *color = heading_color.clone(); *bold = *heading_bold;
+    let shortfall = MINIMUM_PADDING - padding.top.min(padding.bottom);
+    if format.vertical == VerticalAlign::Middle && shortfall > 0.0 {
+        let frame_width = *width - padding.left - padding.right; let frame_height = *height - padding.top - padding.bottom;
+        let needed = f64::from(crate::layout::graph_rich_metrics(text, frame_width, frame_height, *font_size, *bold, format, theme)?.measured_height);
+        // Equal growth on both sides keeps the centered text where the separate text box placed it.
+        let growth = shortfall.min(((frame_height - needed) / 2.0 - 1.0).max(0.0));
+        padding.top += growth; padding.bottom += growth;
+    }
+    format.padding = Some(padding);
+    Ok(())
+}
+
+pub(crate) fn embed_text(id: &str, spec: &GraphSpec, children: &mut Vec<Element>, theme: &Theme) -> Result<()> {
+    let prefix = render_prefix(id, spec)?;
+    for region in &spec.groups {
+        let frame_id = format!("{prefix}-g-{}", region.id);
+        let header = take_text(children, &format!("{prefix}-gt-{}", region.id));
+        embed_labels(children, &frame_id, header.into_iter().collect(), theme)?;
+        let icon_id = format!("{prefix}-gi-{}", region.id);
+        let Some(icon_index) = children.iter().position(|element| element.bounds().0 == icon_id) else { continue; };
+        let icon = children.remove(icon_index);
+        let index = children.iter().position(|element| element.bounds().0 == frame_id).ok_or_else(|| Error::Invalid("graph group frame is missing".into()))?;
+        let frame = children.remove(index);
+        let (_, x, y, width, height) = frame.bounds();
+        let members = [frame, icon].into_iter().map(|mut member| {
+            if let Element::Shape { x: left, y: top, .. } | Element::Picture { x: left, y: top, .. } = &mut member { *left -= x; *top -= y; }
+            member
+        }).collect();
+        children.insert(index, Element::Group { visual: None, id: format!("{prefix}-gg-{}", region.id), x, y, width, height, view_width: width, view_height: height, children: members });
+    }
+    for node in &spec.nodes {
+        let labels = ["nt", "nd"].iter().filter_map(|role| take_text(children, &format!("{prefix}-{role}-{}", node.id))).collect();
+        embed_labels(children, &format!("{prefix}-n-{}", node.id), labels, theme)?;
+    }
+    Ok(())
+}
+
 fn icon_picture(id: &str, icon: &GraphIcon, rect: [f64; 4]) -> Result<Element> {
     let [left, top, box_width, box_height] = rect;
     let mut picture = crate::media::create_picture(id, icon.base64.clone(), &icon.mime_type, &icon.alt)?;
@@ -636,36 +735,43 @@ fn relationship_label_bounds(spec: &GraphSpec, edge: &GraphEdge, points: &[[f64;
 }
 
 fn label_obstacles(prefix: &str, spec: &GraphSpec, elements: &[Element]) -> Vec<(String, [f64; 4])> {
+    let elements = placed(elements);
     let mut ids = BTreeSet::new();
+    let mut framed = BTreeSet::new();
     for node in &spec.nodes {
-        let roles: &[&str] = if node.presentation == GraphPresentation::Icon { &["ni", "nt", "nd"] } else { &["n"] };
-        for role in roles { ids.insert(format!("{prefix}-{role}-{}", node.id)); }
+        if node.presentation == GraphPresentation::Icon {
+            for role in ["ni", "nt", "nd"] { ids.insert(format!("{prefix}-{role}-{}", node.id)); }
+            framed.insert(format!("{prefix}-n-{}", node.id));
+        } else { ids.insert(format!("{prefix}-n-{}", node.id)); }
     }
     for edge in &spec.edges {
         ids.insert(format!("{prefix}-et-{}", edge.id));
         ids.insert(format!("{prefix}-eb-{}", edge.id));
     }
-    let mut obstacles: Vec<_> = elements.iter().filter_map(|element| {
-        let (id, left, top, width, height) = element.bounds();
+    let mut obstacles: Vec<_> = elements.iter().filter_map(|(element, bounds)| {
+        let id = element.bounds().0;
+        // An icon node's anchor spans the icon too; only its embedded label frame blocks edge labels.
+        if framed.contains(id) { return text_frame(element, *bounds).map(|frame| (id.to_owned(), frame)); }
         if !ids.contains(id) || matches!(element, Element::Text { text, .. } if text.is_empty()) { return None; }
-        Some((id.to_owned(), [left, top, width, height]))
+        Some((id.to_owned(), *bounds))
     }).collect();
     for group in &spec.groups {
         let group_id = format!("{prefix}-g-{}", group.id);
-        if let Some(element) = elements.iter().find(|element| element.bounds().0 == group_id) {
-            let (_, left, top, width, height) = element.bounds();
+        if let Some((element, [left, top, width, height])) = elements.iter().find(|(element, _)| element.bounds().0 == group_id) {
+            let (left, top, width, height) = (*left, *top, *width, *height);
             if !group.label.is_empty() || group.icon.is_some() {
                 let role = if group.label.is_empty() { "gi" } else { "gt" };
                 obstacles.push((format!("{prefix}-{role}-{}", group.id), [left, top, width, group.header_height() * height / group.height]));
             }
             if let Element::Shape { stroke, stroke_width, .. } = element {
-                if *stroke_width > 0.0 && stroke != "none" {
+                let stroke_width = *stroke_width;
+                if stroke_width > 0.0 && stroke != "none" {
                     let half = stroke_width / 2.0;
                     for border in [
-                        [left - half, top - half, width + *stroke_width, *stroke_width],
-                        [left - half, top + height - half, width + *stroke_width, *stroke_width],
-                        [left - half, top - half, *stroke_width, height + *stroke_width],
-                        [left + width - half, top - half, *stroke_width, height + *stroke_width],
+                        [left - half, top - half, width + stroke_width, stroke_width],
+                        [left - half, top + height - half, width + stroke_width, stroke_width],
+                        [left - half, top - half, stroke_width, height + stroke_width],
+                        [left + width - half, top - half, stroke_width, height + stroke_width],
                     ] { obstacles.push((group_id.clone(), border)); }
                 }
             }
@@ -680,10 +786,29 @@ fn label_overlap(left: [f64; 4], right: [f64; 4], padding: f64) -> bool {
         && left[1] < right[1] + right[3] + padding && left[1] + left[3] + padding > right[1]
 }
 
-fn check_label_overlap(edge: &GraphEdge, label_id: &str, bounds: [f64; 4], obstacles: &[(String, [f64; 4])]) -> Result<()> {
-    let conflicts: Vec<_> = obstacles.iter().filter(|(id, obstacle)| id != label_id && label_overlap(bounds, *obstacle, 0.0)).map(|(id, _)| id.as_str()).collect();
+fn check_label_overlap(prefix: &str, edge: &GraphEdge, label_id: &str, bounds: [f64; 4], obstacles: &[(String, [f64; 4])]) -> Result<()> {
+    let conflicts: BTreeSet<_> = obstacles.iter().filter(|(id, obstacle)| id != label_id && label_overlap(bounds, *obstacle, 0.0)).map(|(id, _)| reported_id(prefix, id)).collect();
     if conflicts.is_empty() { return Ok(()); }
-    Err(Error::Invalid(format!("graph edge '{}' label overlaps {}; reduce label_font_size, reflow the label, increase offset or revise label_placement", edge.id, conflicts.join(", "))))
+    Err(Error::Invalid(format!("graph edge '{}' label overlaps {}; reduce label_font_size, reflow the label, increase offset or revise label_placement", edge.id, conflicts.into_iter().collect::<Vec<_>>().join(", "))))
+}
+
+// Node and group labels are embedded in their frame shapes, so findings name the shape that holds the text.
+fn reported_id(prefix: &str, id: &str) -> String {
+    for (role, frame) in [("nt", "n"), ("nd", "n"), ("gt", "g")] {
+        if let Some(entity) = id.strip_prefix(&format!("{prefix}-{role}-")) { return format!("{prefix}-{frame}-{entity}"); }
+    }
+    id.into()
+}
+
+// Fitting runs on internal label frames; errors name the embedding shape that exists in the output.
+pub(crate) fn public_label_error(id: &str, spec: &GraphSpec, error: Error) -> Error {
+    let Ok(prefix) = render_prefix(id, spec) else { return error; };
+    let public = |message: String| [("nt", "n"), ("nd", "n"), ("gt", "g")].iter().fold(message, |message, (role, frame)| message.replace(&format!("{prefix}-{role}-"), &format!("{prefix}-{frame}-")));
+    match error {
+        Error::Invalid(message) => Error::Invalid(public(message)),
+        Error::Limit(message) => Error::Limit(public(message)),
+        error => error,
+    }
 }
 
 fn render_prefix(id: &str, spec: &GraphSpec) -> Result<String> {
@@ -698,7 +823,7 @@ pub(crate) fn validate_label_overlaps(id: &str, spec: &GraphSpec, children: &[El
         let element = children.iter().find(|element| element.bounds().0 == label_id)
             .ok_or_else(|| Error::Invalid("graph edge label is missing".into()))?;
         let (_, left, top, width, height) = element.bounds();
-        check_label_overlap(edge, &label_id, [left, top, width, height], &obstacles)?;
+        check_label_overlap(&prefix, edge, &label_id, [left, top, width, height], &obstacles)?;
     }
     Ok(())
 }
@@ -750,7 +875,7 @@ pub(crate) fn diagnostics(id: &str, spec: &GraphSpec, element: &Element, theme: 
         let (_, left, top, width, height) = label.bounds();
         let bounds = [left, top, width, height];
         for border in [false, true] {
-            let conflicts: BTreeSet<_> = obstacles.iter().filter(|(other, frame)| *other != label_id && group_ids.contains(other) == border && label_overlap(bounds, *frame, 0.0)).map(|(other, _)| other.clone()).collect();
+            let conflicts: BTreeSet<_> = obstacles.iter().filter(|(other, frame)| *other != label_id && group_ids.contains(other) == border && label_overlap(bounds, *frame, 0.0)).map(|(other, _)| reported_id(&prefix, other)).collect();
             if conflicts.is_empty() { continue; }
             let mut element_ids = vec![label_id.clone()];
             if conflicts.len() > 12 { report.status = "partial".into(); }
@@ -763,18 +888,26 @@ pub(crate) fn diagnostics(id: &str, spec: &GraphSpec, element: &Element, theme: 
             });
         }
     }
+    let placed_children = placed(children);
     for node in &spec.nodes {
-        let label_id = format!("{prefix}-nt-{}", node.id);
-        let Some(Element::Text { text, x, y, width, height, font_size, bold, .. }) = children.iter().find(|element| element.bounds().0 == label_id) else { report.status = "partial".into(); continue; };
-        let Ok((metrics, _)) = crate::layout::graph_text_metrics(text, *width, *height, *font_size, *bold, theme) else { report.status = "partial".into(); continue; };
+        let shape_id = format!("{prefix}-n-{}", node.id);
+        let Some(&(element, bounds)) = placed_children.iter().find(|(element, _)| element.bounds().0 == shape_id) else { report.status = "partial".into(); continue; };
+        let Element::Shape { format, .. } = element else { report.status = "partial".into(); continue; };
+        let heading_lines = node.label.replace("\r\n", "\n").replace('\r', "\n").split('\n').count();
+        let Some(heading) = format.paragraphs.get(..heading_lines).filter(|_| !node.label.is_empty()) else { continue; };
+        let Some(style) = heading.first().and_then(|paragraph| paragraph.runs.first()).map(|run| &run.style) else { report.status = "partial".into(); continue; };
+        let (Some(font_size), Some(bold)) = (style.font_size, style.bold) else { report.status = "partial".into(); continue; };
+        let Some([x, y, width, height]) = text_frame(element, bounds) else { continue; };
+        let text = crate::rich_text::plain_text(heading);
+        let Ok((metrics, _)) = crate::layout::graph_text_metrics(&text, width, height, font_size, bold, theme) else { report.status = "partial".into(); continue; };
         if metrics.lines <= node.label.lines().count().max(1) { continue; }
         let shrink_limit = node.label_fit == GraphLabelFit::Shrink && !node.label.contains('\n') && !node.label.contains('\r');
         report.push(GraphFinding {
             code: if shrink_limit { "GRAPH_NODE_LABEL_SHRINK_LIMIT" } else { "GRAPH_NODE_LABEL_WRAPPED" }.into(),
             severity: if shrink_limit { "warning" } else { "info" }.into(), graph_id: id.into(), entity_id: node.id.clone(),
-            element_ids: vec![label_id], bounds: [*x, *y, *width, *height],
+            element_ids: vec![shape_id], bounds: [x, y, width, height],
             message: if shrink_limit { "A single line does not fit at the 12px floor; retained wrapping. Widen the node or shorten the label." } else { "Node label wraps into additional lines; widen the node or opt into label_fit:shrink." }.into(),
-            slide_id: None, lines: Some(metrics.lines), font_size: Some(*font_size),
+            slide_id: None, lines: Some(metrics.lines), font_size: Some(font_size),
         });
     }
     report
@@ -920,6 +1053,14 @@ pub(crate) fn fit_detail_widows(id: &str, spec: &GraphSpec, children: &mut [Elem
 }
 
 pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
+    let mut result = create_with_label_boxes(id, spec, theme).map_err(|error| public_label_error(id, spec, error))?;
+    if let Element::Group { children, .. } = &mut result { embed_text(id, spec, children, theme)?; }
+    validate_elements(std::slice::from_ref(&result), (1280.0, 720.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
+    Ok(result)
+}
+
+// Labels stay separate text boxes here so fitting can size each one; `embed_text` moves them into their shapes afterwards.
+pub(crate) fn create_with_label_boxes(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
     valid_text(id, 40)?;
     if id.is_empty() { return Err(Error::Invalid("graph root ID is required".into())); }
     validate(spec)?; crate::design::validate_theme(theme)?;

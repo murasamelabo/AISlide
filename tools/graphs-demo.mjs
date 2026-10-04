@@ -163,8 +163,17 @@ function inspectCloudDocument(document, specs) {
   return specs.map((spec, index) => {
     const root = document.deck.slides[index].elements.find((element) => element.id === `graph-${index + 1}`);
     assert.equal(root.type, 'group');
+    const placed = (elements) => elements.flatMap((element) => element.type !== 'group' ? [element] : placed(element.children).map((child) => {
+      const scaleX = element.width / element.view_width, scaleY = element.height / element.view_height;
+      return { ...child, x: element.x + child.x * scaleX, y: element.y + child.y * scaleY, width: child.width * scaleX, height: child.height * scaleY };
+    }));
+    const textFrame = (shape) => {
+      const padding = shape.format?.padding ?? { left: 6, top: 4, right: 6, bottom: 4 };
+      return { x: shape.x + padding.left, y: shape.y + padding.top, width: shape.width - padding.left - padding.right, height: shape.height - padding.top - padding.bottom };
+    };
+    const children = placed(root.children);
     const find = (suffix) => {
-      const matches = root.children.filter((element) => element.id.endsWith(suffix));
+      const matches = children.filter((element) => element.id.endsWith(suffix));
       assert.equal(matches.length, 1, `Missing or ambiguous ${suffix}`);
       return matches[0];
     };
@@ -184,16 +193,16 @@ function inspectCloudDocument(document, specs) {
       maxDepth = Math.max(maxDepth, ancestors.size);
     }
     assert.ok(maxDepth <= 4);
-    const entities = [...spec.nodes.map((node) => ({ entity: node, kind: 'node', imagePrefix: '-ni-', labelPrefix: '-nt-' })), ...spec.groups.map((region) => ({ entity: region, kind: 'group', imagePrefix: '-gi-', labelPrefix: '-gt-' }))].map(({ entity, kind, imagePrefix, labelPrefix }) => {
+    const entities = [...spec.nodes.map((node) => ({ entity: node, kind: 'node', imagePrefix: '-ni-' })), ...spec.groups.map((region) => ({ entity: region, kind: 'group', imagePrefix: '-gi-' }))].map(({ entity, kind, imagePrefix }) => {
       assert.ok(entity.x >= 0 && entity.y >= 88 && entity.x + entity.width <= 1152 && entity.y + entity.height <= 512);
       if (entity.group) assert.ok(contains(groups.get(entity.group), entity), `Node containment: ${entity.id}`);
       const anchor = find((kind === 'node' ? '-n-' : '-g-') + entity.id);
-      assert.ok(['shape', 'text', 'rect'].includes(anchor.type));
-      assert.equal(anchor.text ?? '', '');
+      assert.equal(anchor.type, 'shape');
+      // Labels are embedded in the node or group shape so they move with it.
+      assert.ok(anchor.text === entity.label || anchor.text.startsWith(`${entity.label}\n`), `Embedded label: ${entity.id}`);
       for (const key of ['x', 'y', 'width', 'height']) assert.ok(Math.abs(anchor[key] - entity[key]) < 0.001, `Native bounds: ${entity.id}.${key}`);
-      const label = find(labelPrefix + entity.id);
-      assert.equal(label.text, entity.label);
-      const detail = { id: entity.id, native_id: anchor.id, native_type: anchor.type, kind, parent: entity.parent ?? entity.group ?? null, bounds: rect(anchor), label: entity.label, label_bounds: rect(label), label_font_size: label.font_size };
+      const label = textFrame(anchor);
+      const detail = { id: entity.id, native_id: anchor.id, native_type: anchor.type, kind, parent: entity.parent ?? entity.group ?? null, bounds: rect(anchor), label: entity.label, label_bounds: label, label_font_size: anchor.font_size };
       if (entity.icon) {
         assert.deepEqual(Object.keys(entity.icon).sort(), ['alt', 'base64', 'mime_type']);
         const picture = find(imagePrefix + entity.id);
@@ -206,7 +215,7 @@ function inspectCloudDocument(document, specs) {
       }
       return detail;
     });
-    assert.equal(root.children.filter((element) => element.type === 'picture').length, entities.filter((entity) => entity.picture_id).length);
+    assert.equal(children.filter((element) => element.type === 'picture').length, entities.filter((entity) => entity.picture_id).length);
     const connections = spec.edges.map((edge) => {
       const connector = find('-e-' + edge.id);
       assert.equal(connector.type, 'connector');

@@ -423,9 +423,9 @@ fn geometry(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '_>, 
     Ok(())
 }
 
-fn text_padding_changes(xml: &str, body: Node<'_, '_>, format: &crate::model::TextFormat, edits: &mut Edits) -> Result<()> {
+fn text_padding_changes(xml: &str, body: Node<'_, '_>, element: &Element, edits: &mut Edits) -> Result<()> {
     let properties = child(body, A, "bodyPr").ok_or_else(|| Error::Unsupported("native body properties missing".into()))?;
-    let padding = format.padding.clone().unwrap_or_default();
+    let padding = crate::model::drawing_text_insets(element).unwrap_or_default();
     for (name, value) in [("lIns", padding.left), ("rIns", padding.right), ("tIns", padding.top), ("bIns", padding.bottom)] {
         set_attribute(xml, properties, name, &(value * 9525.0).round().to_string(), edits)?;
     }
@@ -436,13 +436,14 @@ fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '
     crate::rich_text::validate_element(new)?;
     let (old_text, old_size, old_color, old_bold, old_format) = match old { Element::Text { text, font_size, color, bold, format, .. } | Element::Shape { text, font_size, color, bold, format, .. } => (text, font_size, color, bold, format), _ => return Ok(()) };
     let (text, size, color, bold, format) = match new { Element::Text { text, font_size, color, bold, format, .. } | Element::Shape { text, font_size, color, bold, format, .. } => (text, font_size, color, bold, format), _ => return Err(Error::Unsupported("native object type change".into())) };
-    let padding_changed = old_format.padding != format.padding;
+    // A resized preset moves its text rectangle, so frame-relative padding needs new DrawingML insets.
+    let padding_changed = old_format.padding != format.padding || (format.padding.is_some() && crate::model::preset_text_inset(old) != crate::model::preset_text_inset(new));
     let mut padded_format = old_format.clone(); padded_format.padding = format.padding.clone(); padded_format.inherit_layout = format.inherit_layout;
     let style_changed = !equal(&(old_size, old_color, old_bold, &padded_format), &(size, color, bold, format))?;
     let rich = !old_format.paragraphs.is_empty() || !format.paragraphs.is_empty();
     if old_text == text && !padding_changed && (!style_changed || (!rich && old_format.inherit_layout && format.inherit_layout)) { return Ok(()); }
     let body = child(node, P, "txBody").ok_or_else(|| Error::Unsupported("text body missing".into()))?;
-    if padding_changed && old_text == text && !style_changed { return text_padding_changes(xml, body, format, edits); }
+    if padding_changed && old_text == text && !style_changed { return text_padding_changes(xml, body, new, edits); }
     if rich {
         if format.paragraphs.is_empty() { return Err(Error::Unsupported("rich native text must be edited through the rich text API".into())); }
         if !equal(&(old_size, old_color, old_bold, old_format.italic, old_format.underline, &old_format.font_family, old_format.alignment, old_format.bullet), &(size, color, bold, format.italic, format.underline, &format.font_family, format.alignment, format.bullet))? {
@@ -450,7 +451,7 @@ fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '
         }
         let next_body = child(next, P, "txBody").ok_or_else(|| Error::Invalid("generated text body missing".into()))?;
         replace_rich_paragraphs(xml, body, generated, next_body, edits)?;
-        if old_format.padding != format.padding { text_padding_changes(xml, body, format, edits)?; }
+        if padding_changed { text_padding_changes(xml, body, new, edits)?; }
         if old_format.vertical != format.vertical {
             let properties = child(body, A, "bodyPr").ok_or_else(|| Error::Unsupported("native body properties missing".into()))?;
             set_attribute(xml, properties, "anchor", match format.vertical { crate::model::VerticalAlign::Top => "t", crate::model::VerticalAlign::Middle => "ctr", crate::model::VerticalAlign::Bottom => "b" }, edits)?;
@@ -463,7 +464,7 @@ fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '
         let next_body = child(next, P, "txBody").ok_or_else(|| Error::Invalid("generated text body".into()))?;
         edits.push((body.range(), fragment(generated, next_body)));
     } else {
-        if padding_changed { text_padding_changes(xml, body, format, edits)?; }
+        if padding_changed { text_padding_changes(xml, body, new, edits)?; }
         if old_text != text { replace_text(xml, body, text, edits)?; }
     }
     Ok(())
@@ -675,11 +676,17 @@ fn selection_scaled_style(node: Node<'_, '_>, old: &Element, next: &Element, edi
     crate::selection::transform(&mut expected, [old_x, old_y], [x, y], scale)?;
     if !equal(&expected, next)? { return Ok(false); }
     let scalar = scale[0].min(scale[1]);
+    // Preset text rectangles do not always scale linearly, so frame-relative padding is rewritten from the result.
+    let insets = crate::model::preset_text_inset(next).and(crate::model::drawing_text_insets(next));
     for current in node.descendants().filter(|current| current.tag_name().namespace() == Some(A) && !current.ancestors().take_while(|ancestor| *ancestor != node).any(|ancestor| ancestor.tag_name().name() == "extLst")) {
         if ["r", "fld"].contains(&current.tag_name().name()) && child(current, A, "rPr").and_then(|properties| properties.attribute("sz")).is_none() {
             return Err(Error::Unsupported("scaled native ungroup requires explicit run font sizes".into()));
         }
         for attribute in current.attributes().filter(|attribute| attribute.namespace().is_none()) {
+            if let (Some(insets), "bodyPr") = (&insets, current.tag_name().name()) {
+                let value = match attribute.name() { "lIns" => insets.left, "rIns" => insets.right, "tIns" => insets.top, "bIns" => insets.bottom, _ => f64::NAN };
+                if value.is_finite() { edits.push((attribute.range_value(), (value * 9525.0).round().to_string())); continue; }
+            }
             let factor = match (current.tag_name().name(), attribute.name()) {
                 ("rPr" | "defRPr" | "endParaRPr", "sz" | "kern" | "spc") | ("spcPts", "val") | ("ln", "w") => scalar,
                 ("pPr", "marL" | "marR" | "indent") | ("tab", "pos") | ("bodyPr", "lIns" | "rIns") => scale[0],

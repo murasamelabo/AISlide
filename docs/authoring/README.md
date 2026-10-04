@@ -231,7 +231,8 @@ accepts a nonblank description up to 240 characters. `detail_font_size` is
 12-40, requires detail and cannot exceed heading `font_size`; its default is
 `max(12,font_size*0.8)`. `text_align` is left/center/right, default left with
 detail and center without. `heading_bold` defaults true. Heading and detail
-render as separate editable native text with an 8px gap, subject to fitting.
+render as paragraphs inside the node shape with an 8px space before the detail,
+subject to fitting, so the text moves and resizes with the shape in PowerPoint.
 Omitting the new fields preserves the earlier title/label presentation.
 
 Node `label_fit:"shrink"` prefers a single-line heading by reducing its font
@@ -939,7 +940,7 @@ resolution or `format:"jpeg"` (lossy quality 90) for photo-heavy pages. Other
 errors never trigger silent retry. `include_images:false` still renders;
 use `get_deck_summary` instead when only the current revision/hash is needed.
 
-Preflight returns stable slide/element IDs, `scopes` (slide/master/layout), transformed bounds, severity, evidence category and repair suggestions. Renderer warnings include actual shape-padding/table clipping and font/glyph warnings. Geometry checks flag possible text-frame overlap, connector/label interference and off-slide objects; font floor and density are heuristics. Background containment and attached endpoint nodes are excluded. At most 1024 visible objects per selected page and 256 findings are allowed; exceedances fail explicitly. Orphan lines, semantic truth, full accessibility and Office parity remain separate checks.
+Preflight returns stable slide/element IDs, `scopes` (slide/master/layout), transformed bounds, severity, evidence category and repair suggestions. Renderer warnings include actual shape-padding/table clipping and font/glyph warnings. Geometry checks flag possible text-frame overlap, connector/label interference and off-slide objects; for a text-bearing shape with explicit `format.padding`, these two checks use the padded text area rather than the whole shape. Font floor and density are heuristics. Background containment and attached endpoint nodes are excluded. At most 1024 visible objects per selected page and 256 findings are allowed; exceedances fail explicitly. Orphan lines, semantic truth, full accessibility and Office parity remain separate checks.
 
 `preview_slide_revision` requires `deck_id`, `expected_revision`, `expected_hash`, `slide_id` and 1-16 typed `edits`. Supported edits are `translate`, `align`, `set_text_frame`, `replace_text`, `update_part`, and `update_graph`. Translation/alignment target up to 32 top-level IDs; text edits may target nested IDs, with frame coordinates in the parent space. Frame changes retain font size. Locked/hidden targets, stale managed updates and unsafe native edits reject. Editing part children can mark their metadata stale, which is reported rather than silently regenerated.
 

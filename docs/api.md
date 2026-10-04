@@ -135,6 +135,16 @@ restores legacy defaults. Explicit all-zero shape padding survives PPTX
 reopening; zero text-box padding may normalize to omission because they are
 equivalent. Legacy shape preview defaults remain 6px horizontal / 4px vertical;
 legacy export defaults remain zero. New composition cards use explicit padding.
+Padding is always measured from the element frame. DrawingML measures `bodyPr`
+insets from a preset's own text rectangle, so explicit padding on `roundRect`
+(with its `adj`), `ellipse`, `diamond`, `can` and `cloud` shapes is written as
+padding minus that rectangle's inset (negative insets are valid OOXML and
+PowerPoint honors them) and read back by adding it, rounded to whole EMU so
+reopening reproduces the padding. Resizing a native shape rewrites its insets.
+Shapes with custom connection sites use a full-frame text rectangle; other
+presets keep writing padding unchanged. An imported shape whose insets plus
+its text rectangle would leave no content area keeps the raw insets so it
+remains editable.
 Studio exposes four numeric controls and a default-reset control. Table cells
 use their existing `CellStyle.padding`, not `text_format.padding`.
 
@@ -804,6 +814,9 @@ Bounds are in the final graph group's local coordinate space.
 
 Codes include `GRAPH_LABEL_BORDER_OVERLAP`, `GRAPH_LABEL_OVERLAP`,
 `GRAPH_NODE_LABEL_WRAPPED` (info), and `GRAPH_NODE_LABEL_SHRINK_LIMIT` (warning).
+Node-label findings name the node shape that holds the text and report its text
+frame as bounds; overlap findings and `on_overlap:error` messages likewise name
+the node or boundary shape rather than an internal label frame.
 Automatic label search includes group-border stroke strips as well as nodes,
 headers and badges; it can retain a warned fallback when space is exhausted.
 Explicit positions remain authoritative. `on_overlap:error` rejects those
@@ -829,11 +842,11 @@ preview warnings remain available, and `office_visual_parity` remains false.
 
 `GraphIcon` is `{base64,mime_type,alt?}` with PNG/JPEG bytes, not a path, URL or raw SVG. Set `icon` to null or omit it on a complete replacement to remove an icon; an icon-mode node must also return to `presentation: "card"`. Each payload uses the existing 1 MiB/4096px/64 MiB decoder bounds; total encoded node and boundary icons share a 3 MiB budget. Document/metadata/response budgets can reject a graph before these maxima. Use `create_graph_icon` for generic imported images: inert SVG becomes PNG at a 256px longest side, larger PNG/JPEG images are downsampled in their format, and smaller rasters retain their bytes. Prepared cloud PNGs bypass this helper to preserve originals up to 512px. Normal `create_asset` behavior is unchanged. Alt text is at most 500 characters.
 
-Omitted presentation preserves legacy card output, including the aspect-fitted picture beside the label at up to 48 graph pixels. Icon mode places a picture above an editable label with a transparent native connection anchor; Studio service icons start at 160x140 with 16px labels. Shape/anchor, picture and label remain separate native objects in the graph root. Logical boundary nesting is metadata, not nested PowerPoint groups. Graph-editor movement moves the complete node; direct Office movement of only its shape does not move the label/picture. Vendor colors and proportions remain unchanged, not live theme bindings.
+Omitted presentation preserves legacy card output, including the aspect-fitted picture beside the label at up to 48 graph pixels. Icon mode places a picture above an editable label with a transparent native connection anchor; Studio service icons start at 160x140 with 16px labels. Node headings and details are written as paragraphs inside the node shape (or icon-mode anchor), with text padding reproducing the fitted label frame and an 8px-scaled space before the detail, so Office moves and resizes the text with its shape. Boundary headers are likewise written inside the boundary rectangle. Centered single-frame labels raise thin top/bottom padding toward 8 px only when the measured text still fits. A boundary with an icon becomes a nested PowerPoint group of its rectangle and picture. A node icon stays a separate sibling picture because AISlide connectors attach only to siblings; direct Office movement of only the node shape does not move that picture. Edge labels and badges remain separate objects because PowerPoint connectors cannot hold text. Logical boundary nesting is metadata, not nested PowerPoint groups. Graph-editor movement moves the complete node. Vendor colors and proportions remain unchanged, not live theme bindings.
 
 Operation batches contain 1-128 entries. `put_node`, `put_edge`, `put_group` carry a complete typed `node`, `edge` or `group`. `move` takes `{ids,dx,dy}`; `remove` takes `{ids}`; `align` takes `{ids,alignment}` with left/center/right/top/middle/bottom; `layout` takes `{columns}` in 1-8. Selection is 1-120 unique existing IDs. Alignment requires at least two nodes. Moving an ancestor moves every descendant once, including multi-selection. Removing a node removes incident edges; removing boundaries promotes direct children to the nearest remaining parent without changing absolute bounds. Grid preserves sizes and fails when they do not fit; with boundaries, all nodes must belong to a group. Grid is disabled/rejected for nested boundaries. Validation is atomic.
 
-Native output uses ordinary shapes, separate label text and attached `p:cxnSp` objects with `straightConnector1` or `bentConnector2/3/4`. Manual routes and other `routing.custom` polylines are written as open freeform `p:sp` shapes (`a:custGeom`, no fill) marked with the `urn:aislide:connector:v1` extension that keeps endpoint bindings, because PowerPoint refuses packages whose `p:cxnSp` uses custom geometry; Office edits them as freeform lines without glue, and AISlide reopens them as connectors. Editing a route that an earlier export stored in `p:cxnSp` rewrites it in the freeform form. Shape-specific connection indices are independent of logical port direction. Standard adjustment values/flips retain reverse and vertical routes. Raw connector `routing` accepts only representable 2-4 normalized points plus `start_arrow`/`dashed`; arbitrary waypoints, curves and unsupported formulas fail closed. Routing is deterministic midpoint routing, not obstacle avoidance. In Office, moving only a native node shape does not automatically move its separate text label.
+Native output uses ordinary shapes with embedded node and boundary text and attached `p:cxnSp` objects with `straightConnector1` or `bentConnector2/3/4`. Manual routes and other `routing.custom` polylines are written as open freeform `p:sp` shapes (`a:custGeom`, no fill) marked with the `urn:aislide:connector:v1` extension that keeps endpoint bindings, because PowerPoint refuses packages whose `p:cxnSp` uses custom geometry; Office edits them as freeform lines without glue, and AISlide reopens them as connectors. Editing a route that an earlier export stored in `p:cxnSp` rewrites it in the freeform form. Shape-specific connection indices are independent of logical port direction. Standard adjustment values/flips retain reverse and vertical routes. Raw connector `routing` accepts only representable 2-4 normalized points plus `start_arrow`/`dashed`; arbitrary waypoints, curves and unsupported formulas fail closed. Routing is deterministic midpoint routing, not obstacle avoidance. In Office, moving a node shape moves its embedded text; edge labels, badges and node icon pictures stay where they are.
 
 Managed graphs use `Document.parts` with preset `diagram/custom` and data `{kind:"diagram",graph:spec}`. They share native/render fingerprints, root placement preservation and Undo/Redo with parts. External edits can conservatively mark metadata stale; graph updates then fail rather than overwrite manual content. Ordinary native objects remain editable without metadata only within the supported native subset; unknown XML still guards against unsupported replacement.
 

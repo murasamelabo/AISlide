@@ -58,6 +58,22 @@ function serviceFrame(graph: GraphSpec, parent?: GraphGroup): Bounds {
   throw new Error('No room for a 160 x 140 service icon. Enlarge the boundary or move existing items.')
 }
 
+// Flattens nested native groups into the graph's coordinate space.
+function placedChildren(children: Element[]): Element[] {
+  return children.flatMap((child) => child.type !== 'group' ? [child] : placedChildren(child.children).map((entry) => {
+    const scaleX = child.width / child.view_width, scaleY = child.height / child.view_height
+    return { ...entry, x: child.x + entry.x * scaleX, y: child.y + entry.y * scaleY, width: entry.width * scaleX, height: entry.height * scaleY }
+  }))
+}
+
+// Node and group labels are embedded in their native shapes; the editor overlays only the shape's text frame.
+function embeddedLabel(shape: Element | undefined): Element[] {
+  if (shape?.type !== 'shape' || !shape.text) return []
+  const padding = shape.format?.padding
+  const [left, top, right, bottom] = [padding?.left ?? 6, padding?.top ?? 4, padding?.right ?? 6, padding?.bottom ?? 4]
+  return [{ type: 'text', id: shape.id, x: shape.x + left, y: shape.y + top, width: shape.width - left - right, height: shape.height - top - bottom, text: shape.text, font_size: shape.font_size, color: shape.color, bold: shape.bold, format: { ...shape.format, padding: null } }]
+}
+
 function appendHistory(entries: GraphSpec[], entry: GraphSpec) {
   const next = [...entries, structuredClone(entry)].slice(-30)
   const encoder = new TextEncoder()
@@ -79,7 +95,7 @@ function GraphNodeView({ id, data, selected }: NodeProps<GraphFlowNode>) {
   return <div className={`graph-node-content ${data.boundary ? 'graph-boundary' : ''}`}>
     {(data.boundary || node.presentation !== 'icon') && <ShapeSurface preset={data.boundary ? 'rect' : kinds[node.kind ?? 'rectangle'].preset} fill={cssColor(item.fill ?? (data.boundary ? '@lt2' : '@lt1'), data.theme)} stroke={cssColor(item.stroke ?? '@accent1', data.theme)} strokeWidth={1.5} width={item.width ?? 176} height={item.height ?? 80} nativeGeometry={Boolean(data.ports?.length)} />}
     {data.icon && <div className="graph-node-icon" style={{ left: data.icon.x - item.x, top: data.icon.y - item.y, width: data.icon.width, height: data.icon.height }}><Content element={data.icon} theme={data.theme} /></div>}
-    {data.labels.map((label) => <div key={label.id} className={`graph-fitted-label${!data.boundary && label.id.endsWith(`-nd-${id}`) ? ' graph-node-detail' : ''}`} style={{ left: label.x - item.x, top: label.y - item.y, width: label.width, height: label.height }}><Content element={label} theme={data.theme} /></div>)}
+    {data.labels.map((label) => <div key={label.id} className="graph-fitted-label" style={{ left: label.x - item.x, top: label.y - item.y, width: label.width, height: label.height }}><Content element={label} theme={data.theme} /></div>)}
     <NodeResizer isVisible={selected} minWidth={64} minHeight={40} maxWidth={1152} maxHeight={data.maxHeight} onResizeEnd={(_event, bounds) => data.resize(id, bounds)} />
     {!data.boundary && Object.entries(portPositions).map(([port, position]) => <Handle key={port} id={port} type="source" position={position} style={node.kind === 'cloud' ? { top: port === 'top' ? `${1235 / 216}%` : port === 'bottom' ? `${21577 / 216}%` : '50%', bottom: 'auto', left: port === 'left' ? `${67 / 216}%` : port === 'right' ? `${21582 / 216}%` : '50%', right: 'auto', transform: 'translate(-50%, -50%)' } : undefined} title={`${item.label} ${port} connection`} aria-hidden="true" />)}
     {data.ports?.map((port) => <Handle key={port.id} id={port.id} type="source" position={port.position} isConnectable={false} className="graph-native-port" style={{ left: port.x, top: port.y, right: 'auto', bottom: 'auto', transform: 'translate(-50%, -50%)' }} title={`${item.label} attached connection`} aria-hidden="true" />)}
@@ -299,7 +315,7 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     current.current = next; setSpec(next)
     selection.current = selection.current.filter((id) => [...next.nodes, ...next.edges ?? [], ...next.groups ?? []].some((entry) => entry.id === id))
     setSelected(selection.current)
-    const nativeChildren = rendered?.type === 'group' ? rendered.children : []
+    const nativeChildren = rendered?.type === 'group' ? placedChildren(rendered.children) : []
     const nativeHash = rendered && nativeChildren[0]?.id.slice(rendered.id.length + 1).split('-')[0]
     const nativePrefix = rendered && nativeHash ? `${rendered.id}-${nativeHash}` : undefined
     const maxHeight = next.show_title === false ? 512 : 424
@@ -307,14 +323,14 @@ export function GraphEditor({ catalog, initial, theme, editing, onApply, onBusy 
     const ordered = [...groups].sort((left, right) => groupAncestors(groups, left.parent).length - groupAncestors(groups, right.parent).length)
     const members: GraphFlowNode[] = ordered.map((item) => {
       const parent = groups.find((group) => group.id === item.parent)
-      return { id: item.id, type: 'graphNode', position: { x: item.x - (parent?.x ?? 0), y: item.y - (parent?.y ?? 0) }, parentId: parent?.id, extent: parent ? [[parent.padding ?? 8, parent.header_height ?? 40], [parent.width - (parent.padding ?? 8), parent.height - (parent.padding ?? 8)]] : undefined, width: item.width, height: item.height, style: { width: item.width, height: item.height }, data: { item, boundary: true, theme, resize, maxHeight, labels: nativeChildren.filter((entry) => entry.type === 'text' && entry.id === `${nativePrefix}-gt-${item.id}`), icon: nativeChildren.find((entry) => entry.type === 'picture' && entry.id === `${nativePrefix}-gi-${item.id}`) }, selected: selection.current.includes(item.id), ariaLabel: `Group ${item.label}`, zIndex: -1 }
+      return { id: item.id, type: 'graphNode', position: { x: item.x - (parent?.x ?? 0), y: item.y - (parent?.y ?? 0) }, parentId: parent?.id, extent: parent ? [[parent.padding ?? 8, parent.header_height ?? 40], [parent.width - (parent.padding ?? 8), parent.height - (parent.padding ?? 8)]] : undefined, width: item.width, height: item.height, style: { width: item.width, height: item.height }, data: { item, boundary: true, theme, resize, maxHeight, labels: embeddedLabel(nativeChildren.find((entry) => entry.id === `${nativePrefix}-g-${item.id}`)), icon: nativeChildren.find((entry) => entry.type === 'picture' && entry.id === `${nativePrefix}-gi-${item.id}`) }, selected: selection.current.includes(item.id), ariaLabel: `Group ${item.label}`, zIndex: -1 }
     })
     for (const item of next.nodes) {
       const parent = next.groups?.find((group) => group.id === item.group)
       const native = nativeChildren.find((entry) => entry.id === `${nativePrefix}-n-${item.id}`)
       const sites = native && 'visual' in native ? native.visual?.connection_sites : undefined
       const ports = sites?.map((site, index) => ({ id: `native-${index}`, x: site.x * (item.width ?? 176), y: site.y * (item.height ?? 80), position: site.angle < 45 || site.angle >= 315 ? Position.Right : site.angle < 135 ? Position.Bottom : site.angle < 225 ? Position.Left : Position.Top }))
-      members.push({ id: item.id, type: 'graphNode', position: { x: item.x - (parent?.x ?? 0), y: item.y - (parent?.y ?? 0) }, parentId: parent?.id, extent: parent ? [[parent.padding ?? 8, parent.header_height ?? 40], [parent.width - (parent.padding ?? 8), parent.height - (parent.padding ?? 8)]] : undefined, width: item.width ?? 176, height: item.height ?? 80, style: { width: item.width ?? 176, height: item.height ?? 80 }, data: { item, boundary: false, theme, resize, maxHeight, ports, labels: nativeChildren.filter((entry) => entry.type === 'text' && (entry.id === `${nativePrefix}-nt-${item.id}` || entry.id === `${nativePrefix}-nd-${item.id}`)), icon: nativeChildren.find((entry) => entry.type === 'picture' && entry.id === `${nativePrefix}-ni-${item.id}`) }, selected: selection.current.includes(item.id), ariaLabel: `Node ${item.label}` })
+      members.push({ id: item.id, type: 'graphNode', position: { x: item.x - (parent?.x ?? 0), y: item.y - (parent?.y ?? 0) }, parentId: parent?.id, extent: parent ? [[parent.padding ?? 8, parent.header_height ?? 40], [parent.width - (parent.padding ?? 8), parent.height - (parent.padding ?? 8)]] : undefined, width: item.width ?? 176, height: item.height ?? 80, style: { width: item.width ?? 176, height: item.height ?? 80 }, data: { item, boundary: false, theme, resize, maxHeight, ports, labels: embeddedLabel(native), icon: nativeChildren.find((entry) => entry.type === 'picture' && entry.id === `${nativePrefix}-ni-${item.id}`) }, selected: selection.current.includes(item.id), ariaLabel: `Node ${item.label}` })
     }
     setNodes((previous) => {
       const measuredById = new Map(previous.map((entry) => [entry.id, entry.measured]))

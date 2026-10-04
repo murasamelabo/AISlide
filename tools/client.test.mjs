@@ -1249,8 +1249,10 @@ test('graph authoring SDK retains routes annotations sites and group layout thro
   const label = rendered.children.find(element => element.id.endsWith('-et-manual'));
   assert.equal(label.color, 'AA2244'); assert.equal(label.font_size, 20);
   assert.equal(rendered.children.find(element => element.id.endsWith('-eb-center')).text, '2');
-  const header = rendered.children.find(element => element.id.endsWith('-gt-region'));
-  assert.equal(header.x, 52); assert.equal(header.height, 52); assert.equal(header.font_size, 24);
+  const header = rendered.children.find(element => element.id.endsWith('-g-region'));
+  assert.equal(header.x + header.format.padding.left, 52); assert.equal(header.height - header.format.padding.top - header.format.padding.bottom, 52); assert.equal(header.font_size, 24);
+  assert.equal(header.text, spec.groups[0].label);
+  assert.ok(rendered.children.every(element => !element.id.includes('-gt-') && !element.id.includes('-nt-')));
   for (const ids of [['source'], ['source', 'target'], ['manual'], ['region']]) {
     const moved = await client.transformGraph(spec, [{ op: 'move', ids, dx: 8, dy: 8 }]);
     assert.deepEqual(moved.edges[0].waypoints, ids.length === 1 && ids[0] === 'source' ? spec.edges[0].waypoints : spec.edges[0].waypoints.map(([horizontal, vertical]) => [horizontal + 8, vertical + 8]));

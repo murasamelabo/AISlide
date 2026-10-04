@@ -52,6 +52,9 @@ struct Object<'a> {
 	scope: String,
 	bounds: Rect,
 	frame: Rect,
+	// Declared text area: a shape's explicit padding confines its text, otherwise the whole frame.
+	text_frame: Rect,
+	text_bounds: Rect,
 	transform: Affine,
 	text: bool,
 	font_size: Option<f64>,
@@ -85,6 +88,14 @@ fn collect<'a>(elements: &'a [Element], parent: Affine, scope: &str, ancestor_so
 			* Affine::translate((-width / 2.0, -height / 2.0));
 		let frame = Rect::new(0.0, 0.0, width, height);
 		let bounds = transform.transform_rect_bbox(frame);
+		let text_frame = match element {
+			Element::Shape { format, .. } if format.padding.is_some() => {
+				let [left, top, frame_width, frame_height] = format.content_frame(width, height, true);
+				Rect::new(left, top, left + frame_width, top + frame_height)
+			}
+			_ => frame,
+		};
+		let text_bounds = transform.transform_rect_bbox(text_frame);
 		let painted_fill = visual.opacity.unwrap_or(1.0) > 0.0
 			&& visual.gradient.as_ref().is_none_or(|gradient| gradient.stops().iter().any(|stop| stop.opacity > 0.0));
 		let container = match element {
@@ -133,7 +144,7 @@ fn collect<'a>(elements: &'a [Element], parent: Affine, scope: &str, ancestor_so
 			(points.into_iter().map(|point| transform * Point::new(point[0] * width, point[1] * height)).collect(),
 				start.iter().chain(end.iter()).map(|connection| connection.element_id.as_str()).collect())
 		} else { (Vec::new(), Vec::new()) };
-		objects.push(Object { id, scope: scope.into(), bounds, frame, transform, text, font_size, characters, route, connections, container, container_item, numbered_badge, picture: matches!(element, Element::Picture { .. }), own_text_padding });
+		objects.push(Object { id, scope: scope.into(), bounds, frame, text_frame, text_bounds, transform, text, font_size, characters, route, connections, container, container_item, numbered_badge, picture: matches!(element, Element::Picture { .. }), own_text_padding });
 		if let Element::Group { view_width, view_height, children, .. } = element {
 			collect(children, transform * Affine::scale_non_uniform(width / view_width, height / view_height), scope, soft_edge, objects)?;
 		}
@@ -379,7 +390,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			}
 			if !object.text { continue; }
 			for other in &objects[index + 1..] {
-				let overlap = object.bounds.intersect(other.bounds);
+				let overlap = object.text_bounds.intersect(other.text_bounds);
 				if other.text && overlap.width() > 2.0 && overlap.height() > 2.0 {
 					push_finding(&mut report, page, &slide.id, &[object, other], "TEXT_OVERLAP", "warning", "geometry", "Visible text frames overlap; confirm whether intentional", &["Move, align or reflow the text frames", "Inspect rotated text before applying a repair"])?;
 				}
@@ -387,7 +398,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			for (connector_index, connector) in objects.iter().enumerate().filter(|(_, candidate)| !candidate.route.is_empty()) {
 				if connector.scope == object.scope && connector.connections.contains(&object.id) { continue; }
 				let inverse = object.transform.inverse();
-				if connector.route.windows(2).any(|segment| crosses_frame(inverse * segment[0], inverse * segment[1], object.frame)) {
+				if connector.route.windows(2).any(|segment| crosses_frame(inverse * segment[0], inverse * segment[1], object.text_frame)) {
 					if object.numbered_badge && index > connector_index && object.scope == connector.scope && route_crosses_badge_center(object, connector) {
 						if object.scope == "slide" && known_badges.contains(&(object.id.into(), connector.id.into())) { continue; }
 						push_finding(&mut report, page, &slide.id, &[object, connector], "CONNECTOR_BADGE_OVERLAP", "info", "heuristic", "A compact opaque numbered badge covers a connector near its center; this may be intentional", &["Keep the connector behind the badge", "Confirm that the number and nearby labels remain readable in the preview"])?;
