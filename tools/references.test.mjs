@@ -116,6 +116,67 @@ test('appendix-only publication explicitly handles a dense slide through real MC
   }
 });
 
+test('English editing skill covers English structure and presentation-specific meaning checks', async () => {
+  const skillUrl = new URL('../.github/skills/english-editing/SKILL.md', import.meta.url);
+  const skill = await readFile(skillUrl, 'utf8');
+  assert.match(skill.replace(/^\uFEFF/, ''), /^---\r?\nname: english-editing\r?\n/);
+  assert.ok(Buffer.byteLength(skill) <= 6000, 'Keep the English editing entry point compact');
+  for (const required of ['subject', 'verb', 'articles', 'modal', 'parallel', 'US', 'UK', 'AI detector', './references/presentation.md', './references/checks-and-sources.md']) {
+    assert.ok(skill.includes(required), `Missing English editing guidance: ${required}`);
+  }
+  const pages = new Map([[skillUrl, skill]]);
+  for (const path of ['references/presentation.md', 'references/checks-and-sources.md']) {
+    const url = new URL(path, skillUrl);
+    pages.set(url, await readFile(url, 'utf8'));
+  }
+  const presentation = [...pages.values()][1];
+  for (const required of ['sentence case', 'speaker notes', 'not statistically significant', 'parallel', 'percentage points', 'do not shrink']) {
+    assert.ok(presentation.includes(required), `Missing English presentation rule: ${required}`);
+  }
+  const checks = [...pages.values()][2];
+  for (const required of ['Synthetic', 'Keep unchanged', 'Ask, do not guess', 'may not', 'not all', 'Unknown actor', 'No causal upgrade', 'https://www.archives.gov/', 'https://github.com/blader/humanizer']) {
+    assert.ok(checks.includes(required), `Missing English preservation case or source: ${required}`);
+  }
+  for (const [base, content] of pages) {
+    for (const match of content.matchAll(/\[([^\]]+)\]\(([^)]+)\)/g)) {
+      if (/^https:\/\//.test(match[2])) continue;
+      await readFile(new URL(match[2].split('#')[0], base), 'utf8');
+    }
+  }
+  const authoring = await readFile(new URL('../.github/skills/aislide-authoring/SKILL.md', import.meta.url), 'utf8');
+  assert.match(authoring, /\.\.\/english-editing\/SKILL\.md/);
+  const guide = await readFile(new URL('../.github/skills/README.md', import.meta.url), 'utf8');
+  assert.match(guide, /english-editing\/SKILL\.md/);
+});
+
+test('Japanese editing skill is portable and separates meaning from presentation formatting', async () => {
+  const skillUrl = new URL('../.github/skills/japanese-editing/SKILL.md', import.meta.url);
+  const skill = await readFile(skillUrl, 'utf8');
+  assert.match(skill.replace(/^\uFEFF/, ''), /^---\r?\nname: japanese-editing\r?\n/);
+  assert.ok(Buffer.byteLength(skill) <= 6000, 'Keep the editing entry point compact');
+  for (const required of ['意味の保持', '数値', '断定', '提案', 'メール', 'プレゼン', '不明', '引用', 'AI判定', 'references/presentation.md']) {
+    assert.ok(skill.includes(required), `Missing Japanese editing guidance: ${required}`);
+  }
+  const presentationUrl = new URL('references/presentation.md', skillUrl);
+  const presentation = await readFile(presentationUrl, 'utf8');
+  for (const required of ['投影', '配布', '見出し', '箇条書き', '図表', 'ノート', '母数', '因果', '文字を縮小', '架空例', '変更しない']) {
+    assert.ok(presentation.includes(required), `Missing presentation editing guidance: ${required}`);
+  }
+  for (const [base, content] of [[skillUrl, skill], [presentationUrl, presentation]]) {
+    for (const match of content.matchAll(/\[([^\]]+)\]\(([^)]+)\)/g)) {
+      const target = match[2];
+      if (/^https:\/\//.test(target)) continue;
+      await readFile(new URL(target.split('#')[0], base), 'utf8');
+    }
+  }
+  for (const name of ['tech-deck-ja', 'aislide-authoring']) {
+    const entry = await readFile(new URL(`../.github/skills/${name}/SKILL.md`, import.meta.url), 'utf8');
+    assert.match(entry, /\.\.\/japanese-editing\/SKILL\.md/);
+  }
+  const guide = await readFile(new URL('../.github/skills/README.md', import.meta.url), 'utf8');
+  assert.match(guide, /japanese-editing\/SKILL\.md/);
+});
+
 test('reference guidance and CI include the publication workflow within the skill budget', async () => {
   const skill = await readFile(new URL('../.github/skills/aislide-authoring/SKILL.md', import.meta.url), 'utf8');
   assert.ok(Buffer.byteLength(skill) <= 6000);

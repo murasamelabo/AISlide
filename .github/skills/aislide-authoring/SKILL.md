@@ -7,10 +7,10 @@ description: 'AISlide MCP / SDK で編集可能な PowerPoint / PPTX を作成�
 
 ## Scope
 
-Use AISlide MCP/SDK and its shared core, never another PPTX engine. For Japanese
-technical storytelling use `tech-deck-ja` once; simple edits need no story pass.
-Honor the requested language and separate facts, assumptions and synthetic data.
-Skill installation does not connect MCP.
+Use AISlide core via MCP/SDK only. Stories: `tech-deck-ja` (Japanese).
+Wording: [Japanese](../japanese-editing/SKILL.md), [English](../english-editing/SKILL.md).
+Honor scope and language; separate facts, assumptions and synthetic data.
+Skills do not connect MCP.
 
 ## Short Workflow
 
