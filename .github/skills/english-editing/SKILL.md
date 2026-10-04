@@ -17,11 +17,11 @@ examples, opinions, experiences or emotions. No unauthorized installs or publish
 Use [presentation editing](./references/presentation.md) for slides, captions and
 speaker notes. Use [meaning checks and sources](./references/checks-and-sources.md)
 when a change could alter meaning or when reviewing the skill's rationale.
-These references are guidance, not automatic rewriting scripts.
+These are guidance, not rewriting scripts.
 
-Return edits to the caller. `aislide-authoring` owns PPTX operations and layout
-review; do not start another deck or invoke `tech-deck-ja` for English.
-Other documents need no MCP. Reuse an approved voice profile if supplied.
+Return edits with the supplied purpose and voice. Wording-only edits skip
+`slide-planning`. `aislide-authoring` owns PPTX operations; never invoke
+`tech-deck-ja` for English. Other documents need no MCP.
 
 ## Preserve before polishing
 

@@ -1,17 +1,20 @@
 ﻿# 再利用可能な資料作成スキル
 
-日本語・英語の編集、技術ストーリーの構成、AISlide の PPTX 実行手順を分離した、リポジトリ管理のスキル例です。特定の業界、顧客、個人環境に依存しません。このページの導入手順は利用者向けの説明であり、スキル配置、MCP 設定、公開を自動実行するものではありません。
+用途別の構成、日本語・英語の編集、技術の専門構成、AISlide の PPTX 実行手順を分離した、リポジトリ管理のスキル例です。特定の業界、顧客、個人環境に依存しません。このページの導入手順は利用者向けの説明であり、スキル配置、MCP 設定、公開を自動実行するものではありません。
 
 ## 使い分け
 
 | スキル | 担当 | 入口 |
 | --- | --- | --- |
+| [slide-planning](slide-planning/SKILL.md) | 6系統・33用途から読者の目的を選び、構成と同じ台帳をつなぐ | スライドの新規構成・明示された再構成。文言修正だけでは起動しない |
 | [japanese-editing](japanese-editing/SKILL.md) | 意味を保った日本語の推敲。プレゼンの見出し・本文・図表ラベル・ノート、提案、報告、メール、技術文書など | 日本語を読みやすくする依頼。文章のみでも単独使用可能 |
 | [english-editing](english-editing/SKILL.md) | 英語の語順・冠詞・法助動詞・修飾・並列性を踏まえた推敲。プレゼン、提案、報告、メールなど | 英文を明快で自然にする依頼。日本語ルールの翻訳ではない独立した編集手順 |
 | [tech-deck-ja](tech-deck-ja/SKILL.md) | 日本語の技術ストーリー、根拠台帳、説明順序、報告調の本文 | 日本語の技術説明資料を新規に構成するとき |
 | [aislide-authoring](aislide-authoring/SKILL.md) | AISlide core / MCP / SDK による編集可能な PPTX の作成、検証、納品 | PPTX の編集・書き出し、または構成後の実行 |
 
-`japanese-editing` / `english-editing` は対象言語の文言、`tech-deck-ja` は日本語の技術的な構成、`aislide-authoring` は PPTX 実行を担当します。技術以外の提案・業務報告・案内にも編集スキルを使えます。混在資料は対象の文章・ページごとに言語を選び、同じ文章に両方の規則を重ねません。翻訳が必要な場合は推敲と分けます。構成が承認済みなら文言だけを整え、再構成しません。
+`slide-planning` は用途の選択と全体構成、日英編集は対象言語の文言、`tech-deck-ja` は日本語の技術的な専門構成、`aislide-authoring` は PPTX 実行を担当します。技術スキルの直接呼び出しも維持しますが、共通構成から呼ばれた場合は依頼元へ返し、編集や生成を二重に開始しません。混在資料は文章・ページごとに言語を選び、同じ文章に両言語の規則を重ねません。翻訳は別作業です。承認済みの構成は、再構成の依頼がなければ保持します。
+
+[用途カタログ](slide-planning/references/catalog.md) は組織・人材、営業・協業、経営・投資、業務・推進、学習・探究、広報・公共・創作の6系統です。主用途は1つ、補助用途は必要なときだけ1つまで選び、対応する節だけを参照します。言語、投影・配布・スマホ閲覧、業種、見た目は用途と別の条件です。これは編集・構成の指針であり、決定論的な分類器や新しいMCPパラメーターではありません。
 
 日本語編集では [nanaism/yomiyasu](https://github.com/nanaism/yomiyasu)（MIT）の意味保持・文脈に基づく推敲を参考に、独自の手順と架空例を記述しています。上流のスキル本文・文章例・検査スクリプトは複製・インストールしていません。箇条書き比率や文長を固定の合否基準にせず、投影・配布・ノートの役割に合わせます。これは AISlide 全体のライセンス選定ではありません。
 
@@ -34,16 +37,17 @@ node "<repo>/tools/mcp.mjs" --output-dir "<output>" --asset-dir "<assets>"
 
 ## 配置先を一つ選ぶ
 
-文章編集だけなら対象言語の編集スキルを単独で使えます。PPTX 作成には `aislide-authoring`、日本語の技術資料の構成も必要なら `tech-deck-ja` を加え、**同じスコープへ、名前を変えずディレクトリごと** コピーします。日英両方を扱う場合は両編集スキルを置き、必要な方だけ読み込みます。編集スキルの `references/` も含めます。
+文章編集だけなら対象言語の編集スキルを単独で使えます。新規構成には `slide-planning`、日本語の技術解説には `tech-deck-ja`、PPTX 作成には `aislide-authoring` を加え、**同じスコープへ、名前を変えずディレクトリごと** コピーします。必要な言語だけ読み込みます。各スキルの `references/` も含めます。
 
 | コピー元 | ユーザースコープ: 複数リポジトリで使用 | リポジトリスコープ: そのプロジェクトだけで使用 |
 | --- | --- | --- |
+| `<repo>/.github/skills/slide-planning/` | `~/.copilot/skills/slide-planning/` | `<project>/.github/skills/slide-planning/` |
 | `<repo>/.github/skills/japanese-editing/` | `~/.copilot/skills/japanese-editing/` | `<project>/.github/skills/japanese-editing/` |
 | `<repo>/.github/skills/english-editing/` | `~/.copilot/skills/english-editing/` | `<project>/.github/skills/english-editing/` |
 | `<repo>/.github/skills/aislide-authoring/` | `~/.copilot/skills/aislide-authoring/` | `<project>/.github/skills/aislide-authoring/` |
 | `<repo>/.github/skills/tech-deck-ja/` | `~/.copilot/skills/tech-deck-ja/` | `<project>/.github/skills/tech-deck-ja/` |
 
-Windows の `~` は通常 `%USERPROFILE%` に相当します。ホストが対応する `~/.agents/skills/` 等を既に使っている場合は、その一つの探索先へ統一します。すべての探索先へ複製しません。この AISlide リポジトリ内では四つともリポジトリスコープにあるため、追加コピーは不要です。
+Windows の `~` は通常 `%USERPROFILE%` に相当します。ホストが対応する `~/.agents/skills/` 等を既に使っている場合は、その一つの探索先へ統一します。すべての探索先へ複製しません。この AISlide リポジトリ内では五つともリポジトリスコープにあるため、追加コピーは不要です。
 
 1. ユーザー用かリポジトリ用かを選び、ホストが読む他の探索先も含めて同名スキルの有無を確認します。既存の個人版・マーケットプレイス版を無断で上書き・削除しません。
 2. コピー先に同名のディレクトリがなければ親ディレクトリを用意し、必要な役割のスキルをコピーします。既存版があれば差分を確認し、どちらを有効にするか利用者が選びます。同名の複数版の読み込み優先順位に依存しません。
@@ -57,6 +61,18 @@ Windows の `~` は通常 `%USERPROFILE%` に相当します。ホストが対�
 ## 明示的な呼び出し例
 
 自動認識だけに頼らず、最初の依頼で構成と実行の担当を明記できます。以下はすべて架空の依頼例です。
+
+### 用途から新規構成する
+
+```text
+slide-planning で架空企業の採用資料を8枚に構成してください。
+読者はエンジニア候補者。仕事と期待を理解して応募を検討できることが目的です。
+主用途と選択理由、スライド台帳を示してください。
+日本語、10分の説明と配布PDF向け。待遇や実績は創作しないでください。
+今回は構成と文言までで、PPTXの作成・公開はしないでください。
+```
+
+英語なら「Use slide-planning for a sales proposal in UK English. Include two customer-case slides as supporting evidence. Keep the supplied figures and caveats. Return an outline only.」のように、目的と言語・実行範囲を分けて指定します。
 
 ### 技術以外のプレゼン・一般文書
 

@@ -1,16 +1,16 @@
 ﻿---
 name: aislide-authoring
-description: 'AISlide MCP / SDK で編集可能な PowerPoint / PPTX を作成・編集・検証・書き出しするときに使う。画像、ノート、アクセシビリティ、型付きバッチ、検証・busy・revision エラーの回復を担当する。日本語技術資料の構成は tech-deck-ja に任せ、このスキルが実行を引き継ぐ。'
+description: 'AISlide MCP / SDK で編集可能な PowerPoint / PPTX を作成・編集・検証・書き出しするときに使う。画像、ノート、アクセシビリティ、型付きバッチ、検証・busy・revision エラーの回復を担当する。新規構成は slide-planning に任せ、同じ台帳で実行する。'
 ---
 
 # AISlide Authoring
 
 ## Scope
 
-Use AISlide core via MCP/SDK only. Stories: `tech-deck-ja` (Japanese).
+Use AISlide core via MCP/SDK only. New structure: `slide-planning`; reuse ledgers.
 Wording: [Japanese](../japanese-editing/SKILL.md), [English](../english-editing/SKILL.md).
-Honor scope and language; separate facts, assumptions and synthetic data.
-Skills do not connect MCP.
+Bounded edits skip planning. Honor scope/language; distinguish facts and assumptions.
+Skills do not connect MCP. Label synthetic data.
 
 ## Short Workflow
 
