@@ -70,7 +70,7 @@ reference-site slide images, branding or proprietary artwork are bundled.
 
 ## MCP Workflow
 
-The short project-owned [AISlide authoring SKILL](../../.github/skills/aislide-authoring/SKILL.md) provides the normal path and failure rules; load detailed sections below only as needed. For Japanese technical storytelling and paired installation, see the [portable skill examples](../../.github/skills/README.md). MCP initialization also advertises the short serialization, batching, asset and completion rules without requiring a separate guide call.
+The short project-owned [AISlide authoring SKILL](../../.github/skills/aislide-authoring/SKILL.md) provides the normal path and failure rules; load detailed sections below only as needed. Reuse supplied ledgers; use `slide-planning` for new structure without one. For purpose planning, language editing, technical structure and same-scope installation, see the [skill roles and setup](../../.github/skills/README.md). MCP initialization also advertises the short serialization, batching, asset and completion rules without requiring a separate guide call.
 
 The default connection is lightweight: ten common tools are initially exposed. `discover_tools({query})` searches advanced operations without their full schemas; `get_tool_schema({name})` returns the needed schema and publishes that tool. The four most recently requested advanced tools remain in the additional list. Existing direct calls are still valid; `--tool-profile full` restores full discovery and legacy response defaults.
 
@@ -119,7 +119,7 @@ The SDK equivalents are `client.bestPracticeProfiles()`, `client.bestPracticeGui
 
 ## Japanese Technical Decks
 
-日本語の技術ストーリーと根拠は `tech-deck-ja`、PPTX 実行は `aislide-authoring` に分担します。[配置先と架空の依頼例](../../.github/skills/README.md) は顧客・業界に依存しません。本文は日本語の報告調を基本とし、出典、仮定、未確認、合成データを区別します。以下は接続先の公開スキーマを確認してから使う例で、フォント・画像の導入や既存レポートの変更を行うものではありません。
+用途別の構成は `slide-planning`、日本語の技術ストーリーと根拠は `tech-deck-ja`、PPTX 実行は `aislide-authoring` に分担し、既存台帳を引き継ぎます。必要な言語編集スキルも含めた [使い分け・配置先と架空の依頼例](../../.github/skills/README.md) は顧客・業界に依存しません。技術解説の本文は日本語の報告調を基本とし、出典、仮定、未確認、合成データを区別します。以下は接続先の公開スキーマを確認してから使う例で、フォント・画像の導入や既存レポートの変更を行うものではありません。
 
 ### 作成時にフォントと共通領域を確定
 

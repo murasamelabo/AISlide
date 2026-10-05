@@ -116,6 +116,120 @@ test('appendix-only publication explicitly handles a dense slide through real MC
   }
 });
 
+test('slide planning covers 33 purposes with bounded routing and portable references', async () => {
+  const root = new URL('../.github/skills/slide-planning/SKILL.md', import.meta.url);
+  const skill = await readFile(root, 'utf8');
+  assert.match(skill.replace(/^\uFEFF/, ''), /^---\r?\nname: slide-planning\r?\n/);
+  assert.ok(Buffer.byteLength(skill) <= 6000, 'Keep the planning entry point compact');
+  for (const required of ['Set one `primary_purpose`', 'secondary_purpose', 'null by default', 'allow at most one', 'wording-only', 'approved structure', 'same ledger', 'return instead of invoking it again', 'tech-deck-ja', 'japanese-editing', 'english-editing', 'aislide-authoring']) {
+    assert.ok(skill.includes(required), `Missing planning boundary: ${required}`);
+  }
+  const families = {
+    organization: ['company-introduction', 'recruiting-pitch', 'culture-deck', 'employee-onboarding', 'portfolio'],
+    commercial: ['service-introduction', 'sales-proposal', 'product-demo', 'customer-case', 'partnership-proposal'],
+    management: ['fundraising-pitch', 'business-plan', 'growth-strategy', 'financial-results', 'decision-proposal', 'sustainability-report'],
+    delivery: ['project-kickoff', 'progress-report', 'retrospective', 'change-announcement', 'all-hands'],
+    learning: ['training', 'procedure', 'workshop', 'technical-explanation', 'research-presentation', 'research-report'],
+    public: ['keynote', 'product-launch', 'public-briefing', 'policy-proposal', 'incident-briefing', 'creative-proposal'],
+  };
+  const catalogUrl = new URL('references/catalog.md', root);
+  const catalog = await readFile(catalogUrl, 'utf8');
+  const rows = [...catalog.matchAll(/^\| `([a-z-]+)` \| ([a-z]+) \| ([^|]+) \| \[[^\]]+\]\(([^)]+)\) \|$/gm)];
+  assert.equal(rows.length, 33);
+  assert.equal(new Set(rows.map(row => row[1])).size, 33);
+  const pages = new Map([[root.href, skill], [catalogUrl.href, catalog]]);
+  for (const [family, purposes] of Object.entries(families)) {
+    assert.deepEqual(rows.filter(row => row[2] === family).map(row => row[1]), purposes);
+    const familyUrl = new URL(`references/${family}.md`, root);
+    const content = await readFile(familyUrl, 'utf8');
+    pages.set(familyUrl.href, content);
+    const sections = content.split(/^## /m).slice(1);
+    assert.equal(sections.length, purposes.length);
+    for (const purpose of purposes) {
+      const section = sections.find(section => section.startsWith(`${purpose}\n`) || section.startsWith(`${purpose}\r\n`));
+      assert.ok(section, `Missing purpose: ${purpose}`);
+      for (const field of ['読者・到達点', '必須材料', '構成例', '表現', '確認']) assert.ok(section.includes(field), `Missing ${field} for ${purpose}`);
+      assert.equal(rows.find(row => row[1] === purpose)[4], `${family}.md#${purpose}`);
+    }
+  }
+  const checksUrl = new URL('references/checks-and-sources.md', root);
+  const checks = await readFile(checksUrl, 'utf8');
+  pages.set(checksUrl.href, checks);
+  for (const required of ['webinar', 'fundraising-pitch', 'sales-proposal', 'wording-only', 'secondary_purpose', 'slideland.tech', 'sequoiacap.com', 'mitcommlab.mit.edu']) assert.ok(checks.includes(required), `Missing scenario or source: ${required}`);
+  for (const [base, content] of pages) {
+    for (const match of content.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
+      if (/^https?:\/\//.test(match[1])) continue;
+      const target = new URL(match[1], base);
+      const anchor = target.hash.slice(1);
+      target.hash = '';
+      const destination = await readFile(target, 'utf8');
+      if (anchor) assert.ok(destination.split(/\r?\n/).includes(`## ${anchor}`), `Missing anchor: ${match[1]}`);
+    }
+  }
+  const routing = {
+    'aislide-authoring': /Bounded edits skip planning/,
+    'tech-deck-ja': /編集スキルや実行担当をここから再呼び出ししない/,
+    'japanese-editing': /文言の修正だけなら構成スキルを起動しない/,
+    'english-editing': /Wording-only edits skip\s+`slide-planning`/,
+  };
+  for (const [name, boundary] of Object.entries(routing)) {
+    const entry = await readFile(new URL(`../${name}/SKILL.md`, root), 'utf8');
+    assert.ok(entry.includes('slide-planning'), `Missing routing for ${name}`);
+    assert.match(entry, boundary, `Missing no-recursion boundary for ${name}`);
+    if (name === 'tech-deck-ja') assert.ok(entry.includes('以下はPPTX実行も依頼された場合だけ適用'));
+  }
+  const guide = await readFile(new URL('../README.md', root), 'utf8');
+  assert.ok(guide.includes('slide-planning/SKILL.md'));
+});
+
+for (const [name, rules] of [
+  ['tech-deck-ja', [
+    /description:.*採用・営業提案・会社紹介.*技術が題材にすぎない.*slide-planning/,
+    /読者の到達点が技術の理解・判断ではなく/,
+    /`slide-planning` へ一度だけ渡す/,
+    /未配置なら用途の不一致を伝えて確認する/,
+  ]],
+  ['english-editing', [
+    /Return edits to the caller with the supplied purpose and voice/,
+    /start no other\s+deck or research/,
+  ]],
+  ['aislide-authoring', [
+    /Reuse supplied ledgers without replanning/,
+    /For new structure without a ledger, use `slide-planning` once; ask if absent/,
+  ]],
+  ['slide-planning', [
+    /Specify delivery separately: live talk, read-alone PDF, hands-on session or recorded talk/,
+    /not\s+new MCP parameters or guided `profile_id` values/,
+  ]],
+]) {
+  test(`${name} retains its purpose and handoff boundary when selected directly`, async () => {
+    const entry = await readFile(new URL(`../.github/skills/${name}/SKILL.md`, import.meta.url), 'utf8');
+    for (const rule of rules) assert.match(entry, rule);
+    const windowsBytes = Buffer.byteLength(entry.replace(/\r?\n/g, '\r\n'));
+    if (name !== 'tech-deck-ja') assert.ok(windowsBytes <= 6000, `${name} exceeds the Windows checkout skill budget: ${windowsBytes}`);
+  });
+}
+
+test('purpose catalog distinguishes workshop delivery and slide-only scope', async () => {
+  const catalog = await readFile(new URL('../.github/skills/slide-planning/references/catalog.md', import.meta.url), 'utf8');
+  assert.match(catalog, /「ワークショップ形式」.*開催形式/);
+  assert.match(catalog, /参加者が成果物や合意を作る場合だけ `workshop` を用途にする/);
+  assert.match(catalog, /冊子そのものではなく、その内容を説明するスライドを対象とする/);
+});
+
+test('skill setup documentation includes purpose planning and the shared installation guide', async () => {
+  const guide = new URL('../.github/skills/README.md', import.meta.url);
+  for (const path of ['../README.md', '../docs/authoring/README.md']) {
+    const page = new URL(path, import.meta.url);
+    const content = await readFile(page, 'utf8');
+    assert.ok(content.includes('`slide-planning`'), `Missing planning setup in ${path}`);
+    assert.doesNotMatch(content, /両方をユーザースコープ|paired installation/);
+    const links = [...content.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)];
+    assert.ok(links.some(match => new URL(match[1], page).href === guide.href), `Missing shared installation guide in ${path}`);
+  }
+  await readFile(guide, 'utf8');
+});
+
 test('English editing skill covers English structure and presentation-specific meaning checks', async () => {
   const skillUrl = new URL('../.github/skills/english-editing/SKILL.md', import.meta.url);
   const skill = await readFile(skillUrl, 'utf8');
