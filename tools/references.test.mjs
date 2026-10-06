@@ -7,6 +7,105 @@ import { fileURLToPath } from 'node:url';
 import { unzipSync, strFromU8 } from 'fflate';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { requestCore } from './core-client.mjs';
+
+const specialistFamilies = {
+  organization: { name: 'organization-deck-ja', purposes: ['company-introduction', 'recruiting-pitch', 'culture-deck', 'employee-onboarding', 'portfolio'] },
+  commercial: { name: 'commercial-deck-ja', purposes: ['service-introduction', 'sales-proposal', 'product-demo', 'customer-case', 'partnership-proposal'] },
+  management: { name: 'management-deck-ja', purposes: ['fundraising-pitch', 'business-plan', 'growth-strategy', 'financial-results', 'decision-proposal', 'sustainability-report'] },
+  delivery: { name: 'delivery-deck-ja', purposes: ['project-kickoff', 'progress-report', 'retrospective', 'change-announcement', 'all-hands'] },
+  learning: { name: 'learning-deck-ja', purposes: ['training', 'procedure', 'workshop', 'technical-explanation', 'research-presentation', 'research-report'] },
+  public: { name: 'public-deck-ja', purposes: ['keynote', 'product-launch', 'public-briefing', 'policy-proposal', 'incident-briefing', 'creative-proposal'] },
+};
+
+const pilotPurposes = {
+  organization: 'recruiting-pitch',
+  commercial: 'sales-proposal',
+  management: 'decision-proposal',
+  delivery: 'progress-report',
+  learning: 'training',
+  public: 'keynote',
+};
+
+function validateExampleLedger(section, purpose) {
+  const example = section.split('### ページ設計とノート')[1].split('### 図表と部品の選定')[0];
+  const lines = example.split(/\r?\n/).filter(line => /^\s*\|\s*S\d+/.test(line));
+  const slides = lines.map(line => {
+    const row = line.match(/^\| S([1-9]\d*) \| ([^|]*) \| ([^|]*) \| ([^|]*) \| ([^|]*) \|$/);
+    assert.ok(row, `Malformed ledger row in ${purpose}: ${line}`);
+    for (const cell of row.slice(2)) assert.ok(cell.trim().length > 0, `Empty ledger cell in ${purpose}`);
+    return row;
+  });
+  assert.ok(slides.length >= 4 && slides.length <= 8, `${purpose} needs a bounded, coherent page example`);
+  assert.deepEqual(slides.map(row => Number(row[1])), slides.map((_, index) => index + 1));
+  const declaredInputs = new Set(example.split('| ID |')[0].match(/F\d+/g));
+  for (const row of slides) {
+    for (const source of row[3].match(/F\d+/g) ?? []) assert.ok(declaredInputs.has(source), `Undeclared example source ${source} in ${purpose}`);
+  }
+  return slides.length;
+}
+
+test('purpose guide ledger validation rejects empty and malformed trailing rows', () => {
+  const header = '### ページ設計とノート\n架空例: F1=example input\n| ID | 役割・見出し | 本文と根拠 | 図表案 | ノート |\n';
+  const rows = Array.from({ length: 4 }, (_, index) => `| S${index + 1} | Role | Body / F1 | Table | Note |`).join('\n');
+  const section = extra => `${header}${rows}\n${extra}\n### 図表と部品の選定\n`;
+  assert.equal(validateExampleLedger(section(''), 'synthetic'), 4);
+  assert.throws(() => validateExampleLedger(section('| S5 |  | F999 | chart | notes |'), 'synthetic'), /Empty ledger cell/);
+  assert.throws(() => validateExampleLedger(section('| S5 | Role | F1 | notes |'), 'synthetic'), /Malformed ledger row/);
+  assert.throws(() => validateExampleLedger(section('| S5 | Role | F999 | chart | notes |'), 'synthetic'), /Undeclared example source/);
+});
+
+for (const [family, { purposes }] of Object.entries(specialistFamilies)) {
+  for (const purpose of purposes.filter(purpose => purpose !== 'technical-explanation')) {
+    test(`purpose guide ${purpose} provides actionable decisions and a synthetic ledger`, async () => {
+      const guide = await readFile(new URL(`../.github/skills/slide-planning/references/${family}.md`, import.meta.url), 'utf8');
+      const section = guide.split(/^## /m).find(section => section.startsWith(`${purpose}\n`) || section.startsWith(`${purpose}\r\n`));
+      assert.ok(section, `Missing purpose: ${purpose}`);
+      for (const heading of ['判断と境界', '入力と不足時の分岐', '構成の分岐', 'ページ設計とノート', '図表と部品の選定', '失敗例と修正', '完了基準']) {
+        assert.ok(section.includes(`### ${heading}`), `Missing ${purpose} guidance: ${heading}`);
+      }
+      assert.ok(section.includes('架空例'), 'Ledger examples must be explicitly synthetic');
+      validateExampleLedger(section, purpose);
+      assert.ok(section.includes('不合格'), 'State when the purpose-specific result is not ready');
+      if (purpose === 'progress-report') assert.ok(section.includes('未設定・不明・異なるを言い換えない'));
+      if (purpose === 'product-launch') {
+        assert.ok(section.includes('発表内容の確認状態と素材の有無を分ける'));
+        assert.ok(section.includes('提供条件は未確認'));
+      }
+      if (purpose === 'incident-briefing') {
+        assert.ok(section.includes('未確認と調査中を同一視しない'));
+        assert.ok(section.includes('影響: 範囲は未確認'));
+        assert.doesNotMatch(section, /不足なら調査中/);
+      }
+      if (purpose === 'change-announcement') assert.ok(section.includes('採否を決めることが主目的の場合だけ decision-proposal'));
+    });
+  }
+}
+
+test('purpose guide part references exist in the current core catalog', async () => {
+  const catalog = await requestCore({ op: 'part_catalog' });
+  const presets = new Set(catalog.presets.map(preset => preset.id));
+  assert.ok(presets.size > 0);
+  for (const family of Object.keys(specialistFamilies)) {
+    const guide = await readFile(new URL(`../.github/skills/slide-planning/references/${family}.md`, import.meta.url), 'utf8');
+    for (const match of guide.matchAll(/`([a-z][a-z0-9-]+\/[a-z0-9-]+)`/g)) {
+      assert.ok(presets.has(match[1]), `Unknown ${family} guide preset: ${match[1]}`);
+    }
+  }
+});
+
+test('purpose guide comparison fixes 18 synthetic inputs before model evaluation', async () => {
+  const checks = await readFile(new URL('../.github/skills/slide-planning/references/checks-and-sources.md', import.meta.url), 'utf8');
+  const cases = [...checks.matchAll(/^\| `([a-z-]+\.(?:complete|gap|boundary))` \| ([^|]+) \| ([^|]+) \| ([^|]+) \|$/gm)];
+  assert.equal(cases.length, 18);
+  assert.equal(new Set(cases.map(row => row[1])).size, 18);
+  for (const purpose of Object.values(pilotPurposes)) {
+    for (const condition of ['complete', 'gap', 'boundary']) {
+      assert.ok(cases.some(row => row[1] === `${purpose}.${condition}`), `Missing ${purpose} ${condition}`);
+    }
+  }
+  for (const required of ['すべて架空例', '用途別ガイドだけを差し替える', '取得できなければ不明', '普遍的な優越性を主張しない']) assert.ok(checks.includes(required));
+});
 
 test('reference workflow uses real MCP core, Undo and PPTX/PDF delivery', { timeout: 120_000 }, async () => {
   const retained = process.env.AISLIDE_REFERENCE_ARTIFACTS;
@@ -124,21 +223,13 @@ test('slide planning covers 33 purposes with bounded routing and portable refere
   for (const required of ['Set one `primary_purpose`', 'secondary_purpose', 'null by default', 'allow at most one', 'wording-only', 'approved structure', 'same ledger', 'return instead of invoking it again', 'tech-deck-ja', 'japanese-editing', 'english-editing', 'aislide-authoring']) {
     assert.ok(skill.includes(required), `Missing planning boundary: ${required}`);
   }
-  const families = {
-    organization: ['company-introduction', 'recruiting-pitch', 'culture-deck', 'employee-onboarding', 'portfolio'],
-    commercial: ['service-introduction', 'sales-proposal', 'product-demo', 'customer-case', 'partnership-proposal'],
-    management: ['fundraising-pitch', 'business-plan', 'growth-strategy', 'financial-results', 'decision-proposal', 'sustainability-report'],
-    delivery: ['project-kickoff', 'progress-report', 'retrospective', 'change-announcement', 'all-hands'],
-    learning: ['training', 'procedure', 'workshop', 'technical-explanation', 'research-presentation', 'research-report'],
-    public: ['keynote', 'product-launch', 'public-briefing', 'policy-proposal', 'incident-briefing', 'creative-proposal'],
-  };
   const catalogUrl = new URL('references/catalog.md', root);
   const catalog = await readFile(catalogUrl, 'utf8');
-  const rows = [...catalog.matchAll(/^\| `([a-z-]+)` \| ([a-z]+) \| ([^|]+) \| \[[^\]]+\]\(([^)]+)\) \|$/gm)];
+  const rows = [...catalog.matchAll(/^\| `([a-z-]+)` \| ([a-z]+) \| ([^|]+) \| \[[^\]]+\]\(([^)]+)\) \| \[[a-z-]+\]\([^)]+\) \|$/gm)];
   assert.equal(rows.length, 33);
   assert.equal(new Set(rows.map(row => row[1])).size, 33);
   const pages = new Map([[root.href, skill], [catalogUrl.href, catalog]]);
-  for (const [family, purposes] of Object.entries(families)) {
+  for (const [family, { purposes }] of Object.entries(specialistFamilies)) {
     assert.deepEqual(rows.filter(row => row[2] === family).map(row => row[1]), purposes);
     const familyUrl = new URL(`references/${family}.md`, root);
     const content = await readFile(familyUrl, 'utf8');
@@ -180,6 +271,112 @@ test('slide planning covers 33 purposes with bounded routing and portable refere
   }
   const guide = await readFile(new URL('../README.md', root), 'utf8');
   assert.ok(guide.includes('slide-planning/SKILL.md'));
+});
+
+test('Japanese specialist routing covers all 33 purposes without duplicate assignments', async () => {
+  const catalogUrl = new URL('../.github/skills/slide-planning/references/catalog.md', import.meta.url);
+  const catalog = await readFile(catalogUrl, 'utf8');
+  const rows = [...catalog.matchAll(/^\| `([a-z-]+)` \| ([a-z]+) \| [^|]+ \| \[[^\]]+\]\(([^)]+)\) \| \[([a-z-]+)\]\(([^)]+)\) \|$/gm)];
+  assert.ok(catalog.includes('構成を依頼されている場合だけ個別案を返し、担当候補の提示だけならそこで止める'));
+  assert.equal(rows.length, 33, 'Every catalog purpose needs a Japanese specialist');
+  assert.equal(new Set(rows.map(row => row[1])).size, 33);
+  assert.equal(new Set(rows.map(row => row[4])).size, 7);
+  for (const [family, { name, purposes }] of Object.entries(specialistFamilies)) {
+    assert.deepEqual(rows.filter(row => row[2] === family).map(row => row[1]), purposes);
+    for (const purpose of purposes) {
+      const row = rows.find(row => row[1] === purpose);
+      const specialist = purpose === 'technical-explanation' ? 'tech-deck-ja' : name;
+      assert.equal(row[3], `${family}.md#${purpose}`);
+      assert.equal(row[4], specialist);
+      assert.equal(row[5], `../../${specialist}/SKILL.md`);
+      await readFile(new URL(row[5], catalogUrl), 'utf8');
+    }
+  }
+});
+
+for (const [family, { name, purposes }] of Object.entries(specialistFamilies)) {
+  test(`Japanese specialist ${name} preserves purpose detail and caller boundaries`, async () => {
+    const entryUrl = new URL(`../.github/skills/${name}/SKILL.md`, import.meta.url);
+    const entry = await readFile(entryUrl, 'utf8');
+    const frontmatter = entry.match(/^\uFEFF---\r?\n([\s\S]*?)\r?\n---\r?\n/);
+    assert.ok(frontmatter, 'Skill frontmatter must have opening and closing delimiters');
+    assert.match(frontmatter[1], new RegExp(`^name: ${name}\\r?$`, 'm'));
+    const description = frontmatter[1].match(/^description: '([^'\r\n]+)'\r?$/m)?.[1];
+    assert.ok(description && description.length <= 1024, 'Use a compact, quoted discovery description');
+    assert.ok(description.includes('日本語'));
+    const windowsBytes = Buffer.byteLength(entry.replace(/\r?\n/g, '\r\n'));
+    assert.ok(windowsBytes <= 6000, `${name} exceeds the Windows checkout skill budget: ${windowsBytes}`);
+    for (const required of [
+      'Japanese planning only', 'When delegated, return the same ledger to the caller.',
+      'Do not call planners, specialists, editors or rendering.',
+      'For standalone mismatches, hand off to `slide-planning` once; ask if unavailable.',
+      'Stop after that handoff.', 'Wording-only edits skip planning.',
+      'Explicit restructuring is required to change an approved outline.',
+      'Read only the selected purpose sections.', 'Recommendation-only requests stop before planning.',
+      'locate `## <purpose-id>` and read through the next level-two heading',
+      'Do not reuse fictional F IDs as user evidence.',
+      '## Purpose Decisions', '../japanese-editing/SKILL.md', '../aislide-authoring/SKILL.md',
+      `../slide-planning/references/${family}.md`,
+    ]) assert.ok(entry.includes(required), `Missing ${name} boundary: ${required}`);
+    const decisions = [...entry.matchAll(/^\| `([a-z-]+)` \| ([^|]+) \| ([^|]+) \|$/gm)];
+    assert.deepEqual(decisions.map(row => row[1]), purposes.filter(purpose => purpose !== 'technical-explanation'));
+    for (const row of decisions) {
+      assert.ok(row[2].trim().length >= 15, `Missing purpose-specific decision for ${row[1]}`);
+      assert.ok(row[3].trim().length >= 15, `Missing visual or facilitation guidance for ${row[1]}`);
+    }
+    for (const match of entry.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
+      assert.ok(!/^https?:/.test(match[1]), 'Specialists should use the existing local guidance');
+      const target = new URL(match[1], entryUrl);
+      const anchor = target.hash.slice(1);
+      target.hash = '';
+      const destination = await readFile(target, 'utf8');
+      if (anchor) assert.ok(destination.split(/\r?\n/).includes(`## ${anchor}`));
+    }
+  });
+}
+
+test('Japanese specialist selection is disclosed before bounded delegation', async () => {
+  const skill = await readFile(new URL('../.github/skills/slide-planning/SKILL.md', import.meta.url), 'utf8');
+  for (const required of [
+    'Show the selected specialist, reason and target slide IDs before delegation.',
+    'Recommendation-only requests stop after the selection; do not invoke a specialist.',
+    'Japanese passages only', 'English passages keep the purpose reference and `english-editing`',
+    'Invoke each selected specialist at most once', 'secondary purpose is limited to its assigned slides',
+    'If unavailable, disclose it and use the matching reference section without installing anything.',
+    'specialist_selections',
+  ]) assert.ok(skill.includes(required), `Missing specialist routing boundary: ${required}`);
+  const recommendationExit = skill.indexOf('Recommendation-only requests stop after the selection; do not invoke a specialist.');
+  for (const planningAction of ['## Build one plan', 'propose a custom outline', 'Invoke each selected specialist at most once']) {
+    assert.ok(skill.indexOf(planningAction) > recommendationExit, `Recommendation-only exit must precede ${planningAction}`);
+  }
+});
+
+test('Japanese specialist documentation preserves portable setup and routing scenarios', async () => {
+  const guideUrl = new URL('../.github/skills/README.md', import.meta.url);
+  const guide = await readFile(guideUrl, 'utf8');
+  assert.ok(guide.includes('11スキル'));
+  assert.doesNotMatch(guide, /五つとも/);
+  assert.ok(guide.includes('slide-planning/references/'));
+  const checksUrl = new URL('./slide-planning/references/checks-and-sources.md', guideUrl);
+  const checks = await readFile(checksUrl, 'utf8');
+  for (const { name } of Object.values(specialistFamilies)) {
+    assert.ok(guide.includes(`[${name}](${name}/SKILL.md)`), `Missing specialist guide: ${name}`);
+    assert.ok(guide.includes(`<repo>/.github/skills/${name}/`), `Missing setup source: ${name}`);
+    assert.ok(guide.includes(`~/.copilot/skills/${name}/`), `Missing user setup: ${name}`);
+    assert.ok(guide.includes(`<project>/.github/skills/${name}/`), `Missing workspace setup: ${name}`);
+    assert.ok(checks.includes(name), `Missing specialist scenario: ${name}`);
+  }
+  for (const scenario of ['recommendation-only', 'recommendation-unknown', 'same-specialist', 'secondary-scope', 'mixed-language', 'missing-specialist', 'delegated-mismatch', 'standalone-mismatch']) {
+    assert.ok(checks.includes(`| \`${scenario}\` |`), `Missing handoff scenario: ${scenario}`);
+  }
+  for (const [base, content] of [[guideUrl, guide], [checksUrl, checks]]) {
+    for (const match of content.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
+      if (/^https?:/.test(match[1])) continue;
+      const target = new URL(match[1], base);
+      target.hash = '';
+      await readFile(target, 'utf8');
+    }
+  }
 });
 
 for (const [name, rules] of [

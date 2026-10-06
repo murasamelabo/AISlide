@@ -1,20 +1,32 @@
 ﻿# 再利用可能な資料作成スキル
 
-用途別の構成、日本語・英語の編集、技術の専門構成、AISlide の PPTX 実行手順を分離した、リポジトリ管理のスキル例です。特定の業界、顧客、個人環境に依存しません。このページの導入手順は利用者向けの説明であり、スキル配置、MCP 設定、公開を自動実行するものではありません。
+用途の選択、日本語の用途別専門構成、日英の編集、AISlide の PPTX 実行を分離した、リポジトリ管理の11スキルです。特定の業界、顧客、個人環境に依存しません。このページの導入手順は利用者向けの説明であり、スキル配置、MCP 設定、公開を自動実行するものではありません。
 
 ## 使い分け
 
 | スキル | 担当 | 入口 |
 | --- | --- | --- |
-| [slide-planning](slide-planning/SKILL.md) | 6系統・33用途から読者の目的を選び、構成と同じ台帳をつなぐ | スライドの新規構成・明示された再構成。文言修正だけでは起動しない |
+| [slide-planning](slide-planning/SKILL.md) | 6系統・33用途を選び、専門スキル・理由・担当ページを提示して同じ台帳をつなぐ | 新規構成・明示された再構成・担当候補の相談。候補提示だけなら委譲しない |
 | [japanese-editing](japanese-editing/SKILL.md) | 意味を保った日本語の推敲。プレゼンの見出し・本文・図表ラベル・ノート、提案、報告、メール、技術文書など | 日本語を読みやすくする依頼。文章のみでも単独使用可能 |
 | [english-editing](english-editing/SKILL.md) | 英語の語順・冠詞・法助動詞・修飾・並列性を踏まえた推敲。プレゼン、提案、報告、メールなど | 英文を明快で自然にする依頼。日本語ルールの翻訳ではない独立した編集手順 |
+| [organization-deck-ja](organization-deck-ja/SKILL.md) | 組織・人材の読者との適合、実態、根拠と図表 | 日本語の会社紹介、採用、文化、入社案内、ポートフォリオ |
+| [commercial-deck-ja](commercial-deck-ja/SKILL.md) | 顧客の判断、比較条件、導入負担、実画面と成果 | 日本語のサービス紹介、営業提案、製品デモ、導入事例、協業提案 |
+| [management-deck-ja](management-deck-ja/SKILL.md) | 数値の整合、資源配分、選択肢と承認範囲 | 日本語の資金調達、事業計画、成長戦略、決算、稟議、サステナビリティ |
+| [delivery-deck-ja](delivery-deck-ja/SKILL.md) | 計画と実績、影響、分担、期限、支援・合意 | 日本語のキックオフ、進捗、振り返り、制度変更、全社会議 |
+| [learning-deck-ja](learning-deck-ja/SKILL.md) | 到達目標、作業成果、方法と証拠、適用限界 | 日本語の研修、操作手順、討議、研究発表、調査報告。技術解説は別担当 |
+| [public-deck-ja](public-deck-ja/SKILL.md) | 視点、立場別の影響、発表条件、表現案の判断 | 日本語の講演、製品発表、住民説明、政策提言、障害説明、創作提案 |
 | [tech-deck-ja](tech-deck-ja/SKILL.md) | 日本語の技術ストーリー、根拠台帳、説明順序、報告調の本文 | 日本語の技術説明資料を新規に構成するとき |
 | [aislide-authoring](aislide-authoring/SKILL.md) | AISlide core / MCP / SDK による編集可能な PPTX の作成、検証、納品 | PPTX の編集・書き出し、または構成後の実行 |
 
-`slide-planning` は用途の選択と全体構成、日英編集は対象言語の文言、`tech-deck-ja` は日本語の技術的な専門構成、`aislide-authoring` は PPTX 実行を担当します。技術スキルの直接呼び出しも維持しますが、共通構成から呼ばれた場合は依頼元へ返し、編集や生成を二重に開始しません。混在資料は文章・ページごとに言語を選び、同じ文章に両言語の規則を重ねません。翻訳は別作業です。承認済みの構成は、再構成の依頼がなければ保持します。
+`slide-planning` は全体構成と担当選択、7つの専門スキルは日本語の用途別の構成判断、日英編集は文言、`aislide-authoring` は PPTX 実行を担当します。専門担当は読者・根拠・図表・ノートを同じ台帳へ返し、委譲中に他担当を再呼び出ししません。同じ専門スキルは一度だけ使い、補助用途は指定ページだけに適用します。直接呼び出しで用途が合わない場合は `slide-planning` へ一度渡し、そこから呼ばれていた場合は不一致を依頼元へ返します。
+
+専門スキルの提示は実行の許可ではありません。候補だけを求められた場合は名前・理由・担当ページ案までで止めます。構成の依頼があれば担当を示してから委譲します。混在資料は文章・ページごとに言語を選び、日本語部分だけに専門スキルを適用します。英語部分は用途別参照と `english-editing` を使い、翻訳や日本語の報告調を強制しません。承認済みの構成は、再構成の依頼がなければ保持します。
 
 [用途カタログ](slide-planning/references/catalog.md) は組織・人材、営業・協業、経営・投資、業務・推進、学習・探究、広報・公共・創作の6系統です。主用途は1つ、補助用途は必要なときだけ1つまで選び、対応する節だけを参照します。言語、投影・配布・スマホ閲覧、業種、見た目は用途と別の条件です。これは編集・構成の指針であり、決定論的な分類器や新しいMCPパラメーターではありません。
+
+非技術の32用途には、判断と境界、入力不足時の対応、構成の分岐、ページとノートの架空台帳、部品の適用・回避条件、失敗例と修正、完了基準を用意しています。例えば [営業提案](slide-planning/references/commercial.md#sales-proposal)、[採用](slide-planning/references/organization.md#recruiting-pitch)、[研修](slide-planning/references/learning.md#training) を参照できます。専門スキルは選択した用途の `##` 見出しから次の同レベル見出しまでを読み、系統全体を毎回読み込みません。例の枚数・F1などの根拠ID・仮定を、利用者の資料へそのまま流用しません。
+
+静的テストは項目・参照・部品IDの整合を確認します。モデル出力は [固定比較ケース](slide-planning/references/checks-and-sources.md) で別に評価し、ガイドの詳しさや文字数を品質改善の証明としません。実際の表示確認・読者の理解・モデルによる自動選択も別の評価です。
 
 日本語編集では [nanaism/yomiyasu](https://github.com/nanaism/yomiyasu)（MIT）の意味保持・文脈に基づく推敲を参考に、独自の手順と架空例を記述しています。上流のスキル本文・文章例・検査スクリプトは複製・インストールしていません。箇条書き比率や文長を固定の合否基準にせず、投影・配布・ノートの役割に合わせます。これは AISlide 全体のライセンス選定ではありません。
 
@@ -37,7 +49,9 @@ node "<repo>/tools/mcp.mjs" --output-dir "<output>" --asset-dir "<assets>"
 
 ## 配置先を一つ選ぶ
 
-文章編集だけなら対象言語の編集スキルを単独で使えます。新規構成には `slide-planning`、日本語の技術解説には `tech-deck-ja`、PPTX 作成には `aislide-authoring` を加え、**同じスコープへ、名前を変えずディレクトリごと** コピーします。必要な言語だけ読み込みます。各スキルの `references/` も含めます。
+文章編集だけなら対象言語の編集スキルを単独で使えます。新規構成には `slide-planning`、日本語なら必要な用途の専門スキルと `japanese-editing`、PPTX 作成には `aislide-authoring` を加え、**同じスコープへ、名前を変えずディレクトリごと** コピーします。配置しても全スキルを毎回読み込みません。
+
+新しい6専門スキルは `slide-planning/references/` の用途別指針を参照します。専門スキルを直接使う場合も `slide-planning/` を参照ファイルごと配置してください。日本語の全用途を扱うなら7専門担当すべて、英語編集も含めた一式なら11スキルを配置します。専門担当が未配置でも、`slide-planning` は不足を明示して対応する参照節で構成できます。自動インストールはしません。
 
 | コピー元 | ユーザースコープ: 複数リポジトリで使用 | リポジトリスコープ: そのプロジェクトだけで使用 |
 | --- | --- | --- |
@@ -46,8 +60,14 @@ node "<repo>/tools/mcp.mjs" --output-dir "<output>" --asset-dir "<assets>"
 | `<repo>/.github/skills/english-editing/` | `~/.copilot/skills/english-editing/` | `<project>/.github/skills/english-editing/` |
 | `<repo>/.github/skills/aislide-authoring/` | `~/.copilot/skills/aislide-authoring/` | `<project>/.github/skills/aislide-authoring/` |
 | `<repo>/.github/skills/tech-deck-ja/` | `~/.copilot/skills/tech-deck-ja/` | `<project>/.github/skills/tech-deck-ja/` |
+| `<repo>/.github/skills/organization-deck-ja/` | `~/.copilot/skills/organization-deck-ja/` | `<project>/.github/skills/organization-deck-ja/` |
+| `<repo>/.github/skills/commercial-deck-ja/` | `~/.copilot/skills/commercial-deck-ja/` | `<project>/.github/skills/commercial-deck-ja/` |
+| `<repo>/.github/skills/management-deck-ja/` | `~/.copilot/skills/management-deck-ja/` | `<project>/.github/skills/management-deck-ja/` |
+| `<repo>/.github/skills/delivery-deck-ja/` | `~/.copilot/skills/delivery-deck-ja/` | `<project>/.github/skills/delivery-deck-ja/` |
+| `<repo>/.github/skills/learning-deck-ja/` | `~/.copilot/skills/learning-deck-ja/` | `<project>/.github/skills/learning-deck-ja/` |
+| `<repo>/.github/skills/public-deck-ja/` | `~/.copilot/skills/public-deck-ja/` | `<project>/.github/skills/public-deck-ja/` |
 
-Windows の `~` は通常 `%USERPROFILE%` に相当します。ホストが対応する `~/.agents/skills/` 等を既に使っている場合は、その一つの探索先へ統一します。すべての探索先へ複製しません。この AISlide リポジトリ内では五つともリポジトリスコープにあるため、追加コピーは不要です。
+Windows の `~` は通常 `%USERPROFILE%` に相当します。ホストが対応する `~/.agents/skills/` 等を既に使っている場合は、その一つの探索先へ統一します。すべての探索先へ複製しません。この AISlide リポジトリ内では11スキルともリポジトリスコープにあるため、追加コピーは不要です。
 
 1. ユーザー用かリポジトリ用かを選び、ホストが読む他の探索先も含めて同名スキルの有無を確認します。既存の個人版・マーケットプレイス版を無断で上書き・削除しません。
 2. コピー先に同名のディレクトリがなければ親ディレクトリを用意し、必要な役割のスキルをコピーします。既存版があれば差分を確認し、どちらを有効にするか利用者が選びます。同名の複数版の読み込み優先順位に依存しません。
@@ -67,12 +87,33 @@ Windows の `~` は通常 `%USERPROFILE%` に相当します。ホストが対�
 ```text
 slide-planning で架空企業の採用資料を8枚に構成してください。
 読者はエンジニア候補者。仕事と期待を理解して応募を検討できることが目的です。
-主用途と選択理由、スライド台帳を示してください。
+主用途、専門スキル名、選択理由、担当ページ案を先に示してください。
+その後、適合する専門スキルに一度だけ委譲し、同じ台帳へ構成をまとめてください。
 日本語、10分の説明と配布PDF向け。待遇や実績は創作しないでください。
 今回は構成と文言までで、PPTXの作成・公開はしないでください。
 ```
 
 英語なら「Use slide-planning for a sales proposal in UK English. Include two customer-case slides as supporting evidence. Keep the supplied figures and caveats. Return an outline only.」のように、目的と言語・実行範囲を分けて指定します。
+
+### 担当候補の提示だけ
+
+```text
+slide-planningで、日本語の架空サービス導入提案に合う専門スキルを提示してください。
+読者は顧客の決裁者で、比較・費用・導入負担から採否を判断することが目的です。
+予定は8枚。主用途、専門スキル名、選択理由、担当ページ案だけを示してください。
+今回は候補の提示だけで、専門スキルへの委譲・構成・PPTX作成はしないでください。
+```
+
+この例は `sales-proposal` と `commercial-deck-ja` が候補です。技術製品でも題材だけで `tech-deck-ja` にしません。選択結果の `specialist_selections` は台帳用の記録で、MCP引数や guided `profile_id` ではありません。
+
+### 専門スキルを直接使う
+
+```text
+management-deck-jaで、添付した架空の投資計画を日本語の稟議資料8枚に構成してください。
+主用途はdecision-proposal。決裁者が承認範囲と条件を判断できる資料にします。
+承認対象、見送る案を含む選択肢、費用、リスクを、根拠IDと図表案付きで示してください。
+不足情報は未確認とし、構成と文言までに留めてください。PPTX作成・公開は不要です。
+```
 
 ### 技術以外のプレゼン・一般文書
 

@@ -24,7 +24,13 @@ A local-first slide editor with an independently implemented Rust PresentationML
 
 The built-in example remains deterministic and explicitly synthetic. Model generation is a separate operation. Existing PPTX engine code is not used.
 
-Local input materials, task-specific examples and generated deliverables are not included in this repository. Reproducible synthetic examples live in `tools/*-demo.mjs`.
+Local input materials, task-specific examples and generated deliverables are not included in the source tree. Reproducible synthetic examples live in `tools/*-demo.mjs`. Explicitly reviewed sample distributions are published separately as release assets.
+
+### 32用途の日本語サンプル
+
+[JR東日本・Suicaを共通題材にした32用途サンプル](https://github.com/murasamelabo/AISlide/releases/tag/purpose-samples-2026-10-06)を配布しています。各用途3枚、本文96枚と参考資料4枚からなる一括PPTX、32用途別のPPTX/PDF、比較用HTMLと画像を含みます。ZIPを展開して `index.html` を開くと、用途別に比較できます。アプリ本体の正式リリースではありません。
+
+公開一次資料14件を基にした非公式資料です。公表事実・分析・提案・演習を各ページで区別し、出典と時点を記載しています。JR東日本による制作・承認を示すものではなく、公式画像・ロゴ・実画面は転載していません。一括PDFは含まず、PDFは用途別に提供します。PPTXの再読込・編集・Undoと静的描画を検証していますが、Microsoft Officeとの表示の完全一致は保証しません。
 
 ## Run
 
@@ -149,7 +155,7 @@ Workspace MCP tools are `create_presentation`, `edit_slides`, `edit_elements`, `
 
 ### 日本語技術資料と再利用スキル
 
-用途別の構成は `slide-planning`、文言は日英の編集スキル、日本語の技術専門構成は `tech-deck-ja`、編集可能な PPTX の実行は `aislide-authoring` が担当します。[スキルの使い分けと配置表](.github/skills/README.md) に従い、必要なスキルをユーザースコープまたはリポジトリスコープの一方へまとめて配置し、同名スキルの重複起動を避けます。AISlide MCP の接続は別の前提条件です。このリポジトリで使う場合は追加コピー不要です。
+用途の選択と担当の提示は `slide-planning`、日本語の専門構成は組織・営業・経営・業務推進・学習研究・広報創作の6スキルと `tech-deck-ja`、文言は日英の編集スキル、PPTX実行は `aislide-authoring` が担当します。33用途を7専門担当でカバーし、候補の提示だけなら構成・実行は始めません。[スキルの使い分けと配置表](.github/skills/README.md) に従い、必要な担当と共有参照を同じスコープへ配置します。AISlide MCP の接続は別の前提条件です。このリポジトリでは11スキルとも追加コピー不要です。
 
 日本語の技術解説を作る場合は「`tech-deck-ja` で日本語技術資料を構成し、`aislide-authoring` で AISlide MCP の編集可能な PPTX を新規作成」と明示できます。資料本文は日本語の報告調、例は明示的な架空データです。作成時に日本語フォントと共通レイアウトを決め、管理対象 graphs / parts と承認済み原図を使います。詳細は [日本語技術資料の実行手順](docs/authoring/README.md#japanese-technical-decks) を参照してください。スキル導入によるインストール、既存資料の上書き、公開、デプロイは行いません。
 
