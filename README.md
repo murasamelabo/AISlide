@@ -24,13 +24,7 @@ A local-first slide editor with an independently implemented Rust PresentationML
 
 The built-in example remains deterministic and explicitly synthetic. Model generation is a separate operation. Existing PPTX engine code is not used.
 
-Local input materials, task-specific examples and generated deliverables are not included in the source tree. Reproducible synthetic examples live in `tools/*-demo.mjs`. Explicitly reviewed sample distributions are published separately as release assets.
-
-### 32用途の日本語サンプル
-
-[JR東日本・Suicaを共通題材にした32用途サンプル](https://github.com/murasamelabo/AISlide/releases/tag/purpose-samples-2026-10-06)を配布しています。各用途3枚、本文96枚と参考資料4枚からなる一括PPTX、32用途別のPPTX/PDF、比較用HTMLと画像を含みます。ZIPを展開して `index.html` を開くと、用途別に比較できます。アプリ本体の正式リリースではありません。
-
-公開一次資料14件を基にした非公式資料です。公表事実・分析・提案・演習を各ページで区別し、出典と時点を記載しています。JR東日本による制作・承認を示すものではなく、公式画像・ロゴ・実画面は転載していません。一括PDFは含まず、PDFは用途別に提供します。PPTXの再読込・編集・Undoと静的描画を検証していますが、Microsoft Officeとの表示の完全一致は保証しません。
+Local input materials, task-specific examples and generated deliverables are not included in this repository. Reproducible synthetic examples live in `tools/*-demo.mjs`.
 
 ## Run
 
