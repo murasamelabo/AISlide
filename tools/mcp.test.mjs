@@ -87,6 +87,43 @@ async function feedbackMcpFixture(run, args = ['--tool-profile', 'full']) {
   } finally { hooks.deregister(); delete globalThis[key]; }
 }
 
+test('issue16 MCP returns creation effect warnings outside graph diagnostics', async () => {
+  await feedbackMcpFixture(async ({ call, fixture }) => {
+    const created = await call('create_presentation', { title: 'Synthetic effects' });
+    const warning = { code: 'EFFECT_APPROXIMATION', page_index: 0, element_id: 'soft-0', message: 'Synthetic budget warning' };
+    fixture.onRequest = async request => ({ document: { ...request.document, revision: request.document.revision + 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] }, render_warnings: [warning] });
+    const added = await call('add_elements', { deck_id: created.deck_id, expected_revision: 0, slide_id: 'slide-1', elements: [{ type: 'text', id: 'soft-0', x: 20, y: 20, width: 200, height: 100, text: 'Synthetic', font_size: 24, color: '000000', bold: false }] });
+    assert.deepEqual(added.renderWarnings, { revision: 1, hash: 'b'.repeat(64), status: 'complete', warnings: [warning] });
+    assert.equal(added.graphDiagnostics, undefined);
+    const changed = await call('apply_operations', { deck_id: created.deck_id, expected_revision: 1, expected_hash: 'b'.repeat(64), operations: [{ op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' }] });
+    assert.equal(changed.renderWarnings.revision, 2);
+    const resized = await call('set_frames', { deck_id: created.deck_id, expected_revision: 2, slide_id: 'slide-1', frames: [{ id: 'soft-0', frame: { x: 20, y: 20, width: 640, height: 390 } }] });
+    assert.equal(resized.renderWarnings.revision, 3);
+  });
+});
+
+test('issue18 MCP exposes bounded template inspection and selection', async () => {
+  await feedbackMcpFixture(async ({ call, calls, registrations, fixture }) => {
+    assert.ok(registrations.has('inspect_template'));
+    const schema = registrations.get('import_template').config.inputSchema;
+    const selection = { include_sample_slides: false, layout_ids: ['ppt/slideLayouts/slideLayout1.xml'], strip_sections: true, source_sha256: 'c'.repeat(64) };
+    assert.equal(schema.safeParse({ kind: 'potx', base64: 'UEs=', options: selection }).success, true);
+    for (const options of [{ unknown: true }, { layout_ids: Array(33).fill('layout') }, { master_names: Array(9).fill('Master') }, { source_sha256: 'not-a-hash' }, { include_sample_slides: 'false' }]) {
+      assert.equal(schema.safeParse({ kind: 'potx', base64: 'UEs=', options }).success, false);
+    }
+    fixture.onRequest = async request => {
+      if (request.op === 'inspect_template') return { source_sha256: 'c'.repeat(64), layouts: [{ id: selection.layout_ids[0], name: 'Blank', master_id: 'master' }], masters: [{ id: 'master', name: 'Master' }] };
+      assert.equal(request.op, 'import_template');
+      return { version: 1, id: request.id, revision: 0, hash: 'a'.repeat(64), sources: [], bindings: [], parts: [], deck: { version: 1, title: 'Selected template', width: 1280, height: 720, slides: [{ id: 'slide-1', title: '', background: 'FFFFFF', elements: [], notes: '' }] } };
+    };
+    const inspected = await call('inspect_template', { kind: 'potx', base64: 'UEs=', capacity_profile: 'standard' });
+    assert.equal(inspected.source_sha256, selection.source_sha256);
+    assert.equal(calls.at(-1).request.capacity_profile, 'standard');
+    await call('import_template', { kind: 'potx', base64: 'UEs=', options: selection });
+    assert.deepEqual(calls.at(-1).request.options, selection);
+  });
+});
+
 test('reference MCP registers guarded publication with default-deny entries', async () => {
   await feedbackMcpFixture(async ({ registrations, call, calls, fixture }) => {
     const tool = registrations.get('set_references');
@@ -228,6 +265,11 @@ test('briefing parts MCP keeps strict data and Lucide assets return reusable ico
     const security = await call('lucide_icons', { category: 'security', limit: 5 });
     assert.ok(security.icons.length > 0 && security.icons.length <= 5 && security.icons.every(icon => icon.categories.includes('security')));
     assert.ok((await call('lucide_icons', {})).categories.includes('security'));
+    for (const [query, expected] of [['list-checks', 'ListChecks'], ['list_checks', 'ListChecks'], ['ListChecks', 'ListChecks'], ['message-square', 'MessageSquare'], ['lock', 'Lock'], ['eye', 'Eye'], ['table', 'Table']]) {
+      const result = await call('lucide_icons', { query, limit: 1 });
+      assert.equal(result.icons[0]?.name, expected, query);
+    }
+    assert.ok(!(await call('lucide_icons', { query: 'eye', limit: 50 })).icons.some(icon => icon.name === 'BadgeJapaneseYen'));
     assert.equal(calls.length, 0);
     fixture.onRequest = async request => {
       assert.equal(request.op, 'create_graph_icon');
@@ -244,6 +286,10 @@ test('briefing parts MCP keeps strict data and Lucide assets return reusable ico
     assert.notEqual(prepared.icons[0].icon.asset_id, prepared.icons[2].icon.asset_id);
     assert.equal(prepared.icons[2].icon.alt, 'Agent');
     assert.equal(prepared.icons[0].icon.alt, 'Shield Check icon');
+    const aliases = await call('lucide_icon_assets', { icons: [{ name: 'History' }, { name: 'RotateCcwClock' }, { name: 'Fingerprint' }, { name: 'FingerprintPattern' }] });
+    assert.deepEqual(aliases.icons.map(icon => icon.name), ['RotateCcwClock', 'RotateCcwClock', 'FingerprintPattern', 'FingerprintPattern']);
+    assert.equal(aliases.icons[0].icon.asset_id, aliases.icons[1].icon.asset_id);
+    assert.equal(aliases.icons[2].icon.asset_id, aliases.icons[3].icon.asset_id);
     const assets = registrations.get('lucide_icon_assets');
     const unknown = await assets.callback(assets.config.inputSchema.parse({ icons: [{ name: 'NotALucideIcon' }] }), { signal: new AbortController().signal });
     assert.equal(unknown.isError, true);
@@ -332,13 +378,16 @@ test('semantic authoring MCP forwards composition and single-source text with st
     const spec = { title: 'Synthetic', footer: 'Example', blocks: [{ kind: 'cards', items: [{ label: 'First', detail: 'Detail' }, { label: 'Second' }] }] };
     await call('compose_slide', { deck_id: created.deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'content', spec });
     assert.deepEqual(calls.at(-1).request.operations, [{ op: 'compose_slide', slide_id: 'slide-1', id: 'content', spec }]);
-    const paragraphs = [{ runs: [{ text: 'Single source', style: { bold: true } }] }];
+    const paragraphs = [{ runs: [{ text: 'Single source', style: { bold: true, alternative_language: 'ja-JP' } }] }];
     await call('set_rich_text', { deck_id: created.deck_id, expected_revision: 1, slide_id: 'slide-1', id: 'content-b0-c0', paragraphs });
     assert.deepEqual(calls.at(-1).request.operations, [{ op: 'set_rich_text', slide_id: 'slide-1', id: 'content-b0-c0', paragraphs }]);
     const schema = registrations.get('compose_slide').config.inputSchema;
     const input = { deck_id: created.deck_id, expected_revision: 2, slide_id: 'slide-1', id: 'content', spec };
     for (const invalid of [{ ...spec, unknown: true }, { ...spec, blocks: [] }, { ...spec, style: { padding: 0 } }, { ...spec, blocks: [{ kind: 'cards', items: [{ label: 'First' }], x: 10 }] }]) assert.equal(schema.safeParse({ ...input, spec: invalid }).success, false);
     assert.equal(registrations.get('set_rich_text').config.inputSchema.safeParse({ deck_id: created.deck_id, expected_revision: 2, slide_id: 'slide-1', id: 'text', text: 'Duplicate source', paragraphs }).success, false);
+    for (const language of ['', 'ja_JP', 'a'.repeat(65)]) {
+      assert.equal(registrations.get('set_rich_text').config.inputSchema.safeParse({ deck_id: created.deck_id, expected_revision: 2, slide_id: 'slide-1', id: 'text', paragraphs: [{ runs: [{ text: 'Invalid', style: { alternative_language: language } }] }] }).success, false);
+    }
   });
 });
 

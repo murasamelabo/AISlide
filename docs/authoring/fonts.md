@@ -47,7 +47,9 @@ Document fonts live in optional `Deck.embedded_fonts`. Font-free documents omit 
 
 ## Rendering And Dependencies
 
-Current lockfile: `cosmic-text` 0.19.0, `fontdb` 0.23.0, `ttf-parser` 0.25.1 and `resvg` 0.48.1. `fontdue` is not a dependency. No new dependency was needed for G28.
+Current lockfile: `cosmic-text` 0.19.0, `fontdb` 0.24.0, `ttf-parser` 0.25.1 and `resvg` 0.48.1. `fontdue` is not a dependency. No new dependency was needed for G28.
+
+Installed Office-style name-ID-1 aliases (such as `Yu Gothic UI Semilight`, `Segoe UI Semibold` and `Segoe UI Light`) resolve alongside typographic families, retaining their actual face weight. Ordinary variable-font weight requests are not snapped to an alias weight. Rendering locales normalize `ja-*` to `ja` and `ko-*` to `ko`, while preserving Chinese regional/script preferences. Explicit element or run families are shared by measurement and rendering and written consistently to OOXML `latin`, `ea` and `cs`; theme-role tokens remain script-specific. Missing-font and missing-glyph diagnostics remain active. This does not install fonts or establish Office visual parity.
 
 Layout and static rendering clone the installed-font database only when consented document faces exist, replace matching-family database entries in the local clone, and load the selected bytes in memory. The native family name is added as a local alias when typographic naming differs. The temporary font system is dropped after the operation; embedded bytes are not inserted into the process-wide installed-font cache. Existing glyph fallback and missing-glyph reports remain active. Static export shapes and outlines text before resvg/SVG-to-PDF conversion, so the integration precedes outlining; it does not add an independent usvg global font registry. PDF remains outlined text, not selectable/tagged text or embedded-font PDF.
 

@@ -60,6 +60,7 @@ export class AislideClient {
   searchText(deck: Deck, input: SearchOptions, options?: RequestOptions): Promise<TextMatch[]>
   /** Pure local image preparation. Use session.applyImageEdit separately to mutate a picture. */
   editImage(input: ImageEditInput, options?: RequestOptions): Promise<EditedImage>
+  inspectTemplate(input: { kind: 'potx'; base64: string }, options?: RequestOptions): Promise<import('./types').TemplateInspection>
   /** Explicit POTX/THMX factory returning a new revision-zero document, never modifying another session. */
   importTemplate(id: string, input: TemplateInput, options?: RequestOptions): Promise<DocumentSession>
   ingest(input: SourceInput, options?: RequestOptions): Promise<SourceDocument>
@@ -111,6 +112,7 @@ export class DocumentSession {
   readonly busy: boolean
   readonly fieldWarnings: string[]
   readonly graphDiagnostics: GraphDiagnosticsSnapshot | null
+  readonly renderWarnings: import('./types').RenderWarningsSnapshot | null
   getSummary(options?: { offset?: number; limit?: number; slideId?: string }): SessionSummary
   transact(operations: PatchOperation[], options?: TransactionOptions): Promise<AislideDocument>
   /** 1..128 typed operations, one core transaction and Undo per changed batch. Prefer add_part/add_graph for regenerable metadata; add_elements is unmanaged. add_graph accepts layout here only; update_graph retains its existing PartLayout. Core capacity and 128 total metadata entries still apply. */

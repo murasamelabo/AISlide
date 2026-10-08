@@ -274,6 +274,12 @@ fn plain_paragraphs(body: Node<'_, '_>) -> bool {
     })
 }
 
+fn clear_proofing_flags(paragraph: Node<'_, '_>, edits: &mut Edits) {
+    for node in paragraph.descendants().filter(|node| matches!(node.tag_name().name(), "rPr" | "defRPr" | "endParaRPr")) {
+        for attribute in node.attributes().filter(|attribute| attribute.namespace().is_none() && matches!(attribute.name(), "err" | "dirty")) { edits.push((attribute.range(), String::new())); }
+    }
+}
+
 fn replace_text(xml: &str, body: Node<'_, '_>, text: &str, edits: &mut Edits) -> Result<()> {
     let paragraphs: Vec<_> = body.children().filter(|node| node.has_tag_name((A, "p"))).collect();
     if paragraphs.is_empty() || !plain_paragraphs(body) { return Err(Error::Unsupported("mixed-run or field text is preserved; this text change cannot be represented safely".into())); }
@@ -282,6 +288,7 @@ fn replace_text(xml: &str, body: Node<'_, '_>, text: &str, edits: &mut Edits) ->
         if let Some(line) = lines.get(index) {
             let node = paragraph.descendants().find(|node| node.has_tag_name((A, "t"))).unwrap();
             edits.push((node.range(), format!("<a:t xmlns:a=\"{A}\">{}</a:t>", quick_xml::escape::escape(*line))));
+            if node.text().unwrap_or("") != *line { clear_proofing_flags(*paragraph, edits); }
         } else { edits.push((paragraph.range(), String::new())); }
     }
     if lines.len() > paragraphs.len() {
@@ -289,9 +296,9 @@ fn replace_text(xml: &str, body: Node<'_, '_>, text: &str, edits: &mut Edits) ->
         let node = prototype.descendants().find(|node| node.has_tag_name((A, "t"))).unwrap();
         let mut added = String::new();
         for line in &lines[paragraphs.len()..] {
-            let mut paragraph = xml[prototype.range()].to_owned();
-            paragraph.replace_range(node.range().start - prototype.range().start..node.range().end - prototype.range().start, &format!("<a:t xmlns:a=\"{A}\">{}</a:t>", quick_xml::escape::escape(*line)));
-            added.push_str(&paragraph);
+            let mut paragraph_edits = vec![(node.range(), format!("<a:t xmlns:a=\"{A}\">{}</a:t>", quick_xml::escape::escape(*line)))];
+            clear_proofing_flags(prototype, &mut paragraph_edits);
+            added.push_str(&edited_fragment(xml, prototype, paragraph_edits)?);
         }
         let position = prototype.range().end; edits.push((position..position, added));
     }
@@ -323,10 +330,16 @@ fn supports_style(body: Node<'_, '_>) -> bool {
     })
 }
 
-fn supports_rich_style(body: Node<'_, '_>) -> bool {
+fn rich_style_error(node: Node<'_, '_>, attribute: Option<&str>) -> Error {
+    let prefix = if node.tag_name().namespace() == Some(P) { "p" } else { "a" };
+    let location = format!("{prefix}:{}{}", node.tag_name().name(), attribute.map(|name| format!("@{name}")).unwrap_or_default());
+    Error::Unsupported(format!("unrepresentable native text styles or fields are preserved; rich text edit rejected at {location}"))
+}
+
+fn validate_rich_style(body: Node<'_, '_>) -> Result<()> {
     use crate::native::R;
     for node in body.descendants().filter(|node| node.is_element()) {
-        if node != body && node.tag_name().namespace() != Some(A) { return false; }
+        if node != body && node.tag_name().namespace() != Some(A) { return Err(rich_style_error(node, None)); }
         let (attributes, children): (&[&str], &[&str]) = match node.tag_name().name() {
             "txBody" => (&[], &["bodyPr", "lstStyle", "p"]),
             "bodyPr" => (&["lIns", "rIns", "tIns", "bIns", "wrap", "anchor"], &["noAutofit"]),
@@ -334,7 +347,7 @@ fn supports_rich_style(body: Node<'_, '_>) -> bool {
             "p" => (&[], &["pPr", "r", "endParaRPr"]),
             "pPr" | "lvl1pPr" | "lvl2pPr" | "lvl3pPr" | "lvl4pPr" | "lvl5pPr" | "lvl6pPr" | "lvl7pPr" | "lvl8pPr" | "lvl9pPr" => (&["algn", "marL", "indent", "lvl"], &["lnSpc", "spcBef", "spcAft", "buNone", "buChar", "buAutoNum", "tabLst", "defRPr"]),
             "r" => (&[], &["rPr", "t"]),
-            "rPr" | "defRPr" | "endParaRPr" => (&["lang", "sz", "b", "i", "u", "baseline", "dirty"], &["solidFill", "highlight", "latin", "ea", "cs", "hlinkClick"]),
+            "rPr" | "defRPr" | "endParaRPr" => (&["lang", "altLang", "sz", "b", "i", "u", "baseline", "dirty", "err"], &["solidFill", "highlight", "latin", "ea", "cs", "hlinkClick"]),
             "solidFill" | "highlight" => (&[], &["srgbClr", "schemeClr"]),
             "lnSpc" | "spcBef" | "spcAft" => (&[], &["spcPct", "spcPts"]),
             "tabLst" => (&[], &["tab"]),
@@ -344,44 +357,60 @@ fn supports_rich_style(body: Node<'_, '_>) -> bool {
             "spcPct" | "spcPts" | "srgbClr" | "schemeClr" => (&["val"], &[]),
             "hlinkClick" => (&["id"], &[]), "t" => (&["space"], &[]),
             "noAutofit" | "buNone" => (&[], &[]),
-            _ => return false,
+            _ => return Err(rich_style_error(node, None)),
         };
-        if node.attributes().any(|attribute| !attributes.contains(&attribute.name()) || attribute.namespace().is_some_and(|namespace| !(node.has_tag_name((A, "hlinkClick")) && attribute.name() == "id" && namespace == R) && !(node.has_tag_name((A, "t")) && attribute.name() == "space" && namespace == "http://www.w3.org/XML/1998/namespace"))) { return false; }
+        if let Some(attribute) = node.attributes().find(|attribute| !attributes.contains(&attribute.name()) || attribute.namespace().is_some_and(|namespace| !(node.has_tag_name((A, "hlinkClick")) && attribute.name() == "id" && namespace == R) && !(node.has_tag_name((A, "t")) && attribute.name() == "space" && namespace == "http://www.w3.org/XML/1998/namespace"))) { return Err(rich_style_error(node, Some(attribute.name()))); }
         let mut seen = BTreeSet::new();
         for child in node.children().filter(|node| node.is_element()) {
             let name = child.tag_name().name();
-            if !children.contains(&name) || (!matches!(name, "p" | "r" | "tab") && !seen.insert(name)) { return false; }
+            if !children.contains(&name) || (!matches!(name, "p" | "r" | "tab") && !seen.insert(name)) { return Err(rich_style_error(child, None)); }
         }
-        if node.has_tag_name((A, "schemeClr")) && !node.attribute("val").is_some_and(|value| crate::design::COLOR_KEYS.contains(&value)) { return false; }
+        if node.has_tag_name((A, "schemeClr")) && !node.attribute("val").is_some_and(|value| crate::design::COLOR_KEYS.contains(&value)) { return Err(rich_style_error(node, Some("val"))); }
         if matches!(node.tag_name().name(), "rPr" | "defRPr" | "endParaRPr") {
-            if node.attribute("u").is_some_and(|value| !["none", "sng"].contains(&value)) { return false; }
+            if node.attribute("u").is_some_and(|value| !["none", "sng"].contains(&value)) { return Err(rich_style_error(node, Some("u"))); }
             let latin = child(node, A, "latin").and_then(|node| node.attribute("typeface"));
-            if node.tag_name().name() != "rPr" && child(node, A, "hlinkClick").is_some() { return false; }
+            if node.tag_name().name() != "rPr" && child(node, A, "hlinkClick").is_some() { return Err(rich_style_error(node, None)); }
             let font_count = ["latin", "ea", "cs"].iter().filter(|tag| child(node, A, tag).is_some()).count();
-            if font_count != 0 && font_count != 3 { return false; }
+            if font_count != 0 && font_count != 3 { return Err(rich_style_error(node, None)); }
             for (tag, major, minor) in [("ea", "+mj-ea", "+mn-ea"), ("cs", "+mj-cs", "+mn-cs")] {
                 if let Some(family) = child(node, A, tag).and_then(|node| node.attribute("typeface")) {
-                    if Some(family) != latin && !matches!((latin, family), (Some("+mj-lt"), value) if value == major) && !matches!((latin, family), (Some("+mn-lt"), value) if value == minor) { return false; }
+                    if Some(family) != latin && !matches!((latin, family), (Some("+mj-lt"), value) if value == major) && !matches!((latin, family), (Some("+mn-lt"), value) if value == minor) { return Err(rich_style_error(node, None)); }
                 }
             }
         }
     }
     let links: Vec<_> = body.descendants().filter(|node| node.has_tag_name((A, "r"))).map(|node| child(node, A, "rPr").and_then(|node| child(node, A, "hlinkClick")).and_then(|node| node.attribute((R, "id")))).collect();
-    links.windows(2).all(|pair| pair[0] == pair[1])
+    if !links.windows(2).all(|pair| pair[0] == pair[1]) { return Err(rich_style_error(body, None)); }
+    Ok(())
 }
 
-fn replace_rich_paragraphs(xml: &str, body: Node<'_, '_>, generated: &str, next_body: Node<'_, '_>, edits: &mut Edits) -> Result<()> {
-    if !supports_rich_style(body) { return Err(Error::Unsupported("unrepresentable native text styles or fields are preserved; rich text edit rejected".into())); }
+pub(crate) fn check_rich_text(package: &Package, binding: &NativePart, id: &str) -> Result<()> {
+    let Some(numeric) = binding.nodes.get(id) else { return Ok(()); };
+    let xml = parse(package.text(&binding.path)?)?;
+    let node = xml.descendants().find(|node| is_shape(*node) && properties(*node).and_then(|node| node.attribute("id")) == Some(numeric)).ok_or_else(|| Error::Invalid("native text identity missing".into()))?;
+    if let Some(body) = child(node, P, "txBody") { validate_rich_style(body)?; }
+    Ok(())
+}
+
+fn replace_rich_paragraphs(xml: &str, body: Node<'_, '_>, generated: &str, next_body: Node<'_, '_>, unchanged: &[bool], edits: &mut Edits) -> Result<()> {
+    validate_rich_style(body)?;
     crate::native::read_rich_paragraphs(body, &crate::rich_text::RunStyle::default(), &crate::model::TextFormat::default())?;
     let original: Vec<_> = body.children().filter(|node| node.has_tag_name((A, "p"))).collect();
     let next: Vec<_> = next_body.children().filter(|node| node.has_tag_name((A, "p"))).collect();
     for (index, paragraph) in original.iter().enumerate() {
+        if unchanged.get(index) == Some(&true) { continue; }
         let replacement = if let Some(next) = next.get(index) {
             let mut replacement = fragment(generated, *next);
             if let Some(end) = child(*paragraph, A, "endParaRPr") {
                 let parsed = parse(&replacement)?;
                 let generated_end = child(parsed.root_element(), A, "endParaRPr").map(|node| node.range());
-                if let Some(range) = generated_end { replacement.replace_range(range, &fragment(xml, end)); }
+                if let Some(range) = generated_end {
+                    let retained = crate::native_design::isolated_row(xml, end)?;
+                    let parsed = parse(&retained)?;
+                    let mut end_edits = Vec::new();
+                    clear_proofing_flags(parsed.root_element(), &mut end_edits);
+                    replacement.replace_range(range, &edited_fragment(&retained, parsed.root_element(), end_edits)?);
+                }
             }
             replacement
         } else { String::new() };
@@ -450,7 +479,8 @@ fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '
             return Err(Error::Unsupported("rich text has explicit run and paragraph styles; use the rich range or paragraph API instead of frame-style replacement".into()));
         }
         let next_body = child(next, P, "txBody").ok_or_else(|| Error::Invalid("generated text body missing".into()))?;
-        replace_rich_paragraphs(xml, body, generated, next_body, edits)?;
+        let unchanged: Vec<_> = old_format.paragraphs.iter().enumerate().map(|(index, paragraph)| format.paragraphs.get(index) == Some(paragraph)).collect();
+        replace_rich_paragraphs(xml, body, generated, next_body, &unchanged, edits)?;
         if padding_changed { text_padding_changes(xml, body, new, edits)?; }
         if old_format.vertical != format.vertical {
             let properties = child(body, A, "bodyPr").ok_or_else(|| Error::Unsupported("native body properties missing".into()))?;
@@ -493,7 +523,10 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
     let old_bounds = old.bounds(); let new_bounds = new.bounds();
     if old_bounds != new_bounds || matches!((old, new), (Element::Text { format: old, .. }, Element::Text { format: new, .. }) if old.inherit_layout != new.inherit_layout)
         || matches!((old, new), (Element::Shape { rotation: old, .. }, Element::Shape { rotation: new, .. }) if old != new) { geometry(xml, node, &generated, next, old, new, scale, edits)?; }
-    text_changes(xml, node, &generated, next, previous, old, new, edits)?;
+    text_changes(xml, node, &generated, next, previous, old, new, edits).map_err(|error| match error {
+        Error::Unsupported(message) => Error::Unsupported(format!("slide_id {}, element {}: {message}", binding.id, new.bounds().0)),
+        error => error,
+    })?;
     crate::visual::patch(xml, node, &generated, next, previous, old, new, edits)?;
     match (old, new) {
         (Element::Group { children: old, view_width, view_height, .. }, Element::Group { children: new, view_width: next_width, view_height: next_height, .. }) => {
@@ -519,7 +552,7 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
                     let rich = [&old_style.text_format,&style.text_format].iter().any(|format| format.as_ref().is_some_and(|format| !format.paragraphs.is_empty()));
                     let style_changed = old_style.text_style != style.text_style || old_style.text_format != style.text_format || font_size != next_size;
                     if style_changed || (before != after && rich) {
-                        if !supports_rich_style(body) { return Err(Error::Unsupported("unrepresentable native cell body is preserved; rich text edit rejected".into())); }
+                        validate_rich_style(body).map_err(|error| Error::Unsupported(format!("slide_id {}, element {}, cell ({row}, {column}): {error}", binding.id, new.bounds().0)))?;
                         if body.descendants().any(|node| node.has_tag_name((A,"hlinkClick")) || node.has_tag_name((A,"hlinkMouseOver"))) { return Err(Error::Unsupported("native cell hyperlinks are preserved; text style replacement is unsupported".into())); }
                         let next_body = child(next_cell,A,"txBody").ok_or_else(|| Error::Invalid("generated table text missing".into()))?;
                         crate::table_format::patch_paragraphs(xml,body,&generated,next_body,edits)?;
@@ -528,7 +561,7 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
                         let before_flags = crate::table_format::merge_flags(format,row,column);
                         let after_flags = crate::table_format::merge_flags(next_format,row,column);
                         if before_flags != after_flags {
-                            if !supports_rich_style(body) { return Err(Error::Unsupported("complex cell body is preserved; merge change rejected".into())); }
+                            validate_rich_style(body).map_err(|error| Error::Unsupported(format!("slide_id {}, element {}, cell ({row}, {column}): {error}", binding.id, new.bounds().0)))?;
                             for name in ["gridSpan","rowSpan","hMerge","vMerge"] {
                                 match (cell.attribute(name),next_cell.attribute(name)) {
                                     (Some(old),Some(new)) if old != new => set_attribute(xml,cell,name,new,edits)?,
@@ -1154,7 +1187,7 @@ fn patch_notes(package: &mut Package, main: &str, slide_path: &str, slide: &crat
                 if let (Some(previous), Some(next)) = (previous.get(index), slide.notes_paragraphs.get(index)) {
                     if crate::fields::patch_paragraph_cache(&xml, *paragraph, previous, next, &mut edits)? { continue; }
                 }
-                if !supports_rich_style(*paragraph) || paragraph.descendants().any(|node| node.has_tag_name((A, "hlinkClick"))) { return Err(Error::Unsupported("notes paragraph fields, links or unmodeled styles are preserved".into())); }
+                if validate_rich_style(*paragraph).is_err() || paragraph.descendants().any(|node| node.has_tag_name((A, "hlinkClick"))) { return Err(Error::Unsupported("notes paragraph fields, links or unmodeled styles are preserved".into())); }
                 let replacement = if let Some(next) = next.get(index) {
                     let mut replacement = fragment(template, *next);
                     if let Some(end) = child(*paragraph, A, "endParaRPr") {

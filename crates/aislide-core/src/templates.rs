@@ -2,6 +2,9 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "template_selection.rs"]
+mod selection;
+
 const CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 const PPTX: &str = "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";
 const POTX: &str = "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml";
@@ -51,6 +54,48 @@ pub fn load_potx(id: String, bytes: Vec<u8>) -> Result<Document> {
     let pptx = convert(Package::open(bytes)?, POTX, PPTX)?;
     let result = document::open_presentation(id, pptx)?;
     Ok(serde_json::from_value(result["document"].clone())?)
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct TemplateImportOptions {
+    pub include_sample_slides: bool,
+    #[schemars(length(max = 32))]
+    pub layout_ids: Vec<String>,
+    #[schemars(length(max = 32))]
+    pub layout_names: Vec<String>,
+    #[schemars(length(max = 8))]
+    pub master_ids: Vec<String>,
+    #[schemars(length(max = 8))]
+    pub master_names: Vec<String>,
+    pub strip_sections: bool,
+    pub source_sha256: Option<String>,
+}
+
+impl Default for TemplateImportOptions {
+    fn default() -> Self {
+        Self { include_sample_slides: true, layout_ids: vec![], layout_names: vec![], master_ids: vec![], master_names: vec![], strip_sections: false, source_sha256: None }
+    }
+}
+
+pub fn inspect_potx(bytes: Vec<u8>) -> Result<serde_json::Value> {
+    selection::inspect(bytes)
+}
+
+pub fn load_potx_with_options(id: String, bytes: Vec<u8>, options: &TemplateImportOptions) -> Result<Document> {
+    let package = selection::select(bytes, options)?;
+    let result = document::open_presentation(id, package.save()?)?;
+    Ok(serde_json::from_value(result["document"].clone())?)
+}
+
+fn strip_sections(package: &mut Package, main: &str) -> Result<()> {
+    let xml = package.text(main)?.to_owned(); let parsed = parse(&xml)?;
+    let edits = crate::native::child(parsed.root_element(), crate::native::P, "extLst").into_iter()
+        .flat_map(|list| list.children()).filter(|node| node.has_tag_name((crate::native::P, "ext")))
+        .flat_map(|entry| entry.children()).filter(|node| node.has_tag_name(("http://schemas.microsoft.com/office/powerpoint/2010/main", "sectionLst")))
+        .map(|node| (node.range(), String::new())).collect::<Vec<_>>();
+    if !edits.is_empty() { package.replace_part(main, apply(xml, edits)?)?; }
+    Ok(())
 }
 
 pub(crate) fn master_source(bytes: Vec<u8>, potx: bool) -> Result<Package> {

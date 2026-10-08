@@ -266,6 +266,228 @@ fn body_fixture(body: &str) -> Vec<u8> {
 }
 
 #[test]
+fn native_office_proofing_flags_do_not_block_rich_replacement() {
+    let bytes = body_fixture("<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang='en-US' err='1' dirty='1'/><a:t>Lorem ipsum dolor</a:t></a:r></a:p></p:txBody>");
+    let document = open(&bytes);
+    assert_eq!(export_document(&document), bytes);
+    let changed = execute_request(json!({"op":"apply_operations","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"operations":[
+        {"op":"set_rich_text","slide_id":"slide-1","id":"text-1","paragraphs":[{"runs":[{"text":"Updated wording","style":{"bold":true,"language":"en-US"}}]}]}
+    ]})).expect("Office proofing flags must not reject a supported rich-text replacement");
+    let saved = export_document(&changed["document"]);
+    let package = Package::open(saved.clone()).unwrap();
+    let xml = roxmltree::Document::parse(package.text("ppt/slides/slide1.xml").unwrap()).unwrap();
+    assert!(xml.descendants().filter(|node| node.tag_name().name() == "rPr").all(|node| node.attribute("err").is_none()));
+    assert_eq!(open(&saved)["deck"]["slides"][0]["elements"][0]["text"], "Updated wording");
+    let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":changed["document"]["revision"],"receipt":changed["receipt"]})).unwrap();
+    assert_eq!(export_document(&undone["document"]), bytes);
+}
+
+#[test]
+fn native_office_alternative_language_survives_rich_edits() {
+    let bytes = body_fixture("<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang='en-US' altLang='ja-JP'/><a:t>Lorem ipsum</a:t></a:r></a:p></p:txBody>");
+    let document = open(&bytes);
+    assert_eq!(export_document(&document), bytes);
+    let current = element(document["deck"]["slides"][0]["elements"][0].clone());
+    let next = apply_range(current, 0, 5, RunStyle { bold: Some(true), ..Default::default() }).unwrap();
+    let changed = transact(&document, value(next)).expect("Office alternative language must not reject a supported rich-text edit");
+    let saved = export_document(&changed["document"]);
+    let package = Package::open(saved.clone()).unwrap();
+    let xml = roxmltree::Document::parse(package.text("ppt/slides/slide1.xml").unwrap()).unwrap();
+    let runs: Vec<_> = xml.descendants().filter(|node| node.tag_name().name() == "rPr").collect();
+    assert!(!runs.is_empty());
+    assert!(runs.iter().all(|node| node.attribute("altLang") == Some("ja-JP")));
+    let reopened = open(&saved);
+    assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["text"], "Lorem ipsum");
+    let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":changed["document"]["revision"],"receipt":changed["receipt"]})).unwrap();
+    assert_eq!(export_document(&undone["document"]), bytes);
+}
+
+#[test]
+fn native_office_alternative_language_and_end_properties_survive_two_edit_cycles() {
+    let bytes = body_fixture("<p:txBody><a:bodyPr lIns='100'/><a:lstStyle/><a:p><a:r><a:rPr lang='en-US' altLang='ja-JP'/><a:t>Lorem ipsum</a:t></a:r><a:endParaRPr lang='fr-FR' altLang='ja-JP' sz='3300' baseline='-10000'/></a:p></p:txBody>");
+    let original = open(&bytes);
+    assert_eq!(export_document(&original), bytes);
+    let mut document = original.clone();
+    let mut source = bytes.clone();
+    for style in [RunStyle { bold: Some(true), ..Default::default() }, RunStyle { italic: Some(true), ..Default::default() }] {
+        let current = element(document["deck"]["slides"][0]["elements"][0].clone());
+        let next = apply_range(current, 0, 5, style).unwrap();
+        let changed = transact(&document, value(next)).expect("rich editing must remain valid after export and reopen");
+        let saved = export_document(&changed["document"]);
+        let package = Package::open(saved.clone()).unwrap();
+        let xml = roxmltree::Document::parse(package.text("ppt/slides/slide1.xml").unwrap()).unwrap();
+        let runs: Vec<_> = xml.descendants().filter(|node| node.tag_name().name() == "rPr").collect();
+        assert!(!runs.is_empty());
+        assert!(runs.iter().all(|node| node.attribute("altLang") == Some("ja-JP")));
+        let ends: Vec<_> = xml.descendants().filter(|node| node.tag_name().name() == "endParaRPr").collect();
+        assert_eq!(ends.len(), 1);
+        for (name, expected) in [("lang", "fr-FR"), ("altLang", "ja-JP"), ("sz", "3300"), ("baseline", "-10000")] {
+            assert_eq!(ends[0].attribute(name), Some(expected), "{name}");
+        }
+        let old_package = Package::open(source.clone()).unwrap();
+        for (path, content) in old_package.parts().iter().filter(|(path, _)| path.as_str() != "ppt/slides/slide1.xml" && !path.starts_with("customXml/")) {
+            assert_eq!(package.part(path).unwrap(), content, "unrelated part {path}");
+        }
+        let reopened = open(&saved);
+        assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["text"], "Lorem ipsum");
+        assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["format"]["paragraphs"][0]["runs"][0]["style"]["bold"], true);
+        assert_eq!(export_document(&reopened), saved);
+        assert_eq!(export_document(&document), source);
+        let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":changed["document"]["revision"],"receipt":changed["receipt"]})).unwrap();
+        assert_eq!(undone["document"]["hash"], document["hash"]);
+        assert_eq!(export_document(&undone["document"]), source);
+        document = reopened; source = saved;
+    }
+    assert_eq!(export_document(&original), bytes);
+}
+
+#[test]
+fn native_office_alternative_language_survives_paragraph_replacement() {
+    let bytes = body_fixture("<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang='en-US' altLang='ja-JP'/><a:t>Lorem </a:t></a:r><a:r><a:rPr lang='fr-FR' altLang='ja-JP'/><a:t>ipsum</a:t></a:r></a:p></p:txBody>");
+    let document = open(&bytes);
+    for (replacement, expected) in [
+        (json!({"runs":[{"text":"New ","style":{"bold":true}},{"text":"title","style":{"italic":true}}]}), ["ja-JP", "ja-JP"]),
+        (json!({"runs":[{"text":"New ","style":{"alternative_language":"ko-KR"}},{"text":"title"}]}), ["ko-KR", "ja-JP"]),
+        (json!({"runs":[{"text":"New ","style":{"alternative_language":"ko-KR"}},{"text":"title","style":{"alternative_language":"de-DE"}}]}), ["ko-KR", "de-DE"]),
+    ] {
+        let changed = execute_request(json!({"op":"update_paragraphs","document":document,"expected_revision":document["revision"],"slide_id":"slide-1","id":"text-1","paragraphs":[replacement]})).unwrap();
+        let saved = export_document(&changed["document"]);
+        let package = Package::open(saved.clone()).unwrap();
+        let xml = roxmltree::Document::parse(package.text("ppt/slides/slide1.xml").unwrap()).unwrap();
+        let languages: Vec<_> = xml.descendants().filter(|node| node.tag_name().name() == "rPr").map(|node| node.attribute("altLang").unwrap()).collect();
+        assert_eq!(languages, expected);
+        let reopened = open(&saved);
+        assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["text"], "New title");
+        for (index, language) in expected.iter().enumerate() {
+            assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["format"]["paragraphs"][0]["runs"][index]["style"]["alternative_language"], *language);
+        }
+        let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":changed["document"]["revision"],"receipt":changed["receipt"]})).unwrap();
+        assert_eq!(undone["document"]["hash"], document["hash"]);
+        assert_eq!(export_document(&undone["document"]), bytes);
+    }
+    assert_eq!(export_document(&document), bytes);
+}
+
+#[test]
+fn native_office_mixed_alternative_languages_require_every_replacement_run_to_be_explicit() {
+    for second_language in ["altLang='ko-KR'", ""] {
+        let bytes = body_fixture(&format!("<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang='en-US' altLang='ja-JP'/><a:t>First</a:t></a:r><a:r><a:rPr lang='en-US' {second_language}/><a:t>Second</a:t></a:r></a:p></p:txBody>"));
+        let document = open(&bytes);
+        let paragraphs = &document["deck"]["slides"][0]["elements"][0]["format"]["paragraphs"];
+        let unchanged = execute_request(json!({"op":"update_paragraphs","document":document,"expected_revision":document["revision"],"slide_id":"slide-1","id":"text-1","paragraphs":paragraphs})).unwrap();
+        assert_eq!(export_document(&unchanged["document"]), bytes);
+        for runs in [
+            json!([{"text":"New title"}]),
+            json!([{"text":"New ","style":{"alternative_language":"de-DE"}},{"text":"title"}]),
+            json!([{"text":"New "},{"text":"title","style":{"alternative_language":"de-DE"}}]),
+        ] {
+            let error = execute_request(json!({"op":"update_paragraphs","document":document,"expected_revision":document["revision"],"slide_id":"slide-1","id":"text-1","paragraphs":[{"runs":runs}]})).unwrap_err();
+            assert!(matches!(error, aislide_core::Error::Unsupported(_)), "{error}");
+            assert!(error.to_string().contains("mixed native alternative languages require explicit alternative_language"), "{error}");
+            assert_eq!(export_document(&document), bytes);
+        }
+        let changed = execute_request(json!({"op":"update_paragraphs","document":document,"expected_revision":document["revision"],"slide_id":"slide-1","id":"text-1","paragraphs":[{"runs":[
+            {"text":"New ","style":{"alternative_language":"de-DE"}},
+            {"text":"title","style":{"alternative_language":"es-ES"}}
+        ]}]})).unwrap();
+        let reopened = open(&export_document(&changed["document"]));
+        let runs = &reopened["deck"]["slides"][0]["elements"][0]["format"]["paragraphs"][0]["runs"];
+        assert_eq!(runs.as_array().unwrap().len(), 2);
+        assert_eq!(runs[0]["style"]["alternative_language"], "de-DE");
+        assert_eq!(runs[1]["style"]["alternative_language"], "es-ES");
+        let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":changed["document"]["revision"],"receipt":changed["receipt"]})).unwrap();
+        assert_eq!(export_document(&undone["document"]), bytes);
+        assert_eq!(export_document(&document), bytes);
+    }
+}
+
+#[test]
+fn native_office_rich_edits_clear_only_modified_paragraph_end_proofing_flags() {
+    let untouched = "<a:p><a:r><a:rPr lang='en-US' altLang='ja-JP' err='1' dirty='0'/><a:t>Untouched</a:t></a:r><a:endParaRPr lang='de-DE' altLang='ko-KR' sz='2400' err='0' dirty='1'/></a:p>";
+    let bytes = body_fixture(&format!("<p:txBody><a:bodyPr lIns='100'/><a:lstStyle/><a:p><a:r><a:rPr lang='en-US' altLang='ja-JP' err='1' dirty='1'/><a:t>Lorem ipsum</a:t></a:r><a:endParaRPr lang='fr-FR' altLang='ja-JP' sz='3300' baseline='-10000' i='1' err='1' dirty='0'/></a:p>{untouched}</p:txBody>"));
+    let document = open(&bytes);
+    assert_eq!(export_document(&document), bytes);
+    for text_changed in [false, true] {
+        let mut paragraphs = document["deck"]["slides"][0]["elements"][0]["format"]["paragraphs"].clone();
+        if text_changed { paragraphs[0]["runs"][0]["text"] = json!("Edited wording"); }
+        else { paragraphs[0]["runs"][0]["style"]["bold"] = json!(true); }
+        let changed = execute_request(json!({"op":"update_paragraphs","document":document,"expected_revision":document["revision"],"slide_id":"slide-1","id":"text-1","paragraphs":paragraphs})).unwrap();
+        let saved = export_document(&changed["document"]);
+        let package = Package::open(saved.clone()).unwrap();
+        let xml = roxmltree::Document::parse(package.text("ppt/slides/slide1.xml").unwrap()).unwrap();
+        let ends: Vec<_> = xml.descendants().filter(|node| node.tag_name().name() == "endParaRPr").collect();
+        assert_eq!(ends.len(), 2);
+        for name in ["err", "dirty"] { assert_eq!(ends[0].attribute(name), None, "modified paragraph end {name}"); }
+        for (name, expected) in [("lang", "fr-FR"), ("altLang", "ja-JP"), ("sz", "3300"), ("baseline", "-10000"), ("i", "1")] {
+            assert_eq!(ends[0].attribute(name), Some(expected), "preserved paragraph end {name}");
+        }
+        assert_eq!(ends[1].attribute("err"), Some("0"));
+        assert_eq!(ends[1].attribute("dirty"), Some("1"));
+        assert!(package.text("ppt/slides/slide1.xml").unwrap().contains(untouched));
+        assert!(package.text("ppt/slides/slide1.xml").unwrap().contains("lIns='100'"));
+        let reopened = open(&saved);
+        assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["text"], if text_changed { "Edited wording\nUntouched" } else { "Lorem ipsum\nUntouched" });
+        let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":changed["document"]["revision"],"receipt":changed["receipt"]})).unwrap();
+        assert_eq!(export_document(&undone["document"]), bytes);
+        assert_eq!(export_document(&document), bytes);
+    }
+}
+
+#[test]
+fn native_office_batch_error_identifies_operation_element_and_attribute() {
+    let mut source = deck(text_element());
+    let mut second = text_element(); second["id"] = json!("blocked-text");
+    source["slides"][0]["elements"].as_array_mut().unwrap().push(second);
+    let mut package = Package::open(export_deck(source)).unwrap();
+    let mut xml = package.text("ppt/slides/slide1.xml").unwrap().to_owned();
+    let parsed = roxmltree::Document::parse(&xml).unwrap();
+    let position = parsed.descendants().filter(|node| node.tag_name().name() == "rPr").last().unwrap().range().start + "<a:rPr".len();
+    xml.insert_str(position, " kern='1200'");
+    package.replace_part("ppt/slides/slide1.xml", xml.into_bytes()).unwrap();
+    let bytes = package.save().unwrap();
+    let document = open(&bytes);
+    let error = execute_request(json!({"op":"apply_operations","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"operations":[
+        {"op":"set_rich_text","slide_id":"slide-1","id":"text-1","paragraphs":[{"runs":[{"text":"First update"}]}]},
+        {"op":"set_rich_text","slide_id":"slide-1","id":"blocked-text","paragraphs":[{"runs":[{"text":"Blocked update"}]}]}
+    ]})).unwrap_err().to_string();
+    for expected in ["operation 2", "slide-1", "blocked-text", "a:rPr@kern"] { assert!(error.contains(expected), "{expected}: {error}"); }
+    assert_eq!(export_document(&document), bytes);
+}
+
+#[test]
+fn native_office_noop_keeps_unrepresented_styles_byte_identical() {
+    let bytes = body_fixture("<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr b='1' kern='1200'/><a:t>First</a:t></a:r><a:r><a:rPr i='1'/><a:t>Second</a:t></a:r></a:p></p:txBody>");
+    let document = open(&bytes);
+    let paragraphs = &document["deck"]["slides"][0]["elements"][0]["format"]["paragraphs"];
+    assert!(paragraphs.is_array());
+    let unchanged = execute_request(json!({"op":"apply_operations","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"operations":[
+        {"op":"set_rich_text","slide_id":"slide-1","id":"text-1","paragraphs":paragraphs}
+    ]})).unwrap();
+    assert_eq!(export_document(&unchanged["document"]), bytes);
+}
+
+#[test]
+fn native_office_table_cell_retains_alternative_language_on_text_edit() {
+    let table = json!({"type":"table","id":"table-1","x":40,"y":100,"width":600,"height":160,"rows":[["Before"]],"font_size":24});
+    let mut package = Package::open(export_deck(deck(table))).unwrap();
+    let xml = package.text("ppt/slides/slide1.xml").unwrap().replacen("<a:rPr ", "<a:rPr altLang='ja-JP' err='1' ", 1);
+    package.replace_part("ppt/slides/slide1.xml", xml.into_bytes()).unwrap();
+    let bytes = package.save().unwrap();
+    let document = open(&bytes);
+    let current = element(document["deck"]["slides"][0]["elements"][0].clone());
+    let edited = aislide_core::table_format::replace_cell_text(current, 0, 0, "After".into()).unwrap();
+    let changed = transact(&document, value(edited)).unwrap();
+    let saved = export_document(&changed["document"]);
+    let reopened = open(&saved);
+    assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["rows"][0][0], "After");
+    let package = Package::open(saved).unwrap();
+    let xml = roxmltree::Document::parse(package.text("ppt/slides/slide1.xml").unwrap()).unwrap();
+    assert!(xml.descendants().filter(|node| node.tag_name().name() == "rPr").all(|node| node.attribute("altLang") == Some("ja-JP") && node.attribute("err").is_none()));
+    let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":changed["document"]["revision"],"receipt":changed["receipt"]})).unwrap();
+    assert_eq!(export_document(&undone["document"]), bytes);
+}
+
+#[test]
 fn fields_and_unknown_styles_preserve_original_and_reject_lossy_edits() {
     for content in [
         "<a:fld id='{00000000-0000-0000-0000-000000000001}' type='slidenum'><a:rPr/><a:t>7</a:t></a:fld>",

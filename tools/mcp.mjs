@@ -13,6 +13,7 @@ import { publishNewFile, publishNewBundle, BundlePublicationError } from './atom
 import { publishProject } from './atomic-project.mjs';
 import { AislideClient } from '../packages/client/index.mjs';
 import { McpAssets } from './mcp-assets.mjs';
+import { searchLucideIcons, resolveLucideIcon } from './lucide-search.mjs';
 
 const serverInfo = { name: 'aislide', version: '0.1.0' };
 const { values: args } = parseArgs({ options: { 'output-dir': { type: 'string' }, 'tool-profile': { type: 'string', default: 'compact' }, 'asset-dir': { type: 'string', multiple: true, default: [] }, 'layout-patterns': { type: 'string', default: 'off' } }, allowPositionals: false });
@@ -62,7 +63,7 @@ const errorBarsSchema = z.object({ kind: z.enum(['fixed_value', 'percentage', 's
 const chartSeriesSchema = z.object({ name: z.string().max(80), values: z.array(numeric).max(32), color: colorSchema, kind: optional(chartKinds), axis: optional(z.enum(['primary', 'secondary'])), bubble_sizes: optional(z.array(numeric.positive()).min(1).max(32)), trendline: optional(trendlineSchema), error_bars: optional(errorBarsSchema) }).strict();
 const chartSchema = z.object({ kind: chartKinds, categories: z.array(z.string().max(80)).max(32), series: z.array(chartSeriesSchema).min(1).max(6), options: chartOptionsSchema.optional() }).strict();
 const themeSchema = z.object({ name: z.string().max(80), colors: z.record(z.string().max(16), z.string().regex(/^[0-9a-fA-F]{6}$/)), fonts: z.object({ major: z.string().min(1).max(100), minor: z.string().min(1).max(100), east_asian: z.string().min(1).max(100), complex_script: z.string().min(1).max(100) }).strict() }).strict();
-const runStyleSchema = z.object({ bold: optional(z.boolean()), italic: optional(z.boolean()), underline: optional(z.boolean()), font_size: optional(z.number().min(1).max(400)), color: optional(colorSchema), font_family: optional(z.string().min(1).max(100)), baseline: optional(z.number().int().min(-100000).max(100000)), highlight: optional(z.union([colorSchema, z.literal('none')])), language: optional(z.string().min(1).max(64).regex(/^[A-Za-z0-9-]+$/)) }).strict();
+const runStyleSchema = z.object({ bold: optional(z.boolean()), italic: optional(z.boolean()), underline: optional(z.boolean()), font_size: optional(z.number().min(1).max(400)), color: optional(colorSchema), font_family: optional(z.string().min(1).max(100)), baseline: optional(z.number().int().min(-100000).max(100000)), highlight: optional(z.union([colorSchema, z.literal('none')])), language: optional(z.string().min(1).max(64).regex(/^[A-Za-z0-9-]+$/)), alternative_language: optional(z.string().min(1).max(64).regex(/^[A-Za-z0-9-]+$/)) }).strict();
 const spacingSchema = z.discriminatedUnion('kind', [z.object({ kind: z.literal('percent'), value: z.number().int().min(0).max(1000000) }).strict(), z.object({ kind: z.literal('points'), value: z.number().int().min(0).max(158400) }).strict()]);
 const fieldUuid = z.string().min(36).max(38).regex(/^(?:[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|\{[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\})$/);
 const fieldSchema = z.object({ id: fieldUuid, kind: z.string().min(1).max(128).refine(value => !/\p{Cc}/u.test(value), 'Field kinds cannot contain control characters') }).strict();
@@ -97,9 +98,9 @@ const visualSchema = z.object({ rotation: optional(z.number().min(-360).max(360)
 const currentVisualSchema = visualSchema.extend({ path: optional(pathSchema), connection_sites: z.array(z.object({ x: alpha, y: alpha, angle: z.number().min(0).max(360) }).strict()).max(128).optional() }).strict();
 const paintEffectsSchema = visualSchema.pick({ shadow: true, glow: true, soft_edge: true, reflection: true }).strict();
 const surfaceStyleSchema = z.object({ fill: z.union([colorSchema,z.literal('none')]), stroke: colorSchema.nullable(), stroke_width: z.number().min(0).max(20).nullable(), opacity: alpha.nullable(), gradient: visualSchema.shape.gradient }).strict();
-const paintedCellSchema = cellStyleSchema.extend({ text_style: optional(runStyleSchema.omit({ highlight: true, language: true })), text_format: optional(textFormatSchema.extend({ paragraphs: z.array(paragraphSchema.extend({ runs: z.array(z.never()).length(0) })).max(1).optional(), hyperlink: z.null().optional(), placeholder: z.null().optional(), inherit_layout: z.literal(false).optional() })) }).strict();
+const paintedCellSchema = cellStyleSchema.extend({ text_style: optional(runStyleSchema.omit({ highlight: true, language: true, alternative_language: true })), text_format: optional(textFormatSchema.extend({ paragraphs: z.array(paragraphSchema.extend({ runs: z.array(z.never()).length(0) })).max(1).optional(), hyperlink: z.null().optional(), placeholder: z.null().optional(), inherit_layout: z.literal(false).optional() })) }).strict();
 const formatSnapshotSchema = z.union([
-	z.object({ run: runStyleSchema.omit({ highlight: true, language: true }), paragraph: paragraphSchema.extend({ runs: z.array(z.never()).length(0) }), vertical: z.enum(['top', 'middle', 'bottom']), surface: optional(surfaceStyleSchema), effects: optional(paintEffectsSchema), text_warp: visualSchema.shape.text_warp }).strict(),
+	z.object({ run: runStyleSchema.omit({ highlight: true, language: true, alternative_language: true }), paragraph: paragraphSchema.extend({ runs: z.array(z.never()).length(0) }), vertical: z.enum(['top', 'middle', 'bottom']), surface: optional(surfaceStyleSchema), effects: optional(paintEffectsSchema), text_warp: visualSchema.shape.text_warp }).strict(),
 	z.object({ kind: z.literal('filled'), surface: surfaceStyleSchema, effects: paintEffectsSchema }).strict(),
 	z.object({ kind: z.literal('picture'), opacity: alpha.nullable(), effects: paintEffectsSchema }).strict(),
 	z.object({ kind: z.literal('table'), font_size: z.number().min(8).max(120), rows: z.number().int().min(1).max(12), columns: z.number().int().min(1).max(8), cells: z.array(z.object({ row: rowIndex,column: columnIndex,style: paintedCellSchema }).strict()).max(96) }).strict(),
@@ -272,6 +273,9 @@ const basicAuthoringOperations = z.array(z.discriminatedUnion('op', authoringVar
 }))).min(1).max(128);
 const objectInput = { id: slideId, kind: z.enum(['text', 'shape', 'table', 'chart', 'line', 'arrow']), preset: z.string().max(80).optional(), rows: z.number().int().min(1).max(12).optional(), columns: z.number().int().min(1).max(8).optional() };
 const templateKind = z.enum(['potx', 'thmx']);
+const templateSelectionSchema = z.object({ include_sample_slides: z.boolean().optional(), layout_ids: z.array(z.string().min(1).max(512)).max(32).optional(), layout_names: z.array(z.string().min(1).max(100)).max(32).optional(), master_ids: z.array(z.string().min(1).max(512)).max(8).optional(), master_names: z.array(z.string().min(1).max(100)).max(8).optional(), strip_sections: z.boolean().optional(), source_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable().optional() }).strict()
+	.refine(options => (options.layout_ids?.length ?? 0) + (options.layout_names?.length ?? 0) <= 32, 'Select at most 32 layouts')
+	.refine(options => (options.master_ids?.length ?? 0) + (options.master_names?.length ?? 0) <= 8, 'Select at most eight masters');
 const templateFilename = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}\.(?:potx|thmx)$/).refine((name) => !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])\./i.test(name), 'Reserved Windows filename');
 
 const graphId = z.string().regex(/^[A-Za-z0-9_-]{1,24}$/);
@@ -453,7 +457,7 @@ function expandAssetReferences(input, name, rootMime, budget) {
 			const asset = assets.get(value.asset_id);
 			const { asset_id: _assetId, ...fields } = value;
 			if (fields.base64 !== undefined) throw new Error('Supply base64 or asset_id, not both');
-			const expectedFormat = root && (['open_pptx', 'import_pptx', 'inspect_pptx_fonts', 'open_project'].includes(name) ? 'pptx' : name === 'ingest_source' ? fields.format : ['import_template', 'inspect_master_source'].includes(name) ? fields.kind : undefined);
+			const expectedFormat = root && (['open_pptx', 'import_pptx', 'inspect_pptx_fonts', 'open_project'].includes(name) ? 'pptx' : name === 'ingest_source' ? fields.format : ['import_template', 'inspect_template', 'inspect_master_source'].includes(name) ? fields.kind : undefined);
 			if (expectedFormat && asset.format !== expectedFormat) throw new Error('Asset format does not match the requested input');
 			if (root && ['inspect_font', 'embed_font'].includes(name) && !['ttf', 'otf'].includes(asset.format)) throw new Error('Expected a registered TTF/OTF asset');
 			if (fields.mime_type !== undefined && fields.mime_type !== asset.mime_type) throw new Error('Asset MIME type mismatch');
@@ -553,7 +557,7 @@ function managedProgress(name, readOnly, extra) {
 }
 
 function register(name, description, inputSchema, readOnly, action) {
-	const selectsProfile = ['create_presentation', 'compile_report', 'open_pptx', 'import_pptx', 'open_project', 'import_template', 'inspect_master_source', 'create_guided_presentation', 'verify_recovery', 'recover_presentation'].includes(name);
+	const selectsProfile = ['create_presentation', 'compile_report', 'open_pptx', 'import_pptx', 'open_project', 'import_template', 'inspect_template', 'inspect_master_source', 'create_guided_presentation', 'verify_recovery', 'recover_presentation'].includes(name);
 	const originalSchema = z.object({ ...inputSchema, ...(selectsProfile ? { capacity_profile: capacityProfileSchema.optional() } : {}) }).strict();
 	const binary = Boolean(inputSchema.base64);
 	const schema = binary ? withAssetReference(originalSchema) : originalSchema;
@@ -759,7 +763,8 @@ register('apply_text_assist', 'Apply a reviewed candidate atomically after check
 });
 register('segmentation_status', 'Read sanitized local U2NetP model setup status. Verified bytes do not prove inference availability or quality. No download or document mutation.', {}, true, async (_input, signal) => client.segmentationStatus({ signal }));
 register('segment_image', 'Generate a review-only PNG with U2NetP general saliency on local CPU. Explicit model setup and dataset terms acknowledgement required. Fixed pinned model, no path/URL inputs or runtime downloads, no color-key fallback. Native inference is non-preemptible; cancelled results are discarded. Use apply_image_edit separately.', { base64: preparedImageSchema.shape.base64, mime_type: preparedImageSchema.shape.mime_type }, true, async (input, signal) => client.segmentImage(input, { signal }));
-register('import_template', 'Create a NEW document from explicit POTX or THMX base64. POTX uses the template factory; THMX creates one blank themed slide. No path reads, existing-deck mutation or protection changes.', { kind: templateKind, base64: archiveBase64 }, false, async (input, signal, options) => {
+register('inspect_template', 'Inspect bounded POTX topology before the 32-layout document limit: up to eight masters, 256 layouts and 256 sample slides. Returns exact package-part IDs, names, ownership and source SHA-256; inspection is not editable-content or Office-parity approval. External relationships and protected content reject. No files, network or document mutation.', { kind: z.literal('potx'), base64: archiveBase64 }, true, async (input, _signal, options) => client.inspectTemplate(input, options));
+register('import_template', 'Create a NEW document from explicit POTX or THMX bytes. POTX options select inspected master/layout IDs or unambiguous names, optionally exclude sample slides and explicitly strip sections. Retained samples must use selected layouts. Selection is not sanitization: unselected payloads remain embedded. Defaults preserve prior behavior; THMX rejects POTX options. No files, fetches, original overwrite or protection changes.', { kind: templateKind, base64: archiveBase64, options: templateSelectionSchema.optional() }, false, async (input, signal, options) => {
 	if (decks.size >= 8) throw new Error('At most eight decks per session');
 	const id = randomUUID(); const state = await client.importTemplate(id, input, options);
 	if (signal.aborted) throw new Error('Operation cancelled');
@@ -944,28 +949,28 @@ register('create_graph_icon', 'Prepare a node icon from SVG/PNG/JPEG, fitted to 
 let lucideLibrary;
 async function lucide() {
 	lucideLibrary ??= Promise.all([import('lucide-react'), import('react'), import('react-dom/server'), readFile(new URL('../apps/studio/src/lucide-categories.json', import.meta.url), 'utf8')])
-		.then(([icons, react, markup, metadata]) => ({ icons: icons.icons, createElement: react.createElement, render: markup.renderToStaticMarkup, metadata: JSON.parse(metadata) }))
+		.then(([icons, react, markup, metadata]) => ({ icons: icons.icons, exports: icons, createElement: react.createElement, render: markup.renderToStaticMarkup, metadata: JSON.parse(metadata) }))
 		.catch(() => { lucideLibrary = undefined; throw new Error('The installed Lucide icon library is unavailable; install the project dependencies (lucide-react, react, react-dom) on the MCP host'); });
 	return lucideLibrary;
 }
 const lucideName = z.string().regex(/^[A-Z][A-Za-z0-9]{0,63}$/);
-register('lucide_icons', 'Search the locally installed Lucide icon library (ISC license) by name, tag or category. Returns PascalCase names with categories/tags for lucide_icon_assets; choose icons by meaning, not decoration. Compact pages default to 20 entries. No downloads, model calls or document changes.', { ...catalogPage, category: z.string().regex(/^[a-z0-9-]{1,64}$/).optional() }, true, async ({ query, category, offset, limit }) => {
+register('lucide_icons', 'Search the locally installed Lucide icon library (ISC license) by canonical name, name words, tag or category. Kebab-case, snake_case and PascalCase normalize alike; complete names rank first and word-prefix matches do not match inside unrelated words. Returns canonical PascalCase names for lucide_icon_assets. Compact pages default to 20 entries. No downloads, model calls or document changes.', { ...catalogPage, category: z.string().regex(/^[a-z0-9-]{1,64}$/).optional() }, true, async ({ query, category, offset, limit }) => {
 	const { icons, metadata } = await lucide();
-	const terms = (query ?? '').toLowerCase().split(/\s+/).filter(Boolean);
-	const matching = Object.entries(metadata.icons).filter(([name, entry]) => Object.hasOwn(icons, name) && (!category || entry.categories.includes(category))
-		&& terms.every(term => [name, name.replace(/([a-z0-9])([A-Z])/g, '$1 $2'), ...entry.tags, ...entry.categories].join(' ').toLowerCase().includes(term)));
+	const entries = Object.entries(metadata.icons).filter(([name, entry]) => Object.hasOwn(icons, name) && (!category || entry.categories.includes(category)));
+	const matching = searchLucideIcons(entries, query);
 	const start = offset ?? 0, count = limit ?? 20;
-	return { library: 'lucide-react', version: metadata.version, license: 'ISC', total: matching.length, icons: matching.slice(start, start + count).map(([name, entry]) => ({ name, categories: entry.categories, tags: entry.tags.slice(0, 8) })), next_offset: start + count < matching.length ? start + count : null, ...(!category && !terms.length && start === 0 ? { categories: Object.keys(metadata.categories) } : {}) };
+	return { library: 'lucide-react', version: metadata.version, license: 'ISC', total: matching.length, icons: matching.slice(start, start + count).map(([name, entry]) => ({ name, categories: entry.categories, tags: entry.tags.slice(0, 8) })), next_offset: start + count < matching.length ? start + count : null, ...(!category && !(query ?? '').trim() && start === 0 ? { categories: Object.keys(metadata.categories) } : {}) };
 });
 register('lucide_icon_assets', 'Render 1-32 installed Lucide icons as transparent PNG icon assets (256px longest side). Each result has icon:{asset_id,mime_type,alt}; pass that object unchanged to part or graph icon fields. color is six-digit RGB (default 0F6CBD); stroke_width 1-3 (default 1.8). Identical renders reuse one handle; close unused assets after insertion because the registry holds 32. No downloads or document changes.', { icons: z.array(z.object({ name: lucideName, color: z.string().regex(/^[0-9a-fA-F]{6}$/).optional(), stroke_width: z.number().min(1).max(3).optional(), alt: z.string().max(500).optional() }).strict()).min(1).max(32) }, true, async ({ icons: requested }, signal) => {
-	const { icons, createElement, render } = await lucide();
+	const { icons, exports, createElement, render } = await lucide();
 	const prepared = [];
 	for (const icon of requested) {
-		if (!Object.hasOwn(icons, icon.name)) throw new Error(`Unknown Lucide icon ${icon.name}; search with lucide_icons`);
+		const resolved = resolveLucideIcon(exports, icon.name, icons);
+		if (!resolved) throw new Error(`Unknown Lucide icon ${icon.name}; search with lucide_icons`);
 		const color = (icon.color ?? '0F6CBD').toUpperCase();
-		const svg = render(createElement(icons[icon.name], { size: 96, color: `#${color}`, strokeWidth: icon.stroke_width ?? 1.8 }));
-		const alt = icon.alt ?? `${icon.name.replace(/([a-z0-9])([A-Z])/g, '$1 $2')} icon`;
-		prepared.push({ ...(await client.createGraphIcon({ base64: Buffer.from(svg).toString('base64'), mime_type: 'image/svg+xml', alt }, { signal })), id: icon.name, color });
+		const svg = render(createElement(resolved.component, { size: 96, color: `#${color}`, strokeWidth: icon.stroke_width ?? 1.8 }));
+		const alt = icon.alt ?? `${resolved.name.replace(/([a-z0-9])([A-Z])/g, '$1 $2')} icon`;
+		prepared.push({ ...(await client.createGraphIcon({ base64: Buffer.from(svg).toString('base64'), mime_type: 'image/svg+xml', alt }, { signal })), id: resolved.name, color });
 		signal.throwIfAborted();
 	}
 	const retained = retainedImages(prepared.map(({ color: _color, ...image }) => image));
@@ -982,6 +987,10 @@ register('get_graph', 'Read one managed graph specification and stale status wit
 function graphDiagnosticMetadata(state) {
 	const graphDiagnostics = state.graphDiagnostics;
 	return graphDiagnostics === null ? {} : { graphDiagnostics };
+}
+function renderWarningMetadata(state) {
+	const renderWarnings = state.renderWarnings;
+	return renderWarnings === null ? {} : { renderWarnings };
 }
 const graphDiagnosticDescription = ' Returns optional revision/hash-bound graphDiagnostics from the accepted operation, including no-ops: complete/partial/unavailable, at most 64 findings and 32 KiB. Diagnostic failure does not undo a successful commit; no extra render request. Diagnostics are not persisted. Label warnings are nonblocking unless on_overlap=error.';
 for (const name of ['add_graph', 'update_graph', 'apply_graph']) {
@@ -1078,7 +1087,7 @@ register('create_object', 'Create a typed default object without inserting it. C
 register('apply_operations', 'Apply 1-128 typed operations across slides with one Undo and revision/hash checks. Default discovery shows text/rect/shape/connector elements, picture placement and metadata. For tables/charts/polygons/groups or managed add_part/add_graph, fetch get_tool_schema(name="apply_operations") for the complete schema. Runtime validation always retains all strict types. Includes update_notes (8000 scalars), set_table_headers and set_accessibility after target creation. Plain notes never flatten incompatible rich notes. Managed graphs retain PartLayout/stale guards. Core retains locks, native/source safety and capacity limits. Serialize AISlide calls; never blindly retry. No raw Patch paths.' + graphDiagnosticDescription, { ...mutationInput, expected_hash: contentHash, operations: authoringOperations }, false, async ({ deck_id, expected_revision, expected_hash, operations }, signal) => {
 	const state = getDeck(deck_id);
 	await state.applyOperations(operations, { signal, expectedRevision: expected_revision, expectedHash: expected_hash });
-	return { deck_id, revision: state.revision, hash: state.document.hash, can_undo: state.canUndo, ...graphDiagnosticMetadata(state) };
+	return { deck_id, revision: state.revision, hash: state.document.hash, can_undo: state.canUndo, ...graphDiagnosticMetadata(state), ...renderWarningMetadata(state) };
 });
 const authoringDescriptions = {
 	add_elements: 'Append 1-128 complete typed native elements in one Undo. Includes rich text, geometry, visual styles, tables, charts and groups. Core validates all content; no external fetches.',
@@ -1100,13 +1109,13 @@ for (const variant of authoringVariants) {
 	register(name, authoringDescriptions[name], { ...mutationInput, ...(name === 'add_picture' ? { expected_revision: mutationInput.expected_revision.optional() } : {}), expected_hash: contentHash.optional(), ...variant.omit({ op: true }).shape }, false, async ({ deck_id, expected_revision, expected_hash, ...input }, signal) => {
 		const state = getDeck(deck_id);
 		await state.applyOperations([{ ...input, op: name }], { signal, expectedRevision: expected_revision, expectedHash: expected_hash });
-		return { deck_id, revision: state.revision, hash: state.document.hash, ...(input.id === undefined ? {} : { element_id: input.id }) };
+		return { deck_id, revision: state.revision, hash: state.document.hash, ...(input.id === undefined ? {} : { element_id: input.id }), ...renderWarningMetadata(state) };
 	});
 }
 register('set_frames', 'Set 1-128 frames on one slide in one Undo. Geometry only; fonts and strokes remain unchanged. Core validates the whole batch.', { ...mutationInput, expected_hash: contentHash.optional(), slide_id: slideId, frames: z.array(z.object({ id: slideId, frame: frameSchema }).strict()).min(1).max(128) }, false, async ({ deck_id, expected_revision, expected_hash, slide_id, frames }, signal) => {
 	const state = getDeck(deck_id);
 	await state.setFrames(slide_id, frames, { signal, expectedRevision: expected_revision, expectedHash: expected_hash });
-	return { deck_id, revision: state.revision, hash: state.document.hash };
+	return { deck_id, revision: state.revision, hash: state.document.hash, ...renderWarningMetadata(state) };
 });
 register('import_slides', 'Import 1-128 selected slides from an existing authored source deck handle into a same-canvas target, in one Undo. Core deduplicates design and preserves supported metadata, fonts and evidence bindings. Native sources and unsupported native target edits fail closed. Source notes/evidence may contain sensitive data. No paths or arbitrary source JSON.', { ...mutationInput, expected_hash: contentHash, source_deck_id: handle, source_slide_ids: authoringIds, prefix: z.string().regex(/^[A-Za-z0-9_-]{1,24}$/), after: optional(slideId) }, false, async ({ deck_id, expected_revision, expected_hash, source_deck_id, ...input }, signal) => {
 	const state = getDeck(deck_id);

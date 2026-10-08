@@ -5,6 +5,34 @@ import { AislideClient, DocumentSession } from '../packages/client/index.mjs';
 import { requestCore } from './core-client.mjs';
 import { guidedExamples } from './guided-demo.mjs';
 
+test('issue16 SDK binds effect warnings to accepted revisions without persisting them', async () => {
+  const original = { id: 'effects', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
+  const warning = { code: 'EFFECT_APPROXIMATION', page_index: 0, element_id: 'soft-0', message: 'Synthetic budget warning' };
+  let result = { document: { ...original, revision: 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] }, render_warnings: [warning] };
+  const session = new DocumentSession(async () => { if (result instanceof Error) throw result; return result; }, original);
+  const operations = [{ op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' }];
+  assert.equal(session.renderWarnings, null);
+  await session.applyOperations(operations);
+  const snapshot = { revision: 1, hash: result.document.hash, status: 'complete', warnings: [warning] };
+  assert.deepEqual(session.renderWarnings, snapshot);
+  session.renderWarnings.warnings[0].message = 'Must not leak';
+  assert.deepEqual(session.renderWarnings, snapshot);
+  assert.equal(session.document.render_warnings, undefined);
+  result = new Error('Rejected edit');
+  await assert.rejects(session.applyOperations(operations), /Rejected edit/);
+  assert.deepEqual(session.renderWarnings, snapshot);
+  result = { document: { ...original, revision: 2 }, receipt: { inverse: [] } };
+  await session.undo();
+  assert.equal(session.renderWarnings, null);
+  result = { document: { ...original, revision: 3 }, receipt: { inverse: [] }, render_warnings: 'invalid' };
+  await session.applyOperations(operations);
+  assert.equal(session.revision, 3);
+  assert.equal(session.renderWarnings.status, 'unavailable');
+  result = { document: { ...original, revision: 4 }, receipt: { inverse: [] } };
+  await session.applyOperations(operations);
+  assert.equal(session.renderWarnings, null);
+});
+
 test('reference SDK forwards guarded core mutation and records undo', async () => {
   const original = { id: 'references-sdk', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
   const calls = [];
@@ -1022,6 +1050,22 @@ test('expanded authoring SDK integrates rich, notes, selection, table, images, c
     assert.equal(exported.filename, `template.${kind}`);
     const opened = await client.importTemplate(`template-${kind}`, { kind, base64: exported.base64 });
     assert.equal(opened.revision, 0);
+    const beforeTemplate = session.document;
+    if (kind === 'potx') {
+      const inspection = await client.inspectTemplate({ kind, base64: exported.base64 }, { capacityProfile: 'standard' });
+      assert.equal(inspection.sample_slide_count, 1);
+      assert.equal(inspection.office_visual_parity, false);
+      const options = { include_sample_slides: false, layout_ids: [inspection.layouts[0].id], source_sha256: inspection.source_sha256, strip_sections: true };
+      const selected = await client.importTemplate('selected-template', { kind, base64: exported.base64, options });
+      assert.equal(selected.revision, 0);
+      assert.equal(selected.document.deck.slides.length, 1);
+      assert.equal(selected.document.deck.slides[0].elements.length, 0);
+      assert.equal(selected.document.deck.design.layouts.length, 1);
+      await assert.rejects(client.importTemplate('stale-template', { kind, base64: exported.base64, options: { ...options, source_sha256: '0'.repeat(64) } }), /source|hash|SHA/i);
+    } else {
+      await assert.rejects(client.importTemplate('invalid-selection', { kind, base64: exported.base64, options: { include_sample_slides: false } }), /only to POTX/);
+    }
+    assert.deepEqual(session.document, beforeTemplate);
   }
   await session.addAsset('slide-1', { id: 'image', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="red"/></svg>').toString('base64'), mime_type: 'image/svg+xml', alt: 'Synthetic image', size: 32 });
   const beforeImage = session.document;
