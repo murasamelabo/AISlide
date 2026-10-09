@@ -170,13 +170,14 @@ fn write_spacing(writer: &mut XmlWriter, tag: &str, spacing: crate::rich_text::S
     writer.end_element();
 }
 
-fn styled_run_properties(writer: &mut XmlWriter, tag: &str, size: f64, shade: &str, bold: bool, format: &TextFormat, link_id: Option<&str>, theme: &Theme, style: Option<&crate::rich_text::RunStyle>) {
+fn styled_run_properties(writer: &mut XmlWriter, tag: &str, size: f64, shade: &str, bold: bool, format: &TextFormat, link_id: Option<&str>, _theme: &Theme, style: Option<&crate::rich_text::RunStyle>) {
     let mut resolved = crate::rich_text::RunStyle::frame(size, shade, bold, format);
     if let Some(style) = style { resolved.overlay(style); }
     let size = resolved.font_size.unwrap_or(size); let shade = resolved.color.as_deref().unwrap_or(shade);
     writer.start_element(tag); writer.write_attribute("lang", resolved.language.as_deref().unwrap_or("ja-JP")); writer.write_attribute("sz", &(size * 75.0).round().to_string()); writer.write_attribute("b", if resolved.bold.unwrap_or(bold) { "1" } else { "0" });
     writer.write_attribute("i", if resolved.italic.unwrap_or(false) { "1" } else { "0" }); writer.write_attribute("u", if resolved.underline.unwrap_or(false) { "sng" } else { "none" });
     if let Some(baseline) = resolved.baseline { writer.write_attribute("baseline", &baseline.to_string()); }
+    if let Some(language) = &resolved.alternative_language { writer.write_attribute("altLang", language); }
     color(writer, shade);
     if let Some(highlight) = resolved.highlight.as_deref().filter(|value| *value != "none") {
         writer.start_element("a:highlight");
@@ -187,8 +188,7 @@ fn styled_run_properties(writer: &mut XmlWriter, tag: &str, size: f64, shade: &s
     let (latin, east, complex) = match resolved.font_family.as_deref() {
         Some("@major") => ("+mj-lt", "+mj-ea", "+mj-cs"),
         None | Some("@minor") => ("+mn-lt", "+mn-ea", "+mn-cs"),
-        Some(family) if style.is_some_and(|style| style.font_family.is_some()) => (family, family, family),
-        Some(family) => (family, theme.fonts.east_asian.as_str(), theme.fonts.complex_script.as_str()),
+        Some(family) => (family, family, family),
     };
     empty(writer, "a:latin", &[("typeface", latin)]); empty(writer, "a:ea", &[("typeface", east)]); empty(writer, "a:cs", &[("typeface", complex)]);
     if let Some(link) = link_id { empty(writer, "a:hlinkClick", &[("r:id", link)]); }

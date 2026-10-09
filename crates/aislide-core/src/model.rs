@@ -328,7 +328,12 @@ pub fn validate_deck(deck: &Deck) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_elements(elements: &[Element], canvas: (f64, f64), depth: usize, ids: &mut BTreeSet<String>, total: &mut usize, image_bytes: &mut usize) -> Result<()> {
+pub(crate) fn validate_elements(elements: &[Element], canvas: (f64, f64), depth: usize, ids: &mut BTreeSet<String>, total: &mut usize, _image_bytes: &mut usize) -> Result<()> {
+    crate::preflight::element_image_budget(elements, depth)?;
+    validate_element_tree(elements, canvas, depth, ids, total)
+}
+
+fn validate_element_tree(elements: &[Element], canvas: (f64, f64), depth: usize, ids: &mut BTreeSet<String>, total: &mut usize) -> Result<()> {
     if depth > crate::limits::STANDARD.group_depth { return Err(Error::Limit("group nesting > 8".into())); }
     *total += elements.len();
     if elements.len() > crate::limits::STANDARD.elements_per_slide || *total > crate::limits::STANDARD.elements_total { return Err(Error::Limit("too many scene elements".into())); }
@@ -371,13 +376,10 @@ pub(crate) fn validate_elements(elements: &[Element], canvas: (f64, f64), depth:
                 Element::Chart { kind, categories, series, options, .. } => chart_format::validate(*kind, categories, series, options)?,
                 Element::Picture { base64, mime_type, alt, crop, svg, .. } => {
                     valid_text(alt, 500)?;
-                    *image_bytes += base64.len();
                     if let Some(svg) = svg {
-                        *image_bytes += svg.len();
                         if mime_type != "image/png" { return Err(Error::Invalid("SVG requires a PNG fallback".into())); }
                         crate::vector::prepare_svg(svg)?;
                     }
-                    if *image_bytes > crate::limits::STANDARD.image_encoded_bytes { return Err(Error::Limit("scene image payload > 3 MiB encoded".into())); }
                     crop.validate()?;
                     crate::media::inspect_raster(base64, mime_type)?;
                 }
@@ -408,7 +410,7 @@ pub(crate) fn validate_elements(elements: &[Element], canvas: (f64, f64), depth:
                 }
                 Element::Group { view_width, view_height, children, .. } => {
                     if children.is_empty() || [*view_width, *view_height].iter().any(|value| !value.is_finite() || !(1.0..=4096.0).contains(value)) { return Err(Error::Invalid("group requires children and a 1-4096px coordinate space".into())); }
-                    validate_elements(children, (*view_width, *view_height), depth + 1, ids, total, image_bytes)?;
+                    validate_element_tree(children, (*view_width, *view_height), depth + 1, ids, total)?;
                 }
             }
     }

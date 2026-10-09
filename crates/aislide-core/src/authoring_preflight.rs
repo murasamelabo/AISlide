@@ -322,6 +322,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed frame bounds, not glyph intersection; intentional overlapping text needs human review", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices are summarized per page as info; specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
 		office_visual_parity: false, semantic_truth_verified: false };
 	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into(), "numbered_sequence_spacing".into(), "part_aspect".into()]);
+	report.limitations.push("Over-budget shadow, glow, soft-edge and reflection are omitted only from the diagnostic view at scale 1, with an EFFECT_APPROXIMATION finding; native content is unchanged and other renderer failures still reject.".into());
 	report.limitations.push("Reference URL detection uses normalized HTTP(S) tokens terminated by CJK prose; percent-encode CJK URL paths. Warnings do not echo private note URLs. Fixed-reference collisions require explicit repair, not automatic reflow.".into());
 	for page in selected {
 		let slide = &deck.slides[page];
@@ -333,7 +334,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		}
 		let known_badges = crate::graphs::managed_badge_pairs(document, &slide.id);
 		let objects = page_objects(deck, page)?;
-		let rendered = crate::render::render_slide_svg(deck, page, false)?;
+		let rendered = crate::render::render_with_effect_policy(deck, page, false, 1.0, crate::render::EffectPolicy::Preflight)?;
 		let mut chart_notices: Vec<&Object<'_>> = Vec::new();
 		for warning in rendered.warnings {
 			let object = objects.iter().rev().find(|object| warning.element_id == object.id || warning.element_id.starts_with(&format!("{}[", object.id)));
@@ -349,6 +350,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			let evidence = object.into_iter().collect::<Vec<_>>();
 			let severity = if matches!(warning.code.as_str(), "TEXT_OVERFLOW" | "MISSING_GLYPHS") { "error" } else { "warning" };
 			let suggestions: &[&str] = match warning.code.as_str() {
+				"EFFECT_APPROXIMATION" => &["Review the reported effect budget and preview scale", "Reduce effects only with author approval or compare the unchanged native PPTX in Office"],
 				"TEXT_OVERFLOW" => &["Enlarge or reflow the text frame", "Shorten or split content only with author approval"],
 				"MISSING_GLYPHS" | "FONT_FALLBACK" => &["Select an available font or explicitly supply a licensed document font"],
 				"IMAGE_ASPECT_DISTORTED" => &["Use contain or cover when placing the image", "Preserve the cropped source aspect ratio or confirm intentional stretching"],

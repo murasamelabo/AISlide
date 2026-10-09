@@ -33,10 +33,16 @@ fn inspect(bytes: &[u8]) -> aislide_core::Result<Value> {
 }
 
 fn outline_font(flags: u16, selection: u16) -> Vec<u8> {
+    named_outline_font(flags, selection, "AISlide Synthetic", "AISlide Typographic", 400)
+}
+
+fn named_outline_font(flags: u16, selection: u16, family: &str, typographic: &str, weight: u16) -> Vec<u8> {
     let metadata = metadata_font(flags, selection);
     let mut tables = std::collections::BTreeMap::new();
-    tables.insert(*b"OS/2", metadata[44..140].to_vec());
-    let entries = [(1u16,"AISlide Synthetic"),(2,"Regular"),(4,"AISlide Synthetic Regular"),(5,"Version 1.0"),(6,"AISlideSynthetic-Regular"),(16,"AISlide Typographic")];
+    let mut os2 = metadata[44..140].to_vec();
+    os2[4..6].copy_from_slice(&weight.to_be_bytes());
+    tables.insert(*b"OS/2", os2);
+    let entries = [(1u16,family),(2,"Regular"),(4,family),(5,"Version 1.0"),(6,"AISlideSynthetic-Regular"),(16,typographic)];
     let mut names = vec![0u8; 6+entries.len()*12];
     names[2..4].copy_from_slice(&(entries.len() as u16).to_be_bytes());
     let storage = names.len();
@@ -94,6 +100,44 @@ fn font_document() -> Value {
             "id":"slide-1","title":"Fonts","background":"FFFFFF","notes":"","elements":[{
                 "type":"text","id":"text-1","x":40,"y":40,"width":400,"height":100,"text":"AAA",
                 "font_size":30,"color":"000000","bold":false,"format":{"font_family":"AISlide Synthetic"}}]}]}})).unwrap()
+}
+
+#[test]
+fn issue15_explicit_frame_font_is_used_for_japanese_measurement() {
+    let mut deck = font_document()["deck"].clone();
+    deck["slides"][0]["elements"][0]["text"] = json!("観測と要求で成果が決まる");
+    deck["slides"][0]["elements"][0]["format"]["font_family"] = json!("Yu Gothic UI");
+    let report = execute_request(json!({"op":"measure_layout","deck":deck})).unwrap();
+    assert_eq!(report["measurements"][0]["requested_family"], "Yu Gothic UI");
+    assert_eq!(report["office_parity_verified"], false);
+}
+
+#[test]
+fn issue15_explicit_frame_font_is_written_for_all_scripts() {
+    let mut deck = font_document()["deck"].clone();
+    deck["slides"][0]["elements"][0]["text"] = json!("観測と要求で成果が決まる");
+    deck["slides"][0]["elements"][0]["format"]["font_family"] = json!("Yu Gothic UI");
+    let document = execute_request(json!({"op":"new_document","id":"explicit-frame-font","deck":deck})).unwrap();
+    let exported = execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+    let bytes = STANDARD.decode(exported["base64"].as_str().unwrap()).unwrap();
+    let package = aislide_core::package::Package::open(bytes).unwrap();
+    let xml = roxmltree::Document::parse(package.text("ppt/slides/slide1.xml").unwrap()).unwrap();
+    for tag in ["latin", "ea", "cs"] {
+        let face = xml.descendants().find(|node| node.tag_name().name() == tag).unwrap();
+        assert_eq!(face.attribute("typeface"), Some("Yu Gothic UI"), "{tag}");
+    }
+}
+
+#[test]
+fn issue15_legacy_alias_resolves_the_named_face_weight() {
+    for (name, weight) in [("AISlide Synthetic Semilight", 350), ("AISlide Synthetic Semibold", 600)] {
+        let mut deck = font_document()["deck"].clone();
+        deck["slides"][0]["elements"][0]["format"]["font_family"] = json!(name);
+        deck["embedded_fonts"] = json!([{"family":name,"style":"regular","base64":STANDARD.encode(named_outline_font(0, 0, name, "AISlide Typographic", weight)),"license_acknowledged":true}]);
+        let measured = execute_request(json!({"op":"measure_layout","deck":deck})).unwrap();
+        assert_eq!(measured["measurements"][0]["fonts"], json!([name]), "{name}: {measured}");
+        assert_eq!(measured["measurements"][0]["missing_glyphs"], 0);
+    }
 }
 
 #[test]

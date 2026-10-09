@@ -1,5 +1,5 @@
 ﻿use crate::{model::{Deck, Element, Issue, TextFormat, Bullet, validate_deck}, design::Theme, Error, Result};
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, Weight, Wrap};
+use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, Wrap};
 use serde::Serialize;
 use std::{collections::BTreeSet, sync::{Mutex, OnceLock}};
 
@@ -21,12 +21,12 @@ fn measure(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width: f64
 }
 
 fn measure_plain(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width: f64, height: f64, size: f64, bold: bool, format: &TextFormat, theme: &Theme) -> (Measurement, bool) {
-    let family = if text.chars().any(|character| character >= '\u{3000}') { &theme.fonts.east_asian } else { match format.font_family.as_deref() { Some("@major") => &theme.fonts.major, None | Some("@minor") => &theme.fonts.minor, Some(family) => family } };
+    let family = crate::fonts::requested_family(text, format.font_family.as_deref(), theme);
     let available_width = width - if format.bullet == Bullet::None { 0.0 } else { size };
     let mut buffer = Buffer::new(fonts, Metrics::new(size as f32, (size * 1.15) as f32));
     buffer.set_size(Some(available_width.max(1.0) as f32), None);
     buffer.set_wrap(Wrap::WordOrGlyph);
-    buffer.set_text(text, &Attrs::new().family(Family::Name(family)).weight(if bold { Weight::BOLD } else { Weight::NORMAL }).style(if format.italic { Style::Italic } else { Style::Normal }), Shaping::Advanced, None);
+    buffer.set_text(text, &Attrs::new().family(Family::Name(family)).weight(crate::fonts::weight(fonts, family, bold, format.italic)).style(if format.italic { Style::Italic } else { Style::Normal }), Shaping::Advanced, None);
     buffer.shape_until_scroll(fonts, false);
     let mut measured_width = 0.0f32; let mut measured_height = 0.0f32; let mut lines = 0; let mut missing = 0;
     let mut used = BTreeSet::new();
@@ -45,7 +45,7 @@ fn measure_plain(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, widt
         previous_line = Some(run.line_i);
         for glyph in run.glyphs {
             if glyph.glyph_id == 0 { missing += 1; }
-            if let Some(face) = fonts.db().face(glyph.font_id) { if let Some((name, _)) = face.families.first() { used.insert(name.clone()); } }
+            if let Some(face) = fonts.db().face(glyph.font_id) { if let Some((name, _)) = face.families.iter().find(|(name, _)| name.eq_ignore_ascii_case(family)).or_else(|| face.families.first()) { used.insert(name.clone()); } }
         }
     }
     (Measurement { slide_id: slide.into(), element_id: id.into(), width, height, measured_width, measured_height, lines,
@@ -53,13 +53,13 @@ fn measure_plain(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, widt
 }
 
 pub(crate) fn graph_text_metrics(text: &str, width: f64, height: f64, size: f64, bold: bool, theme: &Theme) -> Result<(Measurement, bool)> {
-    let mut fonts = FONTS.get_or_init(|| Mutex::new(FontSystem::new())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
+    let mut fonts = FONTS.get_or_init(|| Mutex::new(crate::fonts::system())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
     if fonts.db().faces().next().is_none() { return Err(Error::Unsupported("installed fonts are required for graph text fitting".into())); }
     Ok(measure_plain(&mut fonts, "graph", "text", text, width, height, size, bold, &TextFormat::default(), theme))
 }
 
 pub(crate) fn graph_rich_metrics(text: &str, width: f64, height: f64, size: f64, bold: bool, format: &TextFormat, theme: &Theme) -> Result<Measurement> {
-    let mut fonts = FONTS.get_or_init(|| Mutex::new(FontSystem::new())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
+    let mut fonts = FONTS.get_or_init(|| Mutex::new(crate::fonts::system())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
     if fonts.db().faces().next().is_none() { return Err(Error::Unsupported("installed fonts are required for graph text fitting".into())); }
     Ok(measure(&mut fonts, "graph", "text", text, width, height, size, bold, format, theme))
 }
@@ -71,12 +71,7 @@ fn measure_rich(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width
     let spacing_pixels = |spacing: Spacing, size: f64| match spacing { Spacing::Percent(value) => size * value as f64 / 100000.0, Spacing::Points(value) => value as f64 / 75.0 };
     for paragraph in &format.paragraphs {
         let styles: Vec<_> = paragraph.runs.iter().map(|run| { let mut style = RunStyle::frame(size, "@dk1", bold, format); style.overlay(&run.style); style }).collect();
-        let families: Vec<_> = paragraph.runs.iter().zip(&styles).map(|(run, style)| match style.font_family.as_deref() {
-            Some("@major") if !run.text.chars().any(|character| character >= '\u{3000}') => theme.fonts.major.clone(),
-            None | Some("@minor" | "@major") if run.text.chars().any(|character| character >= '\u{3000}') => theme.fonts.east_asian.clone(),
-            None | Some("@minor" | "@major") => theme.fonts.minor.clone(),
-            Some(family) => family.to_owned(),
-        }).collect();
+        let families: Vec<_> = paragraph.runs.iter().zip(&styles).map(|(run, style)| crate::fonts::requested_family(&run.text, style.font_family.as_deref(), theme).to_owned()).collect();
         if requested.is_empty() { requested = families.first().cloned().unwrap_or_else(|| theme.fonts.minor.clone()); }
         let maximum_size = styles.iter().filter_map(|style| style.font_size).reduce(f64::max).unwrap_or(size);
         let line_height = spacing_pixels(paragraph.line_spacing.unwrap_or(Spacing::Percent(115000)), maximum_size).max(maximum_size);
@@ -88,7 +83,7 @@ fn measure_rich(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width
         let mut buffer = Buffer::new(fonts, Metrics::new(maximum_size as f32, line_height as f32));
         buffer.set_size(Some((width - inset).max(1.0) as f32), None); buffer.set_wrap(Wrap::WordOrGlyph);
         buffer.set_rich_text(paragraph.runs.iter().zip(&styles).zip(&families).map(|((run, style), family)| {
-            let attrs = Attrs::new().family(Family::Name(family)).weight(if style.bold.unwrap_or(bold) { Weight::BOLD } else { Weight::NORMAL }).style(if style.italic.unwrap_or(false) { Style::Italic } else { Style::Normal }).metrics(Metrics::new(style.font_size.unwrap_or(size) as f32, line_height as f32));
+            let attrs = Attrs::new().family(Family::Name(family)).weight(crate::fonts::weight(fonts, family, style.bold.unwrap_or(bold), style.italic.unwrap_or(false))).style(if style.italic.unwrap_or(false) { Style::Italic } else { Style::Normal }).metrics(Metrics::new(style.font_size.unwrap_or(size) as f32, line_height as f32));
             (run.text.as_str(), attrs)
         }), &default_attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(fonts, false);
@@ -97,7 +92,7 @@ fn measure_rich(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width
             measured_width = measured_width.max(run.line_w + inset as f32); paragraph_height = paragraph_height.max(run.line_top + run.line_height); lines += 1;
             for glyph in run.glyphs {
                 if glyph.glyph_id == 0 { missing += 1; }
-                if let Some(face) = fonts.db().face(glyph.font_id) { if let Some((name, _)) = face.families.first() { used.insert(name.clone()); } }
+                if let Some(face) = fonts.db().face(glyph.font_id) { if let Some((name, _)) = face.families.iter().find(|(name, _)| families.iter().any(|family| name.eq_ignore_ascii_case(family))).or_else(|| face.families.first()) { used.insert(name.clone()); } }
             }
         }
         let raise = styles.iter().map(|style| style.baseline.unwrap_or(0).max(0) as f64 * style.font_size.unwrap_or(size) / 100000.0).fold(0.0, f64::max);
@@ -158,7 +153,7 @@ pub(crate) fn measure_visible_layout(deck: &Deck) -> Result<LayoutReport> {
 
 fn measure_layout_scope(deck: &Deck, visible_only: bool) -> Result<LayoutReport> {
     validate_deck(deck)?;
-    let mut fonts = FONTS.get_or_init(|| Mutex::new(FontSystem::new())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
+    let mut fonts = FONTS.get_or_init(|| Mutex::new(crate::fonts::system())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
     let mut document_fonts = crate::fonts::document_system(&fonts, deck)?;
     let fonts = document_fonts.as_mut().unwrap_or(&mut fonts);
     if fonts.db().faces().next().is_none() { return Err(Error::Unsupported("no installed fonts available for measurement".into())); }
@@ -201,7 +196,7 @@ fn measure_layout_scope(deck: &Deck, visible_only: bool) -> Result<LayoutReport>
 }
 
 pub(crate) fn fit_metric_size(text: &str, width: f64, height: f64) -> Result<f64> {
-    let mut fonts = FONTS.get_or_init(|| Mutex::new(FontSystem::new())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
+    let mut fonts = FONTS.get_or_init(|| Mutex::new(crate::fonts::system())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
     if fonts.db().faces().next().is_none() { return Err(Error::Unsupported("installed fonts are required for metric fitting".into())); }
     for size in [56.0, 52.0, 48.0, 44.0, 40.0, 36.0, 32.0, 28.0, 24.0] {
         let measured = measure(&mut fonts, "metric", "value", text, width, height, size, true, &TextFormat::default(), &Theme::default());
@@ -211,7 +206,7 @@ pub(crate) fn fit_metric_size(text: &str, width: f64, height: f64) -> Result<f64
 }
 
 fn installed_fonts() -> Result<std::sync::MutexGuard<'static, FontSystem>> {
-    let fonts = FONTS.get_or_init(|| Mutex::new(FontSystem::new())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
+    let fonts = FONTS.get_or_init(|| Mutex::new(crate::fonts::system())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
     if fonts.db().faces().next().is_none() { return Err(Error::Unsupported("installed fonts are required for text fitting".into())); }
     Ok(fonts)
 }
@@ -247,7 +242,7 @@ pub(crate) fn fit_part_text(elements: &mut [Element], theme: &Theme) -> Result<(
 }
 
 pub(crate) fn fit_part_text_with_small_annotations(elements: &mut [Element], theme: &Theme, small_annotations: &BTreeSet<String>) -> Result<()> {
-    let mut fonts=FONTS.get_or_init(||Mutex::new(FontSystem::new())).lock().map_err(|_|Error::Invalid("font measurement state unavailable".into()))?;
+    let mut fonts=FONTS.get_or_init(||Mutex::new(crate::fonts::system())).lock().map_err(|_|Error::Invalid("font measurement state unavailable".into()))?;
     if fonts.db().faces().next().is_none() {return Err(Error::Unsupported("installed fonts are required for part fitting".into()));}
     fn fit(fonts:&mut FontSystem,elements:&mut [Element],theme:&Theme,small_annotations:&BTreeSet<String>)->Result<()> {
         for element in elements {

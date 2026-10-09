@@ -34,7 +34,7 @@ use crate::{
     Error, Result,
 };
 use cosmic_text::{
-    Align, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, Weight, Wrap,
+    Align, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, Wrap,
 };
 use std::{
     collections::BTreeSet,
@@ -47,6 +47,7 @@ static FONTS: OnceLock<Mutex<FontSystem>> = OnceLock::new();
 pub struct RenderedSlide {
     pub svg: String,
     pub warnings: Vec<RenderWarning>,
+    pub(crate) effects_omitted: bool,
     pub(crate) text: Vec<RenderedText>,
     pub(crate) objects: Vec<(String, String)>,
 }
@@ -86,10 +87,11 @@ pub fn render_element_preview(element: &Element, theme: Option<&Theme>) -> Resul
     let fallback = Theme::default();
     let theme = theme.unwrap_or(&fallback);
     crate::design::validate_theme(theme)?;
-    let mut filter_bytes = 0.0; let mut nodes = 0;
-    filter_budget(&deck.slides[0].elements[0], 1.0, 1.0, 1, &mut filter_bytes, &mut nodes)?;
-    let mut fonts = FONTS.get_or_init(|| Mutex::new(FontSystem::new())).lock().map_err(|_| Error::Invalid("render font state unavailable".into()))?;
-    let mut scene = Scene { writer: XmlWriter::new(Options { indent: xmlwriter::Indent::None, ..Default::default() }), theme, fonts: &mut fonts, page_index: 0, warnings: vec![], sequence: 0, path_bytes: 0, text: vec![], objects: vec![] };
+    let mut budget = EffectBudget::default();
+    filter_budget(&deck.slides[0].elements[0], 1.0, 1.0, 1, &mut budget)?;
+    budget.check("preview", 1.0)?;
+    let mut fonts = FONTS.get_or_init(|| Mutex::new(crate::fonts::system())).lock().map_err(|_| Error::Invalid("render font state unavailable".into()))?;
+    let mut scene = Scene { writer: XmlWriter::new(Options { indent: xmlwriter::Indent::None, ..Default::default() }), theme, fonts: &mut fonts, page_index: 0, warnings: vec![], omit_effects: false, sequence: 0, path_bytes: 0, text: vec![], objects: vec![] };
     scene.writer.start_element("svg"); scene.writer.write_attribute("xmlns", "http://www.w3.org/2000/svg"); scene.writer.write_attribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
     scene.writer.write_attribute("width", &width); scene.writer.write_attribute("height", &height); scene.writer.write_attribute("viewBox", &format!("0 0 {width} {height}"));
     scene.element(&deck.slides[0].elements[0])?;
@@ -113,6 +115,88 @@ pub(crate) fn render_at_scale(
     transparent: bool,
     scale: f64,
 ) -> Result<RenderedSlide> {
+    render_with_effect_policy(deck, page_index, transparent, scale, EffectPolicy::Strict)
+}
+
+pub(crate) fn render_preview_at_scale(
+    deck: &Deck,
+    page_index: usize,
+    transparent: bool,
+    scale: f64,
+) -> Result<RenderedSlide> {
+    render_with_effect_policy(deck, page_index, transparent, scale, EffectPolicy::Preview)
+}
+
+pub(crate) enum EffectPolicy { Strict, Preview, Preflight, DeliveryPdf }
+
+fn render_layers(deck: &Deck, page_index: usize) -> Result<Vec<&[Element]>> {
+    let slide = deck.slides.get(page_index)
+        .ok_or_else(|| Error::Invalid("render page index out of range".into()))?;
+    let layout = deck.design.as_ref().and_then(|design| {
+        slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id))
+            .or_else(|| design.layouts.first())
+    });
+    let master = layout.and_then(|layout| deck.design.as_ref()?.masters.iter().find(|master| master.id == layout.master_id));
+    Ok(master.filter(|_| !slide.hide_master_graphics).map(|master| master.elements.as_slice()).into_iter()
+        .chain(layout.map(|layout| layout.elements.as_slice()))
+        .chain(std::iter::once(slide.elements.as_slice())).collect())
+}
+
+fn page_effect_budget(deck: &Deck, page_index: usize, scale: f64) -> Result<EffectBudget> {
+    if !scale.is_finite() || !(0.01..=16.0).contains(&scale) {
+        return Err(Error::Invalid("effect budget scale must be in 0.01..=16".into()));
+    }
+    let layers = render_layers(deck, page_index)?;
+    let mut budget = EffectBudget::default();
+    for (index, layer) in layers.iter().enumerate() {
+        for element in *layer {
+            if index + 1 < layers.len() && matches!(element, Element::Text { format, .. } if format.placeholder.is_some()) { continue; }
+            filter_budget(element, scale, scale, 1, &mut budget)
+                .map_err(|error| Error::Limit(format!("slide {}: {error}", deck.slides[page_index].id)))?;
+        }
+    }
+    Ok(budget)
+}
+
+/// Read-only effect-budget analysis after deck validation. No rendering or
+/// font-system initialization; an empty result does not certify renderability.
+/// Uses visible slide/used-layout/master layers, skips design placeholders,
+/// and rejects expanded-node overflow. Scale is bounded to 0.01..=16.
+pub fn effect_budget_warnings(deck: &Deck, page_index: usize, scale: f64) -> Result<Vec<RenderWarning>> {
+    validate_deck(deck)?;
+    let budget = page_effect_budget(deck, page_index, scale)?;
+    Ok(budget.warning(&deck.slides[page_index].id, page_index, scale, None).into_iter().collect())
+}
+
+pub(crate) fn validated_authoring_effect_warnings(deck: &Deck, page_indices: &[usize]) -> Result<Vec<RenderWarning>> {
+    let scale = 1280.0 / f64::from(deck.width.max(deck.height));
+    let mut warnings = Vec::new();
+    for &page_index in page_indices {
+        match page_effect_budget(deck, page_index, scale) {
+            Ok(budget) => warnings.extend(budget.warning(&deck.slides[page_index].id, page_index, scale, None)),
+            Err(Error::Limit(message)) => warnings.push(RenderWarning { code: "EFFECT_ANALYSIS_UNAVAILABLE".into(), page_index, element_id: String::new(), message: format!("Effect budget prediction unavailable at scale={scale}: {message}. The edit is accepted; actual rendering limits remain enforced.") }),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(warnings)
+}
+
+pub(crate) fn render_with_effect_policy(
+    deck: &Deck,
+    page_index: usize,
+    transparent: bool,
+    scale: f64,
+    policy: EffectPolicy,
+) -> Result<RenderedSlide> {
+    let budget = page_effect_budget(deck, page_index, scale)?;
+    let mode = match policy {
+        EffectPolicy::Strict => { budget.check(&deck.slides[page_index].id, scale)?; "strict" }
+        EffectPolicy::Preview => "preview",
+        EffectPolicy::Preflight => "preflight",
+        EffectPolicy::DeliveryPdf => "delivery PDF",
+    };
+    let warning = budget.warning(&deck.slides[page_index].id, page_index, scale, Some(mode));
+    let omit_effects = warning.is_some();
     let slide = deck
         .slides
         .get(page_index)
@@ -133,20 +217,11 @@ pub(crate) fn render_at_scale(
             .iter()
             .find(|master| master.id == layout.master_id)
     });
-    let layers: Vec<&[Element]> = master
-        .filter(|_| !slide.hide_master_graphics)
-        .map(|master| master.elements.as_slice())
-        .into_iter()
-        .chain(layout.map(|layout| layout.elements.as_slice()))
-        .chain(std::iter::once(slide.elements.as_slice()))
-        .collect();
+    let layers = render_layers(deck, page_index)?;
     let mut characters = 0usize;
     let mut points = 0usize;
     let mut pixels = 0usize;
-    let mut filter_bytes = 0.0;
-    let mut expanded_nodes = 0;
     for layer in &layers {
-        for element in *layer { filter_budget(element, scale, scale, 1, &mut filter_bytes, &mut expanded_nodes)?; }
         for element in crate::model::element_list(layer) {
             match element {
                 Element::Text { text, .. } | Element::Shape { text, .. } => {
@@ -184,7 +259,7 @@ pub(crate) fn render_at_scale(
         ));
     }
     let mut fonts = FONTS
-        .get_or_init(|| Mutex::new(FontSystem::new()))
+        .get_or_init(|| Mutex::new(crate::fonts::system()))
         .lock()
         .map_err(|_| Error::Invalid("render font state unavailable".into()))?;
     let mut document_fonts = crate::fonts::document_system(&fonts, deck)?;
@@ -197,7 +272,8 @@ pub(crate) fn render_at_scale(
         theme,
         fonts,
         page_index,
-        warnings: Vec::new(),
+        warnings: warning.into_iter().collect(),
+        omit_effects,
         sequence: 0,
         path_bytes: 0,
         text: Vec::new(),
@@ -248,6 +324,7 @@ pub(crate) fn render_at_scale(
     Ok(RenderedSlide {
         svg,
         warnings: scene.warnings,
+        effects_omitted: omit_effects,
         text: scene.text,
         objects: scene.objects,
     })
@@ -259,6 +336,7 @@ struct Scene<'a> {
     fonts: &'a mut FontSystem,
     page_index: usize,
     warnings: Vec<RenderWarning>,
+    omit_effects: bool,
     sequence: usize,
     path_bytes: usize,
     text: Vec<RenderedText>,
@@ -428,6 +506,15 @@ impl Scene<'_> {
         if visual.hidden {
             return Ok(());
         }
+        let mut view;
+        let visual = if self.omit_effects {
+            view = visual.clone();
+            view.shadow = None;
+            view.glow = None;
+            view.soft_edge = None;
+            view.reflection = None;
+            &view
+        } else { visual };
         if visual.text_warp.is_some() { self.warning(id, "WORDART_APPROXIMATION", "Shaped glyph outlines warped with kurbo subdivision (0.25 local-pixel target, bounded paths); default adjustments only, not Office visual parity. PDF semantic text retained; search/selection geometry, underline and highlight remain unwarped"); }
         let rotation = match element {
             Element::Shape { rotation, .. } => *rotation,
@@ -854,12 +941,7 @@ impl Scene<'_> {
         self.path(&path, color, color, 0.0, &VisualStyle::default())
     }
     fn family(&self, text: &str, requested: Option<&str>) -> String {
-        match requested {
-            Some(name) if !name.starts_with('@')=>name.into(),
-            _ if text.chars().any(|character|matches!(character,'\u{3000}'..='\u{9fff}'|'\u{ac00}'..='\u{d7ff}'|'\u{f900}'..='\u{faff}'|'\u{20000}'..='\u{3134f}'))=>self.theme.fonts.east_asian.clone(),
-            _ if text.chars().any(|character|matches!(character,'\u{0590}'..='\u{08ff}'|'\u{0900}'..='\u{0dff}'))=>self.theme.fonts.complex_script.clone(),
-            Some("@major")=>self.theme.fonts.major.clone(),_=>self.theme.fonts.minor.clone(),
-        }
+        crate::fonts::requested_family(text, requested, self.theme).to_owned()
     }
     fn text(
         &mut self,
@@ -1019,11 +1101,7 @@ impl Scene<'_> {
                             run.text.as_str(),
                             Attrs::new()
                                 .family(Family::Name(family))
-                                .weight(if style.bold.unwrap_or(bold) {
-                                    Weight::BOLD
-                                } else {
-                                    Weight::NORMAL
-                                })
+                                .weight(crate::fonts::weight(self.fonts, family, style.bold.unwrap_or(bold), style.italic.unwrap_or(false)))
                                 .style(if style.italic.unwrap_or(false) {
                                     Style::Italic
                                 } else {
@@ -1369,10 +1447,44 @@ fn effect_bounds(element: &Element) -> [f64; 4] {
     [bounds[0] - padding, bounds[1] - padding, bounds[2] - bounds[0] + padding * 2.0, bounds[3] - bounds[1] + padding * 2.0]
 }
 
-fn filter_budget(element: &Element, scale_x: f64, scale_y: f64, copies: usize, bytes: &mut f64, expanded_nodes: &mut usize) -> Result<()> {
+const MAX_FILTER_BYTES: f64 = 32.0 * 1024.0 * 1024.0;
+
+#[derive(Default)]
+struct EffectBudget {
+    bytes: f64,
+    expanded_nodes: usize,
+    highest_cost: f64,
+    highest_id: String,
+    max_extent: f64,
+    extent_id: String,
+}
+
+impl EffectBudget {
+    fn exceeded(&self) -> bool {
+        !self.bytes.is_finite() || self.bytes > MAX_FILTER_BYTES || !self.max_extent.is_finite() || self.max_extent > 8192.0
+    }
+
+    fn description(&self, slide_id: &str, scale: f64) -> String {
+        format!("slide {slide_id}, highest-cost element {}: static filter working budget exceeds 32 MiB or 8192px; sum_bytes={}, limit_bytes={MAX_FILTER_BYTES}, scale={scale}, max_extent_px={}, extent_element={}, edge_limit_px=8192",
+            self.highest_id, self.bytes, self.max_extent, self.extent_id)
+    }
+
+    fn check(&self, slide_id: &str, scale: f64) -> Result<()> {
+        if self.exceeded() { return Err(Error::Limit(self.description(slide_id, scale))); }
+        Ok(())
+    }
+
+    fn warning(&self, slide_id: &str, page_index: usize, scale: f64, mode: Option<&str>) -> Option<RenderWarning> {
+        self.exceeded().then(|| RenderWarning { code: "EFFECT_APPROXIMATION".into(), page_index, element_id: self.highest_id.clone(),
+            message: format!("{}; {}: shadow, glow, soft-edge and reflection {} omitted from the disposable rendered view on this page; fills, text, opacity and native PPTX are unchanged. This budget check does not validate other renderer resources.",
+                self.description(slide_id, scale), mode.unwrap_or("budget analysis for preview/preflight/delivery"), if mode.is_some() { "are" } else { "would be" }) })
+    }
+}
+
+fn filter_budget(element: &Element, scale_x: f64, scale_y: f64, copies: usize, budget: &mut EffectBudget) -> Result<()> {
     if element.visual().is_some_and(|style| style.hidden) { return Ok(()); }
-    *expanded_nodes = expanded_nodes.saturating_add(copies);
-    if *expanded_nodes > 8192 { return Err(Error::Limit("static reflection expansion exceeds 8192 objects".into())); }
+    budget.expanded_nodes = budget.expanded_nodes.saturating_add(copies);
+    if budget.expanded_nodes > 8192 { return Err(Error::Limit(format!("element {}: static reflection expansion exceeds 8192 objects", element.bounds().0))); }
     let style = element.visual().cloned().unwrap_or_default();
     let scale = scale_x.abs().max(scale_y.abs());
     if style.shadow.is_some() || style.glow.is_some() || style.soft_edge.is_some() || style.reflection.is_some() {
@@ -1380,13 +1492,20 @@ fn filter_budget(element: &Element, scale_x: f64, scale_y: f64, copies: usize, b
         let rotation = match element { Element::Shape { rotation, .. } => *rotation, _ => style.rotation.unwrap_or(0.0) }.to_radians();
         let extent_width = (bounds[2] * rotation.cos().abs() + bounds[3] * rotation.sin().abs()) * scale;
         let extent_height = (bounds[2] * rotation.sin().abs() + bounds[3] * rotation.cos().abs()) * scale;
-        *bytes += extent_width.ceil() * extent_height.ceil() * 4.0 * 8.0 * copies as f64;
-        if !bytes.is_finite() || extent_width > 8192.0 || extent_height > 8192.0 || *bytes > 32.0 * 1024.0 * 1024.0 {
-            return Err(Error::Limit("static filter working budget exceeds 32 MiB or 8192px".into()));
+        let cost = extent_width.ceil() * extent_height.ceil() * 4.0 * 8.0 * copies as f64;
+        budget.bytes += cost;
+        if cost > budget.highest_cost || !cost.is_finite() {
+            budget.highest_cost = cost;
+            budget.highest_id = element.bounds().0.into();
+        }
+        let extent = extent_width.max(extent_height);
+        if extent > budget.max_extent || !extent.is_finite() {
+            budget.max_extent = extent;
+            budget.extent_id = element.bounds().0.into();
         }
     }
     if let Element::Group { width, height, view_width, view_height, children, .. } = element {
-        for child in children { filter_budget(child, scale * width / view_width, scale * height / view_height, copies * if style.reflection.is_some() { 2 } else { 1 }, bytes, expanded_nodes)?; }
+        for child in children { filter_budget(child, scale * width / view_width, scale * height / view_height, copies * if style.reflection.is_some() { 2 } else { 1 }, budget)?; }
     }
     Ok(())
 }

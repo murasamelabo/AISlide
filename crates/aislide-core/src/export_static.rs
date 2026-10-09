@@ -38,6 +38,7 @@ const MAX_PREVIEW_CACHE_BYTES: usize = 16 * 1024 * 1024;
 struct PreviewScene {
     svg: String,
     warnings: Vec<RenderWarning>,
+    effects_omitted: bool,
 }
 
 impl PreviewScene {
@@ -86,9 +87,9 @@ impl PreviewSceneCache {
         Self { entries: std::array::from_fn(|_| None), allocated_bytes: 0, limit }
     }
 
-    /// render_at_scale uses scale only for its monotone filter-budget check;
-    /// the outlined SVG and warnings are scale independent. A successful check
-    /// covers smaller scales for this immutable request, never larger ones.
+    /// Only scenes without omitted effects are retained. Their filter-budget
+    /// check covers smaller scales for this immutable request, never larger
+    /// ones. Omitted effects must be reconsidered at every attempted scale.
     /// Do not retain RenderedSlide text/glyph metadata, trees or decoded images.
     fn scene(&mut self, deck: &Deck, page_index: usize, options: &ExportOptions) -> Result<PreviewSceneRef<'_>> {
         if let Some(slot) = self.entries.iter().position(|entry| {
@@ -100,7 +101,7 @@ impl PreviewSceneCache {
         }
         let scene = render_preview_scene(deck, page_index, options)?;
         let bytes = scene.allocated_bytes();
-        if bytes > self.limit.saturating_sub(self.allocated_bytes) {
+        if scene.effects_omitted || bytes > self.limit.saturating_sub(self.allocated_bytes) {
             return Ok(PreviewSceneRef::Uncached(scene));
         }
         let Some(slot) = self.entries.iter().position(Option::is_none) else {
@@ -117,8 +118,8 @@ impl PreviewSceneCache {
 fn render_preview_scene(deck: &Deck, page_index: usize, options: &ExportOptions) -> Result<PreviewScene> {
     #[cfg(test)]
     preview_cache_tests::SCENE_RENDERS.with(|count| count.set(count.get() + 1));
-    let scene = render::render_at_scale(deck, page_index, options.transparent, options.scale)?;
-    Ok(PreviewScene { svg: scene.svg, warnings: scene.warnings })
+    let scene = render::render_preview_at_scale(deck, page_index, options.transparent, options.scale)?;
+    Ok(PreviewScene { svg: scene.svg, warnings: scene.warnings, effects_omitted: scene.effects_omitted })
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
@@ -254,7 +255,7 @@ fn preview_attempt(
     let output = export_static_inner(deck, &ExportOptions {
         format: match options.format { PreviewFormat::Png => ExportFormat::Png, PreviewFormat::Jpeg => ExportFormat::Jpeg },
         page_indices: Some(selected.to_vec()), scale: scale.max(0.01), max_output_bytes: options.max_output_bytes, ..Default::default()
-    }, Some(cache))?;
+    }, Some(cache), false)?;
     let mut pages = Vec::new();
     let mut artifacts = output.artifacts;
     let mut remaining = options.max_output_bytes;
@@ -299,8 +300,9 @@ fn preview_attempt(
     if document.bindings.iter().any(|binding| binding.stale) {
         warnings.push(RenderWarning { code: "SOURCE_BINDINGS_STALE".into(), page_index: pages[0].page_index, element_id: String::new(), message: "Preview includes stale source bindings; undo or rebind before export".into() });
     }
-    let quality_reduced = max_dimension < options.max_dimension;
-    if quality_reduced {
+    let downscaled = max_dimension < options.max_dimension;
+    let quality_reduced = downscaled || output.effects_omitted;
+    if downscaled {
         warnings.push(RenderWarning { code: "PREVIEW_DOWNSCALED".into(), page_index: pages[0].page_index, element_id: String::new(),
             message: format!("Preview max_dimension reduced from requested {} to actual {max_dimension} pixels to fit the encoded image budget; all {} selected pages are preserved in their requested order", options.max_dimension, pages.len()) });
     }
@@ -395,6 +397,7 @@ pub struct ExportArtifact {
 pub struct StaticExport {
     pub artifacts: Vec<ExportArtifact>,
     pub warnings: Vec<RenderWarning>,
+    pub(crate) effects_omitted: bool,
     pub office_parity_verified: bool,
     /// False means pages were not flattened. Individual pictures (including
     /// sanitized SVG assets rasterized by core) and warned effect-bearing
@@ -507,19 +510,25 @@ fn preflight(deck: &Deck, options: &ExportOptions) -> Result<(Vec<usize>, u32, u
 /// All-or-error: no partial artifact list escapes on unsupported content,
 /// validation failure, or budget exhaustion. Caller owns publication/printing.
 pub fn export_static(deck: &Deck, options: &ExportOptions) -> Result<StaticExport> {
-    export_static_inner(deck, options, None).map_err(StaticExportError::into_error)
+    export_static_inner(deck, options, None, false).map_err(StaticExportError::into_error)
+}
+
+pub(crate) fn export_delivery_static(deck: &Deck, options: &ExportOptions) -> Result<StaticExport> {
+    export_static_inner(deck, options, None, true).map_err(StaticExportError::into_error)
 }
 
 fn export_static_inner(
     deck: &Deck, options: &ExportOptions, mut cache: Option<&mut PreviewSceneCache>,
+    approximate_pdf_effects: bool,
 ) -> std::result::Result<StaticExport, StaticExportError> {
     let (pages, width, height) = preflight(deck, options)?;
     if options.format == ExportFormat::Pdf {
-        return export_pdf(deck, options, pages, width, height).map_err(StaticExportError::from);
+        return export_pdf(deck, options, pages, width, height, approximate_pdf_effects).map_err(StaticExportError::from);
     }
     let mut result = StaticExport {
         artifacts: Vec::new(),
         warnings: Vec::new(),
+        effects_omitted: false,
         office_parity_verified: false,
         pdf_rasterized: false,
     };
@@ -527,9 +536,13 @@ fn export_static_inner(
     for page_index in pages {
         let scene = match cache.as_deref_mut() {
             Some(cache) => cache.scene(deck, page_index, options)?,
-            None => PreviewSceneRef::Uncached(render_preview_scene(deck, page_index, options)?),
+            None => {
+                let scene = render::render_at_scale(deck, page_index, options.transparent, options.scale)?;
+                PreviewSceneRef::Uncached(PreviewScene { svg: scene.svg, warnings: scene.warnings, effects_omitted: scene.effects_omitted })
+            }
         };
         let scene = scene.as_ref();
+        result.effects_omitted |= scene.effects_omitted;
         if options.deny_warnings && !scene.warnings.is_empty() {
             return Err(Error::Unsupported(
                 "static export has render warnings".into(),
@@ -605,6 +618,7 @@ fn export_pdf(
     pages: Vec<usize>,
     width: u32,
     height: u32,
+    approximate_effects: bool,
 ) -> Result<StaticExport> {
     use lopdf::{dictionary, Document, Object};
     let mut document = Document::with_version("1.7");
@@ -616,11 +630,14 @@ fn export_pdf(
     let mut parent_numbers = Vec::new();
     let mut children = Vec::new();
     let mut warnings = Vec::new();
+    let mut effects_omitted = false;
     let mut total_svg = 0usize;
     let mut intermediate_bytes = 0usize;
     let mut semantic_bytes = 0usize;
     for page_index in &pages {
-        let scene = render::render_at_scale(deck, *page_index, options.transparent, 2.0)?;
+        let scene = render::render_with_effect_policy(deck, *page_index, options.transparent, 2.0,
+            if approximate_effects { render::EffectPolicy::DeliveryPdf } else { render::EffectPolicy::Strict })?;
+        effects_omitted |= scene.effects_omitted;
         let text_tree = svg2pdf::usvg::Tree::from_str(&scene.svg, &svg2pdf::usvg::Options::default())
             .map_err(|error| Error::Invalid(format!("internal text SVG: {error}")))?;
         semantic_bytes += scene.text.iter().map(|span| 512 + span.glyphs.iter().map(|glyph| 128 + glyph.text.len() * 4).sum::<usize>()).sum::<usize>();
@@ -736,6 +753,7 @@ fn export_pdf(
             height,
         }],
         warnings,
+        effects_omitted,
         office_parity_verified: false,
         pdf_rasterized: false,
     })
@@ -1148,15 +1166,99 @@ mod preview_cache_tests {
         let options = PreviewOptions { max_dimension: 320, max_output_bytes: 1, ..Default::default() };
         let mut cache = PreviewSceneCache::new(&options);
         assert!(cache.scene(&document.deck, 0, &ExportOptions { scale: 0.75, ..Default::default() }).is_ok());
-        assert!(matches!(cache.scene(&document.deck, 0, &ExportOptions::default()), Err(Error::Limit(message)) if message.contains("filter working budget")));
+        assert!(matches!(export_static(&document.deck, &ExportOptions::default()), Err(Error::Limit(message)) if message.contains("filter working budget")));
+        for scale in [1.0, 1.25, 1.0] {
+            let scene = cache.scene(&document.deck, 0, &ExportOptions { scale, ..Default::default() }).unwrap();
+            assert!(matches!(scene, PreviewSceneRef::Uncached(_)));
+            assert!(scene.as_ref().effects_omitted);
+            assert!(scene.as_ref().warnings.iter().any(|warning| warning.code == "EFFECT_APPROXIMATION" && warning.message.contains(&format!("scale={scale}"))));
+            assert!(!scene.as_ref().svg.contains("<filter"));
+        }
+        let smaller = cache.scene(&document.deck, 0, &ExportOptions { scale: 0.5, ..Default::default() }).unwrap();
+        assert!(matches!(smaller, PreviewSceneRef::Cached(_)));
+        assert!(!smaller.as_ref().effects_omitted);
+        assert!(smaller.as_ref().svg.contains("<filter"));
         SCENE_RENDERS.with(|count| count.set(0));
         let error = preview_presentation(&document, &options).unwrap_err();
-        assert!(matches!(error, Error::Limit(message) if message.contains("filter working budget") && !message.contains("attempt")));
-        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 1);
-        assert_eq!(cache.entries.iter().flatten().count(), 1, "failed scenes must not be cached");
+        assert!(matches!(error, Error::Limit(message) if message.contains("3 attempt")));
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 2, "omitted scene must be regenerated at the smaller scale before reuse");
+        assert_eq!(cache.entries.iter().flatten().count(), 1, "omitted scenes must not be cached");
+        SCENE_RENDERS.with(|count| count.set(0));
         let opaque = cache.scene(&document.deck, 0, &ExportOptions { scale: 0.5, ..Default::default() }).unwrap().as_ref().svg.clone();
         let transparent = cache.scene(&document.deck, 0, &ExportOptions { scale: 0.5, transparent: true, ..Default::default() }).unwrap();
         assert_ne!(opaque, transparent.as_ref().svg);
-        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 2);
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 1);
+        let mut source = document.deck.clone();
+        source.slides[0].elements.push(serde_json::from_value(serde_json::json!({
+            "type":"text","id":"unsupported","x":10,"y":10,"width":280,"height":80,
+            "text":"Left\tRight","font_size":24,"color":"000000","bold":false
+        })).unwrap());
+        let document = crate::document::create("preview-unsupported".into(), source, vec![], vec![], None).unwrap();
+        SCENE_RENDERS.with(|count| count.set(0));
+        assert!(matches!(preview_presentation(&document, &options), Err(Error::Unsupported(message)) if message.contains("tab stops")));
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 1, "non-effect errors must not trigger shrink retries");
+    }
+
+    #[test]
+    fn issue16_omission_preserves_all_non_effect_svg_and_pdf_warning_denial() {
+        let mut source = document().deck;
+        source.width = 1280;
+        source.height = 720;
+        source.slides[0].elements = vec![serde_json::from_value(serde_json::json!({
+            "type":"group","id":"effects","x":40,"y":40,"width":640,"height":390,"view_width":640,"view_height":390,
+            "visual":{"rotation":10,"flip_h":true,"soft_edge":60,
+                "shadow":{"color":"000000","opacity":0.4,"blur":40,"distance":30,"angle":45},
+                "glow":{"color":"0000FF","opacity":0.3,"radius":40},
+                "reflection":{"blur":20,"distance":10,"start_opacity":0.5,"end_opacity":0,"end_position":1}},
+            "children":[{"type":"rect","id":"gradient","x":0,"y":0,"width":600,"height":300,"fill":"FF0000",
+                "visual":{"soft_edge":30,"gradient":{"kind":"linear","angle":45,
+                    "stops":[{"offset":0,"color":"FF0000","opacity":1},{"offset":1,"color":"00FF00","opacity":0.5}]}}},
+                {"type":"text","id":"label","x":20,"y":20,"width":400,"height":80,
+                    "text":"Unchanged content","font_size":24,"color":"000000","bold":true},
+                {"type":"rect","id":"opacity","x":20,"y":100,"width":80,"height":80,"fill":"0000FF","visual":{"opacity":0.7}}]
+        })).unwrap()];
+        validate_deck(&source).unwrap();
+        let original = serde_json::to_value(&source).unwrap();
+        let mut clean = original.clone();
+        for path in ["/slides/0/elements/0/visual", "/slides/0/elements/0/children/0/visual"] {
+            let style = clean.pointer_mut(path).unwrap().as_object_mut().unwrap();
+            for effect in ["shadow", "glow", "soft_edge", "reflection"] { style.remove(effect); }
+        }
+        let clean = serde_json::from_value(clean).unwrap();
+        let rendered = render::render_preview_at_scale(&source, 0, true, 1.0).unwrap();
+        assert!(rendered.effects_omitted);
+        assert_eq!(rendered.svg, render::render_slide_svg(&clean, 0, true).unwrap().svg);
+        assert_eq!(rendered.warnings.iter().filter(|warning| warning.code == "EFFECT_APPROXIMATION").count(), 1);
+        assert!(matches!(export_delivery_static(&source, &ExportOptions { format: ExportFormat::Pdf, deny_warnings: true, ..Default::default() }), Err(Error::Unsupported(message)) if message.contains("render warnings")));
+        assert_eq!(serde_json::to_value(&source).unwrap(), original);
+    }
+
+    #[test]
+    fn issue16_approximation_retains_image_and_expanded_node_limits() {
+        use base64::Engine;
+        let mut source = document().deck;
+        let picture = image::RgbaImage::from_pixel(2048, 2048, image::Rgba([255, 0, 0, 255]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        picture.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        source.slides[0].elements = (0..3).map(|index| serde_json::from_value(serde_json::json!({
+            "type":"picture","id":format!("picture-{index}"),"x":0,"y":0,"width":300,"height":300,
+            "base64":base64::engine::general_purpose::STANDARD.encode(bytes.get_ref()),"mime_type":"image/png","alt":"Synthetic",
+            "visual":{"soft_edge":100}
+        })).unwrap()).collect();
+        assert!(matches!(render::render_preview_at_scale(&source, 0, false, 1.0), Err(Error::Limit(message)) if message.contains("decoded-image budget")));
+        source.slides[0].elements.truncate(1);
+        if let Element::Picture { svg, .. } = &mut source.slides[0].elements[0] {
+            *svg = Some(base64::engine::general_purpose::STANDARD.encode("<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><image href='https://example.invalid/private'/></svg>"));
+        }
+        assert!(matches!(render::render_preview_at_scale(&source, 0, false, 4.0), Err(Error::Unsupported(message)) if message.contains("SVG") || message.contains("external")));
+        if let Element::Picture { base64, .. } = &mut source.slides[0].elements[0] { *base64 = "invalid".into(); }
+        assert!(render::render_preview_at_scale(&source, 0, false, 4.0).is_err());
+        let mut children = (0..128).map(|index| serde_json::json!({"type":"rect","id":format!("leaf-{index}"),"x":0,"y":0,"width":1,"height":1,"fill":"FF0000"})).collect::<Vec<_>>();
+        for depth in 0..7 {
+            children = vec![serde_json::json!({"type":"group","id":format!("level-{depth}"),"x":0,"y":0,"width":1,"height":1,"view_width":1,"view_height":1,
+                "visual":{"reflection":{"blur":0,"distance":0,"start_opacity":1,"end_opacity":0,"end_position":1}},"children":children})];
+        }
+        source.slides[0].elements = serde_json::from_value(serde_json::json!(children)).unwrap();
+        assert!(matches!(render::render_preview_at_scale(&source, 0, false, 1.0), Err(Error::Limit(message)) if message.contains("8192 objects") && message.contains("leaf-") && message.contains("slide page")));
     }
 }

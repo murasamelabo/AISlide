@@ -182,6 +182,7 @@ fn rich_run_style(node: Node<'_, '_>, style: &mut crate::rich_text::RunStyle) ->
     if let Some(size) = rich_number::<u32>(node, "sz")? { style.font_size = Some(size as f64 / 75.0); }
     if let Some(baseline) = rich_number(node, "baseline")? { style.baseline = Some(baseline); }
     if let Some(language) = node.attribute("lang") { style.language = Some(language.into()); }
+    if let Some(language) = node.attribute("altLang") { style.alternative_language = Some(language.into()); }
     if child(node, A, "solidFill").is_some() { style.color = Some(color(node, "@dk1")); }
     if let Some(highlight) = child(node, A, "highlight") {
         style.highlight = Some(if let Some(rgb) = child(highlight, A, "srgbClr").and_then(|node| node.attribute("val")) { rgb.into() }

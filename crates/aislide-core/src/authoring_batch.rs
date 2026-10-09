@@ -151,7 +151,7 @@ fn text_style(element: &mut Element, style: &RunStyle) -> Result<()> {
     if let Some(value) = style.italic { format.italic = value; }
     if let Some(value) = style.underline { format.underline = value; }
     if let Some(value) = &style.font_family { format.font_family = Some(value.clone()); }
-    if format.paragraphs.is_empty() && (style.baseline.is_some() || style.highlight.is_some() || style.language.is_some()) {
+    if format.paragraphs.is_empty() && (style.baseline.is_some() || style.highlight.is_some() || style.language.is_some() || style.alternative_language.is_some()) {
         format.paragraphs = text.split('\n').map(|line| RichParagraph { runs: vec![RichRun { text: line.into(), style: style.clone(), field: None }], alignment: Some(format.alignment), bullet: Some(format.bullet), ..Default::default() }).collect();
     } else {
         for paragraph in &mut format.paragraphs { for run in &mut paragraph.runs { run.style.overlay(style); } }
@@ -272,14 +272,28 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
         if matches!(operation, Operation::ComposeSlide { .. }) && document.origin.as_ref().is_some_and(|origin| origin.native) {
             return Err(Error::Unsupported("compose_slide requires a new empty slide in a generated document; use explicit edits for imported presentations".into()));
         }
-        changed.insert(apply(&mut deck, &mut parts, operation, &mut native_guard).map_err(|error| Error::Invalid(format!("operation {}: {error}", index + 1)))?);
+        let context = match operation {
+            Operation::SetRichText { slide_id, id, .. } => format!("operation {}, slide_id {slide_id}, element {id}", index + 1),
+            _ => format!("operation {}", index + 1),
+        };
+        if let Operation::SetRichText { slide_id, id, paragraphs } = operation {
+            if let Some(slide) = deck.slides.iter().find(|slide| slide.id == *slide_id) {
+                let unchanged = slide.elements.iter().find(|element| element.bounds().0 == id).is_some_and(|element| {
+                    matches!(element, Element::Text { text, format, .. } | Element::Shape { text, format, .. } if format.paragraphs == *paragraphs && *text == crate::rich_text::plain_text(paragraphs))
+                });
+                if !unchanged { native_guard.check_rich_text(slide.native_source_id.as_deref().unwrap_or(slide_id), id).map_err(|error| Error::Invalid(format!("{context}: {error}")))?; }
+            }
+        }
+        changed.insert(apply(&mut deck, &mut parts, operation, &mut native_guard).map_err(|error| Error::Invalid(format!("{context}: {error}")))?);
         crate::preflight::deck(&deck, document.capacity_profile.limits())?;
     }
+    let page_indices: Vec<_> = changed.iter().copied().collect();
     let mut patches: Vec<_> = if metadata_changed && changed.len() == 128 {
         vec![json!({"op":"replace","path":"/deck/slides","value":deck.slides})]
     } else { changed.into_iter().map(|index| json!({"op":"replace","path":format!("/deck/slides/{index}"),"value":deck.slides[index]})).collect() };
     if metadata_changed { patches.push(json!({"op":"add","path":"/parts","value":parts})); }
-    let result = document::transact(document, Transaction { expected_revision, expected_hash: expected_hash.into(), operations: serde_json::from_value(json!(patches))? })?;
+    let mut result = document::transact(document, Transaction { expected_revision, expected_hash: expected_hash.into(), operations: serde_json::from_value(json!(patches))? })?;
+    result.render_warnings = crate::render::validated_authoring_effect_warnings(&result.document.deck, &page_indices)?;
     let mut targets: BTreeSet<_> = operations.iter().filter_map(|operation| match operation {
         Operation::AddGraph { slide_id, id, .. } | Operation::UpdateGraph { slide_id, id, .. } => Some((slide_id.clone(), id.clone())),
         Operation::AddPart { slide_id, id, spec } | Operation::UpdatePart { slide_id, id, spec } if matches!(spec.data, crate::parts::PartData::Diagram { .. }) => Some((slide_id.clone(), id.clone())),

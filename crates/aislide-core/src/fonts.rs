@@ -7,6 +7,113 @@ use std::collections::BTreeMap;
 pub const MAX_FONT_BYTES: usize = 12 * 1024 * 1024;
 pub const MAX_TOTAL_FONT_BYTES: usize = 24 * 1024 * 1024;
 
+fn rendering_locale(locale: &str) -> String {
+    let parts: Vec<_> = locale.split(['-', '_']).collect();
+    match parts.first().map(|language| language.to_ascii_lowercase()).as_deref() {
+        Some("ja") => "ja".into(),
+        Some("ko") => "ko".into(),
+        Some("zh") => {
+            if parts.iter().any(|part| part.eq_ignore_ascii_case("HK")) { "zh-HK".into() }
+            else if parts.iter().any(|part| part.eq_ignore_ascii_case("TW") || part.eq_ignore_ascii_case("Hant")) { "zh-TW".into() }
+            else if parts.iter().any(|part| part.eq_ignore_ascii_case("CN") || part.eq_ignore_ascii_case("Hans")) { "zh-CN".into() }
+            else { locale.to_owned() }
+        }
+        _ => locale.to_owned(),
+    }
+}
+
+fn prepared_system(locale: &str, mut database: cosmic_text::fontdb::Database) -> cosmic_text::FontSystem {
+    let faces: Vec<_> = database.faces().cloned().collect();
+    for mut face in faces {
+        let Some((_, language)) = face.families.first().cloned() else { continue; };
+        let aliases = database.with_face_data(face.id, |bytes, index| {
+            let parsed = ttf_parser::Face::parse(bytes, index).ok()?;
+            Some(parsed.names().into_iter().filter(|name| name.name_id == 1).filter_map(|name| name.to_string()).filter(|name| !name.is_empty() && name.chars().count() <= 100).take(64).collect::<Vec<_>>())
+        }).flatten().unwrap_or_default();
+        let mut changed = false;
+        for alias in aliases {
+            if !face.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(&alias)) { face.families.push((alias, language)); changed = true; }
+        }
+        if changed { database.remove_face(face.id); database.push_face_info(face); }
+    }
+    cosmic_text::FontSystem::new_with_locale_and_db(rendering_locale(locale), database)
+}
+
+pub(crate) fn system() -> cosmic_text::FontSystem {
+    let (locale, database) = cosmic_text::FontSystem::new().into_locale_and_db();
+    prepared_system(&locale, database)
+}
+
+pub(crate) fn weight(fonts: &cosmic_text::FontSystem, family: &str, bold: bool, italic: bool) -> cosmic_text::Weight {
+    use cosmic_text::{fontdb::Query, Family, Style, Weight};
+    let requested = if bold { Weight::BOLD } else { Weight::NORMAL };
+    let Some(id) = fonts.db().query(&Query { families: &[Family::Name(family)], weight: requested, style: if italic { Style::Italic } else { Style::Normal }, ..Default::default() }) else { return requested; };
+    let legacy = fonts.db().with_face_data(id, |bytes, index| {
+        let Ok(face) = ttf_parser::Face::parse(bytes, index) else { return false; };
+        let matches = |id| face.names().into_iter().filter(|name| name.name_id == id).filter_map(|name| name.to_string()).any(|name| name.eq_ignore_ascii_case(family));
+        matches(1) && !matches(16) && face.names().into_iter().any(|name| name.name_id == 16)
+    }).unwrap_or(false);
+    if legacy { fonts.db().face(id).map_or(requested, |face| face.weight) } else { requested }
+}
+
+#[cfg(test)]
+mod rendering_tests {
+    #[test]
+    fn issue15_regional_locales_preserve_cjk_preferences() {
+        for (input, expected) in [("ja-JP", "ja"), ("JA-jp", "ja"), ("ko-KR", "ko"), ("zh-Hant", "zh-TW"), ("zh-Hant-HK", "zh-HK"), ("zh-Hans", "zh-CN"), ("zh-TW", "zh-TW"), ("en-US", "en-US")] {
+            assert_eq!(super::rendering_locale(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn review19_fullwidth_and_halfwidth_forms_use_the_east_asian_role() {
+        let mut theme = crate::design::Theme::default();
+        theme.fonts.major = "Synthetic Heading".into();
+        theme.fonts.minor = "Synthetic Latin".into();
+        theme.fonts.east_asian = "Synthetic East Asian".into();
+        for text in ["\u{ff2b}\u{ff30}\u{ff29}", "\u{ff11}\u{ff0e}", "\u{ff76}\u{ff80}\u{ff76}\u{ff85}"] {
+            assert_eq!(super::requested_family(text, None, &theme), theme.fonts.east_asian);
+            assert_eq!(super::requested_family(text, Some("@major"), &theme), theme.fonts.east_asian);
+            assert_eq!(super::requested_family(text, Some("Explicit Family"), &theme), "Explicit Family");
+        }
+        assert_eq!(super::requested_family("Latin only", None, &theme), theme.fonts.minor);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn review19_installed_legacy_alias_is_registered_by_prepared_system() {
+        use cosmic_text::fontdb::{Database, Family, Query, Stretch, Style, Weight};
+        let alias = "Segoe UI Semibold";
+        let mut database = Database::new(); database.load_system_fonts();
+        let expected = database.faces().filter(|info|info.style==Style::Normal).find_map(|info|database.with_face_data(info.id,|bytes,index| {
+            let face = ttf_parser::Face::parse(bytes,index).ok()?;
+            face.names().into_iter().any(|name|name.name_id==1 && name.to_string().as_deref()==Some(alias)).then_some(info.weight)
+        }).flatten());
+        let Some(expected) = expected else { eprintln!("Skipping installed alias test: Segoe UI Semibold is not installed"); return; };
+        let families = [Family::Name(alias)];
+        let query = Query { families:&families, weight:Weight::NORMAL, stretch:Stretch::Normal, style:Style::Normal };
+        assert!(database.query(&query).is_none(), "raw typographic database unexpectedly includes the legacy alias");
+        let fonts = super::prepared_system("ja-JP",database);
+        let id = fonts.db().query(&query).expect("prepared_system must register installed name-ID-1 aliases");
+        let face = fonts.db().face(id).unwrap();
+        assert_eq!(face.weight,expected);
+        assert!(face.families.iter().any(|(family,_)|family==alias));
+        assert_eq!(super::weight(&fonts,alias,false,false).0,expected.0);
+        assert_eq!(super::weight(&fonts,"Segoe UI",true,false).0,700);
+        assert_eq!(fonts.locale(),"ja");
+    }
+}
+
+pub(crate) fn requested_family<'a>(text: &str, requested: Option<&'a str>, theme: &'a crate::design::Theme) -> &'a str {
+    match requested {
+        Some(family) if !family.starts_with('@') => family,
+        _ if text.chars().any(|character| matches!(character, '\u{3000}'..='\u{9fff}' | '\u{ac00}'..='\u{d7ff}' | '\u{f900}'..='\u{faff}' | '\u{ff00}'..='\u{ffef}' | '\u{20000}'..='\u{3134f}')) => &theme.fonts.east_asian,
+        _ if text.chars().any(|character| matches!(character, '\u{0590}'..='\u{08ff}' | '\u{0900}'..='\u{0dff}')) => &theme.fonts.complex_script,
+        Some("@major") => &theme.fonts.major,
+        _ => &theme.fonts.minor,
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EmbeddedFont {
@@ -88,7 +195,7 @@ pub(crate) fn document_system(base: &cosmic_text::FontSystem, deck: &crate::mode
         face.families.insert(0,(font.family.clone(),language));
         database.remove_face(id); database.push_face_info(face);
     }
-    Ok(Some(cosmic_text::FontSystem::new_with_locale_and_db(base.locale().into(), database)))
+    Ok(Some(prepared_system(base.locale(), database)))
 }
 
 fn style_tag(style: FontStyle) -> &'static str {

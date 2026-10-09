@@ -264,7 +264,7 @@ fn native_fill(node: roxmltree::Node<'_, '_>) -> Option<String> {
 
 fn style_difference(mut style: RunStyle, base: &RunStyle) -> RunStyle {
     macro_rules! omit { ($($name:ident),*) => { $(if style.$name == base.$name { style.$name = None; })* }; }
-    omit!(bold,italic,underline,font_size,color,font_family,baseline,highlight,language); style
+    omit!(bold,italic,underline,font_size,color,font_family,baseline,highlight,language,alternative_language); style
 }
 
 pub(crate) fn read_native(table: roxmltree::Node<'_, '_>, width: f64, height: f64) -> Result<(Vec<Vec<String>>,f64,TableFormat)> {

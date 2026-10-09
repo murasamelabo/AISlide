@@ -30,7 +30,7 @@
     "setup:bundle": "node tools/windows-setup.mjs --bundle",
     "test:setup": "node --test tools/windows-setup.test.mjs",
     "test:setup:installed": "node tools/windows-setup.test.mjs --installed",
-    "test:icons": "node --test tools/lucide-categories.test.mjs",
+    "test:icons": "node --test tools/lucide-categories.test.mjs tools/lucide-search.test.mjs",
     "demo": "node tools/demo.mjs",
     "demo:poc": "node tools/poc-demo.mjs",
     "demo:benchmark": "node tools/benchmark-deck.mjs",

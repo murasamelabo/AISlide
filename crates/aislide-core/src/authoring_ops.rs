@@ -164,13 +164,14 @@ pub fn replace_text_content(document: &Document, expected_revision: u64, slide_i
     update_element(document, expected_revision, slide_id, id, |element| crate::rich_text::replace_text_content(element, text))
 }
 
-pub fn update_paragraphs(document: &Document, expected_revision: u64, slide_id: &str, id: &str, paragraphs: Vec<RichParagraph>) -> Result<TransactionResult> {
+pub fn update_paragraphs(document: &Document, expected_revision: u64, slide_id: &str, id: &str, mut paragraphs: Vec<RichParagraph>) -> Result<TransactionResult> {
     update_element(document, expected_revision, slide_id, id, |mut element| {
         crate::rich_text::validate_paragraphs(&paragraphs)?;
         let (text, format) = match &mut element {
             Element::Text { text, format, .. } | Element::Shape { text, format, .. } => (text, format),
             _ => return Err(Error::Unsupported("paragraph editing requires a text box or shape".into())),
         };
+        crate::rich_text::preserve_alternative_languages(&format.paragraphs, &mut paragraphs)?;
         *text = crate::rich_text::plain_text(&paragraphs);
         format.paragraphs = paragraphs;
         format.inherit_layout = false;
@@ -241,6 +242,14 @@ pub fn import_template(id: String, kind: TemplateKind, bytes: Vec<u8>) -> Result
             deck.design.as_mut().ok_or_else(|| Error::Invalid("blank design missing".into()))?.theme = theme;
             document::create(id, deck, Vec::new(), Vec::new(), None)
         }
+    }
+}
+
+pub fn import_template_with_options(id: String, kind: TemplateKind, bytes: Vec<u8>, options: Option<&crate::templates::TemplateImportOptions>) -> Result<Document> {
+    match (kind, options) {
+        (TemplateKind::Potx, Some(options)) => crate::templates::load_potx_with_options(id, bytes, options),
+        (TemplateKind::Thmx, Some(_)) => Err(Error::Invalid("template selection options apply only to POTX".into())),
+        (kind, None) => import_template(id, kind, bytes),
     }
 }
 
