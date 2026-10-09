@@ -77,13 +77,40 @@ pub(crate) fn native_hash(package:&Package,native:&NativeDeck,slide_id:&str,elem
     Ok(format!("{:x}",digest.finalize()))
 }
 
-pub(crate) fn refresh(parts:&mut [PartInstance],deck:&Deck,origin:Option<&ImportedOrigin>)->Result<()> {
+fn validate_instances(parts:&[PartInstance])->Result<()> {
     if parts.len()>128 {return Err(Error::Limit("more than 128 metadata parts".into()));}
-    let original=if !parts.is_empty() {origin.filter(|origin|origin.native).map(|origin|->Result<_>{let package=Package::open(STANDARD.decode(&origin.base64).map_err(|_|Error::Invalid("part origin".into()))?)?;let native=crate::native::read(&package)?;Ok((package,native))}).transpose()?} else {None};
     let mut identities=BTreeSet::new();
     for part in parts {
         crate::model::valid_text(&part.slide_id,80)?;crate::model::valid_text(&part.element_id,40)?;
         if !identities.insert((&part.slide_id,&part.element_id)) || part.render_sha256.len()!=64 || !part.render_sha256.bytes().all(|byte|byte.is_ascii_hexdigit()) {return Err(Error::Invalid("part metadata identity/hash".into()));}
+    }
+    Ok(())
+}
+
+pub(crate) fn imported_parts(parts:Vec<PartInstance>,warnings:&mut Vec<String>)->Result<Vec<PartInstance>> {
+    validate_instances(&parts)?;
+    let mut retained=Vec::new();
+    for (index,part) in parts.into_iter().enumerate() {
+        match super::validate_spec(&part.spec) {
+            Ok(_)=>retained.push(part),
+            Err(error)=>{
+                let mut detail=format!("spec: {error}");
+                if let super::PartData::Timeline {tasks,..}=&part.spec.data {
+                    if let Some((task_index,task))=tasks.iter().enumerate().find(|(_,task)|task.label.chars().count()>32) {
+                        detail=format!("spec.data.tasks[{task_index}].label: {} > 32 characters",task.label.chars().count());
+                    }
+                }
+                warnings.push(format!("PART_METADATA_UNMANAGED parts[{index}] (slide_id={}, element_id={}): {detail}; native geometry is retained, but this record is no longer a managed part",part.slide_id,part.element_id));
+            }
+        }
+    }
+    Ok(retained)
+}
+
+pub(crate) fn refresh(parts:&mut [PartInstance],deck:&Deck,origin:Option<&ImportedOrigin>)->Result<()> {
+    validate_instances(parts)?;
+    let original=if !parts.is_empty() {origin.filter(|origin|origin.native).map(|origin|->Result<_>{let package=Package::open(STANDARD.decode(&origin.base64).map_err(|_|Error::Invalid("part origin".into()))?)?;let native=crate::native::read(&package)?;Ok((package,native))}).transpose()?} else {None};
+    for part in parts {
         super::validate_spec(&part.spec)?;
         let element=deck.slides.iter().find(|slide|slide.id==part.slide_id).and_then(|slide|slide.elements.iter().find(|element|element.bounds().0==part.element_id));
         let native_changed=match &part.native_sha256 {
@@ -93,6 +120,19 @@ pub(crate) fn refresh(parts:&mut [PartInstance],deck:&Deck,origin:Option<&Import
         part.stale=native_changed || element.map(render_hash).transpose()?.is_none_or(|hash|hash!=part.render_sha256);
     }
     Ok(())
+}
+
+pub fn detach(document:&Document,expected_revision:u64,slide_id:&str,id:&str)->Result<TransactionResult> {
+    crate::document::verify(document)?;
+    if document.revision!=expected_revision {return Err(Error::Conflict("stale document revision".into()));}
+    crate::model::valid_text(slide_id,80)?;crate::model::valid_text(id,40)?;
+    let index=document.parts.iter().position(|part|part.slide_id==slide_id && part.element_id==id)
+        .ok_or_else(||Error::Invalid(format!("managed part not found (slide_id={slide_id}, element_id={id})")))?;
+    if let Some(origin)=document.origin.as_ref().filter(|origin|origin.native) {
+        let package=Package::open(STANDARD.decode(&origin.base64).map_err(|_|Error::Invalid("part origin".into()))?)?;
+        crate::review::ensure_metadata_detach(&package)?;
+    }
+    crate::document::transact(document,Transaction {expected_revision,expected_hash:document.hash.clone(),operations:serde_json::from_value(json!([{"op":"remove","path":format!("/parts/{index}")}]))?})
 }
 
 pub(crate) fn resize_canvas(element: &mut Element, target_width: f64, target_height: f64) -> Result<()> {

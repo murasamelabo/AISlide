@@ -44,7 +44,7 @@ pub fn elements(document: &Document, expected_revision: u64, slide_id: &str, ope
                 identity(new_id)?; valid_text(new_id, 40)?;
                 let source = &slide.elements[index];
                 let part = parts.iter().find(|part| part.slide_id == slide_id && &part.element_id == id).cloned();
-                if part.as_ref().is_some_and(|part| part.stale) { return Err(Error::Conflict("stale part metadata cannot be duplicated".into())); }
+                if part.as_ref().is_some_and(|part| part.stale) { return Err(Error::Conflict(format!("stale part metadata cannot be duplicated (slide_id={slide_id}, element_id={id}); call detach_part to remove only metadata (native shapes remain), or insert a new managed part"))); }
                 if part.is_none() { crate::native_save::check_duplicate(document, slide_id, source)?; }
                 let mapping: std::collections::BTreeMap<_, _> = element_list(&[source.clone()]).iter().enumerate().map(|(index, element)| (element.bounds().0.to_owned(), if index == 0 { new_id.clone() } else { format!("{new_id}-{index}") })).collect();
                 fn rename(value: &mut serde_json::Value, mapping: &std::collections::BTreeMap<String, String>) {
@@ -141,7 +141,7 @@ pub fn slides(document: &Document, expected_revision: u64, operations: &[SlideOp
                     if copied.native_source_id.is_none() && crate::native::read(&package)?.slides.iter().any(|slide| &slide.id == slide_id) { copied.native_source_id = Some(slide_id.clone()); }
                 }
                 let copied_parts: Vec<_> = parts.iter().filter(|part| &part.slide_id == slide_id).map(|part| {
-                    if part.stale { return Err(Error::Conflict("stale part metadata cannot be duplicated; preserve native edits first".into())); }
+                    if part.stale { return Err(Error::Conflict(format!("stale part metadata cannot be duplicated (slide_id={slide_id}, element_id={}); call detach_part to remove only metadata (native shapes remain), or insert a new managed part",part.element_id))); }
                     let mut copy = part.clone(); copy.slide_id = id.clone(); copy.native_sha256 = None; Ok(copy)
                 }).collect::<Result<_>>()?;
                 let copied_bindings: Vec<_> = bindings.iter().filter(|binding| &binding.slide_id == slide_id).map(|binding| { let mut copy = binding.clone(); copy.slide_id = id.clone(); copy }).collect();

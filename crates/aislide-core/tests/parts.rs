@@ -209,6 +209,175 @@ fn deck(element: Value) -> Value {
     json!({"version":1,"title":"Parts test","width":1280,"height":720,"slides":[{"id":"slide","title":"Parts","background":"FFFFFF","notes":"Synthetic examples","elements":[element]}]})
 }
 
+#[test]
+fn issue21_incompatible_saved_part_is_unmanaged_without_losing_native_content() {
+    let short = "A".repeat(18);
+    let long = "A".repeat(36);
+    let spec = json!({"version":1,"preset":"gantt-chart/labeled","title":"Synthetic schedule","data":{"kind":"timeline","periods":["First","Next"],"tasks":[{"label":short,"start":0,"end":2,"progress":0.5}]}});
+    let mut scene = deck(json!({}));
+    scene["slides"][0]["elements"] = json!([]);
+    let mut second = scene["slides"][0].clone(); second["id"] = json!("second");
+    scene["slides"].as_array_mut().unwrap().push(second);
+    let created = execute_request(json!({"op":"new_document","id":"legacy-parts","deck":scene})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":created,"expected_revision":0,"slide_id":"slide","id":"legacy","spec":spec})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":inserted["document"],"expected_revision":1,"slide_id":"second","id":"valid","spec":column_spec()})).unwrap();
+    let output = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+    let pristine = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let metadata_path = pristine.parts().keys().find(|path| path.starts_with("customXml/aislide-provenance") && path.ends_with(".xml")).unwrap().clone();
+    assert!(pristine.text(&metadata_path).unwrap().contains(&short));
+    for renamed in [false, true] {
+        let mut entries = pristine.parts().clone();
+        entries.insert(metadata_path.clone(), pristine.text(&metadata_path).unwrap().replace(&short, &long).into_bytes());
+        if renamed {
+            let bytes = entries.remove(&metadata_path).unwrap();
+            entries.insert("customXml/item1.xml".into(), bytes);
+            for path in ["[Content_Types].xml", "ppt/_rels/presentation.xml.rels"] {
+                let xml = String::from_utf8(entries[path].clone()).unwrap().replace(&metadata_path, "customXml/item1.xml");
+                entries.insert(path.into(), xml.into_bytes());
+            }
+        }
+        let source = Package::from_parts(entries).unwrap().save().unwrap();
+        let opened = execute_request(json!({"op":"open_presentation","id":"legacy-open","base64":STANDARD.encode(&source)})).unwrap();
+        let document = &opened["document"];
+        assert_eq!(document["parts"].as_array().unwrap().len(), 1);
+        assert_eq!(document["parts"][0]["element_id"], "valid");
+        assert_eq!(document["parts"][0]["stale"], false);
+        assert_eq!(document["deck"]["slides"][0]["elements"][0]["id"], "legacy");
+        let warnings = opened["warnings"].as_array().unwrap().iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
+        for detail in ["PART_METADATA_UNMANAGED", "parts[0]", "slide_id=slide", "element_id=legacy", "spec.data.tasks[0].label", "36 > 32"] {
+            assert!(warnings.contains(detail), "missing {detail}: {warnings}");
+        }
+        let unchanged = execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+        assert_eq!(STANDARD.decode(unchanged["base64"].as_str().unwrap()).unwrap(), source);
+        let changed = execute_request(json!({"op":"transaction","document":document,"transaction":{"expected_revision":0,"expected_hash":document["hash"],"operations":[{"op":"replace","path":"/deck/slides/1/notes","value":"Reviewed synthetic notes"}]}})).unwrap();
+        let saved = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+        let package = Package::open(STANDARD.decode(saved["base64"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(package.part("ppt/slides/slide1.xml").unwrap(), pristine.part("ppt/slides/slide1.xml").unwrap());
+        let restored = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":1,"receipt":changed["receipt"]})).unwrap();
+        assert_eq!(restored["document"]["hash"], document["hash"]);
+        let restored_bytes = execute_request(json!({"op":"export_presentation","document":restored["document"]})).unwrap();
+        assert_eq!(STANDARD.decode(restored_bytes["base64"].as_str().unwrap()).unwrap(), source);
+    }
+    let mut invalid_new = spec; invalid_new["data"]["tasks"][0]["label"] = json!(long);
+    assert!(execute_request(json!({"op":"create_part","id":"invalid-new","spec":invalid_new})).is_err());
+}
+
+fn issue22_stale_native_document() -> Value {
+    let mut scene = deck(json!({})); scene["slides"][0]["elements"] = json!([]);
+    let document = execute_request(json!({"op":"new_document","id":"stale-detach","deck":scene})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"managed","spec":column_spec()})).unwrap();
+    let exported = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+    let mut package = Package::open(STANDARD.decode(exported["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let xml = package.text("ppt/slides/slide1.xml").unwrap().replace("Quarterly volume", "Manual content");
+    package.replace_part("ppt/slides/slide1.xml", xml.into_bytes()).unwrap();
+    let bytes = package.save().unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"stale-native","base64":STANDARD.encode(bytes)})).unwrap();
+    assert_eq!(opened["document"]["parts"][0]["stale"], true);
+    opened["document"].clone()
+}
+
+#[test]
+fn issue21_quarantine_does_not_bypass_provenance_structure_identity_or_count_limits() {
+    let document = issue22_stale_native_document();
+    let exported = execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+    let package = Package::open(STANDARD.decode(exported["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let path = package.parts().keys().find(|path|path.starts_with("customXml/aislide-provenance") && path.ends_with(".xml")).unwrap().clone();
+    let xml = package.text(&path).unwrap();
+    for mode in ["bad-hash", "duplicate-id", "too-many", "malformed-xml", "unknown-field"] {
+        let parsed = roxmltree::Document::parse(xml).unwrap();
+        let array = parsed.descendants().find(|node|node.attribute("name")==Some("parts")).unwrap().children().find(|node|node.is_element()).unwrap();
+        let record = array.children().find(|node|node.is_element()).unwrap();
+        let title = record.descendants().find(|node|node.attribute("name")==Some("title")).unwrap().children().find(|node|node.is_element()).unwrap();
+        let mut record_xml = xml[record.range()].to_owned();
+        let range = title.range();
+        record_xml.replace_range(range.start-record.range().start..range.end-record.range().start, &format!("<m:string>{}</m:string>", "A".repeat(81)));
+        let replacement = match mode {
+            "duplicate-id" => format!("<m:array>{record_xml}{record_xml}</m:array>"),
+            "too-many" => format!("<m:array>{}</m:array>", record_xml.repeat(129)),
+            "bad-hash" => {
+                let mut record = record_xml.clone();
+                let hash = document["parts"][0]["render_sha256"].as_str().unwrap();
+                record = record.replace(hash, "invalid");
+                format!("<m:array>{record}</m:array>")
+            },
+            "malformed-xml" => "<m:array><m:object>".into(),
+            _ => format!("<m:array>{}</m:array>", record_xml.replacen("</m:object>", "<m:field name='unrecognized'><m:boolean>true</m:boolean></m:field></m:object>", 1)),
+        };
+        let mut changed = xml.to_owned(); changed.replace_range(array.range(), &replacement);
+        let mut altered = Package::open(package.save().unwrap()).unwrap(); altered.replace_part(&path, changed.into_bytes()).unwrap();
+        let bytes = altered.save().unwrap();
+        assert!(execute_request(json!({"op":"open_presentation","id":"unsafe-provenance","base64":STANDARD.encode(bytes)})).is_err(), "unsafe metadata accepted: {mode}");
+    }
+}
+
+#[test]
+fn issue22_stale_copy_error_identifies_part_and_recovery() {
+    assert!(execute_request(json!({"op":"authoring_capabilities"})).unwrap()["operations"].as_array().unwrap().contains(&json!("detach_part")));
+    let document = issue22_stale_native_document();
+    let error = execute_request(json!({"op":"edit_slides","document":document,"expected_revision":0,"operations":[{"op":"duplicate","slide_id":"slide","id":"copy"}]})).unwrap_err().to_string();
+    for detail in ["slide_id=slide", "element_id=managed", "detach_part", "native shapes remain"] { assert!(error.contains(detail), "missing {detail}: {error}"); }
+}
+
+#[test]
+fn issue22_detach_retains_figures_origin_and_undo_then_allows_duplicate() {
+    let document = issue22_stale_native_document();
+    let original = execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+    let detached = execute_request(json!({"op":"detach_part","document":document,"expected_revision":0,"slide_id":"slide","id":"managed"})).unwrap();
+    assert_eq!(detached["document"]["revision"], 1);
+    assert!(detached["document"]["parts"].as_array().is_none_or(|parts|parts.is_empty()));
+    for field in ["deck", "origin", "sources", "bindings", "references"] { assert_eq!(detached["document"][field], document[field], "changed {field}"); }
+    let output = execute_request(json!({"op":"export_presentation","document":detached["document"]})).unwrap();
+    let before = Package::open(STANDARD.decode(original["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let after = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+    for (path, bytes) in before.parts().iter().filter(|(path, _)| !path.starts_with("customXml/aislide-provenance")) { assert_eq!(after.part(path).unwrap(), bytes, "changed {path}"); }
+    let restored = execute_request(json!({"op":"undo_transaction","document":detached["document"],"expected_revision":1,"receipt":detached["receipt"]})).unwrap();
+    assert_eq!(restored["document"]["hash"], document["hash"]);
+    assert_eq!(execute_request(json!({"op":"export_presentation","document":restored["document"]})).unwrap()["base64"], original["base64"]);
+    let copied = execute_request(json!({"op":"edit_slides","document":detached["document"],"expected_revision":1,"operations":[{"op":"duplicate","slide_id":"slide","id":"copy"}]})).unwrap();
+    assert_eq!(copied["document"]["deck"]["slides"].as_array().unwrap().len(), 2);
+    assert_eq!(copied["document"]["deck"]["slides"][1]["elements"], detached["document"]["deck"]["slides"][0]["elements"]);
+    let saved = execute_request(json!({"op":"export_presentation","document":copied["document"]})).unwrap();
+    let reopened = execute_request(json!({"op":"open_presentation","id":"detached-copy","base64":saved["base64"]})).unwrap();
+    assert!(reopened["document"]["parts"].as_array().is_none_or(|parts|parts.is_empty()));
+    for (revision, slide, id) in [(1, "slide", "managed"), (0, "slide", "missing"), (0, "missing", "managed")] {
+        assert!(execute_request(json!({"op":"detach_part","document":document,"expected_revision":revision,"slide_id":slide,"id":id})).is_err());
+    }
+    assert_eq!(execute_request(json!({"op":"export_presentation","document":document})).unwrap()["base64"], original["base64"]);
+}
+
+#[test]
+fn issue22_metadata_detach_preserves_labels_and_rejects_signed_or_protected_sources() {
+    let document = issue22_stale_native_document();
+    let exported = execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+    let package = Package::open(STANDARD.decode(exported["base64"].as_str().unwrap()).unwrap()).unwrap();
+    for (kind, content_type, payload, blocked) in [
+        ("label", "application/vnd.ms-office.classificationlabels+xml", "<labelList xmlns='http://schemas.microsoft.com/office/2020/mipLabelMetadata'/>", false),
+        ("signature", "application/vnd.openxmlformats-package.digital-signature-xmlsignature+xml", "<ds:Signature xmlns:ds='http://www.w3.org/2000/09/xmldsig#'/>", true),
+        ("edit-protection", "application/xml", "<p:modifyVerifier xmlns:p='http://schemas.openxmlformats.org/presentationml/2006/main'/>", true),
+    ] {
+        let mut parts = package.parts().clone();
+        parts.insert("docProps/guard.xml".into(), payload.as_bytes().to_vec());
+        let types = package.text("[Content_Types].xml").unwrap().replace("</Types>", &format!("<Override PartName='/docProps/guard.xml' ContentType='{content_type}'/></Types>"));
+        parts.insert("[Content_Types].xml".into(), types.into_bytes());
+        let bytes = Package::from_parts(parts).unwrap().save().unwrap();
+        let opened = execute_request(json!({"op":"open_presentation","id":"protected-detach","base64":STANDARD.encode(&bytes)})).unwrap();
+        let result = execute_request(json!({"op":"detach_part","document":opened["document"],"expected_revision":0,"slide_id":"slide","id":"managed"}));
+        if blocked {
+            let error = match result { Ok(_) => panic!("protected detach accepted: {kind}"), Err(error) => error.to_string() };
+            assert!(error.contains("metadata detach"), "{kind}: {error}");
+            let raw = execute_request(json!({"op":"transaction","document":opened["document"],"transaction":{"expected_revision":0,"expected_hash":opened["document"]["hash"],"operations":[{"op":"remove","path":"/parts/0"}]}}));
+            let write = raw.and_then(|changed|execute_request(json!({"op":"export_presentation","document":changed["document"]})));
+            assert!(write.is_err(), "protected metadata can be rewritten via raw transaction: {kind}");
+        } else {
+            let changed = result.unwrap();
+            let output = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+            let saved = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+            assert_eq!(saved.part("docProps/guard.xml").unwrap(), payload.as_bytes());
+        }
+        assert_eq!(STANDARD.decode(execute_request(json!({"op":"export_presentation","document":opened["document"]})).unwrap()["base64"].as_str().unwrap()).unwrap(), bytes);
+    }
+}
+
 fn matrix_spec(category: &str, variant: &str) -> Value {
     json!({"version":1,"preset":format!("{category}/{variant}"),"title":"Alternatives","subtitle":"Synthetic example","data":{"kind":"matrix","rows":["Speed","Control"],"columns":["Option A","Option B"],"cells":[["High","Medium"],["Shared","Dedicated"]]}})
 }

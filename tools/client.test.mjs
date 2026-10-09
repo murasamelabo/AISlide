@@ -5,6 +5,66 @@ import { AislideClient, DocumentSession } from '../packages/client/index.mjs';
 import { requestCore } from './core-client.mjs';
 import { guidedExamples } from './guided-demo.mjs';
 
+test('issue22 SDK detaches managed metadata through one guarded mutation and Undo', async () => {
+  const original = { id: 'detach-sdk', revision: 0, hash: 'a'.repeat(64), parts: [{ slide_id: 'slide-1', element_id: 'managed', stale: true }], deck: { slides: [] } };
+  const calls = [];
+  const signal = new AbortController().signal;
+  const session = new DocumentSession(async (request, options) => {
+    calls.push({ request: structuredClone(request), signal: options?.signal });
+    if (request.op === 'undo_transaction') return { document: { ...original, revision: 2 }, receipt: { inverse: [] } };
+    assert.equal(request.op, 'detach_part');
+    return { document: { ...original, parts: [], revision: 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] } };
+  }, original);
+  for (const options of [{ expectedRevision: 9 }, { expectedHash: 'c'.repeat(64) }]) {
+    await assert.rejects(() => session.detachPart('slide-1', { id: 'managed' }, options), /conflict/i);
+  }
+  assert.equal(calls.length, 0);
+  await session.detachPart('slide-1', { id: 'managed' }, { signal, expectedRevision: 0, expectedHash: original.hash });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].request, { op: 'detach_part', document: original, expected_revision: 0, slide_id: 'slide-1', id: 'managed' });
+  assert.equal(calls[0].signal, signal);
+  assert.equal(session.canUndo, true);
+  assert.deepEqual(session.document.deck, original.deck);
+  await session.undo();
+  assert.equal(session.document.hash, original.hash);
+  assert.deepEqual(session.document.parts, original.parts);
+  assert.equal(session.canUndo, false);
+  assert.equal(session.canRedo, true);
+});
+
+test('issue22 SDK native detach preserves manual edits through duplicate and Undo', async () => {
+  const { unzipSync, zipSync } = await import('fflate');
+  const client = new AislideClient(requestCore);
+  const created = await client.createPresentation('detach-live', 'Synthetic detach');
+  const title = 'Synthetic detach schedule';
+  const spec = { version: 1, preset: 'gantt-chart/labeled', title, data: { kind: 'timeline', periods: ['First', 'Next'], tasks: [{ label: 'Synthetic task', start: 0, end: 2, progress: 0.5 }] } };
+  await created.addPart('slide-1', { id: 'managed', spec });
+  const exported = await created.exportPresentation();
+  const entries = unzipSync(Buffer.from(exported.base64, 'base64'));
+  const xml = new TextDecoder().decode(entries['ppt/slides/slide1.xml']);
+  assert.ok(xml.includes(title));
+  entries['ppt/slides/slide1.xml'] = new TextEncoder().encode(xml.replace(title, 'Manually changed schedule'));
+  const source = Buffer.from(zipSync(entries)).toString('base64');
+  const { session } = await client.openPresentation('detach-live-native', source);
+  assert.equal(session.document.parts[0].stale, true);
+  await assert.rejects(() => session.editSlides([{ op: 'duplicate', slide_id: 'slide-1', id: 'copy' }]), /detach_part/);
+  const before = session.document;
+  await session.detachPart('slide-1', { id: 'managed' }, { expectedRevision: 0, expectedHash: before.hash });
+  assert.deepEqual(session.document.deck, before.deck);
+  assert.deepEqual(session.document.origin, before.origin);
+  assert.equal(session.document.parts?.length ?? 0, 0);
+  await session.editSlides([{ op: 'duplicate', slide_id: 'slide-1', id: 'copy' }]);
+  const saved = await session.exportPresentation();
+  const reopened = await client.openPresentation('detached-copy-live', saved.base64);
+  assert.equal(reopened.session.document.deck.slides.length, 2);
+  assert.equal(reopened.session.document.parts?.length ?? 0, 0);
+  for (const slide of reopened.session.document.deck.slides) assert.ok(JSON.stringify(slide.elements).includes('Manually changed schedule'));
+  await session.undo();
+  await session.undo();
+  assert.equal(session.document.hash, before.hash);
+  assert.equal((await session.exportPresentation()).base64, source);
+});
+
 test('reference SDK forwards guarded core mutation and records undo', async () => {
   const original = { id: 'references-sdk', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
   const calls = [];

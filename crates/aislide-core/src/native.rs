@@ -17,9 +17,30 @@ pub(crate) struct NativeDeck { pub deck: Deck, pub slides: Vec<NativePart>, pub 
 
 pub(crate) fn child<'a>(node: Node<'a, '_>, namespace: &str, name: &str) -> Option<Node<'a, 'a>> { node.children().find(|node| node.has_tag_name((namespace, name))) }
 fn number(node: Node<'_, '_>, attribute: &str, default: f64) -> f64 { node.attribute(attribute).and_then(|value| value.parse().ok()).unwrap_or(default) }
+fn frame_coordinate(node: Node<'_, '_>, attribute: &str) -> Result<f64> {
+    node.attribute(attribute).and_then(|value| value.parse::<i64>().ok()).map(|value| value as f64).ok_or_else(|| Error::Unsupported(format!("native frame {attribute} must be an integer EMU coordinate")))
+}
 pub(crate) fn properties<'a>(node: Node<'a, '_>) -> Option<Node<'a, 'a>> { node.children().find(|node| node.tag_name().namespace() == Some(P) && ["nvSpPr", "nvPicPr", "nvGraphicFramePr", "nvCxnSpPr", "nvGrpSpPr"].contains(&node.tag_name().name())).and_then(|node| child(node, P, "cNvPr")) }
 fn transform<'a>(node: Node<'a, '_>) -> Option<Node<'a, 'a>> { child(node, P, "xfrm").or_else(|| child(node, P, if node.has_tag_name((P, "grpSp")) { "grpSpPr" } else { "spPr" }).and_then(|node| child(node, A, "xfrm"))) }
 pub(crate) fn is_shape(node: Node<'_, '_>) -> bool { node.tag_name().namespace() == Some(P) && ["sp", "pic", "graphicFrame", "grpSp", "cxnSp"].contains(&node.tag_name().name()) }
+
+fn frame_bounds(node: Node<'_, '_>, scale: (f64, f64), fallback: Option<[f64; 4]>) -> Result<[f64; 4]> {
+    let Some(transform) = transform(node) else { return fallback.ok_or_else(|| Error::Unsupported("missing or unresolved inherited geometry".into())); };
+    let (Some(offset), Some(extent)) = (child(transform, A, "off"), child(transform, A, "ext")) else { return fallback.ok_or_else(|| Error::Unsupported("missing or unresolved inherited geometry".into())); };
+    let width = frame_coordinate(extent, "cx")?; let height = frame_coordinate(extent, "cy")?;
+    let connector = node.has_tag_name((P, "cxnSp")) || connector_marker(node).is_some();
+    if width < 0.0 || height < 0.0 || (!connector && (width == 0.0 || height == 0.0)) { return Err(Error::Unsupported("native frame extents must be positive (connectors may have a zero axis)".into())); }
+    let bounds = [frame_coordinate(offset, "x")? * scale.0, frame_coordinate(offset, "y")? * scale.1, if connector { (width * scale.0).max(0.01) } else { width * scale.0 }, if connector { (height * scale.1).max(0.01) } else { height * scale.1 }];
+    if !bounds.iter().all(|value| value.is_finite()) || bounds[2] <= 0.0 || bounds[3] <= 0.0 { return Err(Error::Unsupported("native frame must be finite with positive extents".into())); }
+    Ok(bounds)
+}
+
+fn frame_overflow(bounds: [f64; 4], canvas: (u32, u32)) -> [f64; 4] {
+    let [x, y, width, height] = bounds;
+    [(-x).max(0.0), (-y).max(0.0), (x + width - f64::from(canvas.0)).max(0.0), (y + height - f64::from(canvas.1)).max(0.0)]
+}
+
+fn edge_amounts(edges: [f64; 4]) -> String { format!("left={:.6}px, top={:.6}px, right={:.6}px, bottom={:.6}px", edges[0], edges[1], edges[2], edges[3]) }
 
 pub(crate) fn connector_marker<'a>(node: Node<'a, '_>) -> Option<Node<'a, 'a>> {
     if !node.has_tag_name((P, "sp")) { return None; }
@@ -281,19 +302,13 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
     let template = ph.as_ref().and_then(|ph| templates.iter().find(|element| matches!(element, Element::Text { format, .. } if format.placeholder.as_ref() == Some(ph))));
     let fallback = template.map(|element| { let (_, x, y, width, height) = element.bounds(); [x, y, width, height] });
     let xfrm = transform(node);
-    let bounds = match xfrm {
-        Some(transform) => {
-            if node.has_tag_name((P, "graphicFrame")) && (number(transform, "rot", 0.0) != 0.0 || matches!(transform.attribute("flipH"), Some("1" | "true"))) { return Err(Error::Unsupported("flipped or rotated native frame".into())); }
-            let offset = child(transform, A, "off"); let extent = child(transform, A, "ext");
-            match (offset, extent) { (Some(offset), Some(extent)) => [number(offset, "x", 0.0) * scale.0, number(offset, "y", 0.0) * scale.1, (number(extent, "cx", 0.0) * scale.0).max(0.01), (number(extent, "cy", 0.0) * scale.1).max(0.01)], _ => fallback.ok_or_else(|| Error::Unsupported("missing or unresolved inherited geometry".into()))? }
-        }
-        None => fallback.ok_or_else(|| Error::Unsupported("missing or unresolved inherited geometry".into()))?,
-    };
+    if node.has_tag_name((P, "graphicFrame")) && xfrm.is_some_and(|transform| number(transform, "rot", 0.0) != 0.0 || matches!(transform.attribute("flipH"), Some("1" | "true"))) { return Err(Error::Unsupported("flipped or rotated native frame".into())); }
+    let bounds = frame_bounds(node, scale, fallback)?;
     let [x, y, width, height] = bounds;
     if node.has_tag_name((P, "grpSp")) {
         let transform = xfrm.ok_or_else(|| Error::Unsupported("group transform".into()))?;
         let offset = child(transform, A, "chOff").ok_or_else(|| Error::Unsupported("group child origin".into()))?;
-        let origin_x = number(offset, "x", 0.0) / 9525.0; let origin_y = number(offset, "y", 0.0) / 9525.0;
+        let origin_x = frame_coordinate(offset, "x")? / 9525.0; let origin_y = frame_coordinate(offset, "y")? / 9525.0;
         if !origin_x.is_finite() || !origin_y.is_finite() || origin_x.abs() > 1e6 || origin_y.abs() > 1e6 { return Err(Error::Unsupported("group child origin exceeds supported range".into())); }
         let extent = child(transform, A, "chExt").ok_or_else(|| Error::Unsupported("group child extent".into()))?;
         let mut children = node.children().filter(|node| is_shape(*node)).map(|node| read_element(package, part, node, (1.0 / 9525.0, 1.0 / 9525.0), ids, &[], depth + 1)).collect::<Result<Vec<_>>>()?;
@@ -303,7 +318,7 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
             };
             *x -= origin_x; *y -= origin_y;
         }
-        return Ok(Element::Group { visual: None, id, x, y, width, height, view_width: number(extent, "cx", 0.0) / 9525.0, view_height: number(extent, "cy", 0.0) / 9525.0, children });
+        return Ok(Element::Group { visual: None, id, x, y, width, height, view_width: frame_coordinate(extent, "cx")? / 9525.0, view_height: frame_coordinate(extent, "cy")? / 9525.0, children });
     }
     if node.has_tag_name((P, "pic")) {
         let fill = child(node, P, "blipFill").ok_or_else(|| Error::Unsupported("picture fill".into()))?;
@@ -439,21 +454,97 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
     Ok(Element::Rect { visual: None, id, x, y, width, height, fill: properties.map(shape_fill).unwrap_or_else(|| "@lt1".into()) })
 }
 
+struct NativeFrameProjection { edges: [f64; 4], read_only: bool }
+
+fn supports_native_frame_clip(element: &Element, node: Node<'_, '_>) -> bool {
+    if !matches!(element, Element::Rect { .. } | Element::Picture { svg: None, .. }) || child(node, P, "txBody").is_some() || child(node, P, "style").is_some() { return false; }
+    let mut visual = element.visual().cloned().unwrap_or_default();
+    visual.hidden = false; visual.locked = false; visual.opacity = None;
+    if visual != crate::visual::VisualStyle::default() { return false; }
+    let Some(properties) = child(node, P, "spPr") else { return false; };
+    if properties.attributes().len() != 0 || properties.children().filter(|node| node.is_element()).any(|node| node.tag_name().namespace() != Some(A) || !["xfrm", "prstGeom", "solidFill", "noFill", "ln"].contains(&node.tag_name().name())) { return false; }
+    if child(properties, A, "ln").is_some_and(|line| child(line, A, "noFill").is_none() || line.children().filter(|node| node.is_element()).any(|node| !node.has_tag_name((A, "noFill")))) { return false; }
+    if child(properties, A, "prstGeom").is_some_and(|geometry| geometry.attribute("prst") != Some("rect") || geometry.children().filter(|node| node.is_element()).any(|node| !node.has_tag_name((A, "avLst")) || node.children().any(|node| node.is_element()))) { return false; }
+    if let Some(transform) = child(properties, A, "xfrm") {
+        if transform.children().filter(|node| node.is_element()).any(|node| !node.has_tag_name((A, "off")) && !node.has_tag_name((A, "ext"))) || transform.attributes().any(|attribute| !["rot", "flipH", "flipV"].contains(&attribute.name())) { return false; }
+    }
+    if let Element::Picture { .. } = element {
+        if child(properties, A, "solidFill").is_some() { return false; }
+        let Some(fill) = child(node, P, "blipFill") else { return false; };
+        if fill.children().filter(|node| node.is_element()).any(|node| !["blip", "srcRect", "stretch"].iter().any(|name| node.has_tag_name((A, *name)))) { return false; }
+        let Some(blip) = child(fill, A, "blip") else { return false; };
+        if blip.attribute((R, "link")).is_some() || blip.children().filter(|node| node.is_element()).any(|node| !node.has_tag_name((A, "alphaModFix"))) { return false; }
+        let Some(stretch) = child(fill, A, "stretch") else { return false; };
+        let Some(rect) = child(stretch, A, "fillRect") else { return false; };
+        if stretch.children().filter(|node| node.is_element()).any(|node| !node.has_tag_name((A, "fillRect"))) || rect.children().any(|node| node.is_element()) || rect.attributes().any(|attribute| !["l", "t", "r", "b"].contains(&attribute.name()) || attribute.value().parse::<i64>() != Ok(0)) { return false; }
+    }
+    true
+}
+
+fn normalize_native_frame(element: &mut Element, node: Node<'_, '_>, canvas: (u32, u32)) -> Result<Option<NativeFrameProjection>> {
+    let (_, x, y, width, height) = element.bounds();
+    if ![x, y, width, height].iter().all(|value| value.is_finite()) || width <= 0.0 || height <= 0.0 { return Err(Error::Unsupported("native frame must be finite with positive extents".into())); }
+    let canvas_width = f64::from(canvas.0); let canvas_height = f64::from(canvas.1);
+    let edges = frame_overflow([x, y, width, height], canvas);
+    if edges.iter().all(|amount| *amount == 0.0) { return Ok(None); }
+    let overflow = edge_amounts(edges);
+    let read_only = edges.iter().any(|amount| *amount >= 1.0);
+    if read_only && (!supports_native_frame_clip(element, node) || width > 4096.0 || height > 4096.0) { return Err(Error::Unsupported(format!("native overflow ({overflow}); clipping requires a flat axis-aligned rectangle or stretched PNG/JPEG within 4096px; rotated, warped, grouped or otherwise unsupported geometry retained without preview"))); }
+    let clipped_x = x.max(0.0); let clipped_y = y.max(0.0);
+    let clipped_width = (x + width).min(canvas_width) - clipped_x; let clipped_height = (y + height).min(canvas_height) - clipped_y;
+    if clipped_width <= 0.0 || clipped_height <= 0.0 { return Err(Error::Unsupported(format!("native overflow ({overflow}) leaves no visible frame; retained without preview"))); }
+    if let Element::Picture { crop, .. } = element {
+        crop.validate()?;
+        let visible_width = 1.0 - crop.left - crop.right; let visible_height = 1.0 - crop.top - crop.bottom;
+        crop.left += visible_width * (clipped_x - x) / width;
+        crop.right += visible_width * (x + width - clipped_x - clipped_width) / width;
+        crop.top += visible_height * (clipped_y - y) / height;
+        crop.bottom += visible_height * (y + height - clipped_y - clipped_height) / height;
+        crop.validate()?;
+    }
+    let (target_x, target_y, target_width, target_height) = match element {
+        Element::Text { x, y, width, height, .. } | Element::Rect { x, y, width, height, .. } | Element::Polygon { x, y, width, height, .. } | Element::Shape { x, y, width, height, .. } | Element::Picture { x, y, width, height, .. } | Element::Group { x, y, width, height, .. } | Element::Connector { x, y, width, height, .. } | Element::Table { x, y, width, height, .. } | Element::Chart { x, y, width, height, .. } => (x, y, width, height),
+    };
+    *target_x = clipped_x; *target_y = clipped_y; *target_width = clipped_width; *target_height = clipped_height;
+    if read_only { if let Some(visual) = element.visual_mut() { visual.get_or_insert_with(Default::default).locked = true; } }
+    Ok(Some(NativeFrameProjection { edges, read_only }))
+}
+
 pub(crate) fn read_part(package: &Package, path: &str, id: String, scale: (f64, f64), templates: &[Element], warnings: &mut Vec<String>, metadata: Option<&crate::provenance::Metadata>, canvas: (u32, u32)) -> Result<(String, Option<String>, Vec<Element>, NativePart)> {
     let document = parse(package.text(path)?)?;
     let common = child(document.root_element(), P, "cSld").ok_or_else(|| Error::Invalid("native common slide data missing".into()))?;
     let tree = child(common, P, "spTree").ok_or_else(|| Error::Invalid("native shape tree missing".into()))?;
     let ids = names(tree, metadata.and_then(|metadata| metadata.identities.iter().find(|identity| identity.part == path)))?;
     let mut elements = Vec::new();
+    let scope = match document.root_element().tag_name().name() { "sld" => "slide", "sldMaster" => "master", "sldLayout" => "layout", _ => "part" };
     for node in tree.children().filter(|node| node.is_element() && !["nvGrpSpPr", "grpSpPr", "extLst"].contains(&node.tag_name().name())) {
+        let element_id = properties(node).and_then(|node| node.attribute("id")).and_then(|numeric| ids.get(numeric)).map(String::as_str).unwrap_or("unknown");
+        let context = format!("{scope} {id}, {path}, element {element_id}");
         let result = if is_shape(node) { read_element(package, path, node, scale, &ids, templates, 0) } else { Err(Error::Unsupported(node.tag_name().name().into())) };
         match result {
             Ok(mut element) => {
                 if !document.root_element().has_tag_name((P, "sld")) { if let Element::Text { format, .. } = &mut element { format.inherit_layout = false; } }
-                if !matches!(element, Element::Connector { .. }) && crate::model::validate_elements(std::slice::from_ref(&element), (f64::from(canvas.0), f64::from(canvas.1)), 0, &mut BTreeSet::new(), &mut 0, &mut 0).is_err() { warnings.push(format!("{path}: {} retained but outside supported scene bounds", element.bounds().0)); }
-                else { elements.push(element); }
+                let mut projection = None;
+                if !matches!(element, Element::Connector { .. }) {
+                    match normalize_native_frame(&mut element, node, canvas) {
+                        Ok(value) => projection = value,
+                        Err(error) => { warnings.push(format!("{context}: retained unsupported object ({error})")); continue; }
+                    }
+                    if let Err(error) = crate::model::validate_elements(std::slice::from_ref(&element), (f64::from(canvas.0), f64::from(canvas.1)), 0, &mut BTreeSet::new(), &mut 0, &mut 0) {
+                        let overflow = projection.as_ref().map(|projection| format!("; native overflow ({})", edge_amounts(projection.edges))).unwrap_or_default();
+                        warnings.push(format!("{context}: retained unsupported object ({error}){overflow}; no editing projection")); continue;
+                    }
+                }
+                if let Some(projection) = projection {
+                    let mode = if projection.read_only { "clipped read-only frame (locked until explicit unlock)" } else { "subpixel frame normalized" };
+                    warnings.push(format!("{context}: {mode} in disposable projection ({}); original XML retained", edge_amounts(projection.edges)));
+                }
+                elements.push(element);
             }
-            Err(error) => warnings.push(format!("{path}: retained unsupported object ({error})")),
+            Err(error) => {
+                let overflow = frame_bounds(node, scale, None).ok().map(|bounds| frame_overflow(bounds, canvas)).filter(|edges| edges.iter().any(|amount| *amount > 0.0)).map(|edges| format!("; native overflow ({})", edge_amounts(edges))).unwrap_or_default();
+                warnings.push(format!("{context}: retained unsupported object ({error}){overflow}"));
+            }
         }
     }
     let available: BTreeSet<_> = elements.iter().map(|element| element.bounds().0.to_owned()).collect();
@@ -580,10 +671,34 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
     Ok(NativeDeck { deck, slides: slide_parts, masters: master_parts, layouts: layout_parts, warnings, metadata })
 }
 
+fn prepare_clipped_projection_edits(package: &Package, binding: &NativePart, before: &mut [Element], after: &[&[Element]], scale: (f64, f64), canvas: (u32, u32)) -> Result<()> {
+    if after.is_empty() || !before.iter().any(|element| element.visual().is_some_and(|style| style.locked || style.hidden)) { return Ok(()); }
+    let xml = parse(package.text(&binding.path)?)?;
+    let ids = binding.nodes.iter().map(|(id, numeric)| (numeric.clone(), id.clone())).collect();
+    for old in before {
+        let (locked, hidden) = old.visual().map(|style| (style.locked, style.hidden)).unwrap_or_default();
+        if (!locked && !hidden) || !matches!(old, Element::Rect { .. } | Element::Picture { .. }) { continue; }
+        let id = old.bounds().0.to_owned();
+        let candidates = after.iter().map(|elements| elements.iter().find(|element| element.bounds().0 == id)).collect::<Vec<_>>();
+        let mut unchanged = !candidates.is_empty();
+        for candidate in &candidates { match candidate { Some(new) => unchanged &= crate::canonical::bytes(&*old)? == crate::canonical::bytes(new)?, None => unchanged = false } }
+        if unchanged { continue; }
+        let numeric = binding.nodes.get(&id).ok_or_else(|| Error::Invalid("native clipped projection identity missing".into()))?;
+        let node = xml.descendants().find(|node| is_shape(*node) && properties(*node).and_then(|node| node.attribute("id")) == Some(numeric.as_str())).ok_or_else(|| Error::Invalid("native clipped projection node missing".into()))?;
+        let native = read_element(package, &binding.path, node, scale, &ids, &[], 0)?;
+        let mut projected = native.clone();
+        if normalize_native_frame(&mut projected, node, canvas)?.is_none() { continue; }
+        if candidates.is_empty() || candidates.iter().any(|candidate| candidate.is_none_or(|new| new.visual().is_some_and(|style| locked && style.locked || hidden && style.hidden))) { return Err(Error::Unsupported(format!("{}: normalized native projection {id} is locked or hidden; explicitly unlock/unhide before editing or removing it", binding.path))); }
+        if candidates.len() != 1 { return Err(Error::Unsupported("explicit unlock of a clipped projection shared by native slide copies is not representable".into())); }
+        *old = native;
+    }
+    Ok(())
+}
+
 pub(crate) fn save(bytes: Vec<u8>, deck: &Deck) -> Result<Vec<u8>> {
     validate_deck(deck)?;
     let mut package = Package::open(bytes.clone())?;
-    let original = read(&package)?;
+    let mut original = read(&package)?;
     let mut compatible = deck.clone();
     if compatible.auxiliary_design.is_none() { compatible.auxiliary_design = original.deck.auxiliary_design.clone(); }
     for slide in &mut compatible.slides {
@@ -593,6 +708,31 @@ pub(crate) fn save(bytes: Vec<u8>, deck: &Deck) -> Result<Vec<u8>> {
         }
     }
     if crate::canonical::bytes(&original.deck)? == crate::canonical::bytes(&compatible)? { return Ok(bytes); }
-    if package.parts().keys().any(|name| name.to_ascii_lowercase().starts_with("_xmlsignatures/")) { return Err(Error::Unsupported("editing signed packages".into())); }
+    crate::review::ensure_native_write(&package, "native editing")?;
+    let main = relationship_targets(&package, "", "officeDocument")?.into_values().next().ok_or_else(|| Error::Invalid("presentation missing".into()))?;
+    let presentation = parse(package.text(&main)?)?;
+    let size = child(presentation.root_element(), P, "sldSz").ok_or_else(|| Error::Invalid("native slide dimensions missing".into()))?;
+    let scale = (f64::from(original.deck.width) / number(size, "cx", 0.0), f64::from(original.deck.height) / number(size, "cy", 0.0));
+    let canvas = (original.deck.width, original.deck.height);
+    if let (Some(before), Some(after)) = (original.deck.design.as_mut(), compatible.design.as_ref()) {
+        for binding in &original.masters {
+            if let Some(master) = before.masters.iter_mut().find(|master| master.id == binding.id) {
+                let candidates: Vec<&[Element]> = after.masters.iter().filter(|master| master.id == binding.id).map(|master| master.elements.as_slice()).collect();
+                prepare_clipped_projection_edits(&package, binding, &mut master.elements, &candidates, scale, canvas)?;
+            }
+        }
+        for binding in &original.layouts {
+            if let Some(layout) = before.layouts.iter_mut().find(|layout| layout.id == binding.id) {
+                let candidates: Vec<&[Element]> = after.layouts.iter().filter(|layout| layout.id == binding.id).map(|layout| layout.elements.as_slice()).collect();
+                prepare_clipped_projection_edits(&package, binding, &mut layout.elements, &candidates, scale, canvas)?;
+            }
+        }
+    }
+    for binding in &original.slides {
+        if let Some(slide) = original.deck.slides.iter_mut().find(|slide| slide.id == binding.id) {
+            let candidates: Vec<&[Element]> = compatible.slides.iter().filter(|slide| slide.native_source_id.as_deref().unwrap_or(&slide.id) == binding.id).map(|slide| slide.elements.as_slice()).collect();
+            prepare_clipped_projection_edits(&package, binding, &mut slide.elements, &candidates, scale, canvas)?;
+        }
+    }
     crate::native_save::save(&mut package, &original, &compatible)
 }

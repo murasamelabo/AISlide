@@ -531,16 +531,36 @@ fn reachable(relations: &[Relationship], removed: &BTreeSet<String>) -> BTreeSet
 }
 
 pub(crate) fn ensure_unprotected(package: &crate::package::Package) -> Result<()> {
-    if package.part_names().iter().any(|path| { let path = path.to_ascii_lowercase(); path.starts_with("_xmlsignatures/") || path.contains("labelinfo") || path.contains("encryption") }) { return Err(Error::Unsupported("clean-copy/field refresh does not alter signed, labelled or protected packages".into())); }
+    ensure_protection(package, false)
+}
+
+pub(crate) fn ensure_slide_copy(package: &crate::package::Package) -> Result<()> {
+    ensure_native_write(package, "slide duplication")
+}
+
+pub(crate) fn ensure_metadata_detach(package: &crate::package::Package) -> Result<()> {
+    ensure_native_write(package, "part metadata detach")
+}
+
+pub(crate) fn ensure_native_write(package: &crate::package::Package, operation: &str) -> Result<()> {
+    ensure_protection(package, true).map_err(|error| match error {
+        Error::Unsupported(_) => Error::Unsupported(format!("{operation} does not alter signed, encrypted or edit-protected packages")),
+        error => error,
+    })
+}
+
+fn ensure_protection(package: &crate::package::Package, preserve_labels: bool) -> Result<()> {
+    if package.part_names().iter().any(|path| { let path = path.to_ascii_lowercase(); path.starts_with("_xmlsignatures/") || (!preserve_labels && path.contains("labelinfo")) || path.contains("encryption") }) { return Err(Error::Unsupported("clean-copy/field refresh does not alter signed, labelled or protected packages".into())); }
     for (path, kind) in content_types(package)? {
         let lower = path.to_ascii_lowercase(); let kind = kind.to_ascii_lowercase();
-        if lower.starts_with("_xmlsignatures/") || lower.contains("labelinfo") || lower.contains("encryption") || kind.contains("signature") || kind.contains("sensitivitylabel") { return Err(Error::Unsupported("clean-copy/field refresh does not alter signed, labelled or protected packages".into())); }
+        if lower.starts_with("_xmlsignatures/") || (!preserve_labels && lower.contains("labelinfo")) || lower.contains("encryption") || kind.contains("signature") || (!preserve_labels && kind.contains("sensitivitylabel")) { return Err(Error::Unsupported("clean-copy/field refresh does not alter signed, labelled or protected packages".into())); }
         if lower.ends_with(".xml") || kind.ends_with("+xml") || kind == "application/xml" || kind == "text/xml" {
             let parsed = crate::pptx::parse(package.text(&path)?)?;
             if parsed.descendants().filter(|node| node.is_element()).any(|node| {
                 let namespace = node.tag_name().namespace().unwrap_or("").to_ascii_lowercase();
-                namespace.contains("sensitivitylabel") || namespace.contains("miplabel") || namespace.contains("labelmetadata") || namespace.contains("digital-signature") || matches!(node.tag_name().name(), "modifyVerifier" | "EncryptedData" | "Signature")
-                    || node.attribute("name").is_some_and(|name| name.to_ascii_lowercase().starts_with("msip_label_"))
+                (!preserve_labels && (namespace.contains("sensitivitylabel") || namespace.contains("miplabel") || namespace.contains("labelmetadata")
+                    || node.attribute("name").is_some_and(|name| name.to_ascii_lowercase().starts_with("msip_label_"))))
+                    || namespace.contains("digital-signature") || matches!(node.tag_name().name(), "modifyVerifier" | "EncryptedData" | "Signature")
             }) { return Err(Error::Unsupported("clean-copy/field refresh does not alter signed, labelled or protected packages".into())); }
         }
     }

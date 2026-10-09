@@ -563,6 +563,81 @@ fn native_offslide_and_hidden_objects_are_inspected_and_removed_on_copy() {
 }
 
 #[test]
+fn issue20_labelled_slide_without_comments_duplicates_without_changing_label() {
+    use aislide_core::editing::{self, SlideOperation};
+    let label_path = "docMetadata/LabelInfo.xml";
+    let label = b"<clbl:labelList xmlns:clbl='http://schemas.microsoft.com/office/2020/mipLabelMetadata'><clbl:label id='{00112233-4455-6677-8899-aabbccddeeff}' enabled='1'/></clbl:labelList>";
+    let override_xml = "<Override PartName='/docMetadata/LabelInfo.xml' ContentType='application/vnd.ms-office.classificationlabels+xml'/>";
+    let relationship_xml = "<Relationship Id='synthetic-label' Type='http://schemas.microsoft.com/office/2020/02/relationships/classificationlabels' Target='docMetadata/LabelInfo.xml'/>";
+    for (mode, with_comments) in [("none", false), ("legacy", true), ("modern-empty", false)] {
+        let deck = if with_comments { comments::add(&deck(), "slide-1", comment("first")).unwrap() } else { deck() };
+        let mut package = Package::open(if mode == "modern-empty" { modern_fixture() } else { pptx::export_pptx(&deck).unwrap() }).unwrap();
+        if mode == "modern-empty" {
+            package.replace_part("ppt/comments/modern.xml", b"<m:cmLst xmlns:m='http://schemas.microsoft.com/office/powerpoint/2018/8/main'/>".to_vec()).unwrap();
+            package = Package::open(package.save().unwrap()).unwrap();
+        }
+        let types = package.text("[Content_Types].xml").unwrap().replace("</Types>", &format!("{override_xml}</Types>"));
+        let relationships = package.text("_rels/.rels").unwrap().replace("</Relationships>", &format!("{relationship_xml}</Relationships>"));
+        let mut parts = package.parts().clone();
+        parts.insert("[Content_Types].xml".into(), types.into_bytes());
+        parts.insert("_rels/.rels".into(), relationships.into_bytes());
+        parts.insert(label_path.into(), label.to_vec());
+        let source = Package::from_parts(parts).unwrap().save().unwrap();
+        let original = open(&source);
+        assert_eq!(save(&original), source);
+        let duplicated = editing::slides(&original, original.revision, &[SlideOperation::Duplicate { slide_id: "slide-1".into(), id: "copy".into() }]);
+        if with_comments {
+            let error = match duplicated { Ok(_) => panic!("labelled comments must not be rewritten by duplication"), Err(error) => error };
+            assert!(error.to_string().contains("slide duplication with comments"), "{error}");
+        } else {
+            let duplicated = duplicated.unwrap();
+            assert_eq!(duplicated.document.deck.slides.len(), 2);
+            let bytes = save(&duplicated.document);
+            let saved = Package::open(bytes.clone()).unwrap();
+            assert_eq!(saved.part(label_path).unwrap(), label);
+            assert!(saved.text("[Content_Types].xml").unwrap().contains(override_xml));
+            assert!(saved.text("_rels/.rels").unwrap().contains(relationship_xml));
+            assert_eq!(open(&bytes).deck.slides.len(), 2);
+            let restored = document::undo(&duplicated.document, duplicated.document.revision, duplicated.receipt.unwrap()).unwrap();
+            assert_eq!(restored.document.hash, original.hash);
+            assert_eq!(save(&restored.document), source);
+        }
+        assert_eq!(save(&original), source);
+    }
+}
+
+#[test]
+fn issue20_slide_copy_retains_signature_and_edit_protection_guards() {
+    use aislide_core::editing::{self, SlideOperation};
+    for mode in ["content-type", "relationship", "signature-xml", "modify-verifier", "encrypted-xml"] {
+        let package = Package::open(pptx::export_pptx(&deck()).unwrap()).unwrap();
+        let mut parts = package.parts().clone();
+        let kind = if mode == "content-type" { "application/vnd.openxmlformats-package.digital-signature-xmlsignature+xml" } else { "application/xml" };
+        let payload = match mode {
+            "signature-xml" => "<ds:Signature xmlns:ds='http://www.w3.org/2000/09/xmldsig#'/>",
+            "encrypted-xml" => "<enc:EncryptedData xmlns:enc='http://www.w3.org/2001/04/xmlenc#'/>",
+            _ => "<sentinel xmlns='urn:synthetic:protected'/>"
+        };
+        parts.insert("docProps/protected.xml".into(), payload.as_bytes().to_vec());
+        let types = package.text("[Content_Types].xml").unwrap().replace("</Types>", &format!("<Override PartName='/docProps/protected.xml' ContentType='{kind}'/></Types>"));
+        parts.insert("[Content_Types].xml".into(), types.into_bytes());
+        if mode == "relationship" {
+            let xml = package.text("_rels/.rels").unwrap().replace("</Relationships>", "<Relationship Id='synthetic-signature' Type='http://schemas.openxmlformats.org/package/2006/relationships/digital-signature/origin' Target='docProps/protected.xml'/></Relationships>");
+            parts.insert("_rels/.rels".into(), xml.into_bytes());
+        }
+        if mode == "modify-verifier" {
+            let xml = package.text("ppt/presentation.xml").unwrap().replace("</p:presentation>", "<p:modifyVerifier/></p:presentation>");
+            parts.insert("ppt/presentation.xml".into(), xml.into_bytes());
+        }
+        let source = Package::from_parts(parts).unwrap().save().unwrap();
+        let original = open(&source);
+        let result = editing::slides(&original, original.revision, &[SlideOperation::Duplicate { slide_id: "slide-1".into(), id: "copy".into() }]);
+        assert!(result.is_err(), "protected slide copy accepted: {mode}");
+        assert_eq!(save(&original), source, "source changed: {mode}");
+    }
+}
+
+#[test]
 fn signed_and_labelled_packages_refuse_clean_copy_and_field_refresh() {
     use review::InspectionCategory::*;
     for path in ["_xmlsignatures/sig1.xml", "docMetadata/LabelInfo.xml"] {

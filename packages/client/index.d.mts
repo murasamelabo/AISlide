@@ -202,6 +202,7 @@ export class DocumentSession {
   applySlideRevision(slideId: string, edits: RevisionEdit[], options: RequestOptions & { expectedRevision: number; expectedHash: string; candidateHash: string }): Promise<AislideDocument>
   addPart(slideId: string, input: { id: string; spec: PartSpec }, options?: TransactionOptions): Promise<AislideDocument>
   updatePart(slideId: string, input: { id: string; spec: PartSpec }, options?: TransactionOptions): Promise<AislideDocument>
+  detachPart(slideId: string, input: { id: string }, options?: TransactionOptions): Promise<AislideDocument>
   addGraph(slideId: string, input: { id: string; spec: GraphSpec }, options?: TransactionOptions): Promise<AislideDocument>
   updateGraph(slideId: string, input: { id: string; spec: GraphSpec }, options?: TransactionOptions): Promise<AislideDocument>
   applyGraph(slideId: string, input: { id: string; operations: GraphOperation[] }, options?: TransactionOptions): Promise<AislideDocument>

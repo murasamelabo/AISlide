@@ -275,12 +275,14 @@ export class DocumentSession {
   #part(op, slideId, input, options = {}) {
     return this.#run(async () => {
       this.#expectRevision(options);
+      if (op === 'detach_part' && options.expectedHash !== undefined && options.expectedHash !== this.#document.hash) throw new Error('Hash conflict');
       const result = await this.#request({ ...input, op, document: this.#document, expected_revision: this.revision, slide_id: slideId }, { signal: options.signal });
       return this.#accept(result, options);
     }, options);
   }
   addPart(slideId, input, options) { return this.#part('insert_part', slideId, input, options); }
   updatePart(slideId, input, options) { return this.#part('update_part', slideId, input, options); }
+  detachPart(slideId, input, options) { return this.#part('detach_part', slideId, input, options); }
   addGraph(slideId, input, options) { return this.#part('insert_graph', slideId, input, options); }
   updateGraph(slideId, input, options) { return this.#part('update_graph', slideId, input, options); }
   applyGraph(slideId, input, options) { return this.#part('apply_graph', slideId, input, options); }

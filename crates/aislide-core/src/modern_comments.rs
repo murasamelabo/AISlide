@@ -498,7 +498,7 @@ fn write_authors(package: &mut Package, after: &[ModernThread]) -> Result<()> {
 pub(crate) fn write(package: &mut Package, slide_path: &str, before: Option<&[ModernThread]>, after: Option<&[ModernThread]>, copied: bool) -> Result<()> {
     if copied && before.is_some_and(|threads| !threads.is_empty()) { return Err(Error::Unsupported("copying modern comment anchors requires explicit remapping".into())); }
     let Some(after) = after else { return Ok(()); };
-    if before == Some(after) && !copied { return Ok(()); }
+    if before == Some(after) && (!copied || after.is_empty()) { return Ok(()); }
     if before.is_none() && after.is_empty() { return Ok(()); }
     crate::review::ensure_unprotected(package)?;
     for path in targets(package, slide_path, "comments")?.into_values().chain(targets(package, &main_part(package)?, "authors")?.into_values()) {

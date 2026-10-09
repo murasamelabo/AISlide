@@ -2,6 +2,7 @@
 use roxmltree::Node;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use xmlwriter::{Options, XmlWriter};
 
@@ -184,6 +185,15 @@ pub(crate) fn attach(bytes: Vec<u8>, document: &Document) -> Result<Vec<u8>> {
     let references = document.references.as_ref().map(|state| crate::references::exported_state(state, &document.deck, &native.deck)).transpose()?;
     let metadata = Metadata { version: 1, sources: document.sources.clone(), bindings: document.bindings.clone(), identities, parts, references, guided_record: document.guided_record.clone() };
     if existing.as_ref().is_some_and(|(_, old)| crate::canonical::bytes(old).ok() == crate::canonical::bytes(&metadata).ok()) { return Ok(bytes); }
+    if document.origin.as_ref().is_some_and(|origin| origin.native && origin.sha256 == format!("{:x}", Sha256::digest(&bytes))) {
+        if let Some((_, old)) = &existing {
+            let mut readable = old.clone();
+            let count = readable.parts.len();
+            readable.parts = crate::parts::state::imported_parts(readable.parts, &mut Vec::new())?;
+            if readable.parts.len() < count && crate::canonical::bytes(&readable)? == crate::canonical::bytes(&metadata)? { return Ok(bytes); }
+        }
+    }
+    crate::review::ensure_native_write(&package, "provenance update")?;
     let encoded = encode(&metadata)?;
     if let Some((path, _)) = existing { package.replace_part(&path, encoded)?; return package.save(); }
     let mut index = 1;
