@@ -369,6 +369,49 @@ fn native_office_alternative_language_survives_paragraph_replacement() {
 }
 
 #[test]
+fn review19_mixed_office_languages_inherit_alternatives_from_unique_primary_language() {
+    let bytes = body_fixture("<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang='en-US' altLang='ja-JP'/><a:t>Azure </a:t></a:r><a:r><a:rPr lang='ja-JP' altLang='en-US'/><a:t>\u{306e}\u{5c0e}\u{5165}</a:t></a:r></a:p></p:txBody>");
+    let document = open(&bytes);
+    for batch in [false, true] {
+        let paragraphs = json!([{"runs":[{"text":"Azure ","style":{"language":"en-US","bold":true}},{"text":"\u{306e}\u{66f4}\u{65b0}","style":{"language":"ja-JP"}}]}]);
+        let request = if batch { json!({"op":"apply_operations","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"operations":[{"op":"set_rich_text","slide_id":"slide-1","id":"text-1","paragraphs":paragraphs}]}) }
+            else { json!({"op":"update_paragraphs","document":document,"expected_revision":document["revision"],"slide_id":"slide-1","id":"text-1","paragraphs":paragraphs}) };
+        let changed = execute_request(request).unwrap();
+        let reopened = open(&export_document(&changed["document"]));
+        let runs = &reopened["deck"]["slides"][0]["elements"][0]["format"]["paragraphs"][0]["runs"];
+        assert_eq!(runs[0]["style"]["alternative_language"], "ja-JP");
+        assert_eq!(runs[1]["style"]["alternative_language"], "en-US");
+        assert_eq!(runs[0]["style"]["language"], "en-US");
+        assert_eq!(runs[1]["style"]["language"], "ja-JP");
+        let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":changed["document"]["revision"],"receipt":changed["receipt"]})).unwrap();
+        assert_eq!(export_document(&undone["document"]), bytes);
+    }
+    for style in [json!({}), json!({"language":"de-DE"})] {
+        let error = execute_request(json!({"op":"update_paragraphs","document":document,"expected_revision":document["revision"],"slide_id":"slide-1","id":"text-1","paragraphs":[{"runs":[{"text":"Changed","style":style}]}]})).unwrap_err().to_string();
+        for pair in ["(en-US, ja-JP)", "(ja-JP, en-US)"] { assert!(error.contains(pair), "{error}"); }
+        assert!(error.len() < 2048, "diagnostics must stay bounded");
+    }
+    let explicit = execute_request(json!({"op":"update_paragraphs","document":document,"expected_revision":document["revision"],"slide_id":"slide-1","id":"text-1","paragraphs":[{"runs":[{"text":"Changed","style":{"language":"en-US","alternative_language":"ko-KR"}}]}]})).unwrap();
+    assert_eq!(open(&export_document(&explicit["document"]))["deck"]["slides"][0]["elements"][0]["format"]["paragraphs"][0]["runs"][0]["style"]["alternative_language"], "ko-KR");
+    assert_eq!(export_document(&document), bytes);
+}
+
+#[test]
+fn review19_alternative_language_mapping_ignores_tag_case_and_preserves_source_spelling() {
+    for (body, style, expected) in [
+        ("<a:r><a:rPr lang='en-US' altLang='ja-JP'/><a:t>First</a:t></a:r><a:r><a:rPr lang='EN-us' altLang='JA-jp'/><a:t>Second</a:t></a:r>", json!({}), "ja-JP"),
+        ("<a:r><a:rPr lang='en-US' altLang='ja-JP'/><a:t>First</a:t></a:r><a:r><a:rPr lang='ja-JP' altLang='en-US'/><a:t>Second</a:t></a:r><a:r><a:rPr lang='JA-jp' altLang='EN-us'/><a:t>Third</a:t></a:r>", json!({"language":"ja-jp"}), "en-US"),
+    ] {
+        let bytes = body_fixture(&format!("<p:txBody><a:bodyPr/><a:lstStyle/><a:p>{body}</a:p></p:txBody>"));
+        let document = open(&bytes);
+        let changed = execute_request(json!({"op":"update_paragraphs","document":document,"expected_revision":document["revision"],"slide_id":"slide-1","id":"text-1","paragraphs":[{"runs":[{"text":"Changed","style":style}]}]})).unwrap();
+        let reopened = open(&export_document(&changed["document"]));
+        assert_eq!(reopened["deck"]["slides"][0]["elements"][0]["format"]["paragraphs"][0]["runs"][0]["style"]["alternative_language"], expected);
+        assert_eq!(export_document(&document), bytes);
+    }
+}
+
+#[test]
 fn native_office_mixed_alternative_languages_require_every_replacement_run_to_be_explicit() {
     for second_language in ["altLang='ko-KR'", ""] {
         let bytes = body_fixture(&format!("<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang='en-US' altLang='ja-JP'/><a:t>First</a:t></a:r><a:r><a:rPr lang='en-US' {second_language}/><a:t>Second</a:t></a:r></a:p></p:txBody>"));
@@ -378,6 +421,7 @@ fn native_office_mixed_alternative_languages_require_every_replacement_run_to_be
         assert_eq!(export_document(&unchanged["document"]), bytes);
         for runs in [
             json!([{"text":"New title"}]),
+            json!([{"text":"New title","style":{"language":"en-US"}}]),
             json!([{"text":"New ","style":{"alternative_language":"de-DE"}},{"text":"title"}]),
             json!([{"text":"New "},{"text":"title","style":{"alternative_language":"de-DE"}}]),
         ] {

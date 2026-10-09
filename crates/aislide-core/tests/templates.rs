@@ -8,6 +8,40 @@ const REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships"
 const CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 const PROVENANCE: &str = "urn:aislide:provenance:1";
 
+#[test]
+fn review19_inert_external_hyperlinks_allow_inspection_and_selected_import() {
+    let url = "https://www.example.com/contact";
+    let mut deck = editing::create("links".into(), "Synthetic links".into()).unwrap().deck;
+    deck.slides[0].elements.push(serde_json::from_value(serde_json::json!({"type":"text","id":"contact","x":80,"y":560,"width":600,"height":60,"text":"Contact","font_size":20,"color":"000000","bold":false,"format":{"hyperlink":url}})).unwrap());
+    let source = document::create("links".into(), deck, vec![], vec![], None).unwrap();
+    let bytes = templates::export_potx(&source).unwrap();
+    let original = Package::open(bytes.clone()).unwrap();
+    let path = "ppt/slides/_rels/slide1.xml.rels";
+    assert!(original.text(path).unwrap().contains("TargetMode=\"External\""));
+    let plain = templates::load_potx("plain".into(), bytes.clone()).unwrap();
+    let inspection = templates::inspect_potx(bytes.clone()).unwrap();
+    assert_eq!(inspection["sample_slide_count"], 1);
+    let defaults = templates::load_potx_with_options("defaults".into(), bytes.clone(), &templates::TemplateImportOptions::default()).unwrap();
+    assert_eq!(serde_json::to_value(&plain.deck).unwrap(), serde_json::to_value(&defaults.deck).unwrap());
+    let options = templates::TemplateImportOptions { include_sample_slides: false, source_sha256: Some(inspection["source_sha256"].as_str().unwrap().into()), ..Default::default() };
+    let selected = templates::load_potx_with_options("blank".into(), bytes.clone(), &options).unwrap();
+    assert_eq!(selected.deck.slides.len(), 1);
+    assert!(selected.deck.slides[0].elements.is_empty());
+    for document in [defaults, selected] {
+        let exported = document::export_presentation(&document).unwrap();
+        let package = Package::open(STANDARD.decode(exported["base64"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(package.part(path).unwrap(), original.part(path).unwrap());
+    }
+    for kind in [format!("{R}/image"), format!("{R}/slide"), "urn:vendor:external".into()] {
+        let mut package = Package::open(bytes.clone()).unwrap();
+        let xml = package.text(path).unwrap().replace(&format!("{R}/hyperlink"), &kind);
+        package.replace_part(path, xml.into_bytes()).unwrap();
+        let unsafe_source = package.save().unwrap();
+        assert!(templates::inspect_potx(unsafe_source.clone()).is_err(), "external resource accepted: {kind}");
+        assert!(templates::load_potx_with_options("unsafe".into(), unsafe_source, &options).is_err(), "external resource selected: {kind}");
+    }
+}
+
 fn replace_xml_node(package: &mut Package, path: &str, namespace: &str, tag: &str, replacement: &str) {
     let mut xml = package.text(path).unwrap().to_owned();
     let range = roxmltree::Document::parse(&xml).unwrap().descendants().find(|node| node.has_tag_name((namespace, tag))).unwrap().range();
@@ -313,6 +347,7 @@ fn template_selectors_are_exact_unique_and_source_bound() {
         let mut options: templates::TemplateImportOptions = serde_json::from_value(value).unwrap(); options.include_sample_slides = false;
         let error = templates::load_potx_with_options("reject".into(), bytes.clone(), &options).unwrap_err().to_string();
         assert!(error.contains(expected), "expected {expected}: {error}");
+        if expected == "1-32" { assert!(error.contains("inspect_template") && !error.contains("inspect_potx"), "public recovery tool missing: {error}"); }
     }
     let mut package = Package::open(bytes).unwrap();
     let path = "ppt/slideLayouts/slideLayout15.xml";

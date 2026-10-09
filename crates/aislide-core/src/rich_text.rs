@@ -191,19 +191,42 @@ pub fn replace_paragraphs(mut element: Element, mut paragraphs: Vec<RichParagrap
     Ok(element)
 }
 
+fn unique_alternative_language<'a>(mut values: impl Iterator<Item=Option<&'a str>>) -> Option<Option<&'a str>> {
+    let first = values.next()?;
+    values.all(|value|match (first,value) {
+        (Some(first),Some(value))=>first.eq_ignore_ascii_case(value),
+        (None,None)=>true,
+        _=>false,
+    }).then_some(first)
+}
+
 pub(crate) fn preserve_alternative_languages(previous: &[RichParagraph], paragraphs: &mut [RichParagraph]) -> Result<()> {
     for (index, paragraph) in paragraphs.iter_mut().enumerate() {
         let Some(previous) = previous.get(index) else { continue; };
         if paragraph == previous { continue; }
         if paragraph.runs.iter().all(|run| run.style.alternative_language.is_some()) { continue; }
-        let languages: std::collections::BTreeSet<_> = previous.runs.iter().map(|run| run.style.alternative_language.as_deref()).collect();
-        if languages.len() > 1 && languages.iter().any(Option::is_some) {
-            return Err(Error::Unsupported("mixed native alternative languages require explicit alternative_language on replacement runs".into()));
-        }
-        if let Some(Some(language)) = languages.first() {
-            for run in &mut paragraph.runs {
-                if run.style.alternative_language.is_none() { run.style.alternative_language = Some((*language).into()); }
+        if let Some(language) = unique_alternative_language(previous.runs.iter().map(|run|run.style.alternative_language.as_deref())) {
+            if let Some(language) = language {
+                for run in &mut paragraph.runs { if run.style.alternative_language.is_none() { run.style.alternative_language = Some(language.into()); } }
             }
+            continue;
+        }
+        if previous.runs.iter().any(|run|run.style.alternative_language.is_some()) {
+            for run in &mut paragraph.runs {
+                if run.style.alternative_language.is_some() { continue; }
+                let alternative = run.style.language.as_deref().and_then(|language| unique_alternative_language(previous.runs.iter()
+                    .filter(|old|old.style.language.as_deref().is_some_and(|old|old.eq_ignore_ascii_case(language)))
+                    .map(|old|old.style.alternative_language.as_deref())));
+                if let Some(alternative) = alternative {
+                    run.style.alternative_language = alternative.map(str::to_owned);
+                    continue;
+                }
+                let pairs: std::collections::BTreeSet<_> = previous.runs.iter().map(|old|(old.style.language.as_deref(),old.style.alternative_language.as_deref())).collect();
+                let mut detail = pairs.iter().take(8).map(|(language,alternative)|format!("({}, {})",language.unwrap_or("<none>"),alternative.unwrap_or("<none>"))).collect::<Vec<_>>().join(", ");
+                if pairs.len() > 8 { detail.push_str(&format!(", ... ({} more pairs)",pairs.len()-8)); }
+                return Err(Error::Unsupported(format!("mixed native alternative languages require explicit alternative_language or a uniquely mapped language on replacement runs; previous (lang, altLang): {detail}")));
+            }
+            continue;
         }
     }
     Ok(())

@@ -47,7 +47,7 @@ Document fonts live in optional `Deck.embedded_fonts`. Font-free documents omit 
 
 ## Rendering And Dependencies
 
-Current lockfile: `cosmic-text` 0.19.0, `fontdb` 0.24.0, `ttf-parser` 0.25.1 and `resvg` 0.48.1. `fontdue` is not a dependency. No new dependency was needed for G28.
+Current lockfile: `cosmic-text` 0.19.0 with `fontdb` 0.23.0, `resvg` 0.48.1 with `fontdb` 0.24.0 via `usvg`, and `ttf-parser` 0.25.1. The installed-family alias preparation uses `cosmic_text::fontdb` 0.23.0. `fontdue` is not a dependency. No new dependency was needed for G28.
 
 Installed Office-style name-ID-1 aliases (such as `Yu Gothic UI Semilight`, `Segoe UI Semibold` and `Segoe UI Light`) resolve alongside typographic families, retaining their actual face weight. Ordinary variable-font weight requests are not snapped to an alias weight. Rendering locales normalize `ja-*` to `ja` and `ko-*` to `ko`, while preserving Chinese regional/script preferences. Explicit element or run families are shared by measurement and rendering and written consistently to OOXML `latin`, `ea` and `cs`; theme-role tokens remain script-specific. Missing-font and missing-glyph diagnostics remain active. This does not install fonts or establish Office visual parity.
 

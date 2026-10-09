@@ -1,6 +1,8 @@
 ﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import * as lucideExports from 'lucide-react';
 import { searchLucideIcons, resolveLucideIcon } from './lucide-search.mjs';
 
@@ -16,6 +18,28 @@ test('canonical queries normalize kebab, snake, PascalCase and camelCase', () =>
     assert.deepEqual(names(searchLucideIcons(entries, query)), expected, query);
   }
   assert.equal(names(searchLucideIcons(entries, 'message-square'))[0], 'MessageSquare');
+});
+
+test('review19 official names containing digits and single-letter boundaries rank first', () => {
+  for (const [name, query] of [['Building2', 'building-2'], ['Heading1', 'heading-1'], ['Table2', 'table-2'], ['Grid2x2', 'grid-2x2'], ['ArrowDownAZ', 'arrow-down-a-z'], ['Clock12', 'clock-12']]) {
+    for (const candidate of [query, query.replaceAll('-', '_'), query.replaceAll('-', ' ')]) {
+      assert.equal(names(searchLucideIcons(entries, candidate))[0], name, candidate);
+    }
+  }
+});
+
+test('review19 every installed official Lucide name leads its canonical search', async () => {
+  const library = createRequire(import.meta.url).resolve('lucide-react');
+  const directory = new URL('../esm/icons/', pathToFileURL(library));
+  const official = [];
+  for (const filename of await readdir(directory)) {
+    if (!filename.endsWith('.mjs') || filename === 'index.mjs') continue;
+    const icon = await import(new URL(filename, directory).href);
+    if (icon.__iconData) official.push({ name: icon.default.render.displayName, query: icon.__iconData.name });
+  }
+  assert.equal(official.length, entries.length);
+  const misses = official.filter(({ name, query }) => names(searchLucideIcons(entries, query))[0] !== name);
+  assert.deepEqual(misses, []);
 });
 
 test('Lock, Eye and Table lead real catalog searches without cross-boundary infixes', () => {

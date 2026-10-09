@@ -487,8 +487,11 @@ Native Office text with `err` and `altLang` supports rich editing when the rest
 of its text style is representable. `RunStyle.alternative_language` represents
 `altLang`; language tags are nonempty ASCII alphanumeric/hyphen strings up to
 64 bytes. Paragraph replacement preserves a unique prior alternative language
-unless explicitly overridden. Mixed prior values require an explicit value on
-every replacement run. Changed paragraphs clear transient `err`/`dirty` flags;
+unless explicitly overridden. With mixed prior values, a replacement run's explicit
+`language` inherits its uniquely associated prior alternative language. Otherwise
+it must supply `alternative_language`; ambiguous mappings reject with at most eight
+prior `(lang, altLang)` pairs, without text content. Explicit alternatives take
+precedence. Changed paragraphs clear transient `err`/`dirty` flags;
 untouched XML remains unchanged. Unknown styles and fields still reject. Batch
 errors identify the operation, slide, element and first unsupported tag/attribute.
 
@@ -532,7 +535,9 @@ Supply the inspected SHA to reject changed source bytes. THMX rejects options.
 extensions. Custom shows still block structural edits and sample removal;
 sample removal with managed references/guided records is also rejected.
 Selection is not sanitization: unselected opaque payloads remain embedded.
-Protection, macro, signature and external-relationship guards remain enforced.
+Protection, macro and signature guards remain enforced. Inert external hyperlinks
+are preserved without fetching; external images/slides and unknown resource types
+remain rejected by inspection and selection.
 These selection controls are core/SDK/MCP APIs, not new Studio controls.
 
 The 3 MiB encoded image budget is deck-wide and counts identical MIME/base64/

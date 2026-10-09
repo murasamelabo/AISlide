@@ -33,8 +33,12 @@ fn checked_source(bytes: Vec<u8>) -> Result<Package> {
             if !entry.has_tag_name((REL, "Relationship")) { return Err(Error::Unsupported("template relationship element".into())); }
             let id = entry.attribute("Id").ok_or_else(|| Error::Invalid("template relationship ID missing".into()))?;
             if id.is_empty() || !ids.insert(id) { return Err(Error::Invalid("duplicate template relationship ID".into())); }
-            if entry.attribute("TargetMode").is_some_and(|mode| mode != "Internal") { return Err(Error::Unsupported("template inspection/selection rejects external relationships; no external content is fetched".into())); }
-            let target = resolve(&source, entry.attribute("Target").ok_or_else(|| Error::Invalid("template relationship target missing".into()))?)?;
+            let target = entry.attribute("Target").filter(|target| !target.is_empty()).ok_or_else(|| Error::Invalid("template relationship target missing".into()))?;
+            if entry.attribute("TargetMode").is_some_and(|mode| mode != "Internal") {
+                if entry.attribute("TargetMode") == Some("External") && entry.attribute("Type") == Some(format!("{R}/hyperlink").as_str()) { continue; }
+                return Err(Error::Unsupported("template inspection/selection rejects external resources except inert hyperlinks; no external content is fetched".into()));
+            }
+            let target = resolve(&source, target)?;
             package.part(&target)?;
         }
     }
@@ -262,7 +266,7 @@ pub(super) fn select(bytes: Vec<u8>, options: &TemplateImportOptions) -> Result<
         if !requested_layouts.is_empty() { requested_layouts.contains(&layout.id) }
         else { requested_masters.is_empty() || requested_masters.contains(&layout.master_id) }
     }).map(|layout| layout.id.clone()).collect();
-    if layouts.is_empty() || layouts.len() > 32 { return Err(Error::Limit("template import requires 1-32 selected layouts; inspect_potx and select layout_ids/layout_names or a smaller master".into())); }
+    if layouts.is_empty() || layouts.len() > 32 { return Err(Error::Limit("template import requires 1-32 selected layouts; run inspect_template and select layout_ids/layout_names or a smaller master".into())); }
     if !requested_masters.is_empty() && topology.layouts.iter().filter(|layout| layouts.contains(&layout.id)).any(|layout| !requested_masters.contains(&layout.master_id)) { return Err(Error::Invalid("selected layout is outside the selected masters".into())); }
     let mut masters: BTreeSet<_> = topology.layouts.iter().filter(|layout| layouts.contains(&layout.id)).map(|layout| layout.master_id.clone()).collect();
     masters.extend(requested_masters);

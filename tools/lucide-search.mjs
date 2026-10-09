@@ -9,6 +9,7 @@
 export function searchLucideIcons(entries, query) {
   const terms = words(query ?? '');
   const normalizedQuery = terms.join(' ');
+  const compactQuery = terms.join('');
   const ranked = [];
   for (const entry of entries) {
     const [name, metadata] = entry;
@@ -16,7 +17,7 @@ export function searchLucideIcons(entries, query) {
     if (terms.length) {
       const nameWords = words(name);
       const normalizedName = nameWords.join(' ');
-      if (normalizedName === normalizedQuery) {
+      if (normalizedName === normalizedQuery || nameWords.join('') === compactQuery) {
         rank = 0;
       } else if (terms.every((term) => nameWords.includes(term))) {
         rank = 1;
