@@ -26,16 +26,30 @@ impl<'a> NativeRegenerationGuard<'a> {
         Self { origin: document.origin.as_ref().filter(|origin| origin.native), original: None, checked: BTreeSet::new() }
     }
 
-    fn check(&mut self, slide: &crate::model::Slide, id: &str) -> Result<()> {
+    fn load_original(&mut self) -> Result<()> {
         let Some(origin) = self.origin else { return Ok(()); };
-        let source = slide.native_source_id.as_deref().unwrap_or(&slide.id);
-        let identity = (source.to_owned(), id.to_owned());
-        if self.checked.contains(&identity) { return Ok(()); }
         if self.original.is_none() {
             let package = Package::open(STANDARD.decode(&origin.base64).map_err(|_| Error::Invalid("part origin".into()))?)?;
             let native = crate::native::read(&package)?;
             self.original = Some((package, native));
         }
+        Ok(())
+    }
+
+    pub(crate) fn check_rich_text(&mut self, source: &str, id: &str) -> Result<()> {
+        self.load_original()?;
+        if let Some((package, native)) = &self.original {
+            if let Some(binding) = native.slides.iter().find(|binding| binding.id == source) { crate::native_save::check_rich_text(package, binding, id)?; }
+        }
+        Ok(())
+    }
+
+    fn check(&mut self, slide: &crate::model::Slide, id: &str) -> Result<()> {
+        if self.origin.is_none() { return Ok(()); }
+        let source = slide.native_source_id.as_deref().unwrap_or(&slide.id);
+        let identity = (source.to_owned(), id.to_owned());
+        if self.checked.contains(&identity) { return Ok(()); }
+        self.load_original()?;
         if let Some((package, native)) = &self.original {
             if let Some(binding) = native.slides.iter().find(|binding| binding.id == source) {
                 let original = native.deck.slides.iter().find(|slide| slide.id == source).and_then(|slide| slide.elements.iter().find(|element| element.bounds().0 == id));

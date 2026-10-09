@@ -1328,6 +1328,25 @@ fn effects_render_alpha_reflection_and_pdf_with_explicit_approximation_warnings(
 }
 
 #[test]
+fn issue16_filter_edge_cap_is_strict_but_preview_discloses_omission() {
+    let source = with_elements(json!([{"type":"group","id":"scaled-group","x":0,"y":0,"width":300,"height":300,"view_width":1,"view_height":1,
+        "children":[{"type":"rect","id":"wide-filter","x":0,"y":0,"width":1,"height":1,"fill":"FF0000","visual":{"opacity":0.4,"soft_edge":100}}]}]));
+    let original = serde_json::to_vec(&source).unwrap();
+    let warnings = aislide_core::render::effect_budget_warnings(&source, 0, 1.0).unwrap();
+    assert_eq!(warnings[0].element_id, "wide-filter");
+    assert!(warnings[0].message.contains("max_extent_px=121500") && warnings[0].message.contains("edge_limit_px=8192"));
+    assert!(matches!(render_slide_svg(&source, 0, true), Err(Error::Limit(message)) if message.contains("wide-filter") && message.contains("8192px")));
+    let document = aislide_core::document::create("edge-budget".into(), source, vec![], vec![], None).unwrap();
+    let preview = preview_presentation(&document, &PreviewOptions { max_dimension:320, ..Default::default() }).unwrap();
+    assert!(preview.quality_reduced);
+    assert!(preview.warnings.iter().any(|warning| warning.code == "EFFECT_APPROXIMATION" && warning.element_id == "wide-filter"));
+    let pixels = image::load_from_memory(&STANDARD.decode(&preview.images[0].base64).unwrap()).unwrap().into_rgba8();
+    assert_eq!(pixels.get_pixel(150, 150).0, [255, 153, 153, 255]);
+    assert_eq!(serde_json::to_vec(&document.deck).unwrap(), original);
+    assert!(matches!(export_static(&document.deck, &ExportOptions { scale:16.0, ..Default::default() }), Err(Error::Limit(message)) if message.contains("raster budget")));
+}
+
+#[test]
 fn hidden_group_effects_emit_nothing_and_filter_budgets_reject_before_output() {
     let source = with_elements(json!([{"type":"group","id":"group","x":0,"y":0,"width":100,"height":100,"view_width":100,"view_height":100,
         "visual":{"hidden":true,"soft_edge":10},"children":[{"type":"rect","id":"child","x":0,"y":0,"width":80,"height":80,"fill":"FF0000","visual":{"glow":{"color":"0000FF","opacity":1,"radius":100}}}]}]));

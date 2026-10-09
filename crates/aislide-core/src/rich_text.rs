@@ -13,6 +13,7 @@ pub struct RunStyle {
     #[serde(skip_serializing_if = "Option::is_none")] pub baseline: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")] pub highlight: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub alternative_language: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -61,7 +62,7 @@ impl RunStyle {
             if family.trim().is_empty() || family.chars().any(char::is_control) || (family.starts_with('@') && !["@major", "@minor"].contains(&family.as_str())) { return Err(Error::Invalid("invalid rich font family".into())); }
         }
         if self.baseline.is_some_and(|value| !(-100000..=100000).contains(&value)) { return Err(Error::Invalid("baseline must be in -100000..100000".into())); }
-        if let Some(language) = &self.language {
+        for language in [&self.language, &self.alternative_language].into_iter().flatten() {
             if language.is_empty() || language.len() > 64 || !language.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') { return Err(Error::Invalid("invalid rich text language".into())); }
         }
         Ok(())
@@ -69,11 +70,11 @@ impl RunStyle {
 
     pub(crate) fn overlay(&mut self, style: &Self) {
         macro_rules! merge { ($($field:ident),*) => { $(if style.$field.is_some() { self.$field = style.$field.clone(); })* }; }
-        merge!(bold, italic, underline, font_size, color, font_family, baseline, highlight, language);
+        merge!(bold, italic, underline, font_size, color, font_family, baseline, highlight, language, alternative_language);
     }
 
     pub(crate) fn frame(size: f64, color: &str, bold: bool, format: &TextFormat) -> Self {
-        Self { bold: Some(bold), italic: Some(format.italic), underline: Some(format.underline), font_size: Some(size), color: Some(color.into()), font_family: Some(format.font_family.clone().unwrap_or_else(|| "@minor".into())), baseline: None, highlight: None, language: Some("ja-JP".into()) }
+        Self { bold: Some(bold), italic: Some(format.italic), underline: Some(format.underline), font_size: Some(size), color: Some(color.into()), font_family: Some(format.font_family.clone().unwrap_or_else(|| "@minor".into())), baseline: None, highlight: None, language: Some("ja-JP".into()), alternative_language: None }
     }
 }
 
@@ -173,7 +174,7 @@ pub fn apply_range(mut element: Element, start: usize, end: usize, style: RunSty
     Ok(element)
 }
 
-pub fn replace_paragraphs(mut element: Element, paragraphs: Vec<RichParagraph>) -> Result<Element> {
+pub fn replace_paragraphs(mut element: Element, mut paragraphs: Vec<RichParagraph>) -> Result<Element> {
     validate_element(&element)?;
     validate_paragraphs(&paragraphs)?;
     let had_fields = crate::fields::has_fields(&element);
@@ -182,11 +183,53 @@ pub fn replace_paragraphs(mut element: Element, paragraphs: Vec<RichParagraph>) 
     if had_fields || paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.field.is_some()) {
         return Err(Error::Unsupported("use dedicated field operations to change dynamic field content".into()));
     }
+    preserve_alternative_languages(&format.paragraphs, &mut paragraphs)?;
     *text = plain_text(&paragraphs);
     format.paragraphs = paragraphs;
     format.inherit_layout = false;
     validate_element(&element)?;
     Ok(element)
+}
+
+fn unique_alternative_language<'a>(mut values: impl Iterator<Item=Option<&'a str>>) -> Option<Option<&'a str>> {
+    let first = values.next()?;
+    values.all(|value|match (first,value) {
+        (Some(first),Some(value))=>first.eq_ignore_ascii_case(value),
+        (None,None)=>true,
+        _=>false,
+    }).then_some(first)
+}
+
+pub(crate) fn preserve_alternative_languages(previous: &[RichParagraph], paragraphs: &mut [RichParagraph]) -> Result<()> {
+    for (index, paragraph) in paragraphs.iter_mut().enumerate() {
+        let Some(previous) = previous.get(index) else { continue; };
+        if paragraph == previous { continue; }
+        if paragraph.runs.iter().all(|run| run.style.alternative_language.is_some()) { continue; }
+        if let Some(language) = unique_alternative_language(previous.runs.iter().map(|run|run.style.alternative_language.as_deref())) {
+            if let Some(language) = language {
+                for run in &mut paragraph.runs { if run.style.alternative_language.is_none() { run.style.alternative_language = Some(language.into()); } }
+            }
+            continue;
+        }
+        if previous.runs.iter().any(|run|run.style.alternative_language.is_some()) {
+            for run in &mut paragraph.runs {
+                if run.style.alternative_language.is_some() { continue; }
+                let alternative = run.style.language.as_deref().and_then(|language| unique_alternative_language(previous.runs.iter()
+                    .filter(|old|old.style.language.as_deref().is_some_and(|old|old.eq_ignore_ascii_case(language)))
+                    .map(|old|old.style.alternative_language.as_deref())));
+                if let Some(alternative) = alternative {
+                    run.style.alternative_language = alternative.map(str::to_owned);
+                    continue;
+                }
+                let pairs: std::collections::BTreeSet<_> = previous.runs.iter().map(|old|(old.style.language.as_deref(),old.style.alternative_language.as_deref())).collect();
+                let mut detail = pairs.iter().take(8).map(|(language,alternative)|format!("({}, {})",language.unwrap_or("<none>"),alternative.unwrap_or("<none>"))).collect::<Vec<_>>().join(", ");
+                if pairs.len() > 8 { detail.push_str(&format!(", ... ({} more pairs)",pairs.len()-8)); }
+                return Err(Error::Unsupported(format!("mixed native alternative languages require explicit alternative_language or a uniquely mapped language on replacement runs; previous (lang, altLang): {detail}")));
+            }
+            continue;
+        }
+    }
+    Ok(())
 }
 
 pub fn replace_text_content(mut element: Element, replacement: String) -> Result<Element> {

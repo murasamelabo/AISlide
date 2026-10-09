@@ -81,6 +81,7 @@ export class AislideClient {
   editVector(input, options) { return this.request({ ...input, op: 'edit_vector' }, options); }
   searchText(deck, input, options) { return this.request({ op: 'search_text', deck, options: input }, options); }
   editImage(input, options) { return this.request({ ...input, op: 'edit_image' }, options); }
+  inspectTemplate(input, options) { return this.request({ ...input, op: 'inspect_template' }, options); }
   async importTemplate(id, input, options) {
     const document = await this.request({ ...input, op: 'import_template', id }, options);
     return new DocumentSession(this.#transport, document, this.#options(options));
@@ -146,6 +147,7 @@ export class DocumentSession {
   #busy = false;
   #fieldWarnings = [];
   #graphDiagnostics = null;
+  #renderWarnings = null;
   #referencePublication = null;
   #profile;
   #historyBoundary = null;
@@ -187,6 +189,7 @@ export class DocumentSession {
   get busy() { return this.#busy; }
   get fieldWarnings() { return [...this.#fieldWarnings]; }
   get graphDiagnostics() { return structuredClone(this.#graphDiagnostics); }
+  get renderWarnings() { return structuredClone(this.#renderWarnings); }
   get referencePublication() { return structuredClone(this.#referencePublication); }
 
   getSummary({ offset = 0, limit = 16, slideId } = {}) {
@@ -266,6 +269,7 @@ export class DocumentSession {
     if (result.receipt) { this.#retain(this.#past, result.receipt); this.#future = []; }
     this.#document = result.document;
     this.#graphDiagnostics = graphDiagnosticsSnapshot(result, this.#document);
+    this.#renderWarnings = renderWarningsSnapshot(result, this.#document);
     const publication = result.publication;
     this.#referencePublication = publication && [publication.supplied, publication.published, publication.excluded].every(value => Number.isInteger(value) && value >= 0 && value <= 64)
       && publication.supplied === publication.published + publication.excluded
@@ -455,6 +459,7 @@ export class DocumentSession {
       if (options.signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError');
       from.pop(); this.#retain(to, result.receipt); this.#document = result.document;
       this.#graphDiagnostics = null;
+      this.#renderWarnings = null;
       return this.document;
     }, options);
   }
@@ -465,6 +470,35 @@ export class DocumentSession {
 }
 
 export const FONT_LIMITS = Object.freeze({ face_bytes: 12 * 1048576, total_bytes: 24 * 1048576, faces: 8 });
+
+function renderWarningsSnapshot(result, document) {
+  const binding = { revision: document.revision, hash: document.hash };
+  try {
+    const data = (value, key) => {
+      const property = Object.getOwnPropertyDescriptor(value, key);
+      if (!property) return undefined;
+      if (!Object.hasOwn(property, 'value')) throw new Error('Render warning accessor');
+      return property.value;
+    };
+    const source = data(result, 'render_warnings');
+    if (source === undefined) return null;
+    if (!Array.isArray(source) || source.length > 256) throw new Error('Render warning array limit');
+    const text = (value, limit) => {
+      if (typeof value !== 'string' || value.length > limit) throw new Error('Render warning text limit');
+      return value;
+    };
+    const warnings = [];
+    for (let index = 0; index < source.length; index += 1) {
+      const item = data(source, String(index));
+      const page_index = data(item, 'page_index');
+      if (!Number.isSafeInteger(page_index) || page_index < 0 || page_index > 255) throw new Error('Render warning page index');
+      warnings.push({ code: text(data(item, 'code'), 64), page_index, element_id: text(data(item, 'element_id'), 80), message: text(data(item, 'message'), 2048) });
+    }
+    return { ...binding, status: 'complete', warnings };
+  } catch {
+    return { ...binding, status: 'unavailable', warnings: [] };
+  }
+}
 
 function graphDiagnosticsSnapshot(result, document) {
   const binding = { revision: document.revision, hash: document.hash };

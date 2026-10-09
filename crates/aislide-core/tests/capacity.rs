@@ -131,6 +131,181 @@ fn counts_depth_and_image_payload_remain_fail_closed() {
     assert!(execute_request(json!({"op":"validate","deck":deck})).unwrap_err().to_string().contains("image payload"));
 }
 
+fn noisy_picture(seed: u32) -> Value {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let mut state = seed;
+    let pixels = (0..536 * 536 * 3).map(|_| {
+        state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+        state as u8
+    }).collect();
+    let image = image::RgbImage::from_raw(536, 536, pixels).unwrap();
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    assert!((850_000..880_000).contains(&bytes.get_ref().len()));
+    json!({"type":"picture","id":"budget-picture","x":0,"y":0,"width":10,"height":10,
+        "base64":STANDARD.encode(bytes.into_inner()),"mime_type":"image/png","alt":"Synthetic noise","crop":{}})
+}
+
+fn image_budget_deck() -> Value {
+    let mut deck = text_deck(3);
+    for slide in deck["slides"].as_array_mut().unwrap() { slide["elements"] = json!([]); }
+    deck["design"] = execute_request(json!({"op":"design_defaults"})).unwrap();
+    let auxiliary = json!({"name":"Synthetic auxiliary","background":"FFFFFF","theme":deck["design"]["theme"],"elements":[]});
+    deck["auxiliary_design"] = json!({"width":720,"height":1280,"notes_master":auxiliary,"handout_master":auxiliary});
+    deck
+}
+
+#[test]
+fn issue18_repeated_payload_is_counted_once_across_all_deck_owners() {
+    let picture = noisy_picture(1);
+    let mut deck = image_budget_deck();
+    for slide in deck["slides"].as_array_mut().unwrap() { slide["elements"] = json!([picture]); }
+    for path in ["/design/masters/0/elements", "/design/layouts/0/elements", "/auxiliary_design/notes_master/elements", "/auxiliary_design/handout_master/elements"] {
+        *deck.pointer_mut(path).unwrap() = json!([picture]);
+    }
+    let typed = serde_json::from_value(deck.clone()).unwrap();
+    for limits in [&aislide_core::limits::LEGACY, &aislide_core::limits::STANDARD, &aislide_core::limits::LARGE] {
+        aislide_core::preflight::deck(&typed, limits).unwrap();
+    }
+    aislide_core::model::validate_deck(&typed).unwrap();
+    assert!(execute_request(json!({"op":"new_document","capacity_profile":"large","id":"image-budget","deck":deck})).is_ok());
+    assert!(execute_request(json!({"op":"new_document","capacity_profile":"legacy","id":"image-budget","deck":deck})).is_err());
+}
+
+#[test]
+fn issue18_distinct_payload_error_identifies_first_crossing_owner() {
+    let pictures = [noisy_picture(1), noisy_picture(2), noisy_picture(3)];
+    let total: usize = pictures.iter().map(|picture| picture["base64"].as_str().unwrap().len()).sum();
+    for (path, owner) in [
+        ("/slides/2/elements", "slide synthetic-2"),
+        ("/design/masters/0/elements", "master master-1"),
+        ("/design/layouts/0/elements", "layout blank"),
+        ("/auxiliary_design/notes_master/elements", "notes_master"),
+        ("/auxiliary_design/handout_master/elements", "handout_master"),
+    ] {
+        let mut deck = image_budget_deck();
+        deck["slides"][0]["elements"] = json!([pictures[0]]);
+        deck["slides"][1]["elements"] = json!([pictures[1]]);
+        let mut repeated = pictures[0].clone(); repeated["id"] = json!("repeat");
+        *deck.pointer_mut(path).unwrap() = json!([repeated, pictures[2]]);
+        let typed = serde_json::from_value(deck).unwrap();
+        let error = aislide_core::preflight::standard_deck(&typed).unwrap_err().to_string();
+        for expected in ["deck-wide", "image payload", &format!("{total}"), "3145728", owner, "budget-picture", "placements=4", "distinct_resources=3", "owner_placements=2", "reuse"] {
+            assert!(error.contains(expected), "missing {expected}: {error}");
+        }
+        assert!(error.len() < 1024, "{error}");
+        assert_eq!(aislide_core::model::validate_deck(&typed).unwrap_err().to_string(), error);
+    }
+}
+
+#[test]
+fn issue18_retained_svg_is_included_in_unique_payload_identity_and_bytes() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let mut picture = noisy_picture(1);
+    picture["svg"] = json!(STANDARD.encode("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"2\"><rect width=\"2\" height=\"2\"/></svg>"));
+    let mut deck = image_budget_deck();
+    deck["slides"][0]["elements"] = json!([picture]);
+    deck["slides"][1]["elements"] = json!([picture]);
+    let mut limits = aislide_core::limits::STANDARD;
+    limits.image_encoded_bytes = picture["base64"].as_str().unwrap().len() + picture["svg"].as_str().unwrap().len();
+    let typed = serde_json::from_value(deck.clone()).unwrap();
+    aislide_core::preflight::deck(&typed, &limits).unwrap();
+    aislide_core::model::validate_deck(&typed).unwrap();
+    limits.image_encoded_bytes -= 1;
+    assert!(aislide_core::preflight::deck(&typed, &limits).unwrap_err().to_string().contains("image payload"));
+    limits.image_encoded_bytes = 3 * 1024 * 1024;
+    limits.unique_images = 1;
+    deck["slides"][1]["elements"][0]["svg"] = json!(STANDARD.encode("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"3\" height=\"2\"/>"));
+    let typed = serde_json::from_value(deck).unwrap();
+    assert!(aislide_core::preflight::deck(&typed, &limits).unwrap_err().to_string().contains("unique scene images"));
+}
+
+fn solid_picture(width: u32, height: u32, color: u8) -> Value {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let image = image::RgbImage::from_pixel(width, height, image::Rgb([color, 0, 0]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    json!({"type":"picture","id":format!("solid-{color}"),"x":0,"y":0,"width":10,"height":10,
+        "base64":STANDARD.encode(bytes.into_inner()),"mime_type":"image/png","alt":"Synthetic solid","crop":{}})
+}
+
+#[test]
+fn issue18_duplicate_placements_still_validate_each_placement_and_asset() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let picture = noisy_picture(1);
+    let mut deck = image_budget_deck();
+    deck["slides"][0]["elements"] = json!([{"type":"group","id":"pictures","x":0,"y":0,"width":100,"height":100,"view_width":100,"view_height":100,
+        "children":(0..4).map(|index| { let mut copy = picture.clone(); copy["id"] = json!(format!("copy-{index}")); copy["alt"] = json!(format!("Placement {index}")); copy }).collect::<Vec<_>>()}]);
+    let typed = serde_json::from_value(deck.clone()).unwrap();
+    aislide_core::model::validate_deck(&typed).unwrap();
+    for (field, value) in [("crop", json!({"left":1})), ("alt", json!("a".repeat(501))), ("width", json!(0)),
+        ("mime_type", json!("image/jpeg")), ("base64", json!("invalid!")),
+        ("svg", json!(STANDARD.encode("<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>")))] {
+        let mut invalid = deck.clone(); invalid["slides"][0]["elements"][0]["children"][3][field] = value;
+        let typed = serde_json::from_value(invalid).unwrap();
+        assert!(aislide_core::model::validate_deck(&typed).is_err(), "accepted invalid {field}");
+    }
+    for picture in [solid_picture(4097, 1, 0), {
+        let mut oversized = solid_picture(1, 1, 0);
+        oversized["base64"] = json!(STANDARD.encode(vec![0; 1024 * 1024 + 1])); oversized
+    }, {
+        let mut oversized = solid_picture(1, 1, 0);
+        oversized["svg"] = json!(STANDARD.encode(vec![b' '; 262145])); oversized
+    }] {
+        let mut invalid = image_budget_deck();
+        invalid["auxiliary_design"]["notes_master"]["elements"] = json!([picture]);
+        invalid["auxiliary_design"]["handout_master"]["elements"] = json!([picture]);
+        let typed = serde_json::from_value(invalid).unwrap();
+        assert!(matches!(aislide_core::model::validate_deck(&typed), Err(aislide_core::Error::Limit(_))));
+    }
+}
+
+#[test]
+fn issue18_unique_resource_limit_includes_auxiliary_masters() {
+    let mut deck = image_budget_deck();
+    deck["slides"][0]["elements"] = json!((0..128).map(|index| solid_picture(1, 1, index)).collect::<Vec<_>>());
+    deck["auxiliary_design"]["notes_master"]["elements"] = json!([solid_picture(1, 1, 0)]);
+    let typed = serde_json::from_value(deck.clone()).unwrap();
+    aislide_core::model::validate_deck(&typed).unwrap();
+    deck["auxiliary_design"]["handout_master"]["elements"] = json!([solid_picture(1, 1, 128)]);
+    let typed = serde_json::from_value(deck).unwrap();
+    let error = aislide_core::preflight::standard_deck(&typed).unwrap_err().to_string();
+    for expected in ["deck-wide", "unique scene images", "total=129", "limit=128", "handout_master", "solid-128", "placements=130", "distinct_resources=129"] {
+        assert!(error.contains(expected), "missing {expected}: {error}");
+    }
+}
+
+#[test]
+fn issue18_auxiliary_raster_budget_reports_first_crossing() {
+    let mut deck = image_budget_deck();
+    let first = solid_picture(2049, 4096, 0);
+    deck["slides"][0]["elements"] = json!([first]);
+    deck["auxiliary_design"]["notes_master"]["elements"] = json!([first]);
+    let typed = serde_json::from_value(deck.clone()).unwrap();
+    aislide_core::preflight::standard_deck(&typed).unwrap();
+    deck["auxiliary_design"]["handout_master"]["elements"] = json!([first, solid_picture(2049, 4096, 1)]);
+    let typed = serde_json::from_value(deck).unwrap();
+    let error = aislide_core::preflight::standard_deck(&typed).unwrap_err().to_string();
+    for expected in ["deck-wide", "raster work", "total=67141632", "limit=67108864", "handout_master", "solid-1", "placements=4", "distinct_resources=2", "owner_placements=2"] {
+        assert!(error.contains(expected), "missing {expected}: {error}");
+    }
+}
+
+#[test]
+fn issue18_image_diagnostics_bound_unvalidated_owner_identifiers() {
+    let mut deck = image_budget_deck();
+    let picture = solid_picture(1, 1, 0);
+    deck["slides"][0]["id"] = json!("\n\u{10ffff}".repeat(1000));
+    deck["slides"][0]["elements"] = json!([picture]);
+    deck["slides"][0]["elements"][0]["id"] = json!("\r\u{10ffff}".repeat(1000));
+    let typed = serde_json::from_value(deck).unwrap();
+    let mut limits = aislide_core::limits::STANDARD; limits.image_encoded_bytes = 0;
+    let error = aislide_core::preflight::deck(&typed, &limits).unwrap_err().to_string();
+    assert!(error.len() < 1024, "error length={}", error.len());
+    assert!(!error.chars().any(char::is_control));
+    assert!(!error.contains(picture["base64"].as_str().unwrap()));
+}
+
 #[test]
 fn document_and_raw_json_allocation_budgets_are_bounded() {
     let mut deck = text_deck(128);

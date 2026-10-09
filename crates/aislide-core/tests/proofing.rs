@@ -18,9 +18,9 @@ fn local_dictionary_proofing_uses_scalar_offsets_and_explicit_languages() {
 
 fn document() -> serde_json::Value {
     let source = json!({"type":"text","id":"source","x":10,"y":20,"width":300,"height":100,"text":"Hello","font_size":32,"color":"CC2200","bold":true,
-        "format":{"italic":true,"alignment":"center","hyperlink":"https://example.invalid/source","paragraphs":[{"space_after":{"kind":"points","value":800},"runs":[{"text":"Hello","style":{"underline":true,"highlight":"FFFF00","language":"en-US"}}]}]}});
+        "format":{"italic":true,"alignment":"center","hyperlink":"https://example.invalid/source","paragraphs":[{"space_after":{"kind":"points","value":800},"runs":[{"text":"Hello","style":{"underline":true,"highlight":"FFFF00","language":"en-US","alternative_language":"ja-JP"}}]}]}});
     let target = json!({"type":"text","id":"target","x":400,"y":50,"width":300,"height":200,"text":"Keep mixed\nSecond","font_size":20,"color":"111111","bold":false,
-        "format":{"hyperlink":"https://example.invalid/target","paragraphs":[{"runs":[{"text":"Keep ","style":{"highlight":"00FF00","language":"fr-FR"}},{"text":"mixed","style":{"italic":false}}]},{"runs":[{"text":"Second","style":{}}]}]}});
+        "format":{"hyperlink":"https://example.invalid/target","paragraphs":[{"runs":[{"text":"Keep ","style":{"highlight":"00FF00","language":"fr-FR","alternative_language":"ko-KR"}},{"text":"mixed","style":{"italic":false}}]},{"runs":[{"text":"Second","style":{}}]}]}});
     let locked = json!({"type":"text","id":"locked","x":10,"y":300,"width":300,"height":100,"text":"Locked","font_size":20,"color":"111111","bold":false,"visual":{"locked":true}});
     execute_request(json!({"op":"new_document", "id":"proof-test", "deck":{
         "version":1,"title":"Proof test","width":1280,"height":720,"slides":[{
@@ -32,6 +32,7 @@ fn painter_is_read_only_then_atomic_preserving_content_geometry_and_semantics() 
     let document = document();
     let style = execute_request(json!({"op":"copy_format","document":document,"slide_id":"slide","id":"source","paragraph_index":0,"run_index":0})).unwrap();
     assert!(!style.to_string().contains("example.invalid"));
+    assert!(style["run"].get("alternative_language").is_none());
     let result = execute_request(json!({"op":"apply_format","document":document,"expected_revision":0,"slide_id":"slide","ids":["target"],"style":style})).unwrap();
     let target = &result["document"]["deck"]["slides"][0]["elements"][1];
     for field in ["text","id","x","y","width","height"] { assert_eq!(target[field], document["deck"]["slides"][0]["elements"][1][field]); }
@@ -41,6 +42,7 @@ fn painter_is_read_only_then_atomic_preserving_content_geometry_and_semantics() 
     assert_eq!(target["format"]["paragraphs"].as_array().unwrap().len(),2);
     assert_eq!(target["format"]["paragraphs"][0]["runs"][0]["style"]["highlight"],"00FF00");
     assert_eq!(target["format"]["paragraphs"][0]["runs"][0]["style"]["language"],"fr-FR");
+    assert_eq!(target["format"]["paragraphs"][0]["runs"][0]["style"]["alternative_language"],"ko-KR");
     assert_eq!(target["format"]["paragraphs"][1]["runs"][0]["style"]["underline"],true);
     for ids in [json!(["target","locked"]), json!(["target","target"]), json!([]), json!(["missing"])] {
         assert!(execute_request(json!({"op":"apply_format","document":document,"expected_revision":0,"slide_id":"slide","ids":ids,"style":style})).is_err());
@@ -107,7 +109,7 @@ fn language_operations_are_undoable_strict_and_respect_locked_targets() {
 fn painter_rejects_content_semantics_injected_into_style_snapshot() {
     let document = document();
     let style = execute_request(json!({"op":"copy_format","document":document,"slide_id":"slide","id":"source"})).unwrap();
-    for (field, value) in [("highlight",json!("none")),("language",json!("fr-FR")),("hyperlink",json!("https://example.invalid/"))] {
+    for (field, value) in [("highlight",json!("none")),("language",json!("fr-FR")),("alternative_language",json!("ja-JP")),("hyperlink",json!("https://example.invalid/"))] {
         let mut injected = style.clone(); injected["run"][field] = value;
         assert!(execute_request(json!({"op":"apply_format","document":document,"expected_revision":0,"slide_id":"slide","ids":["target"],"style":injected})).is_err());
     }

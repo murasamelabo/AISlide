@@ -264,6 +264,13 @@ occur; the tools fail clearly when the host lacks `lucide-react`, `react` and
 through the official MCP SDK and verifies preflight, preview, native reopen
 and update/Undo byte identity.
 
+Search normalizes PascalCase, kebab-case, snake_case and whitespace. All query
+words must match; exact normalized names rank before name words/prefixes and
+metadata words/prefixes. Internal substring matches are not used. Actual
+installed module aliases are accepted for assets (`History` resolves to
+`RotateCcwClock`, `Fingerprint` to `FingerprintPattern` in the pinned library).
+Responses use canonical names; aliases do not duplicate the icon catalog.
+
 `apply_operations({document,expected_revision,expected_hash,operations})` accepts
 1-128 strict typed operations across existing slides, including mixed managed
 parts, graphs and ordinary element edits. Managed variants use the same
@@ -473,6 +480,71 @@ Options: `page_indices?`, `pdf:false`, `preview:"contact_sheet"` (`pages` / `non
 MCP `finalize_presentation({deck_id,expected_revision,expected_hash,name,options?,include_images?,detail?})` prepares the same bundle, binds safe filenames, verifies hashes and budgets, then exclusively publishes beneath the startup-approved output root. Compact mode defaults to 640px and the first eight pages for supplemental previews/checks, disclosed by `page_scope` and the manifest; the PPTX always contains every slide. Explicit options override defaults; `detail:"full"` restores core defaults. At most 13 files including the manifest; 32MiB decoded total and at most 4MiB MCP response (capacity limits also apply). A thumbnail plus actual paths, hashes, sizes, check scope and manifest path are returned. `include_images:false` suppresses only the response image. Every destination is checked, all temporary files staged, and the manifest published last. Existing files are never replaced. No directory, URL or arbitrary file path is accepted from the request.
 
 The manifest format is `aislide.delivery`, version 1. It records actual producer/core versions and MCP transport, document revision/hash, file hashes, visual page scope, checks, findings and limitations. `complete` is publication success, not quality approval; preflight can report findings. No source authenticity/freshness, semantic truth, accessibility certification or Office parity is asserted. Files are not a crash-atomic group. A structured `BUNDLE_PUBLICATION_FAILED` result lists exact successful paths and pending filenames with a `not_published`, `partially_published` or `published_with_error` status. Published files are never cleaned up automatically; only owned temporary paths are removed. Cancellation after a link may leave outputs; inspect the manifest and hashes before retrying with a new name. Root checks do not establish hard immunity to hostile local path races. See [delivery workflow and example](authoring/README.md#delivery-bundles).
+
+### Office Text And Rendering
+
+Native Office text with `err` and `altLang` supports rich editing when the rest
+of its text style is representable. `RunStyle.alternative_language` represents
+`altLang`; language tags are nonempty ASCII alphanumeric/hyphen strings up to
+64 bytes. Paragraph replacement preserves a unique prior alternative language
+unless explicitly overridden. With mixed prior values, a replacement run's explicit
+`language` inherits its uniquely associated prior alternative language. Otherwise
+it must supply `alternative_language`; ambiguous mappings reject with at most eight
+prior `(lang, altLang)` pairs, without text content. Explicit alternatives take
+precedence. Changed paragraphs clear transient `err`/`dirty` flags;
+untouched XML remains unchanged. Unknown styles and fields still reject. Batch
+errors identify the operation, slide, element and first unsupported tag/attribute.
+
+Preview, preflight (scale 1) and delivery PDF (scale 2) omit shadow, glow,
+soft edge and reflection on an over-budget page's disposable rendered view.
+`EFFECT_APPROXIMATION` identifies the slide, highest-cost element, scale and
+budget totals. Fills, text, opacity and native PPTX remain unchanged; raw static
+export stays strict. Preview `quality_reduced` also covers effect omission.
+Other resource limits and unsupported-content errors remain enforced.
+
+Typed `apply_operations`, including `add_elements`, returns optional
+`render_warnings` for touched pages at the default preview scale
+`1280 / max(width,height)`, without rendering. If prediction exceeds its own
+analysis limit, `EFFECT_ANALYSIS_UNAVAILABLE` keeps the edit accepted and makes
+the missing analysis explicit; actual rendering still enforces that limit.
+SDK `session.renderWarnings` and MCP typed-edit responses expose a separate
+`renderWarnings:{revision,hash,status,warnings}` snapshot. Status is `complete`
+or `unavailable`; later accepted edits and Undo/Redo clear stale snapshots.
+Warnings are not persisted, and absence of warnings does not certify rendering
+or Office visual parity.
+
+### Selective Template Factory
+
+`inspect_template({kind:"potx",base64})` inspects up to 8 masters, 256 layouts
+and 256 sample slides before the editable document's 32-layout limit. It
+returns exact package-part IDs, names, ownership, sample count, section/custom
+show flags, limits and `source_sha256`. The SDK method is `inspectTemplate`.
+Input bytes and capacity profiles retain the ordinary archive/request guards.
+
+`import_template` / SDK `importTemplate` accepts optional POTX-only `options`:
+`{include_sample_slides?,master_ids?,master_names?,layout_ids?,layout_names?,
+strip_sections?,source_sha256?}`. Defaults keep samples, all layouts and
+sections. ID/name selectors resolve exactly and unambiguously, with combined
+limits of 8 masters and 32 layouts. Master-only selection includes its layouts;
+layout selection includes its owning masters. Retained samples must use selected
+layouts. Set `include_sample_slides:false` to create one blank slide on the first
+selected layout in source order, including templates with no source slide list.
+Supply the inspected SHA to reject changed source bytes. THMX rejects options.
+
+`strip_sections:true` removes only recognized section lists, preserving unknown
+extensions. Custom shows still block structural edits and sample removal;
+sample removal with managed references/guided records is also rejected.
+Selection is not sanitization: unselected opaque payloads remain embedded.
+Protection, macro and signature guards remain enforced. Inert external hyperlinks
+are preserved without fetching; external images/slides and unknown resource types
+remain rejected by inspection and selection.
+These selection controls are core/SDK/MCP APIs, not new Studio controls.
+
+The 3 MiB encoded image budget is deck-wide and counts identical MIME/base64/
+retained-SVG payloads once across slides, masters, layouts and auxiliary design.
+The 128-unique-image and 64 MiB raster-work limits remain. Failures report totals,
+limits, crossing owner/element, placements and distinct resources. Per-image,
+complete-document, request and archive limits still apply to repeated payloads.
 
 ### Master Import
 

@@ -102,7 +102,7 @@ fn sanitize_cell(style: &mut crate::table_format::CellStyle) {
         }
         format.hyperlink = None; format.placeholder = None; format.inherit_layout = false;
     }
-    if let Some(run) = &mut style.text_style { run.highlight = None; run.language = None; }
+    if let Some(run) = &mut style.text_style { run.highlight = None; run.language = None; run.alternative_language = None; }
 }
 
 fn copy_text(element: &Element, paragraph_index: usize, run_index: usize) -> Result<TextSnapshot> {
@@ -121,7 +121,7 @@ fn copy_text(element: &Element, paragraph_index: usize, run_index: usize) -> Res
         else if run_index != 0 || !paragraph.runs.is_empty() { return Err(Error::Invalid("format source run not found".into())); }
         paragraph.clone()
     };
-    run.highlight = None; run.language = None; run.baseline = Some(run.baseline.unwrap_or(0));
+    run.highlight = None; run.language = None; run.alternative_language = None; run.baseline = Some(run.baseline.unwrap_or(0));
     paragraph.runs.clear();
     paragraph.alignment = Some(paragraph.alignment.unwrap_or(format.alignment));
     paragraph.bullet = Some(paragraph.bullet.unwrap_or(format.bullet));
@@ -157,7 +157,7 @@ pub fn apply_format(mut deck: Deck, slide_id: &str, ids: &[String], style: &Form
                     let old = format.cell_style(row,column);
                     let mut cell = cells.iter().find(|cell| cell.row==row && cell.column==column).map(|cell| cell.style.clone()).unwrap_or_default();
                     if let Some(old_run) = &old.text_style {
-                        let run = cell.text_style.get_or_insert_with(Default::default); run.highlight = old_run.highlight.clone(); run.language = old_run.language.clone();
+                        let run = cell.text_style.get_or_insert_with(Default::default); run.highlight = old_run.highlight.clone(); run.language = old_run.language.clone(); run.alternative_language = old_run.alternative_language.clone();
                     }
                     if cell.text_format.is_some() || old.text_format.is_some() {
                         let text_format = cell.text_format.get_or_insert_with(Default::default);
@@ -167,7 +167,7 @@ pub fn apply_format(mut deck: Deck, slide_id: &str, ids: &[String], style: &Form
                         let paragraphs = old.text_format.as_ref().map(|format| format.paragraphs.clone()).filter(|paragraphs| !paragraphs.is_empty()).unwrap_or_else(|| target_rows[row][column].split('\n').map(|text| RichParagraph { runs:vec![crate::rich_text::RichRun { text:text.into(),style:Default::default(),field:None }],..Default::default() }).collect());
                         let mut paint = RunStyle::frame(*font_size,"@dk1",false,text_format);
                         if let Some(run) = &cell.text_style { paint.overlay(run); }
-                        paint.highlight = None; paint.language = None;
+                        paint.highlight = None; paint.language = None; paint.alternative_language = None;
                         text_format.paragraphs = paragraphs.into_iter().map(|paragraph| {
                             let mut result = template.clone(); result.runs = paragraph.runs;
                             for run in &mut result.runs { run.style.overlay(&paint); }
@@ -188,7 +188,7 @@ pub fn apply_format(mut deck: Deck, slide_id: &str, ids: &[String], style: &Form
 fn apply_text(mut deck: Deck, slide_id: &str, ids: &[String], style: &TextSnapshot) -> Result<Deck> {
     style.run.validate()?;
     crate::rich_text::validate_paragraphs(std::slice::from_ref(&style.paragraph))?;
-    if !style.paragraph.runs.is_empty() || style.run.highlight.is_some() || style.run.language.is_some() {
+    if !style.paragraph.runs.is_empty() || style.run.highlight.is_some() || style.run.language.is_some() || style.run.alternative_language.is_some() {
         return Err(Error::Invalid("format snapshot cannot contain text, fields, highlight or proofing language".into()));
     }
     if ids.is_empty() || ids.len() > 128 || ids.iter().collect::<BTreeSet<_>>().len() != ids.len() {

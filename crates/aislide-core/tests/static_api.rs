@@ -6,6 +6,166 @@ fn document() -> Value {
     execute_request(json!({"op":"create_presentation","id":"static-test","title":"Output test"})).unwrap()
 }
 
+fn issue16_document() -> Value {
+    let mut deck = document()["deck"].clone();
+    deck["slides"][0]["elements"] = json!([(640, 390), (520, 300), (380, 280)].into_iter().enumerate().map(|(index, (width, height))| {
+        json!({"type":"shape","id":format!("soft-{index}"),"x":40 + index * 180,"y":40 + index * 120,"width":width,"height":height,"preset":"ellipse","fill":"1860C5","stroke":"1860C5","stroke_width":0,"text":"","font_size":24,"color":"000000","bold":false,"visual":{"opacity":0.4,"soft_edge":60}})
+    }).collect::<Vec<_>>());
+    let mut second = deck["slides"][0].clone();
+    second["id"] = json!("slide-2");
+    second["elements"] = json!([{"type":"text","id":"small-text","x":40,"y":40,"width":400,"height":100,"text":"Normal second page","font_size":12,"color":"000000","bold":false}]);
+    deck["slides"].as_array_mut().unwrap().push(second);
+    execute_request(json!({"op":"new_document","id":"effect-budget","deck":deck})).unwrap()
+}
+
+#[test]
+fn issue16_prediction_limit_does_not_reject_valid_authoring() {
+    let original = document();
+    let mut children = (0..128).map(|index| json!({"type":"rect","id":format!("rect-{index}"),"x":0,"y":0,"width":10,"height":10,"fill":"1860C5"})).collect::<Vec<_>>();
+    for depth in 0..7 {
+        children = vec![json!({"type":"group","id":format!("group-{depth}"),"x":0,"y":0,"width":20,"height":20,"view_width":20,"view_height":20,"children":children,"visual":{"reflection":{"blur":0,"distance":0,"start_opacity":0.5,"end_opacity":0,"end_position":1}}})];
+    }
+    let added = execute_request(json!({"op":"apply_operations","document":original,"expected_revision":0,"expected_hash":original["hash"],"operations":[{"op":"add_elements","slide_id":"slide-1","elements":children}]})).unwrap();
+    let actual: Vec<aislide_core::model::Element> = serde_json::from_value(added["document"]["deck"]["slides"][0]["elements"].clone()).unwrap();
+    let expected: Vec<aislide_core::model::Element> = serde_json::from_value(json!(children)).unwrap();
+    assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(expected).unwrap());
+    assert_eq!(added["render_warnings"][0]["code"], "EFFECT_ANALYSIS_UNAVAILABLE");
+    let changed = execute_request(json!({"op":"apply_operations","document":added["document"],"expected_revision":1,"expected_hash":added["document"]["hash"],"operations":[{"op":"update_notes","slide_id":"slide-1","notes":"Still editable"}]})).unwrap();
+    assert_eq!(changed["document"]["revision"], 2);
+    assert_eq!(changed["document"]["deck"]["slides"][0]["notes"], "Still editable");
+    assert_eq!(changed["render_warnings"][0]["code"], "EFFECT_ANALYSIS_UNAVAILABLE");
+    let error = execute_request(json!({"op":"preview_presentation","document":changed["document"],"options":{"page_indices":[0]}})).unwrap_err();
+    assert!(error.to_string().contains("8192 objects"), "{error}");
+}
+
+#[test]
+fn issue16_authoring_reports_effect_budget_without_changing_effects() {
+    let original = document();
+    let elements = issue16_document()["deck"]["slides"][0]["elements"].clone();
+    let result = execute_request(json!({"op":"apply_operations","document":original,"expected_revision":0,"expected_hash":original["hash"],"operations":[{"op":"add_elements","slide_id":"slide-1","elements":elements}]})).unwrap();
+    assert_eq!(result["document"]["revision"], 1);
+    assert_eq!(result["document"]["deck"]["slides"][0]["elements"], elements);
+    let warnings = result["render_warnings"].as_array().expect("authoring effect warnings");
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0]["code"], "EFFECT_APPROXIMATION");
+    assert_eq!(warnings[0]["element_id"], "soft-0");
+    assert!(warnings[0]["message"].as_str().unwrap().contains("scale=1"));
+    let restored = execute_request(json!({"op":"undo_transaction","document":result["document"],"expected_revision":1,"receipt":result["receipt"]})).unwrap();
+    assert_eq!(restored["document"]["deck"], original["deck"]);
+    assert!(restored.get("render_warnings").is_none());
+}
+
+#[test]
+fn issue16_effect_budget_approximates_preview_and_keeps_other_page_diagnostics() {
+    let document = issue16_document();
+    let original = document.clone();
+    let preview = execute_request(json!({"op":"preview_presentation","document":document,"options":{"page_indices":[0,1],"max_dimension":1280}})).unwrap();
+    assert_eq!(preview["pages"].as_array().unwrap().len(), 2);
+    assert!(preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "EFFECT_APPROXIMATION" && warning["page_index"] == 0 && warning["element_id"] == "soft-0"));
+    let checked = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0,1]}})).unwrap();
+    assert!(checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "EFFECT_APPROXIMATION" && finding["slide_id"] == "slide-1"));
+    assert!(checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "SMALL_TEXT" && finding["slide_id"] == "slide-2"));
+    let delivery = execute_request(json!({"op":"prepare_delivery","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"options":{}})).unwrap();
+    assert!(delivery["files"].as_array().unwrap().iter().any(|file| file["kind"] == "pptx"));
+    assert!(delivery["manifest"]["render_warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "EFFECT_APPROXIMATION"));
+    assert_eq!(document, original);
+}
+
+#[test]
+fn issue16_scale_specific_budget_warnings_and_strict_export_locators() {
+    use aislide_core::{export_static::{export_static, ExportOptions}, render::effect_budget_warnings, Error};
+    let document = issue16_document();
+    let deck = serde_json::from_value(document["deck"].clone()).unwrap();
+    assert!(effect_budget_warnings(&deck, 0, 0.75).unwrap().is_empty());
+    assert!(effect_budget_warnings(&deck, 1, 1.0).unwrap().is_empty());
+    let warnings = effect_budget_warnings(&deck, 0, 1.0).unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].element_id, "soft-0");
+    for detail in ["slide-1", "sum_bytes=", "limit_bytes=33554432", "scale=1", "edge_limit_px=8192"] {
+        assert!(warnings[0].message.contains(detail), "{}", warnings[0].message);
+    }
+    for scale in [0.0, -1.0, f64::NAN, f64::INFINITY, 16.01] { assert!(effect_budget_warnings(&deck, 0, scale).is_err()); }
+    assert!(effect_budget_warnings(&deck, 2, 1.0).is_err());
+    let error = export_static(&deck, &ExportOptions::default()).unwrap_err();
+    assert!(matches!(error, Error::Limit(ref message) if message.contains("slide-1") && message.contains("soft-0") && message.contains("sum_bytes=")));
+    for dimension in [960, 1280, 960] {
+        let preview = execute_request(json!({"op":"preview_presentation","document":document,"options":{"page_indices":[0],"max_dimension":dimension}})).unwrap();
+        assert_eq!(preview["actual_max_dimension"], dimension);
+        assert_eq!(preview["quality_reduced"], dimension == 1280);
+        let omitted = preview["warnings"].as_array().unwrap().iter().filter(|warning| warning["message"].as_str().unwrap().contains("omitted from the disposable")).count();
+        assert_eq!(omitted, usize::from(dimension == 1280));
+        assert!(!preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "PREVIEW_DOWNSCALED"));
+    }
+}
+
+#[test]
+fn issue16_budget_analysis_scopes_used_design_and_highest_cost() {
+    use aislide_core::render::effect_budget_warnings;
+    let mut value = issue16_document()["deck"].clone();
+    let effects = value["slides"][0]["elements"].as_array().unwrap().clone();
+    let layout_id = value["design"]["layouts"][0]["id"].clone();
+    let master_id = value["design"]["layouts"][0]["master_id"].clone();
+    let master = value["design"]["masters"].as_array_mut().unwrap().iter_mut().find(|master| master["id"] == master_id).unwrap();
+    master["elements"] = json!([effects[0]]);
+    value["design"]["layouts"][0]["elements"] = json!([effects[1]]);
+    value["slides"][0]["elements"] = json!([effects[2]]);
+    value["slides"][0]["layout_id"] = layout_id;
+    let mut unused = value["design"]["layouts"][0].clone();
+    unused["id"] = json!("unused-effects");
+    unused["elements"] = json!(effects);
+    value["design"]["layouts"].as_array_mut().unwrap().push(unused);
+    let deck = serde_json::from_value(value.clone()).unwrap();
+    let warnings = effect_budget_warnings(&deck, 0, 1.0).unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].element_id, "soft-0");
+    assert!(warnings[0].message.contains("would be omitted"));
+    value["slides"][0]["hide_master_graphics"] = json!(true);
+    assert!(effect_budget_warnings(&serde_json::from_value(value).unwrap(), 0, 1.0).unwrap().is_empty());
+    let mut value = issue16_document()["deck"].clone();
+    value["slides"][0]["elements"].as_array_mut().unwrap().reverse();
+    assert_eq!(effect_budget_warnings(&serde_json::from_value(value).unwrap(), 0, 1.0).unwrap()[0].element_id, "soft-0");
+}
+
+#[test]
+fn issue16_delivery_pdf_warns_and_preserves_authored_and_native_pptx_bytes() {
+    use aislide_core::{delivery::{prepare_delivery, DeliveryOptions, DeliveryPreview}, export_static::{export_static, ExportFormat, ExportOptions}, Error};
+    let authored = issue16_document();
+    let presentation = execute_request(json!({"op":"export_presentation","document":authored})).unwrap();
+    let native = execute_request(json!({"op":"open_presentation","id":"effect-native","base64":presentation["base64"]})).unwrap()["document"].clone();
+    for value in [authored, native] {
+        let document = serde_json::from_value(value.clone()).unwrap();
+        let before = serde_json::to_vec(&document).unwrap();
+        let output = prepare_delivery(&document, document.revision, &document.hash, &DeliveryOptions { pdf: true, preview: DeliveryPreview::None, preflight: false, ..Default::default() }).unwrap();
+        assert_eq!(output.files.len(), 2);
+        assert_eq!(output.files[0].base64, presentation["base64"].as_str().unwrap());
+        assert_eq!(lopdf::Document::load_mem(&STANDARD.decode(&output.files[1].base64).unwrap()).unwrap().get_pages().len(), 2);
+        assert!(output.manifest["render_warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "EFFECT_APPROXIMATION" && warning["element_id"] == "soft-0" && warning["message"].as_str().unwrap().contains("scale=2")));
+        assert!(matches!(export_static(&document.deck, &ExportOptions { format: ExportFormat::Pdf, ..Default::default() }), Err(Error::Limit(message)) if message.contains("filter")));
+        assert_eq!(serde_json::to_vec(&document).unwrap(), before);
+        assert_eq!(execute_request(json!({"op":"export_presentation","document":value})).unwrap()["base64"], presentation["base64"]);
+    }
+}
+
+#[test]
+fn issue16_approximation_does_not_hide_unsupported_content_on_any_page() {
+    use aislide_core::Error;
+    for page in [0, 1] {
+        let mut deck = issue16_document()["deck"].clone();
+        deck["slides"][page]["elements"].as_array_mut().unwrap().push(json!({"type":"text","id":"unsupported-tabs","x":40,"y":600,"width":400,"height":80,"text":"Left\tRight","font_size":24,"color":"000000","bold":false}));
+        let document = execute_request(json!({"op":"new_document","id":"effect-unsupported","deck":deck})).unwrap();
+        let typed = serde_json::from_value(document["deck"].clone()).unwrap();
+        assert_eq!(aislide_core::render::effect_budget_warnings(&typed, 0, 1.0).unwrap().len(), 1);
+        for request in [
+            json!({"op":"preview_presentation","document":document,"options":{"page_indices":[0,1]}}),
+            json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0,1]}}),
+            json!({"op":"prepare_delivery","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"options":{"pdf":true,"preview":"none","preflight":false}}),
+        ] {
+            let error = execute_request(request).unwrap_err();
+            assert!(matches!(error, Error::Unsupported(ref message) if message.contains("unsupported-tabs") && message.contains("tab stops")), "{error}");
+        }
+    }
+}
+
 #[test]
 fn text_bearing_card_padding_is_reported_without_flagging_small_badges() {
     for padded in [false, true] {
