@@ -192,7 +192,7 @@ pub(crate) fn write(package: &mut crate::package::Package, path: &str, before: &
     use crate::native_save::{apply, insert_child, set_attribute};
     if before == after && (!copied || after.is_empty()) { return Ok(()); }
     crate::review::ensure_unprotected(package).map_err(|error| match error {
-        Error::Unsupported(_) => Error::Unsupported(format!("{} is not supported for signed, labelled or protected packages", if copied { "slide duplication with comments" } else { "comment editing" })),
+        Error::Unsupported(reason) => Error::Unsupported(format!("{} rejected: {reason}", if copied { "slide duplication with comments" } else { "comment editing" })),
         error => error,
     })?;
     validate(after)?;

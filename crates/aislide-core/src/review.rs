@@ -511,6 +511,18 @@ fn relationships(package: &crate::package::Package) -> Result<Vec<Relationship>>
 
 fn content_types(package: &crate::package::Package) -> Result<BTreeMap<String, String>> {
     let parsed = crate::pptx::parse(package.text("[Content_Types].xml")?)?;
+    if !parsed.root_element().has_tag_name((CT, "Types")) { return Err(Error::Invalid("[Content_Types].xml: OPC content types root".into())); }
+    let mut overrides = BTreeSet::new();
+    let mut defaults = BTreeSet::new();
+    for node in parsed.root_element().children().filter(|node| node.is_element()) {
+        let (key, entries) = if node.has_tag_name((CT, "Override")) {
+            (node.attribute("PartName").ok_or_else(|| Error::Invalid("[Content_Types].xml: override part name missing".into()))?, &mut overrides)
+        } else if node.has_tag_name((CT, "Default")) {
+            (node.attribute("Extension").ok_or_else(|| Error::Invalid("[Content_Types].xml: default extension missing".into()))?, &mut defaults)
+        } else { return Err(Error::Invalid("[Content_Types].xml: unknown content type declaration".into())); };
+        if key.is_empty() || node.attribute("ContentType").is_none_or(str::is_empty) { return Err(Error::Invalid("[Content_Types].xml: empty content type declaration".into())); }
+        if !entries.insert(key.to_ascii_lowercase()) { return Err(Error::Invalid(format!("[Content_Types].xml: duplicate content type declaration {key}"))); }
+    }
     let mut result = BTreeMap::new();
     for path in package.part_names() {
         let kind = parsed.root_element().children().find(|node| node.has_tag_name((CT, "Override")) && node.attribute("PartName") == Some(format!("/{path}").as_str()))
@@ -544,27 +556,76 @@ pub(crate) fn ensure_metadata_detach(package: &crate::package::Package) -> Resul
 
 pub(crate) fn ensure_native_write(package: &crate::package::Package, operation: &str) -> Result<()> {
     ensure_protection(package, true).map_err(|error| match error {
-        Error::Unsupported(_) => Error::Unsupported(format!("{operation} does not alter signed, encrypted or edit-protected packages")),
+        Error::Unsupported(reason) => Error::Unsupported(format!("{operation} rejected: {reason}")),
         error => error,
     })
 }
 
+fn protection_xml<'a>(package: &'a crate::package::Package, path: &str) -> Result<std::borrow::Cow<'a, str>> {
+    use std::borrow::Cow;
+    let bytes = package.part(path)?;
+    if bytes.len() > 4 * 1024 * 1024 { return Err(Error::Limit(format!("{path}: XML part > 4 MiB"))); }
+    let utf16 = if bytes.starts_with(&[0xff, 0xfe]) { Some((true, &bytes[2..])) }
+        else if bytes.starts_with(&[0xfe, 0xff]) { Some((false, &bytes[2..])) }
+        else if bytes.starts_with(&[b'<', 0, b'?', 0]) { Some((true, bytes)) }
+        else if bytes.starts_with(&[0, b'<', 0, b'?']) { Some((false, bytes)) }
+        else { None };
+    if let Some((little_endian, bytes)) = utf16 {
+        if bytes.len() % 2 != 0 { return Err(Error::Unsupported(format!("{path}: invalid UTF-16 XML encoding"))); }
+        let units = bytes.chunks_exact(2).map(|unit| if little_endian { u16::from_le_bytes([unit[0], unit[1]]) } else { u16::from_be_bytes([unit[0], unit[1]]) }).collect::<Vec<_>>();
+        return String::from_utf16(&units).map(Cow::Owned).map_err(|_| Error::Unsupported(format!("{path}: invalid UTF-16 XML encoding")));
+    }
+    std::str::from_utf8(bytes).map(Cow::Borrowed).map_err(|_| Error::Unsupported(format!("{path}: unsupported XML encoding")))
+}
+
 fn ensure_protection(package: &crate::package::Package, preserve_labels: bool) -> Result<()> {
-    if package.part_names().iter().any(|path| { let path = path.to_ascii_lowercase(); path.starts_with("_xmlsignatures/") || (!preserve_labels && path.contains("labelinfo")) || path.contains("encryption") }) { return Err(Error::Unsupported("clean-copy/field refresh does not alter signed, labelled or protected packages".into())); }
+    for path in package.part_names() {
+        let lower = path.to_ascii_lowercase();
+        let name = lower.rsplit('/').next().unwrap_or(&lower);
+        let reason = if lower.starts_with("_xmlsignatures/") { Some("signed package marker") }
+            else if matches!(name, "encryptedpackage" | "encryptioninfo") { Some("encrypted package marker") }
+            else if !preserve_labels && lower.contains("labelinfo") { Some("classification label marker") }
+            else { None };
+        if let Some(reason) = reason { return Err(Error::Unsupported(format!("{path}: {reason}"))); }
+    }
+    for relation in relationships(package)? {
+        if relation.kind.starts_with("http://schemas.openxmlformats.org/package/2006/relationships/digital-signature/") {
+            return Err(Error::Unsupported(format!("{}: signed package relationship {} ({})", relation.part, relation.id, relation.kind)));
+        }
+    }
     for (path, kind) in content_types(package)? {
-        let lower = path.to_ascii_lowercase(); let kind = kind.to_ascii_lowercase();
-        if lower.starts_with("_xmlsignatures/") || (!preserve_labels && lower.contains("labelinfo")) || lower.contains("encryption") || kind.contains("signature") || (!preserve_labels && kind.contains("sensitivitylabel")) { return Err(Error::Unsupported("clean-copy/field refresh does not alter signed, labelled or protected packages".into())); }
-        if lower.ends_with(".xml") || kind.ends_with("+xml") || kind == "application/xml" || kind == "text/xml" {
-            let parsed = crate::pptx::parse(package.text(&path)?)?;
-            if parsed.descendants().filter(|node| node.is_element()).any(|node| {
+        let lower = path.to_ascii_lowercase(); let lower_kind = kind.to_ascii_lowercase();
+        if matches!(lower_kind.as_str(), "application/vnd.openxmlformats-package.digital-signature-xmlsignature+xml" | "application/vnd.openxmlformats-package.digital-signature-origin" | "application/vnd.openxmlformats-package.digital-signature-certificate")
+            || !preserve_labels && lower_kind.contains("sensitivitylabel") {
+            return Err(Error::Unsupported(format!("{path}: protected content type {kind}")));
+        }
+        if lower.ends_with(".xml") || lower_kind.ends_with("+xml") || lower_kind == "application/xml" || lower_kind == "text/xml" {
+            let xml = match protection_xml(package, &path) {
+                Ok(xml) => xml,
+                Err(Error::Unsupported(_)) if preserve_labels => continue,
+                Err(error) => return Err(error),
+            };
+            let parsed = match crate::pptx::parse(&xml) {
+                Ok(parsed) => parsed,
+                Err(Error::Xml(roxmltree::Error::NodesLimitReached)) => return Err(Error::Limit(format!("{path}: XML node limit"))),
+                Err(Error::Xml(roxmltree::Error::DtdDetected)) => return Err(Error::Unsupported(format!("{path}: XML DTD is not supported"))),
+                Err(Error::Limit(reason)) => return Err(Error::Limit(format!("{path}: {reason}"))),
+                // Opaque optional XML is retained, not validated, by label-preserving native writes.
+                Err(Error::Xml(_)) if preserve_labels => continue,
+                Err(error) => return Err(error),
+            };
+            if let Some(node) = parsed.descendants().filter(|node| node.is_element()).find(|node| {
                 let namespace = node.tag_name().namespace().unwrap_or("").to_ascii_lowercase();
                 (!preserve_labels && (namespace.contains("sensitivitylabel") || namespace.contains("miplabel") || namespace.contains("labelmetadata")
                     || node.attribute("name").is_some_and(|name| name.to_ascii_lowercase().starts_with("msip_label_"))))
-                    || namespace.contains("digital-signature") || matches!(node.tag_name().name(), "modifyVerifier" | "EncryptedData" | "Signature")
-            }) { return Err(Error::Unsupported("clean-copy/field refresh does not alter signed, labelled or protected packages".into())); }
+                    || node.has_tag_name((crate::native::P, "modifyVerifier"))
+                    || node.has_tag_name(("http://www.w3.org/2001/04/xmlenc#", "EncryptedData"))
+                    || node.has_tag_name(("http://www.w3.org/2000/09/xmldsig#", "Signature"))
+            }) {
+                return Err(Error::Unsupported(format!("{path}: protected element {{{}}}{}", node.tag_name().namespace().unwrap_or(""), node.tag_name().name())));
+            }
         }
     }
-    for relation in relationships(package)? { if relation.kind.to_ascii_lowercase().contains("digital-signature") { return Err(Error::Unsupported("signed package".into())); } }
     Ok(())
 }
 
