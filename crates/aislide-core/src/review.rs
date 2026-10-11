@@ -488,7 +488,7 @@ pub struct CleanCopy { pub bytes: Vec<u8>, pub document: crate::document::Docume
 #[derive(Clone)]
 struct Relationship { source: String, part: String, id: String, kind: String, target: Option<String> }
 
-fn relationships(package: &crate::package::Package) -> Result<Vec<Relationship>> {
+fn relationships(package: &crate::package::Package, resolve_internal_targets: bool) -> Result<Vec<Relationship>> {
     let mut result = Vec::new();
     for path in package.part_names().into_iter().filter(|path| path.ends_with(".rels")) {
         let source = if path == "_rels/.rels" { String::new() }
@@ -502,7 +502,12 @@ fn relationships(package: &crate::package::Package) -> Result<Vec<Relationship>>
             let id = node.attribute("Id").ok_or_else(|| Error::Invalid("OPC relationship ID missing".into()))?;
             if !ids.insert(id) { return Err(Error::Invalid("duplicate OPC relationship ID".into())); }
             let raw = node.attribute("Target").ok_or_else(|| Error::Invalid("OPC relationship target missing".into()))?;
-            let target = match node.attribute("TargetMode") { Some("External") => None, Some("Internal") | None => Some(crate::pptx::resolve(&source, raw)?), _ => return Err(Error::Unsupported("OPC relationship mode".into())) };
+            let target = match node.attribute("TargetMode") {
+                Some("External") => None,
+                Some("Internal") | None if resolve_internal_targets => Some(crate::pptx::resolve(&source, raw)?),
+                Some("Internal") | None => None,
+                _ => return Err(Error::Unsupported("OPC relationship mode".into())),
+            };
             result.push(Relationship { source: source.clone(), part: path.into(), id: id.into(), kind: node.attribute("Type").unwrap_or("").into(), target });
         }
     }
@@ -588,7 +593,7 @@ fn ensure_protection(package: &crate::package::Package, preserve_labels: bool) -
             else { None };
         if let Some(reason) = reason { return Err(Error::Unsupported(format!("{path}: {reason}"))); }
     }
-    for relation in relationships(package)? {
+    for relation in relationships(package, !preserve_labels)? {
         if relation.kind.starts_with("http://schemas.openxmlformats.org/package/2006/relationships/digital-signature/") {
             return Err(Error::Unsupported(format!("{}: signed package relationship {} ({})", relation.part, relation.id, relation.kind)));
         }
@@ -602,16 +607,16 @@ fn ensure_protection(package: &crate::package::Package, preserve_labels: bool) -
         if lower.ends_with(".xml") || lower_kind.ends_with("+xml") || lower_kind == "application/xml" || lower_kind == "text/xml" {
             let xml = match protection_xml(package, &path) {
                 Ok(xml) => xml,
-                Err(Error::Unsupported(_)) if preserve_labels => continue,
+                Err(Error::Unsupported(_) | Error::Limit(_)) if preserve_labels => continue,
                 Err(error) => return Err(error),
             };
             let parsed = match crate::pptx::parse(&xml) {
                 Ok(parsed) => parsed,
+                // Native reads validate required parts; optional XML outside the scan budget remains opaque.
+                Err(Error::Xml(_) | Error::Limit(_)) if preserve_labels => continue,
                 Err(Error::Xml(roxmltree::Error::NodesLimitReached)) => return Err(Error::Limit(format!("{path}: XML node limit"))),
                 Err(Error::Xml(roxmltree::Error::DtdDetected)) => return Err(Error::Unsupported(format!("{path}: XML DTD is not supported"))),
                 Err(Error::Limit(reason)) => return Err(Error::Limit(format!("{path}: {reason}"))),
-                // Opaque optional XML is retained, not validated, by label-preserving native writes.
-                Err(Error::Xml(_)) if preserve_labels => continue,
                 Err(error) => return Err(error),
             };
             if let Some(node) = parsed.descendants().filter(|node| node.is_element()).find(|node| {
@@ -694,7 +699,7 @@ fn inspect_document_inner(document: &crate::document::Document) -> Result<Inspec
     if let Some(origin) = &document.origin { packages.push(("original", crate::package::Package::open(base64::engine::general_purpose::STANDARD.decode(&origin.base64).map_err(|_| Error::Invalid("origin encoding".into()))?)?)); }
     for (scope, package) in packages {
         candidates.package(&package, if scope == "current" { "current_deck" } else { "embedded_origin" }, scope == "current")?;
-        let relations = relationships(&package)?; let reached = reachable(&relations, &BTreeSet::new());
+        let relations = relationships(&package, true)?; let reached = reachable(&relations, &BTreeSet::new());
         let source = crate::provenance::read(&package)?.map(|(path, metadata)| (path, !metadata.sources.is_empty() || !metadata.bindings.is_empty() || metadata.guided_record.is_some()));
         for (path, kind) in content_types(&package)? {
             let category = if source.as_ref().is_some_and(|(source, evidence)| source == &path && *evidence) { Some(Sources) }
@@ -715,7 +720,7 @@ fn remove_parts(package: &mut crate::package::Package, removed: &BTreeSet<String
     let mut all = removed.clone();
     for part in removed { let rels = crate::native::relations_path(part); if package.part_names().contains(rels.as_str()) { all.insert(rels); } }
     let mut updates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for relation in relationships(package)? {
+    for relation in relationships(package, true)? {
         if !all.contains(&relation.part) && relation.target.as_ref().is_some_and(|target| all.contains(target)) { updates.entry(relation.part).or_default().insert(relation.id); }
     }
     for (path, ids) in updates {
@@ -776,7 +781,7 @@ pub fn export_clean_copy(document: &crate::document::Document, options: &CleanCo
     if options.categories.contains(&Sources) || options.categories.contains(&Notes) { sanitized.guided_record = None; }
     let removed_elements = remove_shapes(&mut package, &options.categories, document)?;
     sanitized.parts.retain(|part| !removed_elements.contains(&(part.slide_id.clone(), part.element_id.clone())));
-    let types = content_types(&package)?; let relations = relationships(&package)?;
+    let types = content_types(&package)?; let relations = relationships(&package, true)?;
     let provenance = crate::provenance::read(&package)?.map(|(path, _)| path);
     let mut removed = BTreeSet::new();
     for (path, kind) in &types {
@@ -799,7 +804,7 @@ pub fn export_clean_copy(document: &crate::document::Document, options: &CleanCo
     sanitized.deck = native.deck;
     let bytes = crate::provenance::attach(package.save()?, &sanitized)?;
     let verified = crate::package::Package::open(bytes.clone())?;
-    for relation in relationships(&verified)? { if let Some(target) = relation.target { if !verified.part_names().contains(target.as_str()) { return Err(Error::Invalid("clean copy would contain a dangling OPC relationship".into())); } } }
+    for relation in relationships(&verified, true)? { if let Some(target) = relation.target { if !verified.part_names().contains(target.as_str()) { return Err(Error::Invalid("clean copy would contain a dangling OPC relationship".into())); } } }
     let clean: crate::document::Document = serde_json::from_value(crate::document::open_presentation(options.new_document_id.clone(), bytes.clone())?["document"].clone())?;
     let inspection = inspect_document(&clean)?;
     Ok(CleanCopy { bytes, document: clean, inspection })

@@ -771,23 +771,92 @@ fn pr24_duplicate_content_type_declarations_cannot_hide_protection() {
 }
 
 #[test]
-fn pr24_opaque_xml_keeps_bounded_scan_and_dtd_rejection() {
-    let cases = [
-        ("XML part", [b"<data>".as_slice(), &vec![b' '; 4 * 1024 * 1024], b"</data>"].concat()),
-        ("node", format!("<data>{}</data>", "<node/>".repeat(100_001)).into_bytes()),
-        ("depth", format!("{}{}", "<node>".repeat(65), "</node>".repeat(65)).into_bytes()),
-        ("DTD", b"<!DOCTYPE data [<!ENTITY value 'synthetic'>]><data>&value;</data>".to_vec()),
-    ];
-    for (reason, payload) in cases {
-        let bytes = pr24_package("customXml/vendor.xml", "application/xml", payload);
+fn pr24_optional_xml_beyond_scan_limits_stays_opaque() {
+    for (path, kind, root) in [
+        ("customXml/vendor.xml", "application/xml", "data"),
+        ("ppt/media/vendor.svg", "image/svg+xml", "svg"),
+    ] {
+        let namespace = if root == "svg" { "http://www.w3.org/2000/svg" } else { "urn:synthetic:vendor" };
+        let start = format!("<{root} xmlns='{namespace}'>");
+        let end = format!("</{root}>");
+        let cases = [
+            ("size", format!("{start}{}{end}", " ".repeat(4 * 1024 * 1024)).into_bytes()),
+            ("node", format!("{start}{}{end}", "<node/>".repeat(100_001)).into_bytes()),
+            ("depth", format!("{start}{}{}{end}", "<node>".repeat(65), "</node>".repeat(65)).into_bytes()),
+            ("DTD", format!("<!DOCTYPE {root} [<!ENTITY value 'synthetic'>]>{start}&value;{end}").into_bytes()),
+            ("external DTD", format!("<!DOCTYPE {root} SYSTEM 'https://example.invalid/never-fetch.dtd'>{start}{end}").into_bytes()),
+        ];
+        for (reason, payload) in cases {
+            let bytes = pr24_package(path, kind, payload.clone());
+            let original = open(&bytes);
+            assert_eq!(save(&original), bytes);
+            let changed = document::transact(&original, Transaction {
+                expected_revision: original.revision, expected_hash: original.hash.clone(),
+                operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Edited synthetic notes"}])).unwrap(),
+            }).unwrap_or_else(|error| panic!("optional {path} with {reason} rejected: {error}"));
+            let saved = save(&changed.document);
+            assert_eq!(Package::open(saved.clone()).unwrap().part(path).unwrap(), payload);
+            assert_eq!(open(&saved).deck.slides[0].notes, "Edited synthetic notes");
+            let restored = document::undo(&changed.document, changed.document.revision, changed.receipt.unwrap()).unwrap();
+            assert_eq!(save(&restored.document), bytes);
+            assert!(fields::refresh_native(bytes.clone(), "2026-10-11").is_err(), "strict field refresh must still reject {reason}");
+            assert_eq!(save(&original), bytes);
+        }
+    }
+}
+
+#[test]
+fn pr24_protection_scan_does_not_resolve_unrelated_relationship_targets() {
+    use aislide_core::editing::{self, SlideOperation};
+    let path = "docProps/_rels/vendor.xml.rels";
+    let ns = "http://schemas.openxmlformats.org/package/2006/relationships";
+    for target in ["attachments/my%20file.bin", "mailto:synthetic@example.invalid"] {
+        let payload = format!("<Relationships xmlns='{ns}'><Relationship Id='vendor-link' Type='urn:synthetic:attachment' Target='{target}'/></Relationships>").into_bytes();
+        let bytes = pr24_package(path, "application/vnd.openxmlformats-package.relationships+xml", payload.clone());
+        let original = open(&bytes);
+        let changed = document::transact(&original, Transaction {
+            expected_revision: original.revision, expected_hash: original.hash.clone(),
+            operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Edited synthetic notes"}])).unwrap(),
+        }).unwrap_or_else(|error| panic!("opaque relationship target {target} rejected: {error}"));
+        assert_eq!(Package::open(save(&changed.document)).unwrap().part(path).unwrap(), payload);
+        let restored = document::undo(&changed.document, changed.document.revision, changed.receipt.unwrap()).unwrap();
+        assert_eq!(save(&restored.document), bytes);
+        let copied = editing::slides(&original, original.revision, &[SlideOperation::Duplicate { slide_id: "slide-1".into(), id: "copy".into() }]).unwrap();
+        assert_eq!(Package::open(save(&copied.document)).unwrap().part(path).unwrap(), payload);
+
+        let signed = String::from_utf8(payload).unwrap().replace("urn:synthetic:attachment", &format!("{ns}/digital-signature/origin"));
+        let signed_bytes = pr24_package(path, "application/vnd.openxmlformats-package.relationships+xml", signed.into_bytes());
+        let guarded = open(&signed_bytes);
+        let error = document::transact(&guarded, Transaction {
+            expected_revision: guarded.revision, expected_hash: guarded.hash.clone(),
+            operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Must not commit"}])).unwrap(),
+        }).err().unwrap().to_string();
+        assert!(error.contains(path) && error.contains("signed package relationship") && error.contains("vendor-link"), "{error}");
+        assert_eq!(save(&guarded), signed_bytes);
+    }
+}
+
+#[test]
+fn pr24_unscannable_optional_xml_does_not_hide_declared_protection() {
+    let path = "customXml/vendor.xml";
+    for payload in [
+        format!("<data>{}</data>", " ".repeat(4 * 1024 * 1024)).into_bytes(),
+        b"<!DOCTYPE data [<!ENTITY value 'synthetic'>]><data>&value;</data>".to_vec(),
+    ] {
+        let bytes = pr24_package(path, "application/vnd.openxmlformats-package.digital-signature-xmlsignature+xml", payload);
         let original = open(&bytes);
         let error = document::transact(&original, Transaction {
             expected_revision: original.revision, expected_hash: original.hash.clone(),
             operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Must not commit"}])).unwrap(),
-        }).err().unwrap_or_else(|| panic!("{reason} constraint allowed native editing")).to_string();
-        assert!(error.contains("customXml/vendor.xml") && error.contains(reason), "{error}");
+        }).err().unwrap().to_string();
+        assert!(error.contains(path) && error.contains("protected content type"), "{error}");
         assert_eq!(save(&original), bytes);
     }
+    let mut package = Package::open(pptx::export_pptx(&deck()).unwrap()).unwrap();
+    let xml = package.text("ppt/presentation.xml").unwrap().replace("</p:presentation>", &format!("<p:extLst>{}{}</p:extLst></p:presentation>", "<p:ext>".repeat(65), "</p:ext>".repeat(65)));
+    package.replace_part("ppt/presentation.xml", xml.into_bytes()).unwrap();
+    let error = document::open_presentation("guarded".into(), package.save().unwrap()).err().unwrap().to_string();
+    assert!(error.contains("XML depth"), "{error}");
 }
 
 #[test]

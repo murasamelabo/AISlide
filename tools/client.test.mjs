@@ -474,7 +474,10 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
       session.setHyperlink('slide-1', { id: 'text', link: null }, options),
       session.setShapeAdjustment('slide-1', { id: 'shape', adjustment: { name: 'adj', value: 25000 } }, options),
       session.addPicture('slide-1', picture, options), session.importSlides(source, imported, options),
+      session.detachPart('slide-1', { id: 'managed' }, { expectedRevision: 0, expectedHash: 'hash', signal: new AbortController().signal }),
     ];
+    // @ts-expect-error the detach hash guard must be a string
+    session.detachPart('slide-1', { id: 'managed' }, { expectedHash: 123 });
     const graph: GraphSpec = { version: 1, title: 'Synthetic', show_title: false, nodes: [{ id: 'node', label: 'Heading', detail: 'Detail', detail_font_size: 12, text_align: 'right', heading_bold: false, x: 0, y: 0, height: 512 }] };
     const initial: Promise<DocumentSession> = client.createPresentation('setup', 'Synthetic', { setup: { design_preset: 'minimal', font_family: 'Noto Sans JP' } });
     const positioned: Promise<GraphSpec> = client.layoutGraph({ version: 1, title: 'Synthetic', nodes: [{ id: 'node', label: 'Node' }], columns: 2 });

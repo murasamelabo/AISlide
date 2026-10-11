@@ -74,12 +74,22 @@ and relationships, exact `EncryptionInfo` / `EncryptedPackage` part names, XMLDS
 `Signature`, XMLEnc `EncryptedData` and PresentationML `modifyVerifier` elements.
 Unrelated filenames containing `encryption` and vendor or unqualified elements
 with these local names are not protection markers. UTF-8 and UTF-16LE/BE XML are
-scanned without modifying the source bytes. Unparseable optional XML remains
-opaque for label-preserving native edits; this scan is not validation of every
-package part or a certification that protection is absent. OPC metadata and
-required native parts remain strict, and XML size/node/depth limits and DTD
-rejection remain enforced. Operations such as comment rewriting and clean-copy
-retain their stricter label and XML checks.
+scanned without modifying the source bytes. Optional XML, including SVG and
+Custom XML, that cannot be decoded or parsed within the XML size/node/depth
+budgets, or contains a DTD, remains opaque for label-preserving native edits.
+It does not block ordinary edits and its bytes are retained. The scanner never
+expands entities, loads DTDs or raises its parsing budgets to inspect that content.
+Namespaced element checks apply only to XML that can be fully parsed within
+these budgets; opaque parts may contain uninspected markers. This is not
+validation of every package part or certification that protection is absent.
+Declared signature paths/content types/relationships still reject before
+optional XML is skipped. OPC metadata and required native parts remain strictly
+parsed within existing limits. Signature relationship checks inspect `Type`
+without resolving unrelated internal targets, so percent-encoded attachment
+names and opaque URI targets alone do not block ordinary edits. Referenced
+resources actually read or edited retain their existing target validation;
+external relationships are never fetched. Operations such as comment rewriting,
+field refresh and clean-copy retain their stricter label and XML checks.
 No-op export and supported existing label-preserving edits do not remove or downgrade
 labels. AISlide does not decrypt data, change protection or assert classification rights.
 
@@ -872,7 +882,7 @@ direct insertion or complete typed elements for exact slide coordinates.
 
 `Document.parts` is optional when empty. An instance contains `slide_id`, `element_id`, `spec`, `render_sha256`, optional `native_sha256`, and `stale`. Hashes cover rendered children and original native group/resources, including chart workbooks. Root-only movement/resizing in Studio is allowed; mismatched manual/native edits mark the part stale and block semantic update. Missing fingerprints on existing native roots also mark stale. There is no automatic regeneration, no cryptographic authentication, and benign external XML reserialization can conservatively mark stale. Ordinary native objects remain available even without metadata.
 
-SDK: `client.partCatalog()`, `client.createPart({id,spec,theme?})`, `session.addPart(slideId,{id,spec},options?)`, `session.updatePart(slideId,{id,spec},options?)`, `session.detachPart(slideId,{id},options?)`. Session options accept `expectedRevision`, `expectedHash` and cancellation; late transport success after cancellation cannot commit. MCP: `part_catalog`, `create_part`, `add_part`, `update_part`, `detach_part`; mutations require `deck_id`, `expected_revision`, `slide_id`, `id` and optional `expected_hash`; add/update also require `spec`. Detach removes only metadata, retaining the native figures, manual edits and source bindings in one undoable transaction, including stale records. Protected native packages reject detach.
+SDK: `client.partCatalog()`, `client.createPart({id,spec,theme?})`, `session.addPart(slideId,{id,spec},options?)`, `session.updatePart(slideId,{id,spec},options?)`, `session.detachPart(slideId,{id},options?)`. Session options accept `expectedRevision` and cancellation; detach additionally accepts `expectedHash` through `AuthoringOptions`. Late transport success after cancellation cannot commit. MCP: `part_catalog`, `create_part`, `add_part`, `update_part`, `detach_part`; mutations require `deck_id`, `expected_revision`, `slide_id`, `id` and optional `expected_hash`; add/update also require `spec`. Detach removes only metadata, retaining the native figures, manual edits and source bindings in one undoable transaction, including stale records. Protected native packages reject detach.
 
 ### Layout patterns
 
