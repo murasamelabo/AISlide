@@ -87,6 +87,30 @@ async function feedbackMcpFixture(run, args = ['--tool-profile', 'full']) {
   } finally { hooks.deregister(); delete globalThis[key]; }
 }
 
+test('issue22 MCP discovers bounded metadata detach without raw patch paths', async () => {
+  await feedbackMcpFixture(async ({ registrations, call, calls, fixture }) => {
+    const tool = registrations.get('detach_part');
+    assert.ok(tool);
+    assert.equal(tool.config.annotations.readOnlyHint, false);
+    assert.match(tool.config.description, /native|geometry/i);
+    const found = await call('discover_tools', { query: 'detach_part' });
+    assert.ok(JSON.stringify(found).includes('detach_part'));
+    const created = await call('create_presentation', { title: 'Synthetic detach' });
+    const input = { deck_id: created.deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), slide_id: 'slide-1', id: 'managed' };
+    for (const invalid of [{ ...input, id: 'x'.repeat(41) }, { ...input, path: '/parts/0' }, { ...input, document: {} }]) {
+      assert.equal(tool.config.inputSchema.safeParse(invalid).success, false);
+    }
+    fixture.onRequest = async request => ({ document: { ...request.document, revision: 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] } });
+    const detached = await call('detach_part', input);
+    assert.equal(calls.at(-1).request.op, 'detach_part');
+    assert.equal(calls.at(-1).request.slide_id, input.slide_id);
+    assert.equal(calls.at(-1).request.id, input.id);
+    assert.equal(detached.revision, 1);
+    assert.equal(detached.metadata_detached, true);
+    assert.equal(detached.native_figures_retained, true);
+  });
+});
+
 test('issue16 MCP returns creation effect warnings outside graph diagnostics', async () => {
   await feedbackMcpFixture(async ({ call, fixture }) => {
     const created = await call('create_presentation', { title: 'Synthetic effects' });

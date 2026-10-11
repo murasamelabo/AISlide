@@ -37,6 +37,7 @@ fn clone_resource(package: &mut Package, source: &str, scope: &str, copied: &mut
 }
 
 fn clone_slide(package: &mut Package, original: &NativePart, path: &str, id: &str) -> Result<NativePart> {
+    crate::review::ensure_slide_copy(package)?;
     package.add_part(path.into(), package.part(&original.path)?.to_vec())?;
     let mut copied = BTreeMap::from([(original.path.clone(), path.to_owned())]); let mut total = 0;
     let scope = path.rsplit('/').next().unwrap_or("copy").trim_end_matches(".xml");

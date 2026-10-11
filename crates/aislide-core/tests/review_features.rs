@@ -563,6 +563,303 @@ fn native_offslide_and_hidden_objects_are_inspected_and_removed_on_copy() {
 }
 
 #[test]
+fn issue20_labelled_slide_without_comments_duplicates_without_changing_label() {
+    use aislide_core::editing::{self, SlideOperation};
+    let label_path = "docMetadata/LabelInfo.xml";
+    let label = b"<clbl:labelList xmlns:clbl='http://schemas.microsoft.com/office/2020/mipLabelMetadata'><clbl:label id='{00112233-4455-6677-8899-aabbccddeeff}' enabled='1'/></clbl:labelList>";
+    let override_xml = "<Override PartName='/docMetadata/LabelInfo.xml' ContentType='application/vnd.ms-office.classificationlabels+xml'/>";
+    let relationship_xml = "<Relationship Id='synthetic-label' Type='http://schemas.microsoft.com/office/2020/02/relationships/classificationlabels' Target='docMetadata/LabelInfo.xml'/>";
+    for (mode, with_comments) in [("none", false), ("legacy", true), ("modern-empty", false)] {
+        let deck = if with_comments { comments::add(&deck(), "slide-1", comment("first")).unwrap() } else { deck() };
+        let mut package = Package::open(if mode == "modern-empty" { modern_fixture() } else { pptx::export_pptx(&deck).unwrap() }).unwrap();
+        if mode == "modern-empty" {
+            package.replace_part("ppt/comments/modern.xml", b"<m:cmLst xmlns:m='http://schemas.microsoft.com/office/powerpoint/2018/8/main'/>".to_vec()).unwrap();
+            package = Package::open(package.save().unwrap()).unwrap();
+        }
+        let types = package.text("[Content_Types].xml").unwrap().replace("</Types>", &format!("{override_xml}</Types>"));
+        let relationships = package.text("_rels/.rels").unwrap().replace("</Relationships>", &format!("{relationship_xml}</Relationships>"));
+        let mut parts = package.parts().clone();
+        parts.insert("[Content_Types].xml".into(), types.into_bytes());
+        parts.insert("_rels/.rels".into(), relationships.into_bytes());
+        parts.insert(label_path.into(), label.to_vec());
+        let source = Package::from_parts(parts).unwrap().save().unwrap();
+        let original = open(&source);
+        assert_eq!(save(&original), source);
+        let duplicated = editing::slides(&original, original.revision, &[SlideOperation::Duplicate { slide_id: "slide-1".into(), id: "copy".into() }]);
+        if with_comments {
+            let error = match duplicated { Ok(_) => panic!("labelled comments must not be rewritten by duplication"), Err(error) => error };
+            assert!(error.to_string().contains("slide duplication with comments"), "{error}");
+        } else {
+            let duplicated = duplicated.unwrap();
+            assert_eq!(duplicated.document.deck.slides.len(), 2);
+            let bytes = save(&duplicated.document);
+            let saved = Package::open(bytes.clone()).unwrap();
+            assert_eq!(saved.part(label_path).unwrap(), label);
+            assert!(saved.text("[Content_Types].xml").unwrap().contains(override_xml));
+            assert!(saved.text("_rels/.rels").unwrap().contains(relationship_xml));
+            assert_eq!(open(&bytes).deck.slides.len(), 2);
+            let restored = document::undo(&duplicated.document, duplicated.document.revision, duplicated.receipt.unwrap()).unwrap();
+            assert_eq!(restored.document.hash, original.hash);
+            assert_eq!(save(&restored.document), source);
+        }
+        assert_eq!(save(&original), source);
+    }
+}
+
+#[test]
+fn issue20_slide_copy_retains_signature_and_edit_protection_guards() {
+    use aislide_core::editing::{self, SlideOperation};
+    for mode in ["content-type", "relationship", "signature-xml", "modify-verifier", "encrypted-xml"] {
+        let package = Package::open(pptx::export_pptx(&deck()).unwrap()).unwrap();
+        let mut parts = package.parts().clone();
+        let kind = if mode == "content-type" { "application/vnd.openxmlformats-package.digital-signature-xmlsignature+xml" } else { "application/xml" };
+        let payload = match mode {
+            "signature-xml" => "<ds:Signature xmlns:ds='http://www.w3.org/2000/09/xmldsig#'/>",
+            "encrypted-xml" => "<enc:EncryptedData xmlns:enc='http://www.w3.org/2001/04/xmlenc#'/>",
+            _ => "<sentinel xmlns='urn:synthetic:protected'/>"
+        };
+        parts.insert("docProps/protected.xml".into(), payload.as_bytes().to_vec());
+        let types = package.text("[Content_Types].xml").unwrap().replace("</Types>", &format!("<Override PartName='/docProps/protected.xml' ContentType='{kind}'/></Types>"));
+        parts.insert("[Content_Types].xml".into(), types.into_bytes());
+        if mode == "relationship" {
+            let xml = package.text("_rels/.rels").unwrap().replace("</Relationships>", "<Relationship Id='synthetic-signature' Type='http://schemas.openxmlformats.org/package/2006/relationships/digital-signature/origin' Target='docProps/protected.xml'/></Relationships>");
+            parts.insert("_rels/.rels".into(), xml.into_bytes());
+        }
+        if mode == "modify-verifier" {
+            let xml = package.text("ppt/presentation.xml").unwrap().replace("</p:presentation>", "<p:modifyVerifier/></p:presentation>");
+            parts.insert("ppt/presentation.xml".into(), xml.into_bytes());
+        }
+        let source = Package::from_parts(parts).unwrap().save().unwrap();
+        let original = open(&source);
+        let result = editing::slides(&original, original.revision, &[SlideOperation::Duplicate { slide_id: "slide-1".into(), id: "copy".into() }]);
+        assert!(result.is_err(), "protected slide copy accepted: {mode}");
+        assert_eq!(save(&original), source, "source changed: {mode}");
+    }
+}
+
+fn pr24_package(path: &str, kind: &str, payload: Vec<u8>) -> Vec<u8> {
+    let package = Package::open(pptx::export_pptx(&deck()).unwrap()).unwrap();
+    let mut parts = package.parts().clone();
+    parts.insert(path.into(), payload);
+    let types = package.text("[Content_Types].xml").unwrap().replace("</Types>", &format!("<Override PartName='/{path}' ContentType='{kind}'/></Types>"));
+    parts.insert("[Content_Types].xml".into(), types.into_bytes());
+    Package::from_parts(parts).unwrap().save().unwrap()
+}
+
+fn pr24_utf16(xml: &str, little_endian: bool, bom: bool) -> Vec<u8> {
+    let mut bytes = if !bom { vec![] } else if little_endian { vec![0xff, 0xfe] } else { vec![0xfe, 0xff] };
+    bytes.extend(xml.encode_utf16().flat_map(|unit| if little_endian { unit.to_le_bytes() } else { unit.to_be_bytes() }));
+    bytes
+}
+
+#[test]
+fn pr24_unrelated_opaque_parts_do_not_block_native_edits_or_copies() {
+    use aislide_core::editing::{self, SlideOperation};
+    let xml = "<?xml version='1.0' encoding='UTF-16'?><data>Opaque synthetic content</data>";
+    let mut cases = vec![
+        ("ppt/media/encryption-overview.png", "image/png", b"synthetic opaque media".to_vec()),
+        ("customXml/vendor.xml", "application/xml", b"<data><Signature/><EncryptedData/><modifyVerifier/></data>".to_vec()),
+        ("customXml/vendor.xml", "application/xml", b"<data xmlns='urn:synthetic:vendor'><Signature/><EncryptedData/><modifyVerifier/></data>".to_vec()),
+        ("customXml/vendor.xml", "application/xml", b"<unclosed>".to_vec()),
+        ("customXml/vendor.xml", "application/xml", vec![0xff, 0x80]),
+        ("customXml/vendor.xml", "application/vnd.synthetic.signature+xml", b"<data/>".to_vec()),
+    ];
+    for little_endian in [true, false] {
+        for bom in [true, false] { cases.push(("customXml/vendor.xml", "application/xml", pr24_utf16(xml, little_endian, bom))); }
+    }
+    for (path, kind, payload) in cases {
+        let bytes = pr24_package(path, kind, payload.clone());
+        let original = open(&bytes);
+        assert_eq!(save(&original), bytes);
+        let changed = document::transact(&original, Transaction {
+            expected_revision: original.revision, expected_hash: original.hash.clone(),
+            operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Edited synthetic notes"}])).unwrap(),
+        }).unwrap_or_else(|error| panic!("unprotected {path} rejected: {error}"));
+        let saved = save(&changed.document);
+        assert_eq!(Package::open(saved.clone()).unwrap().part(path).unwrap(), payload);
+        assert_eq!(open(&saved).deck.slides[0].notes, "Edited synthetic notes");
+        let restored = document::undo(&changed.document, changed.document.revision, changed.receipt.unwrap()).unwrap();
+        assert_eq!(save(&restored.document), bytes);
+        let duplicated = editing::slides(&original, original.revision, &[SlideOperation::Duplicate { slide_id: "slide-1".into(), id: "copy".into() }]).unwrap();
+        assert_eq!(Package::open(save(&duplicated.document)).unwrap().part(path).unwrap(), payload);
+        assert_eq!(save(&original), bytes);
+    }
+}
+
+#[test]
+fn pr24_real_protection_blocks_native_edits_with_marker_locations() {
+    let p = "http://schemas.openxmlformats.org/presentationml/2006/main";
+    let ds = "http://www.w3.org/2000/09/xmldsig#";
+    let enc = "http://www.w3.org/2001/04/xmlenc#";
+    let mut cases = vec![
+        ("_xmlsignatures/sig1.xml", "application/xml", b"<opaque/>".to_vec(), "_xmlsignatures/sig1.xml".to_owned()),
+        ("EncryptionInfo", "application/octet-stream", vec![0xff], "EncryptionInfo".to_owned()),
+        ("ppt/EncryptedPackage", "application/octet-stream", vec![0xff], "ppt/EncryptedPackage".to_owned()),
+        ("customXml/vendor.xml", "application/vnd.openxmlformats-package.digital-signature-xmlsignature+xml", b"<unclosed>".to_vec(), "digital-signature-xmlsignature+xml".to_owned()),
+        ("customXml/vendor.xml", "application/xml", format!("<p:modifyVerifier xmlns:p='{p}'/>").into_bytes(), "modifyVerifier".to_owned()),
+        ("customXml/vendor.xml", "application/xml", format!("<ds:Signature xmlns:ds='{ds}'/>").into_bytes(), "Signature".to_owned()),
+        ("customXml/vendor.xml", "application/xml", format!("<enc:EncryptedData xmlns:enc='{enc}'/>").into_bytes(), "EncryptedData".to_owned()),
+    ];
+    for (namespace, name) in [(p, "modifyVerifier"), (ds, "Signature"), (enc, "EncryptedData")] {
+        let xml = format!("<?xml version='1.0' encoding='UTF-16'?><marker:{name} xmlns:marker='{namespace}'/>");
+        for little_endian in [true, false] {
+            for bom in [true, false] { cases.push(("customXml/vendor.xml", "application/xml", pr24_utf16(&xml, little_endian, bom), name.to_owned())); }
+        }
+    }
+    for (path, kind, payload, marker) in cases {
+        let bytes = pr24_package(path, kind, payload);
+        let original = open(&bytes);
+        assert_eq!(save(&original), bytes);
+        let error = document::transact(&original, Transaction {
+            expected_revision: original.revision, expected_hash: original.hash.clone(),
+            operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Must not commit"}])).unwrap(),
+        }).err().unwrap_or_else(|| panic!("protected {path} allowed native editing")).to_string();
+        assert!(error.contains("native editing") && error.contains(path) && error.contains(&marker), "{error}");
+        assert_eq!(save(&original), bytes);
+    }
+    let path = "_rels/.rels";
+    let package = Package::open(pr24_package("customXml/vendor.xml", "application/xml", b"<unclosed>".to_vec())).unwrap();
+    let mut package = package;
+    let xml = package.text(path).unwrap().replace("</Relationships>", "<Relationship Id='synthetic-signature' Type='http://schemas.openxmlformats.org/package/2006/relationships/digital-signature/origin' Target='customXml/vendor.xml'/></Relationships>");
+    package.replace_part(path, xml.into_bytes()).unwrap();
+    let bytes = package.save().unwrap();
+    let original = open(&bytes);
+    let error = document::transact(&original, Transaction {
+        expected_revision: original.revision, expected_hash: original.hash.clone(),
+        operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Must not commit"}])).unwrap(),
+    }).err().unwrap().to_string();
+    assert!(error.contains(path) && error.contains("synthetic-signature"), "{error}");
+    assert_eq!(save(&original), bytes);
+}
+
+#[test]
+fn pr24_modern_comment_protection_error_names_the_operation_and_part() {
+    let label_path = "docMetadata/LabelInfo.xml";
+    let mut parts = Package::open(modern_fixture()).unwrap().parts().clone();
+    parts.insert(label_path.into(), b"<label/>".to_vec());
+    let bytes = Package::from_parts(parts).unwrap().save().unwrap();
+    let original = open(&bytes);
+    let mut changed = original.deck.clone();
+    changed.slides[0].review.as_mut().unwrap().modern_threads.as_mut().unwrap()[0].status = comments::modern::Status::Active;
+    let error = document::transact(&original, Transaction {
+        expected_revision: original.revision, expected_hash: original.hash.clone(),
+        operations: serde_json::from_value(json!([{"op":"replace","path":"/deck","value":changed}])).unwrap(),
+    }).err().unwrap().to_string();
+    assert!(error.contains("modern comment editing") && error.contains(label_path), "{error}");
+    assert_eq!(save(&original), bytes);
+}
+
+#[test]
+fn pr24_duplicate_content_type_declarations_cannot_hide_protection() {
+    for fragment in [
+        "<Override PartName='/ppt/slides/slide1.xml' ContentType='application/vnd.openxmlformats-package.digital-signature-xmlsignature+xml'/>",
+        "<Override PartName='/ppt/slides/slide1.xml' ContentType='application/xml'/>",
+        "<Default Extension='xml' ContentType='application/xml'/>",
+    ] {
+        let mut package = Package::open(pptx::export_pptx(&deck()).unwrap()).unwrap();
+        let xml = package.text("[Content_Types].xml").unwrap().replace("</Types>", &format!("{fragment}</Types>"));
+        package.replace_part("[Content_Types].xml", xml.into_bytes()).unwrap();
+        let bytes = package.save().unwrap();
+        let original = open(&bytes);
+        let error = document::transact(&original, Transaction {
+            expected_revision: original.revision, expected_hash: original.hash.clone(),
+            operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Must not commit"}])).unwrap(),
+        }).err().unwrap_or_else(|| panic!("duplicate OPC type allowed native editing")).to_string();
+        assert!(error.contains("[Content_Types].xml") && error.contains("duplicate"), "{error}");
+        assert_eq!(save(&original), bytes);
+    }
+}
+
+#[test]
+fn pr24_optional_xml_beyond_scan_limits_stays_opaque() {
+    for (path, kind, root) in [
+        ("customXml/vendor.xml", "application/xml", "data"),
+        ("ppt/media/vendor.svg", "image/svg+xml", "svg"),
+    ] {
+        let namespace = if root == "svg" { "http://www.w3.org/2000/svg" } else { "urn:synthetic:vendor" };
+        let start = format!("<{root} xmlns='{namespace}'>");
+        let end = format!("</{root}>");
+        let cases = [
+            ("size", format!("{start}{}{end}", " ".repeat(4 * 1024 * 1024)).into_bytes()),
+            ("node", format!("{start}{}{end}", "<node/>".repeat(100_001)).into_bytes()),
+            ("depth", format!("{start}{}{}{end}", "<node>".repeat(65), "</node>".repeat(65)).into_bytes()),
+            ("DTD", format!("<!DOCTYPE {root} [<!ENTITY value 'synthetic'>]>{start}&value;{end}").into_bytes()),
+            ("external DTD", format!("<!DOCTYPE {root} SYSTEM 'https://example.invalid/never-fetch.dtd'>{start}{end}").into_bytes()),
+        ];
+        for (reason, payload) in cases {
+            let bytes = pr24_package(path, kind, payload.clone());
+            let original = open(&bytes);
+            assert_eq!(save(&original), bytes);
+            let changed = document::transact(&original, Transaction {
+                expected_revision: original.revision, expected_hash: original.hash.clone(),
+                operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Edited synthetic notes"}])).unwrap(),
+            }).unwrap_or_else(|error| panic!("optional {path} with {reason} rejected: {error}"));
+            let saved = save(&changed.document);
+            assert_eq!(Package::open(saved.clone()).unwrap().part(path).unwrap(), payload);
+            assert_eq!(open(&saved).deck.slides[0].notes, "Edited synthetic notes");
+            let restored = document::undo(&changed.document, changed.document.revision, changed.receipt.unwrap()).unwrap();
+            assert_eq!(save(&restored.document), bytes);
+            assert!(fields::refresh_native(bytes.clone(), "2026-10-11").is_err(), "strict field refresh must still reject {reason}");
+            assert_eq!(save(&original), bytes);
+        }
+    }
+}
+
+#[test]
+fn pr24_protection_scan_does_not_resolve_unrelated_relationship_targets() {
+    use aislide_core::editing::{self, SlideOperation};
+    let path = "docProps/_rels/vendor.xml.rels";
+    let ns = "http://schemas.openxmlformats.org/package/2006/relationships";
+    for target in ["attachments/my%20file.bin", "mailto:synthetic@example.invalid"] {
+        let payload = format!("<Relationships xmlns='{ns}'><Relationship Id='vendor-link' Type='urn:synthetic:attachment' Target='{target}'/></Relationships>").into_bytes();
+        let bytes = pr24_package(path, "application/vnd.openxmlformats-package.relationships+xml", payload.clone());
+        let original = open(&bytes);
+        let changed = document::transact(&original, Transaction {
+            expected_revision: original.revision, expected_hash: original.hash.clone(),
+            operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Edited synthetic notes"}])).unwrap(),
+        }).unwrap_or_else(|error| panic!("opaque relationship target {target} rejected: {error}"));
+        assert_eq!(Package::open(save(&changed.document)).unwrap().part(path).unwrap(), payload);
+        let restored = document::undo(&changed.document, changed.document.revision, changed.receipt.unwrap()).unwrap();
+        assert_eq!(save(&restored.document), bytes);
+        let copied = editing::slides(&original, original.revision, &[SlideOperation::Duplicate { slide_id: "slide-1".into(), id: "copy".into() }]).unwrap();
+        assert_eq!(Package::open(save(&copied.document)).unwrap().part(path).unwrap(), payload);
+
+        let signed = String::from_utf8(payload).unwrap().replace("urn:synthetic:attachment", &format!("{ns}/digital-signature/origin"));
+        let signed_bytes = pr24_package(path, "application/vnd.openxmlformats-package.relationships+xml", signed.into_bytes());
+        let guarded = open(&signed_bytes);
+        let error = document::transact(&guarded, Transaction {
+            expected_revision: guarded.revision, expected_hash: guarded.hash.clone(),
+            operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Must not commit"}])).unwrap(),
+        }).err().unwrap().to_string();
+        assert!(error.contains(path) && error.contains("signed package relationship") && error.contains("vendor-link"), "{error}");
+        assert_eq!(save(&guarded), signed_bytes);
+    }
+}
+
+#[test]
+fn pr24_unscannable_optional_xml_does_not_hide_declared_protection() {
+    let path = "customXml/vendor.xml";
+    for payload in [
+        format!("<data>{}</data>", " ".repeat(4 * 1024 * 1024)).into_bytes(),
+        b"<!DOCTYPE data [<!ENTITY value 'synthetic'>]><data>&value;</data>".to_vec(),
+    ] {
+        let bytes = pr24_package(path, "application/vnd.openxmlformats-package.digital-signature-xmlsignature+xml", payload);
+        let original = open(&bytes);
+        let error = document::transact(&original, Transaction {
+            expected_revision: original.revision, expected_hash: original.hash.clone(),
+            operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Must not commit"}])).unwrap(),
+        }).err().unwrap().to_string();
+        assert!(error.contains(path) && error.contains("protected content type"), "{error}");
+        assert_eq!(save(&original), bytes);
+    }
+    let mut package = Package::open(pptx::export_pptx(&deck()).unwrap()).unwrap();
+    let xml = package.text("ppt/presentation.xml").unwrap().replace("</p:presentation>", &format!("<p:extLst>{}{}</p:extLst></p:presentation>", "<p:ext>".repeat(65), "</p:ext>".repeat(65)));
+    package.replace_part("ppt/presentation.xml", xml.into_bytes()).unwrap();
+    let error = document::open_presentation("guarded".into(), package.save().unwrap()).err().unwrap().to_string();
+    assert!(error.contains("XML depth"), "{error}");
+}
+
+#[test]
 fn signed_and_labelled_packages_refuse_clean_copy_and_field_refresh() {
     use review::InspectionCategory::*;
     for path in ["_xmlsignatures/sig1.xml", "docMetadata/LabelInfo.xml"] {

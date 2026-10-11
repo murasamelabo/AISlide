@@ -178,6 +178,17 @@ console.log(reopened.session.document.parts[0].stale);
 
 `client.createPart({id,spec,theme?})` returns a native group for preview without attaching semantic metadata. Use session `addPart`/`updatePart` for persistent metadata, revision guards and history. Root placement is retained on update. Native XML and embedded workbook changes make mismatching metadata stale; update then fails instead of replacing manual content. Deleting a part removes its metadata in the same undoable transaction. Data, source content and metadata remain document-private even though only one PPTX file is required. See the [API contracts](../../docs/api.md) for supported inputs and limits.
 
+To retain manual edits but stop managing one part, use
+`session.detachPart(slideId, { id }, { expectedRevision: session.revision, expectedHash })`.
+It removes only the selected metadata record, including a stale record; figures,
+source bindings and the immutable origin remain. The operation is atomic and has
+one Undo entry. It does not regenerate or remove the figures. The MCP equivalent
+is `detach_part({deck_id,expected_revision,expected_hash?,slide_id,id})`.
+Signed, encrypted or edit-protected native packages reject detach and all other
+native edits, including ordinary notes changes and slide insertion/removal.
+Rejection errors identify the operation and detected protection marker; no-op
+export remains byte-preserving. Classification labels are not removed or downgraded.
+
 ## Architecture Graphs
 
 Given a session and an existing slide with room for a graph:

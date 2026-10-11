@@ -20,6 +20,79 @@ SDK: `client.openPresentation(id, base64)` returns a session and warnings; `sess
 
 OLE containers, which include encrypted/protected Office files and legacy `.ppt`, receive an explicit format error before ZIP parsing. AISlide does not decrypt, remove labels or alter protection settings. The native reader currently supports Transitional PresentationML, not the separate ISO Strict namespace profile. Reopened designs support ID-based master/layout additions, removals and reassignment within the modeled subset and capacity limits. Unknown XML is preserved, and edits that would invalidate retained references or replace unsupported content are rejected. Supported slide structure commands are described below; complex text or chart changes outside the representable subset are rejected rather than flattened.
 
+### Stored Part Metadata
+
+Current native XML remains authoritative when opening a PPTX. Parsed saved part
+records that no longer satisfy current creation rules are excluded from active
+management, not regenerated or used to replace native figures. The returned
+`PART_METADATA_UNMANAGED` warning identifies the record index, slide and element;
+timeline label overages include `spec.data.tasks[N].label`, actual count and limit.
+Valid records remain managed. New part creation/update still enforces the current
+rules. Malformed XML, unknown metadata structure/version, invalid IDs/hashes and
+capacity violations are not ignored. No provenance-skip option bypasses these guards.
+
+An unchanged save, or Undo back to the opened state, preserves the exact source
+archive including quarantined metadata. A later edited export may omit incompatible
+records from newly written provenance; the immutable origin and native figures stay
+retained. A renamed Custom XML part is recognized by its namespace, not its filename.
+
+### Native Edge Frames
+
+Native import uses the same less-than-1px frame-overflow tolerance on all four
+edges. It normalizes only the disposable editing/rendering projection, leaving
+original XML untouched on no-op and unrelated edits. Warnings identify the native
+owner, part path, element and each edge's overflow in pixels. New authored elements
+retain strict canvas bounds; this is not a general permission for negative frames.
+
+Larger overflow can be clipped for flat axis-aligned rectangles and stretched
+PNG/JPEG pictures within existing limits. Picture clipping composes the original
+crop rather than shifting or stretching pixels. These projections are locked until
+explicit unlock; unlocking can materialize the clipped frame in a supported edit.
+Rotated, warped, grouped or otherwise unrepresentable clipping stays opaque with a
+quantified warning. This is bounded preview support, not Office visual parity.
+
+### Label-Preserving Edits
+
+For a standard unencrypted PPTX with a classification label, duplicating a slide
+with no legacy or modern comments preserves the label part, type and relationship.
+Empty modern comment lists do not require comment rewriting. Duplication that would
+rewrite nonempty comments remains guarded and reports the relevant operation.
+Signed, encrypted or edit-protected packages reject all native edits, including
+notes changes, slide insertion/removal, duplication, metadata detach and provenance
+updates. This intentionally extends the previous ordinary-edit guard, which only
+checked conventional signature part paths. Errors identify the operation and the
+detected part path, content type, relationship ID/type or namespaced XML element,
+including protection outside conventional part paths. The shared save guard reports
+`native editing` for ordinary edits (including comment changes); operation-specific
+duplication, detach, provenance and comment-write guards name their own operation
+when reached. A classification label can therefore report `modern comment editing`
+at the stricter comment-write guard, whereas a signed package rejects earlier as
+`native editing`.
+
+Protection detection uses signature package paths, OPC signature content types
+and relationships, exact `EncryptionInfo` / `EncryptedPackage` part names, XMLDSig
+`Signature`, XMLEnc `EncryptedData` and PresentationML `modifyVerifier` elements.
+Unrelated filenames containing `encryption` and vendor or unqualified elements
+with these local names are not protection markers. UTF-8 and UTF-16LE/BE XML are
+scanned without modifying the source bytes. Optional XML, including SVG and
+Custom XML, that cannot be decoded or parsed within the XML size/node/depth
+budgets, or contains a DTD, remains opaque for label-preserving native edits.
+It does not block ordinary edits and its bytes are retained. The scanner never
+expands entities, loads DTDs or raises its parsing budgets to inspect that content.
+Namespaced element checks apply only to XML that can be fully parsed within
+these budgets; opaque parts may contain uninspected markers. This is not
+validation of every package part or certification that protection is absent.
+Declared signature paths/content types/relationships still reject before
+optional XML is skipped. OPC metadata and required native parts remain strictly
+parsed within existing limits. Signature relationship checks inspect `Type`
+without resolving unrelated internal targets, so percent-encoded attachment
+names and opaque URI targets alone do not block ordinary edits. Referenced
+resources actually read or edited retain their existing target validation;
+external relationships are never fetched. Operations such as comment rewriting,
+field refresh and clean-copy retain their stricter label and XML checks.
+No-op export and supported existing label-preserving edits do not remove or downgrade
+labels. AISlide does not decrypt data, change protection or assert classification rights.
+
 ## Static Export and Recovery
 
 `export_static` accepts `{document, options}` and verifies the complete document before calling the shared `export_static::export_static` renderer. Stale source bindings reject. No file, original package, document revision or history is changed. Unknown request/options fields reject.
@@ -647,12 +720,13 @@ guards, which can reject otherwise valid authored additions.
 | `create_presentation` | `id`, `title` | Revision-zero document with one blank slide and the default design |
 | `edit_slides` | `document`, `expected_revision`, `operations` | Atomic transaction and inverse receipt |
 | `edit_elements` | Same, plus `slide_id` | Atomic top-level element operation |
+| `detach_part` | `document`, `expected_revision`, `slide_id`, `id` | Remove one managed record only, preserving figures, sources, bindings and origin; one Undo |
 | `create_asset` | `id`, `base64`, `mime_type`, `alt`, `size` | Validated picture element; accepted inert SVG is retained with a PNG fallback |
 
 Slide operations, in a batch of 1-128:
 
 - `{op:"insert",id,after?,title,layout_id?}` inserts after the specified slide, or appends when omitted. An omitted layout produces a blank slide; an explicit layout creates its placeholders and fills every title placeholder with `title`. An empty title clears the placeholder's sample text; other placeholders are unchanged.
-- `{op:"duplicate",slide_id,id}` creates a copy immediately after its source. Part metadata and source bindings follow the new slide ID; stale part metadata blocks duplication.
+- `{op:"duplicate",slide_id,id}` creates a copy immediately after its source. Part metadata and source bindings follow the new slide ID; stale part metadata blocks duplication with the offending slide/element and `detach_part` recovery guidance.
 - `{op:"remove",slide_id}` removes the slide and its part/binding records; the last remaining slide cannot be removed.
 - `{op:"move",slide_id,index}` moves to a zero-based index in the final list.
 - `{op:"rename",slide_id,title}` changes its displayed title, not the contents of text boxes.
@@ -660,6 +734,20 @@ Slide operations, in a batch of 1-128:
 Slides are limited to 1-256 under the default `large` capacity profile, 1-128 under explicit `standard`, or 1-32 under `legacy`. The request-local provenance limit is 296 identities across profiles; complete-document and XML budgets still apply. Native insertion creates only the added slide/resources and relationships; existing slide bytes remain untouched when their content is unchanged. Native duplication preserves opaque slide XML and independently copies mutable resources such as chart XML and embedded workbooks. It may share immutable images and design resources. Slides carrying modern comments cannot be duplicated. A bounded origin-relative `native_source_id` is used internally for in-session copies; callers should use `edit_slides`, not set it directly.
 
 Native slide deletion removes its slide XML, dedicated notes, relationship parts and their content-type entries. Deletion is refused if a remaining object references those parts. Other shared or opaque package resources and source documents are retained; deletion is not secure redaction. Sections/custom slide shows must be handled in PowerPoint before structural changes. Copy traversal is capped at 128 related resources and 8 MiB. Original files and import origins remain unchanged.
+
+`detach_part` explicitly removes the selected managed-part record, including a
+stale record, without deleting or regenerating its native group. SDK:
+`session.detachPart(slideId,{id},{expectedRevision,expectedHash?,signal?})`.
+MCP: `detach_part({deck_id,expected_revision,expected_hash?,slide_id,id})`, discoverable
+through `discover_tools`. It has one Undo and retains manual edits, source bindings
+and the immutable origin. The group becomes ordinary geometry; `update_part` no
+longer regenerates it. Missing targets and stale requests reject; signed, encrypted
+or edit-protected native packages reject. Labels are retained.
+
+For ordinary unsigned/unprotected documents, the lower-level transaction equivalent
+is `{"op":"remove","path":"/parts/N"}` with the current revision/hash and verified
+record index. Prefer ID-based `detach_part`; indices can change after other edits.
+Never use raw patches to bypass native protection or restore cached geometry.
 
 Element operations are `{op:"duplicate",id,new_id}`, `{op:"remove",id}` or `{op:"order",id,index}`. They apply to the selected slide's top-level objects. Duplication remaps descendant IDs and connection references and copies bindings/part metadata. Removal also removes connectors that lose their target. Unsupported individual native copies fail rather than flatten custom formatting; duplicating the slide is the preservation-oriented alternative. All operations are undoable and require a current revision.
 
@@ -794,7 +882,7 @@ direct insertion or complete typed elements for exact slide coordinates.
 
 `Document.parts` is optional when empty. An instance contains `slide_id`, `element_id`, `spec`, `render_sha256`, optional `native_sha256`, and `stale`. Hashes cover rendered children and original native group/resources, including chart workbooks. Root-only movement/resizing in Studio is allowed; mismatched manual/native edits mark the part stale and block semantic update. Missing fingerprints on existing native roots also mark stale. There is no automatic regeneration, no cryptographic authentication, and benign external XML reserialization can conservatively mark stale. Ordinary native objects remain available even without metadata.
 
-SDK: `client.partCatalog()`, `client.createPart({id,spec,theme?})`, `session.addPart(slideId,{id,spec},options?)`, `session.updatePart(slideId,{id,spec},options?)`. Session options accept `expectedRevision` and cancellation; late transport success after cancellation cannot commit. MCP: `part_catalog`, `create_part`, `add_part`, `update_part`; mutations require `deck_id`, `expected_revision`, `slide_id`, `id`, `spec` and use the same core/session gates.
+SDK: `client.partCatalog()`, `client.createPart({id,spec,theme?})`, `session.addPart(slideId,{id,spec},options?)`, `session.updatePart(slideId,{id,spec},options?)`, `session.detachPart(slideId,{id},options?)`. Session options accept `expectedRevision` and cancellation; detach additionally accepts `expectedHash` through `AuthoringOptions`. Late transport success after cancellation cannot commit. MCP: `part_catalog`, `create_part`, `add_part`, `update_part`, `detach_part`; mutations require `deck_id`, `expected_revision`, `slide_id`, `id` and optional `expected_hash`; add/update also require `spec`. Detach removes only metadata, retaining the native figures, manual edits and source bindings in one undoable transaction, including stale records. Protected native packages reject detach.
 
 ### Layout patterns
 

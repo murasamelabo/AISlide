@@ -215,8 +215,9 @@ pub fn open_presentation(id: String, bytes: Vec<u8>) -> Result<Value> {
 pub fn open_presentation_with_profile(id: String, bytes: Vec<u8>, capacity_profile: crate::limits::CapacityProfile) -> Result<Value> {
     if bytes.len() > capacity_profile.limits().archive_bytes { return Err(Error::Limit("selected profile archive budget".into())); }
     let package = crate::package::Package::open(bytes.clone())?;
-    let imported = crate::native::read(&package)?;
+    let mut imported = crate::native::read(&package)?;
     let (sources, bindings, parts, references, guided_record) = imported.metadata.map(|metadata| (metadata.sources, metadata.bindings, metadata.parts, metadata.references, metadata.guided_record)).unwrap_or_default();
+    let parts = crate::parts::state::imported_parts(parts, &mut imported.warnings)?;
     let mut document = Document { capacity_profile, version: 1, id, revision: 0, hash: String::new(), deck: imported.deck, sources, bindings, references, parts, report: None, guided_record,
         origin: Some(ImportedOrigin { base64: STANDARD.encode(&bytes), sha256: digest(&bytes), native: true }) };
     seal(&mut document)?;
