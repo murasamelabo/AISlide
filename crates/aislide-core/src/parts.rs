@@ -290,6 +290,19 @@ pub(super) fn validate_spec(spec: &PartSpec) -> Result<(&str, usize)> {
     Ok((category, variant))
 }
 
+/// Whether a part's text below the preflight floor is a size the preset fixes (tags, captions, badges), which the spec cannot change.
+/// A `body_size` the author lowered below `floor` is their own choice and stays actionable: raising it clears the finding.
+pub(crate) fn fixed_typography(spec: &PartSpec, floor: f64) -> bool {
+    if briefing::kind(&spec.data).is_none() { return false; }
+    // Presets with a body_size lever draw the body at `body_size` (default 16px); the other presets have no body lever.
+    let body = match &spec.data {
+        PartData::IconCards { body_size, .. } | PartData::IconRows { body_size, .. } | PartData::ShiftRows { body_size, .. }
+        | PartData::StepCards { body_size, .. } | PartData::ScreenshotCallouts { body_size, .. } => Some(body_size.unwrap_or(briefing::BODY)),
+        _ => None,
+    };
+    body.is_none_or(|size| size + 0.01 >= floor)
+}
+
 pub fn create(id: &str, spec: &PartSpec) -> Result<Element> { create_with_theme(id, spec, &crate::design::Theme::default()) }
 
 pub(crate) fn graph_render_context(id: &str, spec: &PartSpec) -> Result<(String, crate::graphs::GraphSpec, f64)> {

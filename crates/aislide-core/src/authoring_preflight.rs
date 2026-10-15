@@ -50,6 +50,8 @@ pub struct PreflightReport {
 struct Object<'a> {
 	id: &'a str,
 	scope: String,
+	// The top-level group this object sits in, so a part's own text can be told from loose text.
+	owner: Option<&'a str>,
 	bounds: Rect,
 	frame: Rect,
 	// Declared text area: a shape's explicit padding confines its text, otherwise the whole frame.
@@ -74,7 +76,7 @@ fn minimum_font(format: &TextFormat, base: f64) -> f64 {
 		.reduce(f64::min).unwrap_or(base)
 }
 
-fn collect<'a>(elements: &'a [Element], parent: Affine, scope: &str, ancestor_soft_edge: bool, objects: &mut Vec<Object<'a>>) -> Result<()> {
+fn collect<'a>(elements: &'a [Element], parent: Affine, scope: &str, owner: Option<&'a str>, ancestor_soft_edge: bool, objects: &mut Vec<Object<'a>>) -> Result<()> {
 	for element in elements {
 		if element.visual().is_some_and(|style| style.hidden) { continue; }
 		if objects.len() >= 1024 { return Err(Error::Limit("visual preflight supports at most 1024 visible objects per page".into())); }
@@ -144,9 +146,9 @@ fn collect<'a>(elements: &'a [Element], parent: Affine, scope: &str, ancestor_so
 			(points.into_iter().map(|point| transform * Point::new(point[0] * width, point[1] * height)).collect(),
 				start.iter().chain(end.iter()).map(|connection| connection.element_id.as_str()).collect())
 		} else { (Vec::new(), Vec::new()) };
-		objects.push(Object { id, scope: scope.into(), bounds, frame, text_frame, text_bounds, transform, text, font_size, characters, route, connections, container, container_item, numbered_badge, picture: matches!(element, Element::Picture { .. }), own_text_padding });
+		objects.push(Object { id, scope: scope.into(), owner, bounds, frame, text_frame, text_bounds, transform, text, font_size, characters, route, connections, container, container_item, numbered_badge, picture: matches!(element, Element::Picture { .. }), own_text_padding });
 		if let Element::Group { view_width, view_height, children, .. } = element {
-			collect(children, transform * Affine::scale_non_uniform(width / view_width, height / view_height), scope, soft_edge, objects)?;
+			collect(children, transform * Affine::scale_non_uniform(width / view_width, height / view_height), scope, owner.or(Some(id)), soft_edge, objects)?;
 		}
 	}
 	Ok(())
@@ -162,17 +164,17 @@ fn page_objects(deck: &Deck, page: usize) -> Result<Vec<Object<'_>>> {
 				if let Some(master) = design.masters.iter().find(|master| master.id == layout.master_id) {
 					for element in &master.elements {
 						if matches!(element, Element::Text { format, .. } if format.placeholder.is_some()) { continue; }
-						collect(std::slice::from_ref(element), Affine::IDENTITY, &format!("master:{}", master.id), false, &mut objects)?;
+						collect(std::slice::from_ref(element), Affine::IDENTITY, &format!("master:{}", master.id), None, false, &mut objects)?;
 					}
 				}
 			}
 			for element in &layout.elements {
 				if matches!(element, Element::Text { format, .. } if format.placeholder.is_some()) { continue; }
-				collect(std::slice::from_ref(element), Affine::IDENTITY, &format!("layout:{}", layout.id), false, &mut objects)?;
+				collect(std::slice::from_ref(element), Affine::IDENTITY, &format!("layout:{}", layout.id), None, false, &mut objects)?;
 			}
 		}
 	}
-	collect(&slide.elements, Affine::IDENTITY, "slide", false, &mut objects)?;
+	collect(&slide.elements, Affine::IDENTITY, "slide", None, false, &mut objects)?;
 	Ok(objects)
 }
 
@@ -334,6 +336,9 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		}
 		let known_badges = crate::graphs::managed_badge_pairs(document, &slide.id);
 		let objects = page_objects(deck, page)?;
+		// Text a managed part draws at sizes its preset fixes (tags, captions, badges) cannot be raised from the spec, so it is information;
+		// a body_size the author lowered below the floor stays a warning (see parts::fixed_typography).
+		let fixed_part = |object: &Object<'_>| object.owner.and_then(|owner| document.parts.iter().find(|part| part.slide_id == slide.id && part.element_id == owner)).filter(|part| crate::parts::fixed_typography(&part.spec, options.min_font_size));
 		let rendered = crate::render::render_with_effect_policy(deck, page, false, 1.0, crate::render::EffectPolicy::Preflight)?;
 		let mut chart_notices: Vec<&Object<'_>> = Vec::new();
 		for warning in rendered.warnings {
@@ -388,7 +393,12 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				push_finding(&mut report, page, &slide.id, &[object], "OFF_SLIDE", "warning", "geometry", "Transformed object extends beyond the slide", &["Move or resize the object within the slide"])?;
 			}
 			if object.characters > 0 && object.font_size.is_some_and(|size| size + 0.01 < options.min_font_size) {
-				push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &format!("Effective font is below the requested {}px floor", options.min_font_size), &["Increase font size and enlarge or reflow the frame", "Split dense content into another slide"])?;
+				match fixed_part(object) {
+					Some(part) => push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "info", "heuristic",
+						&format!("Part {} ({}) draws this text at a fixed {:.0}px, below the requested {}px floor; its preset does not let you change the size", part.element_id, part.spec.preset, object.font_size.unwrap_or_default(), options.min_font_size),
+						&["Choose a preset whose typography meets the floor, or accept the preset's fixed sizes", "Split the content across slides"])?,
+					None => push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &format!("Effective font is below the requested {}px floor", options.min_font_size), &["Increase font size and enlarge or reflow the frame", "Split dense content into another slide"])?,
+				}
 			}
 			if !object.text { continue; }
 			for other in &objects[index + 1..] {

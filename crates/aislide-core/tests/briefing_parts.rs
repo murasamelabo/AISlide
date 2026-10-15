@@ -401,3 +401,114 @@ fn composition_part_blocks_accept_briefing_presets() {
     assert_eq!(number(group, "view_width"), number(group, "width"));
     assert_eq!(number(group, "view_height"), number(group, "height"));
 }
+
+fn preflight_part(preset: &str, id: &str) -> Value {
+    let document = execute_request(json!({"op":"create_presentation","id":format!("small-{id}"),"title":"Small text"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":id,"spec":example(preset)})).unwrap();
+    execute_request(json!({"op":"preflight_presentation","document":inserted["document"],"options":{"page_indices":[0]}})).unwrap()
+}
+
+fn small_text(report: &Value) -> Vec<&Value> {
+    report["findings"].as_array().unwrap().iter().filter(|finding| finding["code"] == "SMALL_TEXT").collect()
+}
+
+#[test]
+fn issue18_fixed_part_typography_is_information_not_a_warning() {
+    let mut reported = 0;
+    for preset in BRIEFING.iter().chain(EDITORIAL.iter()) {
+        let report = preflight_part(preset, "part");
+        for finding in small_text(&report) {
+            reported += 1;
+            assert_eq!(finding["severity"], "info", "{preset}: a size the preset fixes is not an actionable warning: {finding}");
+            let message = finding["message"].as_str().unwrap();
+            assert!(message.contains(preset), "{preset}: the message names the preset: {message}");
+            assert!(message.to_lowercase().contains("fixed"), "{preset}: the message says the size is fixed: {message}");
+            let suggestions = finding["suggestions"].to_string();
+            assert!(suggestions.contains("preset") || suggestions.contains("split"), "{preset}: an executable suggestion: {suggestions}");
+        }
+    }
+    assert!(reported >= 2, "the reported presets list/agenda and list-horizontal/icon-cards must still be reported, as information");
+}
+
+#[test]
+fn issue18_reported_presets_keep_their_finding_as_information() {
+    for (preset, minimum) in [("list/agenda", 6), ("list-horizontal/icon-cards", 3)] {
+        let report = preflight_part(preset, "part");
+        let findings = small_text(&report);
+        assert!(findings.len() >= minimum, "{preset}: {report}");
+        assert!(findings.iter().all(|finding| finding["severity"] == "info"), "{preset}: {findings:?}");
+    }
+}
+
+#[test]
+fn issue18_ordinary_small_text_is_still_a_warning() {
+    let small = json!({"type":"text","id":"small","x":40,"y":40,"width":300,"height":30,"text":"Small body text","font_size":12,"color":"000000","bold":false});
+    let document = execute_request(json!({"op":"new_document","id":"ordinary-small","deck":deck(vec![small])})).unwrap();
+    let report = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
+    let findings = small_text(&report);
+    assert_eq!(findings.len(), 1, "{report}");
+    assert_eq!(findings[0]["severity"], "warning");
+    assert!(!findings[0]["message"].as_str().unwrap().to_lowercase().contains("fixed"));
+}
+
+#[test]
+fn issue18_part_text_the_author_can_resize_is_still_a_warning() {
+    // Comparison panels have a body_size lever (16-28px), so their text is not fixed typography and must keep warning.
+    let spec = json!({"version":1,"preset":"contrast/panels","title":"panels","data":{"kind":"comparison_panels","panels":[
+        {"label":"Before","items":[{"text":"Row"}]},{"label":"After","items":[{"text":"Row"}]}]}});
+    let document = execute_request(json!({"op":"create_presentation","id":"controlled","title":"Controlled"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":"part","spec":spec})).unwrap();
+    let report = execute_request(json!({"op":"preflight_presentation","document":inserted["document"],"options":{"page_indices":[0],"min_font_size":20}})).unwrap();
+    let findings = small_text(&report);
+    assert!(!findings.is_empty(), "18px panel text is below a 20px floor: {report}");
+    assert!(findings.iter().all(|finding| finding["severity"] == "warning"), "{findings:?}");
+}
+
+fn preflight_spec(spec: Value, id: &str, floor: f64) -> Value {
+    let document = execute_request(json!({"op":"create_presentation","id":format!("sized-{id}"),"title":"Body size"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":"part","spec":spec})).unwrap();
+    execute_request(json!({"op":"preflight_presentation","document":inserted["document"],"options":{"page_indices":[0],"min_font_size":floor}})).unwrap()
+}
+
+const SIZED: [&str; 5] = ["list-horizontal/icon-cards", "list/icon-rows", "before-after/shift", "flow/cards", "list-enumeration/screenshot-callouts"];
+
+fn severities(report: &Value) -> Vec<&str> { small_text(report).iter().map(|finding| finding["severity"].as_str().unwrap()).collect() }
+
+#[test]
+fn issue18_author_chosen_body_size_below_the_floor_stays_a_warning() {
+    // body_size (14-22px) is a lever the author controls, so a body they set under the floor is theirs to raise.
+    for preset in SIZED {
+        let mut spec = example(preset);
+        spec["data"]["body_size"] = json!(14);
+        let report = preflight_spec(spec, "low", 16.0);
+        let findings = small_text(&report);
+        assert!(!findings.is_empty(), "{preset}: a 14px body is below the 16px floor: {report}");
+        assert!(findings.iter().all(|finding| finding["severity"] == "warning"), "{preset}: a body the author lowered is actionable: {findings:?}");
+        assert!(findings.iter().all(|finding| !finding["message"].as_str().unwrap().to_lowercase().contains("fixed")),
+            "{preset}: the warning must not claim the size is fixed: {findings:?}");
+    }
+}
+
+#[test]
+fn issue18_body_size_at_or_above_the_floor_leaves_only_fixed_sizes_as_information() {
+    for preset in SIZED {
+        for body in [None, Some(16), Some(20)] {
+            let mut spec = example(preset);
+            if let Some(size) = body { spec["data"]["body_size"] = json!(size); }
+            let report = preflight_spec(spec, "ok", 16.0);
+            assert!(severities(&report).iter().all(|severity| *severity == "info"), "{preset} body {body:?}: what remains is the preset's fixed text: {report}");
+        }
+    }
+}
+
+#[test]
+fn issue18_a_floor_above_the_default_body_makes_it_an_author_choice() {
+    // The default body is 16px: under an 18px floor the author can raise body_size, so those findings are warnings.
+    let report = preflight_spec(example("list-horizontal/icon-cards"), "floor", 18.0);
+    let found = severities(&report);
+    assert!(!found.is_empty() && found.iter().all(|severity| *severity == "warning"), "{report}");
+    let mut spec = example("list-horizontal/icon-cards");
+    spec["data"]["body_size"] = json!(18);
+    let raised = preflight_spec(spec, "raised", 18.0);
+    assert!(severities(&raised).iter().all(|severity| *severity == "info"), "raising body_size to the floor clears the warning: {raised}");
+}

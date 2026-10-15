@@ -221,7 +221,16 @@ a waterfall `unit` and the fixed `Share (%)` unit of
 `100-add-vertical-bar-graph` sit inside the removed 88px band and make title
 removal reject; the error quotes that text and the preset. Empty axis labels and
 units draw nothing, so a chart without them keeps its frame. Chart-internal typography has not been
-newly qualified by these checks. Omitted layout retains previous placement.
+newly qualified by these checks. There are two text floors: the 12px layout floor
+above is a rejection, while preflight's `min_font_size` (default 16px, 8-48) is a
+readability target that only reports `SMALL_TEXT`. A part's own tags, captions,
+badges and labels are drawn at sizes its preset fixes (for example the 13px tag and
+caption of `list-horizontal/icon-cards`, or the text of `list/agenda`), so the spec
+offers no way to raise them; `SMALL_TEXT` on that text is `info`, names the part and
+its preset, and does not count as a warning. Text you can resize stays a warning:
+a `body_size` below the floor (14-22px, default 16px, on the presets that have one),
+the `body_size` of `contrast/panels`, and any loose text. Raising `body_size` to the
+floor clears that warning. Omitted layout retains previous placement.
 `fit:"contain"` scales the part uniformly and centers it, keeping circles and
 arcs round in frames whose aspect differs from the part canvas; the default
 `stretch` keeps legacy per-axis scaling but re-squares small markers and
