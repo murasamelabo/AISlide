@@ -1252,6 +1252,8 @@ Compact successful mutation replies include current revision/hash and Undo/Redo 
 
 Compact `part_catalog` returns 12 entries without examples/schema by default; `preset_id` returns one example. `architecture_icons` defaults to 20 metadata entries and supports a provider filter. Both accept `query`, `offset`, `limit`, and `detail:"full"`. Full detail without filters returns the legacy complete catalog. Generated `create_asset`, `create_graph_icon`, and `architecture_icon_assets` results use reusable asset IDs by default; `detail:"full"` preserves the original byte-bearing results. Core and SDK contracts are unchanged.
 
+`validate_deck({deck_id,detail?})` returns `structurally_valid`, the slide count and warnings in every profile. The validated deck is the one the session already holds, so it is returned only with `detail:"full"`. The core `validate` operation is unchanged and still returns the canonical deck. For a 12-slide report deck the MCP response is about 163 bytes instead of about 21.9KB. The call checks structure and geometry only and does not prove Office visual parity or text fit.
+
 ### Local Asset Handles
 
 `register_assets({assets:[{path,root?}]})` registers 1-32 files atomically under

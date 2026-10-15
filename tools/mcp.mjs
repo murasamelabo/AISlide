@@ -1235,7 +1235,12 @@ register('undo', 'Undo the previous complete transaction using core-verified inv
 	return { deck_id, revision: state.revision };
 });
 register('redo', 'Reapply the last undone transaction; later edits invalidate redo history.', { deck_id: handle }, false, async ({ deck_id }, signal) => { const state = getDeck(deck_id); await state.redo({ signal }); return { deck_id, revision: state.revision }; });
-register('validate_deck', 'Validate IDs, object types, text safety and page geometry. This does not prove Office visual parity or text fit.', { deck_id: handle }, true, async ({ deck_id }, signal) => requestCore({ op: 'validate', capacity_profile: getDeck(deck_id).capacityProfile, deck: getDeck(deck_id).document.deck }, { signal }));
+register('validate_deck', 'Validate IDs, object types, text safety and page geometry; returns structurally_valid, the slide count and warnings. This does not prove Office visual parity or text fit. The validated deck is the one already held in the session, so it is omitted to keep the response small; detail=full also returns it.', { deck_id: handle, detail: detailSchema }, true, async ({ deck_id, detail }, signal) => {
+        const result = await requestCore({ op: 'validate', capacity_profile: getDeck(deck_id).capacityProfile, deck: getDeck(deck_id).document.deck }, { signal });
+        if (detail === 'full') return result;
+        const { deck: _deck, ...summary } = result;
+        return summary;
+});
 register('export_pptx', 'Save one native PPTX including optional sources/bindings in internal Custom XML, without an external checkpoint. Uses the operator-approved --output-dir and never overwrites an existing file. A plain .pptx filename is required.', { deck_id: handle, filename: filenameSchema }, false, async ({ deck_id, filename }, signal) => {
 	if (!outputDirectory) throw new Error('Saving requires --output-dir at server startup');
 	 const { base64 } = await getDeck(deck_id).exportPresentation({ signal });
