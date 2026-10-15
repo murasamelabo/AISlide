@@ -297,11 +297,14 @@ pub(crate) fn graph_render_context(id: &str, spec: &PartSpec) -> Result<(String,
     graph_context(id, spec, graph)
 }
 
+/// A diagram whose own title is removed by the layout shifts up by the 88px title band; every other part keeps its full height.
+pub(crate) fn graph_title_band_removed(graph: &crate::graphs::GraphSpec, layout: &PartLayout) -> bool { graph.show_title && !layout.show_title }
+
 fn graph_context(id: &str, spec: &PartSpec, graph: &crate::graphs::GraphSpec) -> Result<(String, crate::graphs::GraphSpec, f64)> {
     let Some(layout) = &spec.layout else { return Ok((id.into(), graph.clone(), 512.0)); };
     let mut rendered_graph = graph.clone();
     rendered_graph.show_title = graph.show_title && layout.show_title;
-    let content_height = if graph.show_title && !layout.show_title {
+    let content_height = if graph_title_band_removed(graph, layout) {
         for node in &mut rendered_graph.nodes { node.y -= 88.0; }
         for group in &mut rendered_graph.groups { group.y -= 88.0; }
         for edge in &mut rendered_graph.edges { for point in &mut edge.waypoints { point[1] -= 88.0; } }

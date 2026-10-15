@@ -88,3 +88,62 @@ fn ranking_prefers_slots_near_the_part_canvas_for_shape_sensitive_parts() {
     assert_eq!(free["patterns"][0]["pattern_id"], "focus/full");
     assert!(execute_request(json!({"op":"rank_layout_patterns","part":"missing/preset"})).is_err());
 }
+
+/// A graph that shows its title keeps its nodes below the 88px title band; one without a title starts at the top.
+fn titleless_graph(show_title: bool) -> Value {
+    let top = if show_title { 88.0 } else { 0.0 };
+    json!({"version":1,"title":"Aspect","show_title":show_title,
+        "nodes":[{"id":"a","label":"A","kind":"rounded_rectangle","x":0,"y":top,"width":240,"height":120},
+                 {"id":"b","label":"B","kind":"rounded_rectangle","x":900,"y":380,"width":240,"height":120}],
+        "edges":[{"id":"e1","source":"a","target":"b"}]})
+}
+
+fn graph_part_findings(graph_title: bool, layout_title: bool, height: f64) -> (Value, Vec<Value>) {
+    let spec = json!({"version":1,"preset":"diagram/custom","title":"Aspect","data":{"kind":"diagram","graph":titleless_graph(graph_title)},
+        "layout":{"x":64,"y":144,"width":1152,"height":height,"show_title":layout_title}});
+    let document = execute_request(json!({"op":"create_presentation","id":"aspect-graph","title":"Aspect"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":"g1","spec":spec.clone()})).unwrap();
+    let report = execute_request(json!({"op":"preflight_presentation","document":inserted["document"],"options":{"page_indices":[0]}})).unwrap();
+    let findings = report["findings"].as_array().unwrap().iter().filter(|finding| finding["code"] == "PART_ASPECT_DISTORTED").cloned().collect();
+    (execute_request(json!({"op":"part_aspect","spec":spec})).unwrap(), findings)
+}
+
+#[test]
+fn issue15_graph_without_its_own_title_maps_the_full_canvas_height() {
+    // Neither the graph nor the layout shows a title: the renderer keeps all 512px of content height.
+    let (profile, equal_scale) = graph_part_findings(false, false, 512.0);
+    assert_eq!(profile["canvas"][1], 512.0, "{profile}");
+    assert!(equal_scale.is_empty(), "a 1152x512 frame is drawn at equal scale and must not warn: {equal_scale:?}");
+    let (profile, squashed) = graph_part_findings(false, false, 424.0);
+    assert_eq!(profile["canvas"][1], 512.0, "{profile}");
+    assert_eq!(squashed.len(), 1, "a 1152x424 frame squashes the figure to 0.83x and must warn: {squashed:?}");
+}
+
+#[test]
+fn issue15_graph_with_a_title_still_loses_the_removed_title_band() {
+    // The graph owns a title that the layout removes: the renderer shifts the figure up by 88px and maps 424px.
+    let (profile, equal_scale) = graph_part_findings(true, false, 424.0);
+    assert_eq!(profile["canvas"][1], 424.0, "{profile}");
+    assert!(equal_scale.is_empty(), "{equal_scale:?}");
+    let (_, stretched) = graph_part_findings(true, false, 512.0);
+    assert_eq!(stretched.len(), 1, "{stretched:?}");
+    // A layout that keeps its title always maps 512px, whatever the graph says.
+    let (profile, kept) = graph_part_findings(true, true, 512.0);
+    assert_eq!(profile["canvas"][1], 512.0, "{profile}");
+    assert!(kept.is_empty(), "{kept:?}");
+}
+
+#[test]
+fn issue15_rendered_scale_agrees_with_the_preflight_profile() {
+    // The warning is only meaningful if the rendered node height follows the same canvas height as the profile.
+    for (graph_title, layout_title, height, canvas) in [(false, false, 424.0, 512.0), (true, false, 424.0, 424.0), (false, true, 424.0, 512.0)] {
+        let spec = json!({"version":1,"preset":"diagram/custom","title":"Aspect","data":{"kind":"diagram","graph":titleless_graph(graph_title)},
+            "layout":{"x":64,"y":144,"width":1152,"height":height,"show_title":layout_title}});
+        let profile = execute_request(json!({"op":"part_aspect","spec":spec.clone()})).unwrap();
+        assert_eq!(profile["canvas"][1], canvas, "graph title {graph_title}, layout title {layout_title}");
+        let part = execute_request(json!({"op":"create_part","id":"probe","spec":spec})).unwrap();
+        let node = part["children"].as_array().unwrap().iter().find(|child| child["id"].as_str().is_some_and(|id| id.ends_with("-n-a"))).unwrap();
+        let expected = 120.0 * height / canvas;
+        assert!((node["height"].as_f64().unwrap() - expected).abs() < 0.5, "node height {} should be {expected}", node["height"]);
+    }
+}

@@ -102,8 +102,10 @@ pub(crate) fn restore_marker(element: &mut Element, horizontal: f64, vertical: f
 
 /// Height of the canvas region mapped into a part layout frame.
 pub fn content_height(spec: &PartSpec) -> f64 {
-    let show_title = spec.layout.as_ref().is_none_or(|layout| layout.show_title);
-    if show_title { 512.0 } else if spec.preset == "venn/focus" { 432.0 } else { 424.0 }
+    let Some(layout) = &spec.layout else { return 512.0 };
+    // A diagram only loses the title band when its own title was drawn there (mirrors `graph_context`).
+    if let super::PartData::Diagram { graph } = &spec.data { return if super::graph_title_band_removed(graph, layout) { 424.0 } else { 512.0 }; }
+    if layout.show_title { 512.0 } else if spec.preset == "venn/focus" { 432.0 } else { 424.0 }
 }
 
 pub fn profile(spec: &PartSpec) -> Result<AspectProfile> {
