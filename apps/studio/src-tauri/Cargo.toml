@@ -1,0 +1,21 @@
+﻿[package]
+name = "aislide-studio"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde_json = "1"
+aislide-core = { path = "../../../crates/aislide-core" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

@@ -1,0 +1,338 @@
+﻿# AISlide Client
+
+This private, transport-independent client is shared by Studio and MCP. Rust owns schemas, layouts, transactions, validation, and PPTX behavior; the client only manages transport and bounded session history. It is not published to npm.
+
+The normal file workflow is `client.openPresentation(id, pptxBase64)` and `session.exportPresentation()`. It uses one standard PPTX and retains optional sources/bindings internally. Current native XML is always authoritative. `openProject()` / `exportProject()` below remain legacy exact-checkpoint APIs and are not required for normal editing.
+
+```js
+const opened = await client.openPresentation('document-id', pptxBase64);
+const session = opened.session;
+const exported = await session.exportPresentation();
+// exported.base64 is one .pptx; there is no external checkpoint.
+```
+
+```js
+import { AislideClient } from './packages/client/index.mjs';
+import { requestCore } from './tools/core-client.mjs';
+
+const client = new AislideClient(requestCore);
+const source = await client.ingest({
+  name: 'provided.csv', format: 'csv',
+  base64: Buffer.from('Quarter,Value\nQ1,10\nQ2,12\n').toString('base64'),
+});
+const result = await client.dataReport(source, {
+  title: 'Provided values', period: 'Synthetic example', table_index: 0,
+  category_column: 0, value_columns: [1], row_start: 0, row_count: 2,
+  chart_kind: 'column',
+});
+const session = await client.createDocument({
+  id: crypto.randomUUID(), deck: result.compiled.deck, report: result.report,
+  sources: [source], bindings: result.bindings,
+});
+await session.transact([
+  { op: 'replace', path: '/deck/slides/0/background', value: 'EDF3F0' },
+], { expectedRevision: session.revision });
+await session.undo();
+const exported = await session.exportProject();
+const restored = await client.openProject(exported);
+console.log(restored.revision, restored.document.sources[0].sha256);
+```
+
+The transport is `(request, { signal }?) => Promise<JSON>`. The Node bridge runs the fixed compiled CLI without a shell. Studio supplies its same-origin development HTTP or Tauri IPC transport. An aborted or failed request never commits client state; calls are serialized per session.
+
+`session.document` returns a clone. `transact()` uses RFC 6902 JSON Patch against `{deck, sources, bindings, parts?, report, origin?}`, with explicit revision and hash preconditions in Rust. Operations on a batch are atomic. Undo/Redo receipts also pass through the normal transaction checks; they are not authorization capabilities. History is limited to 30 receipts and an approximate serialized-size cap, and is not persisted in checkpoints.
+
+## Workspace Commands
+
+作成時にテーマとフォントを決める例です。`Noto Sans JP` は日本語対応のインストール済みファミリーと確認できた場合に限り使い、なければ作成前に利用可能な名前へ置き換えます。`setup` はプリセット、明示テーマ（指定時）、フォントの順に revision 0 の初期状態へ適用され、フォントをインストールしません。タイトル位置・マスター・ヘッダー・フッターは最初に決めて再利用し、parts / graphs の後から一括再スタイルしません。
+
+```js
+const session = await client.createPresentation('workspace', '技術レビュー（架空例）', {
+  setup: { design_preset: 'minimal', font_family: 'Noto Sans JP' },
+});
+await session.editSlides([
+  { op: 'insert', id: 'icons', after: 'slide-1', title: 'Service icons' },
+], { expectedRevision: session.revision });
+await session.addAsset('icons', {
+  id: 'provided-icon', base64: svgBase64, mime_type: 'image/svg+xml',
+  alt: 'Provided service icon', size: 96,
+}, { expectedRevision: session.revision });
+await session.editElements('icons', [
+  { op: 'duplicate', id: 'provided-icon', new_id: 'icon-copy' },
+], { expectedRevision: session.revision });
+await session.undo();
+const exported = await session.exportPresentation();
+const reopened = await client.openPresentation('workspace-reopened', exported.base64);
+await reopened.session.editSlides([
+  { op: 'duplicate', slide_id: 'icons', id: 'icons-copy' },
+  { op: 'move', slide_id: 'icons-copy', index: 0 },
+]);
+```
+
+`client.createAsset()` is stateless; `session.addAsset()` inserts under revision, cancellation and Undo guards. Accepted inert SVG is retained as a native SVG picture with an inspected transparent PNG fallback, not converted into editable shape paths. Arbitrary SVG, active content and external references are rejected. Native slide copies retain original XML and independently copy chart/workbook resources. Unsupported custom shows/sections or unsafe native copies fail without changing the session. Default `large` permits 256 slides / 32 MiB complete document; explicit `standard` retains 128 / 8 MiB and `legacy` 32 / 2 MiB. Constructor and create/open options accept `capacityProfile`; session operations preserve it. `setCapacityProfile()` verifies before changing the selection. `recoveryEnvelope` and `client.recoverSession()` preserve verified bounded Undo/Redo; legacy document-only recovery starts empty history.
+
+## Master Presets
+
+For content-oriented authoring on a generated empty slide, reuse one style
+object and let the core place the title, body and footer. Imported/nonempty
+slides reject this operation; use existing explicit editing for those.
+
+```js
+const commonStyle = { title_size: 40, body_size: 24, padding: 24 };
+await session.composeSlide('slide-1', {
+  id: 'overview',
+  spec: {
+    title: 'Synthetic overview', footer: 'Synthetic, not measured', style: commonStyle,
+    blocks: [{ kind: 'cards', items: [{ label: 'First', detail: 'Assumption' }, { label: 'Second', detail: 'Unverified' }] }],
+  },
+}, { expectedRevision: session.revision, expectedHash: session.getSummary({ limit: 0 }).hash });
+await session.setRichText('slide-1', {
+  id: 'overview-b0-c0', paragraphs: [{ runs: [{ text: 'One content source', style: { bold: true } }] }],
+});
+const graph = await client.layoutGraph({ version: 1, title: 'Synthetic flow', columns: 2,
+  nodes: [{ id: 'first', label: 'First' }, { id: 'second', label: 'Second' }],
+  edges: [{ id: 'flow', source: 'first', target: 'second' }],
+});
+```
+
+Use a `composeSlide` block `{kind:'graph',input:...}` to lay out and insert
+the graph in one mutation without sending the resulting coordinates back.
+
+Pattern mode fills a layout pattern instead of stacking blocks. Frames, type
+sizes, spacing and theme colors come from `client.designTokens(deck)`, so a
+preset deck keeps its master decorations and scale in Japanese or English:
+
+```js
+const tokens = await client.designTokens(session.document.deck); // source: 'preset:trust' after setup
+await session.composeSlide('slide-2', {
+  id: 'pillars',
+  spec: {
+    title: '計画を支える三つの柱', footer: 'Synthetic example',
+    pattern: { id: 'columns/3' },
+    slots: {
+      'column-1': { kind: 'cards', items: [{ label: '明確さ', detail: '1枚に1メッセージ。' }] },
+      'column-2': { kind: 'metric', value: '42%', label: 'Synthetic share' },
+      'column-3': { kind: 'text', paragraphs: [{ runs: [{ text: 'Start with the conclusion.' }] }] },
+    },
+  },
+});
+```
+
+Undersized slots and overflowing text reject with the pattern fallback; text is
+not reduced in ordinary text blocks. Native tables may fall back to caption
+size; semantic recipes reject that fallback. Marker slots such as step arrows
+and numbers are drawn by core.
+
+Grid layout is not hierarchical; groups are unsupported. Parts keep their
+existing fitting rules; ordinary composition text rejects overflow without
+shrinking. `setRichText` derives plain text and retains strict canonical
+validation. See [semantic contracts](../../docs/api.md#initial-setup-and-semantic-composition).
+
+```js
+const presets = await client.designPresets();
+const session = await client.createPresentation('preset-example', 'Design review');
+await session.applyDesignPreset('minimal', { expectedRevision: session.revision });
+await session.assignLayout('slide-1', 'preset-two-columns');
+const exported = await session.exportPresentation();
+```
+
+The seven presets define native masters/layouts, palette and font roles, side margins, gutters and content regions. Application retains existing slide content and original masters; custom or edited template conflicts fail before commit. The normal session revision, cancellation and Undo guards apply. New blank slides inherit the selected preset master. New parts on `preset-visual-content` are fitted to the layout's visual region without moving existing content. Reopened documents can add a supported preset structure within native preservation and capacity limits; an existing dedicated preset structure must pass its compatibility checks before replacement.
+
+## Semantic Recipes
+
+Select by the information relationship, then preview actual supplied content
+before applying. Recipes reuse the current design tokens, native parts and
+normal transaction history; they are not model inference or quality scores.
+
+```js
+const candidates = await client.recommendRecipes({ relationship: 'layers', item_count: 2 });
+const recipeSession = await client.createPresentation('recipes', 'Synthetic recipes');
+const selection = {
+  id: 'roles', variant: candidates.candidates[0].variant,
+  input: {
+    version: 1, title: 'Synthetic layer responsibilities',
+    source_caption: 'Synthetic example, not product documentation',
+    takeaway: 'Interpret evidence before acting.', notes: 'Supplied speaker notes.',
+    data: { kind: 'layer_role_map', layer_heading: 'Layer', role_heading: 'Responsibility', layers: [
+      { id: 'signals', label: 'Signals', role: 'Events and telemetry' },
+      { id: 'actions', label: 'Actions', role: 'Approved response' },
+    ] },
+  },
+};
+const preview = await recipeSession.previewRecipe('slide-1', selection, { maxDimension: 1280 });
+await recipeSession.applyRecipe('slide-1', selection, {
+  expectedRevision: preview.base_revision, expectedHash: preview.base_hash,
+  candidateHash: preview.candidate_hash,
+});
+await recipeSession.undo();
+```
+
+The catalog contains `layer-role-map`, `source-reading` (including a wide figure
+above its readings), `activity-outcome`, `entity-instance-map` and
+`screenshot-reading` (supplied source-relative callouts). Recommendations accept
+reader goal, image dimensions and exact-position need, and may return
+`no_suitable_recipe` with rejected alternatives. Inspect the reasons and decision
+checks; supplied classification is not automatically verified.
+
+For shared technical briefing chrome use
+`client.componentStyles(session.document.deck, 'technical_briefing')` before
+content. Set `component_profile:'technical_briefing'` on recipe inputs and
+pattern compositions, and reuse the returned roles for manual elements. This
+is optional and does not overwrite an imported template. Record the page's
+reader question, actual relation, primary visual and selected/rejected reasons
+in the existing planning ledger, not as arbitrary MCP arguments.
+
+Preview leaves history and notes unchanged. Existing content, notes or native
+source slides reject. Apply requires all preview anchors; changes after
+preview, including Undo's newer revision, require another preview. Supplied
+image bytes, alt text, source caption, takeaway and notes remain intact.
+Text that cannot fit requires another variant or a split. Existing compact
+part headings/conditions can be 13px; inspect the target reading environment.
+`layout_checked` is not semantic truth, image-rights or Office visual-parity
+verification. See [recipe contracts](../../docs/api.md#semantic-recipes).
+
+## Guided Authoring
+
+```js
+const profiles = await client.bestPracticeProfiles();
+const guide = await client.bestPracticeGuide('consulting-decision');
+const review = await client.validateGuidedPresentation(input);
+if (!review.ready) throw new Error(review.issues.join('; '));
+const created = await client.createGuidedPresentation('new-guided-document', input);
+const exported = await created.session.exportPresentation();
+```
+
+`input` follows the `GuidedInput` schema returned with the guide; the complete [contract and four English profiles](../../docs/authoring/README.md) describe claims, logical ledger, body evidence paths, numeric source declarations and decision issues. [The executable MCP demo](../../tools/guided-demo.mjs) contains complete synthetic inputs for all four profiles.
+
+Creation uses the shared core and returns a new session only on success. Early and late cancellation are rejected. Existing documents are never replaced, and file output is separate. `validation.ready` means compilable input, not verified source truth or a semantically justified conclusion. Review requirements and `model_inference:false` are explicit. The guide's 48 consulting patterns include manual/composed designs; only `native-part` and the consulting-specific `C02`/`C03` templates are automatic.
+
+`input.authoring.ledger_notes` defaults to `full`, preserving the existing note text. `summary` puts supplied speaker text before a readable question/claim/evidence-reference summary; `none` includes only speaker text. Both retain the complete typed creation input (except duplicated speaker notes) in `created.session.document.guided_record` and PPTX Custom XML, including after native reopening. Speaker text is capped at 4000 Unicode scalars and complete notes at 8000; the separate record is capped at 1 MiB JSON and total provenance XML at 2 MiB, which summary/none creation checks after XML escaping. Overflow rejects without truncation. Records containing non-XML 1.0 characters or nesting deeper than 30 levels below the provenance root are rejected rather than saved unreopenable; CR/CRLF roundtrip unchanged, and removing `/guided_record` removes it from later PPTX output. `session.inspectDocument()` scans the record, and a confirmed clean copy with `sources` or `notes` removes it.
+
+Notes and complete creation records need privacy review before redistribution: `none` does not redact evidence from the file. They are distinct from the live source bindings API. Subsequent normal edits can invalidate reasoning without rerunning guided validation or updating the creation snapshot. Part geometry and data remain editable through the usual native metadata and Undo safeguards.
+
+## Metadata Parts
+
+The catalog contains 111 original layouts across 36 categories, each with a typed synthetic example. The original 108 recipes are retained. New `list/rows`, `list-horizontal/columns` and `list-enumeration/grid` entries include optional `recommended`, `use_when` and `avoid_when` metadata for selecting frameless peer lists by purpose. Do not assume exactly three entries per category. Given an existing session and a slide with room for a part:
+
+```js
+const catalog = await client.partCatalog();
+const preset = catalog.presets.find((entry) => entry.id === 'vertical-bar-graph/balanced');
+const spec = structuredClone(preset.example);
+spec.title = 'Quarterly volume';
+spec.data.categories = ['Q1', 'Q2', 'Q3'];
+spec.data.series = [{ name: 'Volume', values: [12, 24, 18] }];
+const slideId = session.document.deck.slides[0].id;
+await session.addPart(slideId, { id: 'quarterly', spec }, { expectedRevision: session.revision });
+spec.data.series[0].values[0] = 16;
+await session.updatePart(slideId, { id: 'quarterly', spec }, { expectedRevision: session.revision });
+await session.undo();
+const exported = await session.exportPresentation();
+const reopened = await client.openPresentation('reopened', exported.base64);
+console.log(reopened.session.document.parts[0].stale);
+```
+
+`client.createPart({id,spec,theme?})` returns a native group for preview without attaching semantic metadata. Use session `addPart`/`updatePart` for persistent metadata, revision guards and history. Root placement is retained on update. Native XML and embedded workbook changes make mismatching metadata stale; update then fails instead of replacing manual content. Deleting a part removes its metadata in the same undoable transaction. Data, source content and metadata remain document-private even though only one PPTX file is required. See the [API contracts](../../docs/api.md) for supported inputs and limits.
+
+To retain manual edits but stop managing one part, use
+`session.detachPart(slideId, { id }, { expectedRevision: session.revision, expectedHash })`.
+It removes only the selected metadata record, including a stale record; figures,
+source bindings and the immutable origin remain. The operation is atomic and has
+one Undo entry. It does not regenerate or remove the figures. The MCP equivalent
+is `detach_part({deck_id,expected_revision,expected_hash?,slide_id,id})`.
+Signed, encrypted or edit-protected native packages reject detach and all other
+native edits, including ordinary notes changes and slide insertion/removal.
+Rejection errors identify the operation and detected protection marker; no-op
+export remains byte-preserving. Classification labels are not removed or downgraded.
+
+## Architecture Graphs
+
+Given a session and an existing slide with room for a graph:
+
+```js
+const catalog = await client.graphCatalog();
+const spec = structuredClone(catalog.examples[0].spec);
+spec.title = 'Service architecture';
+const slideId = session.document.deck.slides[0].id;
+await session.addGraph(slideId, { id: 'architecture', spec }, { expectedRevision: session.revision });
+await session.applyGraph(slideId, {
+  id: 'architecture',
+  operations: [{ op: 'move', ids: [spec.nodes[0].id], dx: 24, dy: 16 }],
+}, { expectedRevision: session.revision });
+const exported = await session.exportPresentation();
+const reopened = await client.openPresentation('architecture-reopened', exported.base64);
+console.log(reopened.session.document.parts.find((part) => part.element_id === 'architecture').stale);
+await session.undo();
+```
+
+`client.createGraph({id,spec,theme?})` previews native elements; `client.transformGraph(spec,operations)` validates a candidate without modifying a session. Use `updateGraph` for a complete specification or `applyGraph` for node/edge/boundary operations. Both preserve root placement and reject stale metadata. Limits are in the [API contract](../../docs/api.md#architecture-graphs). A full official-MCP example is [tools/graphs-demo.mjs](../../tools/graphs-demo.mjs).
+
+### Local Cloud Icon Catalog
+
+`client.architectureIcons(options?)` returns all 1,498 compiled metadata entries, vendor notices and provenance even when the local pack is unavailable. `configured` means only that the local acknowledgment matches this exact catalog; it does not certify every image or grant redistribution rights. Setup is an explicit operator action described in the [cloud icon guide](../../docs/authoring/cloud-icons.md), never an API download.
+
+```js
+const catalog = await client.architectureIcons();
+if (!catalog.configured) throw new Error(catalog.message);
+const { icons } = await client.architectureIconAssets(['azure/entra/microsoft-entra-id']);
+const { base64, mime_type, alt } = icons[0];
+const icon = { base64, mime_type, alt };
+const preview = await client.createGraph({ id: 'identity-graph', spec: {
+    version: 1, title: 'Synthetic identity boundary',
+    groups: [
+      { id: 'cloud', label: 'Cloud', x: 24, y: 88, width: 700, height: 400, icon },
+      { id: 'identity', label: 'Identity', parent: 'cloud', x: 48, y: 144, width: 600, height: 300 },
+    ],
+    nodes: [{ id: 'entra', label: alt, presentation: 'icon', icon, group: 'identity',
+      x: 80, y: 200, width: 160, height: 140, font_size: 16 }],
+  },
+});
+```
+
+`presentation: 'icon'` requires an icon; omitted presentation keeps legacy Card output. Boundary `parent` and `icon` are optional, with at most 16 boundaries/four levels; all coordinates above are absolute, not parent-relative. Containment reserves 40px for the heading and 8px side/bottom padding. Ancestor moves affect descendants once; removal promotes children without moving their absolute bounds. Nested grid rejects. Native pictures, editable labels and connection anchors stay separate within one root, not nested PowerPoint groups. Use `session.addGraph` to commit; the resulting PPTX reopens offline without the pack. Limits remain in the [graph contract](../../docs/api.md#architecture-graphs).
+
+Asset requests accept 1..60 distinct catalog IDs, preserve requested order and original PNG bytes (including 512px sources), and return `{ icons: ArchitectureIconAsset[] }`. Each asset adds `id`, actual `width` and `height`; pass only `base64`, `mime_type` and the full-service-name `alt` to strict `GraphIcon` inputs. Do not send the original PNG through `createGraphIcon`, which can thumbnail it. Read-only MCP tools are `architecture_icons` and `architecture_icon_assets` with the same limits.
+
+Every batch verifies local consent and all selected size/hash/PNG/dimension checks before returning any assets. Limits are 1 MiB per PNG and 4 MiB total raw PNG bytes before Base64 encoding; oversized batches must be split. Existing transport/profile response limits still apply. No request can supply paths, provider URLs or alternate manifests. The host-only `AISLIDE_ICON_PACK_ROOT` selects an absolute local version directory; all ancestor symlinks and Windows reparse points are rejected. These portable path and opened-file checks are not an adversarial directory-handle sandbox; keep the cache user-owned and free from concurrent hostile modification. Runtime performs no network or file writes.
+
+For a custom icon on an existing node, prepare the bytes using the graph-specific helper and replace the complete node specification:
+
+```js
+const icon = await client.createGraphIcon({
+  base64: svgBase64, mime_type: 'image/svg+xml', alt: 'Service icon',
+});
+const graph = session.document.parts.find((part) => part.element_id === 'architecture').spec.data.graph;
+const node = graph.nodes.find((entry) => entry.id === 'api');
+await session.applyGraph(slideId, {
+  id: 'architecture', operations: [{ op: 'put_node', node: { ...node, icon } }],
+}, { expectedRevision: session.revision });
+await session.undo();
+```
+
+The helper accepts supplied SVG/PNG/JPEG bytes and returns PNG/JPEG `GraphIcon` data fitted to 256px; it neither fetches a URL nor mutates the session. SVG is not retained as editable paths. Existing small raster bytes are preserved. Set `icon: null` on a complete `put_node` replacement to remove the icon; for an icon-mode node, also set `presentation: 'card'` in that same replacement. Native picture fingerprints participate in stale-metadata checks. `node tools/graphs-demo.mjs --icons` exercises all six node shapes with 18 icons across five slides, native icon replacement and byte-identical Undo.
+
+## Design Helpers
+
+Transactional design and insertion helpers apply to authored documents and the supported native subset of reopened presentations:
+
+```js
+const design = await client.designDefaults();
+const catalog = await client.objectCatalog();
+await session.updateDesign(design, { expectedRevision: session.revision });
+const slideId = session.document.deck.slides[0].id;
+await session.assignLayout(slideId, 'title-content', { expectedRevision: session.revision });
+await session.addObject(slideId, { id: 'callout', kind: 'shape', preset: 'wedgeRoundRectCallout' }, { expectedRevision: session.revision });
+const theme = structuredClone(design.theme);
+theme.colors.accent1 = 'B53055';
+await session.applyTheme(theme, { expectedRevision: session.revision });
+console.log(catalog.charts);
+```
+
+`client.createObject()` returns a validated element without mutating a session. Session helpers hold the same busy guard across the core transformation and commit, retain undo receipts, and check cancellation before committing. Reopened designs support ID-based master/layout additions, removals and reassignment, with immutable origins and unknown-XML/reference guards. Ordinary native shapes and other objects are editable only within their represented subset; unsupported replacements fail rather than flatten content. See the [authoring model](../../docs/api.md#authoring-model) for rich text, visual styles, paths, master themes and fields.
+
+`client.authoringCapabilities()` and `client.designCapabilities()` expose operation limits and supported subsets. The object catalog has 24 chart kinds: 18 classic and six chartEx; see the [chartEx guide](../../docs/authoring/chart-ex.md) for the histogram Office/schema compatibility exception. Full method signatures and payloads are in [index.d.mts](index.d.mts) and [types.ts](types.ts), including search/replacement, selection, image/table/vector editing, bounded Boolean operations, review and comments. See [capability discovery](../../docs/api.md#capability-discovery), [local proofing](../../docs/authoring/proofing-format-painter.md), [document fonts](../../docs/authoring/fonts.md) and [master fields and themes](../../docs/authoring/master-fields-themes.md) for scoped contracts rather than assuming general Office parity.
+
+`exportProject()` rejects stale source bindings and measured text errors in newly authored documents. It returns PPTX base64 and a hash-bound checkpoint, but does not itself write to disk. The native application and MCP use create-new publication. Browser downloads can require permission for multiple files.
+
+`importPresentation(id, base64)` returns a session retaining the original archive, approximate-preview warnings and per-object writable fields. Edits outside the supported fields fail before state commits. Imported documents cannot detach or change their origin within a transaction; create a new document for authoring.
+
+Sources and checkpoints can contain private input data. Store them with the same care as the source presentation. Unkeyed SHA-256 hashes prove neither identity nor factual truth. Exact project reopening is guaranteed for the same exporter checkpoint; exporter/schema migrations are not yet supported.

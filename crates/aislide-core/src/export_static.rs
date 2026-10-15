@@ -1,0 +1,1264 @@
+﻿//! In-memory static export of the validated native scene. No files, Office,
+//! browser, network, or source mutations. Scene pixels are 1/96 inch; scale
+//! changes raster resolution, not PDF paper size. PDF uses vector paths,
+//! including outlined text, and embedded raster pictures. Top-level objects
+//! containing generated effects are rasterized at 2x with an explicit warning;
+//! other objects remain vector. SVG pictures use the warned PNG fallback.
+//! A positioned invisible Unicode layer provides search/selection and basic
+//! structure tags; visible text remains outlined, not editable. Figures use
+//! tagged nonpainting proxies; visual artwork is an Artifact. No font programs
+//! are embedded. This is not PDF/A, PDF/UA or WCAG certification.
+//!
+//! Limits: 1-32 unique selected pages from a validated deck (up to 128 slides),
+//! scale 0.01-16, output edges <=8192, combined
+//! encoded artifacts <=32 MiB (caller may lower), cumulative RGBA <=128 MiB.
+//! Working raster accounting reserves 64 MiB for scene/media/output and allows
+//! three raster buffers in the remaining 64 MiB. These are allocation budgets,
+//! not an OS RSS/deadline guarantee: installed-font caches and library overhead
+//! are outside that accounting. Hosts needing hard isolation must supply it.
+//! Preview shrink retries may retain up to 16 MiB of SVG/warning allocations
+//! within that same working budget. Trees and rasters are rebuilt at each scale.
+//! Transparent PNG includes RGBA; JPEG composites onto the explicit RGB matte.
+//! Warnings may be escalated with deny_warnings; unsupported content always
+//! rejects. Source validation, image validation and scene limits are not waived.
+use crate::{
+    model::{validate_deck, Deck, Element, Slide},
+    render, Error, Result,
+};
+use image::{ExtendedColorType, ImageEncoder};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeSet, io::Write};
+
+pub const MAX_DIMENSION: u32 = 8192;
+pub const MAX_RENDER_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_SVG_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PREVIEW_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
+struct PreviewScene {
+    svg: String,
+    warnings: Vec<RenderWarning>,
+    effects_omitted: bool,
+}
+
+impl PreviewScene {
+    fn allocated_bytes(&self) -> usize {
+        self.svg.capacity()
+            + self.warnings.capacity() * std::mem::size_of::<RenderWarning>()
+            + self.warnings.iter().map(|warning| {
+                warning.code.capacity() + warning.element_id.capacity() + warning.message.capacity()
+            }).sum::<usize>()
+    }
+}
+
+struct CachedPreviewScene {
+    page_index: usize,
+    validated_scale: f64,
+    transparent: bool,
+    scene: PreviewScene,
+}
+
+enum PreviewSceneRef<'a> {
+    Cached(&'a PreviewScene),
+    Uncached(PreviewScene),
+}
+
+impl AsRef<PreviewScene> for PreviewSceneRef<'_> {
+    fn as_ref(&self) -> &PreviewScene {
+        match self { Self::Cached(scene) => scene, Self::Uncached(scene) => scene }
+    }
+}
+
+struct PreviewSceneCache {
+    entries: [Option<CachedPreviewScene>; 8],
+    allocated_bytes: usize,
+    limit: usize,
+}
+
+impl PreviewSceneCache {
+    /// Reserve the largest possible page or montage (plus rounding) and three
+    /// raster buffers before retaining anything, including on failed encodes.
+    fn new(options: &PreviewOptions) -> Self {
+        let edge = options.max_dimension as usize + 1;
+        let working_bytes = 64 * 1024 * 1024 + edge * edge * 4 * 3 + std::mem::size_of::<Self>();
+        let limit = if matches!(options.overflow, PreviewOverflow::Shrink) {
+            MAX_PREVIEW_CACHE_BYTES.min(MAX_RENDER_BYTES.saturating_sub(working_bytes))
+        } else { 0 };
+        Self { entries: std::array::from_fn(|_| None), allocated_bytes: 0, limit }
+    }
+
+    /// Only scenes without omitted effects are retained. Their filter-budget
+    /// check covers smaller scales for this immutable request, never larger
+    /// ones. Omitted effects must be reconsidered at every attempted scale.
+    /// Do not retain RenderedSlide text/glyph metadata, trees or decoded images.
+    fn scene(&mut self, deck: &Deck, page_index: usize, options: &ExportOptions) -> Result<PreviewSceneRef<'_>> {
+        if let Some(slot) = self.entries.iter().position(|entry| {
+            entry.as_ref().is_some_and(|entry| entry.page_index == page_index
+                && entry.transparent == options.transparent && options.scale <= entry.validated_scale)
+        }) {
+            return self.entries[slot].as_ref().map(|entry| PreviewSceneRef::Cached(&entry.scene))
+                .ok_or_else(|| Error::Invalid("preview cache entry missing".into()));
+        }
+        let scene = render_preview_scene(deck, page_index, options)?;
+        let bytes = scene.allocated_bytes();
+        if scene.effects_omitted || bytes > self.limit.saturating_sub(self.allocated_bytes) {
+            return Ok(PreviewSceneRef::Uncached(scene));
+        }
+        let Some(slot) = self.entries.iter().position(Option::is_none) else {
+            return Ok(PreviewSceneRef::Uncached(scene));
+        };
+        self.allocated_bytes += bytes;
+        let entry = self.entries[slot].insert(CachedPreviewScene {
+            page_index, validated_scale: options.scale, transparent: options.transparent, scene,
+        });
+        Ok(PreviewSceneRef::Cached(&entry.scene))
+    }
+}
+
+fn render_preview_scene(deck: &Deck, page_index: usize, options: &ExportOptions) -> Result<PreviewScene> {
+    #[cfg(test)]
+    preview_cache_tests::SCENE_RENDERS.with(|count| count.set(count.get() + 1));
+    let scene = render::render_preview_at_scale(deck, page_index, options.transparent, options.scale)?;
+    Ok(PreviewScene { svg: scene.svg, warnings: scene.warnings, effects_omitted: scene.effects_omitted })
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewLayout {
+    #[default]
+    Pages,
+    ContactSheet,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewFormat {
+    #[default]
+    Png,
+    Jpeg,
+}
+
+impl PreviewFormat {
+    fn image_format(self) -> image::ImageFormat {
+        match self {
+            Self::Png => image::ImageFormat::Png,
+            Self::Jpeg => image::ImageFormat::Jpeg,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewOverflow {
+    #[default]
+    Shrink,
+    Error,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PreviewOptions {
+    pub page_indices: Option<Vec<usize>>,
+    pub max_dimension: u32,
+    pub layout: PreviewLayout,
+    pub max_output_bytes: usize,
+    pub format: PreviewFormat,
+    pub overflow: PreviewOverflow,
+}
+
+impl Default for PreviewOptions {
+    fn default() -> Self {
+        Self { page_indices: None, max_dimension: 1280, layout: PreviewLayout::Pages, max_output_bytes: 2 * 1024 * 1024,
+            format: PreviewFormat::Png, overflow: PreviewOverflow::Shrink }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreviewImage {
+    pub base64: String,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub byte_length: usize,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreviewPage {
+    pub page_index: usize,
+    pub slide_id: String,
+    pub image_index: usize,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PresentationPreview {
+    pub revision: u64,
+    pub hash: String,
+    pub requested_max_dimension: u32,
+    pub actual_max_dimension: u32,
+    pub quality_reduced: bool,
+    pub pages: Vec<PreviewPage>,
+    pub images: Vec<PreviewImage>,
+    pub warnings: Vec<RenderWarning>,
+    pub office_visual_parity: bool,
+}
+
+pub fn preview_presentation(document: &crate::document::Document, options: &PreviewOptions) -> Result<PresentationPreview> {
+    crate::document::verify(document)?;
+    let deck = &document.deck;
+    let selected = options.page_indices.clone().unwrap_or_else(|| (0..deck.slides.len()).collect());
+    if selected.is_empty() || selected.len() > 8 || selected.iter().any(|index| *index >= deck.slides.len())
+        || selected.iter().collect::<BTreeSet<_>>().len() != selected.len()
+    {
+        return Err(Error::Invalid("preview requires 1-8 unique existing page indices; select a smaller batch".into()));
+    }
+    if !(160..=1600).contains(&options.max_dimension) || options.max_output_bytes == 0 || options.max_output_bytes > 2 * 1024 * 1024 {
+        return Err(Error::Limit("preview requires 160-1600 pixels and at most 2 MiB encoded images".into()));
+    }
+    let mut cache = PreviewSceneCache::new(options);
+    let mut attempted = Vec::new();
+    for dimension in [options.max_dimension, (options.max_dimension * 3 / 4).max(160), (options.max_dimension * 9 / 16).max(160)] {
+        if attempted.contains(&dimension) { continue; }
+        attempted.push(dimension);
+        match preview_attempt(document, options, &selected, dimension, &mut cache) {
+            Ok(preview) => return Ok(preview),
+            Err(StaticExportError::OutputBudget) => {
+                if matches!(options.overflow, PreviewOverflow::Error) { break; }
+            }
+            Err(StaticExportError::Other(error)) => return Err(error),
+        }
+    }
+    Err(Error::Limit(format!(
+        "preview encoded output byte limit exceeded after {} attempt(s) at max_dimension {attempted:?}; select fewer pages, reduce max_dimension, or try format:'jpeg' (JPEG). These may reduce output size but do not guarantee it fits; no partial pages returned",
+        attempted.len()
+    )))
+}
+
+fn preview_attempt(
+    document: &crate::document::Document, options: &PreviewOptions, selected: &[usize], max_dimension: u32,
+    cache: &mut PreviewSceneCache,
+) -> std::result::Result<PresentationPreview, StaticExportError> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let deck = &document.deck;
+    let montage = matches!(options.layout, PreviewLayout::ContactSheet);
+    let columns = if montage { (selected.len() as f64).sqrt().ceil() as u32 } else { 1 };
+    let rows = if montage { (selected.len() as u32).div_ceil(columns) } else { 1 };
+    let gap = if montage { 12 } else { 0 };
+    let cell_width = (max_dimension - gap * (columns + 1)) / columns;
+    let cell_height = (max_dimension - gap * (rows + 1)) / rows;
+    let scale = (f64::from(cell_width) / f64::from(deck.width)).min(f64::from(cell_height) / f64::from(deck.height));
+    let output = export_static_inner(deck, &ExportOptions {
+        format: match options.format { PreviewFormat::Png => ExportFormat::Png, PreviewFormat::Jpeg => ExportFormat::Jpeg },
+        page_indices: Some(selected.to_vec()), scale: scale.max(0.01), max_output_bytes: options.max_output_bytes, ..Default::default()
+    }, Some(cache), false)?;
+    let mut pages = Vec::new();
+    let mut artifacts = output.artifacts;
+    let mut remaining = options.max_output_bytes;
+    for artifact in &mut artifacts {
+        if artifact.width > cell_width || artifact.height > cell_height {
+            let pixels = image::load_from_memory_with_format(&artifact.bytes, options.format.image_format())
+                .map_err(|error| Error::Invalid(format!("preview image: {error}")))?.into_rgba8();
+            artifact.width = (f64::from(deck.width) * scale).floor().max(1.0) as u32;
+            artifact.height = (f64::from(deck.height) * scale).floor().max(1.0) as u32;
+            let resized = image::imageops::resize(&pixels, artifact.width, artifact.height, image::imageops::FilterType::Lanczos3);
+            artifact.bytes = encode_preview_image(&resized, options.format, remaining)?;
+        }
+        remaining = remaining.checked_sub(artifact.bytes.len()).ok_or(StaticExportError::OutputBudget)?;
+    }
+    for (index, artifact) in artifacts.iter().enumerate() {
+        let page_index = artifact.page_indices[0];
+        pages.push(PreviewPage {
+            page_index, slide_id: deck.slides[page_index].id.clone(), image_index: if montage { 0 } else { index },
+            x: if montage { gap + index as u32 % columns * (artifact.width + gap) } else { 0 },
+            y: if montage { gap + index as u32 / columns * (artifact.height + gap) } else { 0 },
+            width: artifact.width, height: artifact.height,
+        });
+    }
+    if montage {
+        let width = artifacts[0].width * columns + gap * (columns + 1);
+        let height = artifacts[0].height * rows + gap * (rows + 1);
+        let mut sheet = image::RgbaImage::from_pixel(width, height, image::Rgba([238, 238, 238, 255]));
+        for (artifact, page) in artifacts.iter().zip(&pages) {
+            let pixels = image::load_from_memory_with_format(&artifact.bytes, options.format.image_format())
+                .map_err(|error| Error::Invalid(format!("preview image: {error}")))?.into_rgba8();
+            image::imageops::replace(&mut sheet, &pixels, i64::from(page.x), i64::from(page.y));
+        }
+        let bytes = encode_preview_image(&sheet, options.format, options.max_output_bytes)?;
+        artifacts = vec![ExportArtifact { bytes, mime_type: artifacts[0].mime_type.clone(), page_indices: pages.iter().map(|page| page.page_index).collect(), width, height }];
+    }
+    let images = artifacts.into_iter().map(|artifact| PreviewImage {
+        sha256: format!("{:x}", Sha256::digest(&artifact.bytes)), byte_length: artifact.bytes.len(),
+        base64: base64::engine::general_purpose::STANDARD.encode(artifact.bytes),
+        mime_type: artifact.mime_type, width: artifact.width, height: artifact.height,
+    }).collect();
+    let mut warnings = output.warnings;
+    if document.bindings.iter().any(|binding| binding.stale) {
+        warnings.push(RenderWarning { code: "SOURCE_BINDINGS_STALE".into(), page_index: pages[0].page_index, element_id: String::new(), message: "Preview includes stale source bindings; undo or rebind before export".into() });
+    }
+    let downscaled = max_dimension < options.max_dimension;
+    let quality_reduced = downscaled || output.effects_omitted;
+    if downscaled {
+        warnings.push(RenderWarning { code: "PREVIEW_DOWNSCALED".into(), page_index: pages[0].page_index, element_id: String::new(),
+            message: format!("Preview max_dimension reduced from requested {} to actual {max_dimension} pixels to fit the encoded image budget; all {} selected pages are preserved in their requested order", options.max_dimension, pages.len()) });
+    }
+    let result = PresentationPreview { revision: document.revision, hash: document.hash.clone(),
+        requested_max_dimension: options.max_dimension, actual_max_dimension: max_dimension, quality_reduced,
+        pages, images, warnings, office_visual_parity: false };
+    if serde_json::to_vec(&result).map_err(Error::from)?.len() > 4 * 1024 * 1024 - 65536 {
+        return Err(Error::Limit("preview response exceeds 4 MiB; select fewer pages, reduce max_dimension, or try format:'jpeg' without a guarantee of fitting".into()).into());
+    }
+    Ok(result)
+}
+
+fn encode_preview_image(
+    pixels: &image::RgbaImage, format: PreviewFormat, limit: usize,
+) -> std::result::Result<Vec<u8>, StaticExportError> {
+    let mut output = BoundedBytes::new(limit);
+    let encoded = match format {
+        PreviewFormat::Png => image::codecs::png::PngEncoder::new(&mut output)
+            .write_image(pixels.as_raw(), pixels.width(), pixels.height(), ExtendedColorType::Rgba8),
+        PreviewFormat::Jpeg => {
+            let rgb: Vec<u8> = pixels.pixels().flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, ExportOptions::default().jpeg_quality)
+                .write_image(&rgb, pixels.width(), pixels.height(), ExtendedColorType::Rgb8)
+        }
+    };
+    output.check_encoding(encoded, "preview image encoding")?;
+    Ok(output.bytes)
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportFormat {
+    #[default]
+    Png,
+    Jpeg,
+    Pdf,
+}
+
+/// Zero-based page selection in output order; None selects all slides. Empty
+/// selections and duplicates reject. Transparency omits only page background;
+/// JPEG always composites against jpeg_matte. Limits may only be lowered.
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExportOptions {
+    pub format: ExportFormat,
+    pub page_indices: Option<Vec<usize>>,
+    pub scale: f64,
+    pub transparent: bool,
+    pub jpeg_quality: u8,
+    pub jpeg_matte: [u8; 3],
+    pub max_output_bytes: usize,
+    pub deny_warnings: bool,
+}
+impl Default for ExportOptions {
+    fn default() -> Self {
+        Self {
+            format: ExportFormat::Png,
+            page_indices: None,
+            scale: 1.0,
+            transparent: false,
+            jpeg_quality: 90,
+            jpeg_matte: [255; 3],
+            max_output_bytes: MAX_OUTPUT_BYTES,
+            deny_warnings: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RenderWarning {
+    pub code: String,
+    pub page_index: usize,
+    pub element_id: String,
+    pub message: String,
+}
+
+#[derive(Debug)]
+/// One image per selected page, or one multipage PDF. width/height are the
+/// requested preview pixel dimensions, also for PDF. PDF MediaBox dimensions
+/// are always deck.width * 0.75 and deck.height * 0.75 points, independent of scale.
+pub struct ExportArtifact {
+    pub bytes: Vec<u8>,
+    pub mime_type: String,
+    pub page_indices: Vec<usize>,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug)]
+pub struct StaticExport {
+    pub artifacts: Vec<ExportArtifact>,
+    pub warnings: Vec<RenderWarning>,
+    pub(crate) effects_omitted: bool,
+    pub office_parity_verified: bool,
+    /// False means pages were not flattened. Individual pictures (including
+    /// sanitized SVG assets rasterized by core) and warned effect-bearing
+    /// top-level objects can still be embedded rasters.
+    pub pdf_rasterized: bool,
+}
+
+pub(crate) struct BoundedBytes {
+    pub bytes: Vec<u8>,
+    pub limit: usize,
+    exceeded: bool,
+}
+
+enum StaticExportError {
+    OutputBudget,
+    Other(Error),
+}
+
+impl From<Error> for StaticExportError {
+    fn from(error: Error) -> Self { Self::Other(error) }
+}
+
+impl StaticExportError {
+    fn into_error(self) -> Error {
+        match self {
+            Self::OutputBudget => Error::Limit("static image encoding: static export output byte limit".into()),
+            Self::Other(error) => error,
+        }
+    }
+}
+
+impl BoundedBytes {
+    fn new(limit: usize) -> Self { Self { bytes: Vec::new(), limit, exceeded: false } }
+
+    fn check_encoding(&self, encoded: image::ImageResult<()>, context: &str) -> std::result::Result<(), StaticExportError> {
+        encoded.map_err(|error| {
+            if self.exceeded { StaticExportError::OutputBudget }
+            else { Error::Limit(format!("{context}: {error}")).into() }
+        })
+    }
+}
+impl Write for BoundedBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(std::io::Error::other("static export output byte limit"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn preflight(deck: &Deck, options: &ExportOptions) -> Result<(Vec<usize>, u32, u32)> {
+    if !options.scale.is_finite() || !(0.01..=16.0).contains(&options.scale) {
+        return Err(Error::Limit(
+            "static export scale must be finite in 0.01..=16".into(),
+        ));
+    }
+    if options.max_output_bytes == 0
+        || options.max_output_bytes > MAX_OUTPUT_BYTES
+        || !(1..=100).contains(&options.jpeg_quality)
+    {
+        return Err(Error::Limit(
+            "static export output cap or JPEG quality out of range".into(),
+        ));
+    }
+    let width = (f64::from(deck.width) * options.scale).ceil();
+    let height = (f64::from(deck.height) * options.scale).ceil();
+    if width < 1.0
+        || height < 1.0
+        || width > f64::from(MAX_DIMENSION)
+        || height > f64::from(MAX_DIMENSION)
+    {
+        return Err(Error::Limit(
+            "static export dimensions must be 1..=8192".into(),
+        ));
+    }
+    let selected_count = options.page_indices.as_ref().map_or(deck.slides.len(), Vec::len);
+    if selected_count == 0 || selected_count > 32 {
+        return Err(Error::Limit("static export requires 1-32 pages".into()));
+    }
+    let pages = options
+        .page_indices
+        .clone()
+        .unwrap_or_else(|| (0..deck.slides.len()).collect());
+    if pages.is_empty()
+        || pages.len() > 32
+        || pages.iter().any(|index| *index >= deck.slides.len())
+        || pages.iter().collect::<BTreeSet<_>>().len() != pages.len()
+    {
+        return Err(Error::Invalid(
+            "static export requires 1-32 unique existing page indices".into(),
+        ));
+    }
+    let raw = width as u64 * height as u64 * 4;
+    if raw * 3 + 64 * 1024 * 1024 > MAX_RENDER_BYTES as u64
+        || raw * pages.len() as u64 > MAX_RENDER_BYTES as u64
+    {
+        return Err(Error::Limit(
+            "static export working/cumulative raster budget exceeds 128 MiB".into(),
+        ));
+    }
+    validate_deck(deck)?;
+    Ok((pages, width as u32, height as u32))
+}
+
+/// All-or-error: no partial artifact list escapes on unsupported content,
+/// validation failure, or budget exhaustion. Caller owns publication/printing.
+pub fn export_static(deck: &Deck, options: &ExportOptions) -> Result<StaticExport> {
+    export_static_inner(deck, options, None, false).map_err(StaticExportError::into_error)
+}
+
+pub(crate) fn export_delivery_static(deck: &Deck, options: &ExportOptions) -> Result<StaticExport> {
+    export_static_inner(deck, options, None, true).map_err(StaticExportError::into_error)
+}
+
+fn export_static_inner(
+    deck: &Deck, options: &ExportOptions, mut cache: Option<&mut PreviewSceneCache>,
+    approximate_pdf_effects: bool,
+) -> std::result::Result<StaticExport, StaticExportError> {
+    let (pages, width, height) = preflight(deck, options)?;
+    if options.format == ExportFormat::Pdf {
+        return export_pdf(deck, options, pages, width, height, approximate_pdf_effects).map_err(StaticExportError::from);
+    }
+    let mut result = StaticExport {
+        artifacts: Vec::new(),
+        warnings: Vec::new(),
+        effects_omitted: false,
+        office_parity_verified: false,
+        pdf_rasterized: false,
+    };
+    let mut remaining = options.max_output_bytes;
+    for page_index in pages {
+        let scene = match cache.as_deref_mut() {
+            Some(cache) => cache.scene(deck, page_index, options)?,
+            None => {
+                let scene = render::render_at_scale(deck, page_index, options.transparent, options.scale)?;
+                PreviewSceneRef::Uncached(PreviewScene { svg: scene.svg, warnings: scene.warnings, effects_omitted: scene.effects_omitted })
+            }
+        };
+        let scene = scene.as_ref();
+        result.effects_omitted |= scene.effects_omitted;
+        if options.deny_warnings && !scene.warnings.is_empty() {
+            return Err(Error::Unsupported(
+                "static export has render warnings".into(),
+            ).into());
+        }
+        result.warnings.extend(scene.warnings.iter().cloned());
+        let tree = resvg::usvg::Tree::from_str(&scene.svg, &resvg::usvg::Options::default())
+            .map_err(|error| Error::Invalid(format!("internal render SVG: {error}")))?;
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+            .ok_or_else(|| Error::Limit("static raster allocation failed".into()))?;
+        if options.format == ExportFormat::Jpeg {
+            pixmap.fill(resvg::tiny_skia::Color::from_rgba8(
+                options.jpeg_matte[0],
+                options.jpeg_matte[1],
+                options.jpeg_matte[2],
+                255,
+            ));
+        }
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_scale(
+                width as f32 / deck.width as f32,
+                height as f32 / deck.height as f32,
+            ),
+            &mut pixmap.as_mut(),
+        );
+        let mut output = BoundedBytes::new(remaining);
+        let encoded = if options.format == ExportFormat::Png {
+            let pixels: Vec<u8> = pixmap
+                .pixels()
+                .iter()
+                .flat_map(|pixel| {
+                    let color = pixel.demultiply();
+                    [color.red(), color.green(), color.blue(), color.alpha()]
+                })
+                .collect();
+            image::codecs::png::PngEncoder::new(&mut output).write_image(
+                &pixels,
+                width,
+                height,
+                ExtendedColorType::Rgba8,
+            )
+        } else {
+            let pixels: Vec<u8> = pixmap
+                .pixels()
+                .iter()
+                .flat_map(|pixel| [pixel.red(), pixel.green(), pixel.blue()])
+                .collect();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, options.jpeg_quality)
+                .write_image(&pixels, width, height, ExtendedColorType::Rgb8)
+        };
+        output.check_encoding(encoded, "static image encoding")?;
+        remaining -= output.bytes.len();
+        result.artifacts.push(ExportArtifact {
+            bytes: output.bytes,
+            mime_type: if options.format == ExportFormat::Png {
+                "image/png"
+            } else {
+                "image/jpeg"
+            }
+            .into(),
+            page_indices: vec![page_index],
+            width,
+            height,
+        });
+    }
+    Ok(result)
+}
+
+fn export_pdf(
+    deck: &Deck,
+    options: &ExportOptions,
+    pages: Vec<usize>,
+    width: u32,
+    height: u32,
+    approximate_effects: bool,
+) -> Result<StaticExport> {
+    use lopdf::{dictionary, Document, Object};
+    let mut document = Document::with_version("1.7");
+    let pages_id = document.new_object_id();
+    let catalog_id = document.new_object_id();
+    let structure_id = document.new_object_id();
+    let logical_id = document.new_object_id();
+    let mut sections = Vec::new();
+    let mut parent_numbers = Vec::new();
+    let mut children = Vec::new();
+    let mut warnings = Vec::new();
+    let mut effects_omitted = false;
+    let mut total_svg = 0usize;
+    let mut intermediate_bytes = 0usize;
+    let mut semantic_bytes = 0usize;
+    for page_index in &pages {
+        let scene = render::render_with_effect_policy(deck, *page_index, options.transparent, 2.0,
+            if approximate_effects { render::EffectPolicy::DeliveryPdf } else { render::EffectPolicy::Strict })?;
+        effects_omitted |= scene.effects_omitted;
+        let text_tree = svg2pdf::usvg::Tree::from_str(&scene.svg, &svg2pdf::usvg::Options::default())
+            .map_err(|error| Error::Invalid(format!("internal text SVG: {error}")))?;
+        semantic_bytes += scene.text.iter().map(|span| 512 + span.glyphs.iter().map(|glyph| 128 + glyph.text.len() * 4).sum::<usize>()).sum::<usize>();
+        if semantic_bytes > MAX_SVG_BYTES {
+            return Err(Error::Limit("PDF semantic text working budget exceeds 8 MiB".into()));
+        }
+        if options.deny_warnings && !scene.warnings.is_empty() {
+            return Err(Error::Unsupported(
+                "static export has render warnings".into(),
+            ));
+        }
+        total_svg += scene.svg.len();
+        if total_svg > MAX_OUTPUT_BYTES {
+            return Err(Error::Limit("PDF cumulative SVG exceeds 32 MiB".into()));
+        }
+        warnings.extend(scene.warnings);
+        let (svg, effect_count) = pdf_effects(&scene.svg)?;
+        if effect_count > 0 {
+            warnings.push(RenderWarning { code: "PDF_EFFECT_RASTERIZED".into(), page_index: *page_index, element_id: String::new(), message: format!("{effect_count} top-level effect objects rendered by resvg at 2x; other page objects remain vector") });
+        }
+        let tree = svg2pdf::usvg::Tree::from_str(&svg, &svg2pdf::usvg::Options::default())
+            .map_err(|error| Error::Invalid(format!("internal PDF SVG: {error}")))?;
+        let bytes = svg2pdf::to_pdf(
+            &tree,
+            svg2pdf::ConversionOptions {
+                embed_text: false,
+                ..Default::default()
+            },
+            svg2pdf::PageOptions { dpi: 96.0 },
+        )
+        .map_err(|error| Error::Unsupported(format!("static SVG to PDF: {error}")))?;
+        intermediate_bytes += bytes.len();
+        if intermediate_bytes > options.max_output_bytes {
+            return Err(Error::Limit("PDF intermediate output byte cap".into()));
+        }
+        let mut page_document = Document::load_mem(&bytes)
+            .map_err(|error| Error::Invalid(format!("internal generated PDF: {error}")))?;
+        page_document.renumber_objects_with(document.max_id + 1);
+        document.max_id = page_document.max_id;
+        let page_id = *page_document
+            .get_pages()
+            .values()
+            .next()
+            .ok_or_else(|| Error::Invalid("PDF converter returned no page".into()))?;
+        page_document
+            .get_object_mut(page_id)
+            .and_then(Object::as_dict_mut)
+            .map_err(|error| Error::Invalid(format!("PDF page dictionary: {error}")))?
+            .set("Parent", pages_id);
+        for (object_id, object) in page_document.objects {
+            let kind = object
+                .as_dict()
+                .ok()
+                .and_then(|dictionary| dictionary.get(b"Type").ok())
+                .and_then(|kind| kind.as_name().ok());
+            if matches!(kind, Some(b"Catalog" | b"Pages")) {
+                continue;
+            }
+            document.objects.insert(object_id, object);
+        }
+        let section_id = document.new_object_id();
+        let mut content = Vec::new();
+        let slide = &deck.slides[*page_index];
+        let ids: BTreeSet<_> = crate::model::element_list(&slide.elements).into_iter().map(|element| element.bounds().0.to_owned()).collect();
+        let mut tags = Vec::new();
+        for span in scene.text.iter().filter(|span| !ids.iter().any(|id| span.element_id == *id || span.element_id.starts_with(&format!("{id}[")))) {
+            let tag = pdf_tag(&mut document, section_id, "P");
+            content.push(PdfContent { tag, role: "P", span: Some(span), bounds: None });
+            tags.push(Object::Reference(tag));
+        }
+        let ordered: Vec<_> = if let Some(review) = slide.review.as_ref().filter(|review| !review.reading_order.is_empty()) {
+            review.reading_order.iter().filter_map(|id| slide.elements.iter().find(|element| element.bounds().0 == id)).collect()
+        } else { slide.elements.iter().collect() };
+        for element in ordered {
+            if let Some(tag) = pdf_element_structure(&mut document, section_id, element, slide, &scene.text, &mut content)? {
+                tags.push(Object::Reference(tag));
+            }
+        }
+        document.objects.insert(section_id, Object::Dictionary(dictionary! {"Type"=>"StructElem", "S"=>"Sect", "P"=>logical_id, "Pg"=>page_id, "T"=>pdf_unicode(&slide.title), "K"=>tags}));
+        let parent_index = sections.len() as i64;
+        let parents = pdf_text(&mut document, page_id, &content, &text_tree, &scene.objects, deck.height as f64)?;
+        pdf_links(&mut document, page_id, &slide.elements, &text_tree, &scene.objects, f64::from(deck.width), f64::from(deck.height))?;
+        document.get_object_mut(page_id).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("StructParents", parent_index);
+        document.get_object_mut(page_id).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("Tabs", Object::Name(b"S".to_vec()));
+        sections.push(Object::Reference(section_id));
+        parent_numbers.extend([Object::Integer(parent_index), Object::Array(parents)]);
+        children.push(Object::Reference(page_id));
+    }
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(
+            dictionary! {"Type"=>"Pages","Count"=>children.len() as i64,"Kids"=>children},
+        ),
+    );
+    let parent_tree = document.add_object(dictionary! {"Nums"=>parent_numbers});
+    document.objects.insert(logical_id, Object::Dictionary(dictionary! {"Type"=>"StructElem", "S"=>"Document", "P"=>structure_id, "K"=>sections}));
+    document.objects.insert(structure_id, Object::Dictionary(dictionary! {"Type"=>"StructTreeRoot", "K"=>vec![Object::Reference(logical_id)], "ParentTree"=>parent_tree, "ParentTreeNextKey"=>pages.len() as i64}));
+    document.objects.insert(
+        catalog_id,
+        Object::Dictionary(dictionary! {"Type"=>"Catalog","Pages"=>pages_id,"StructTreeRoot"=>structure_id,"MarkInfo"=>dictionary! {"Marked"=>true}}),
+    );
+    document.trailer.set("Root", catalog_id);
+    let mut output = BoundedBytes::new(options.max_output_bytes);
+    document
+        .save_to(&mut output)
+        .map_err(|error| Error::Limit(format!("PDF output byte cap: {error}")))?;
+    Ok(StaticExport {
+        artifacts: vec![ExportArtifact {
+            bytes: output.bytes,
+            mime_type: "application/pdf".into(),
+            page_indices: pages,
+            width,
+            height,
+        }],
+        warnings,
+        effects_omitted,
+        office_parity_verified: false,
+        pdf_rasterized: false,
+    })
+}
+
+fn pdf_links(document: &mut lopdf::Document, page_id: lopdf::ObjectId, elements: &[Element], tree: &svg2pdf::usvg::Tree, objects: &[(String, String)], width: f64, height: f64) -> Result<()> {
+    use lopdf::{dictionary, Object};
+    fn collect<'a>(elements: &'a [Element], links: &mut Vec<(&'a str, &'a str)>) {
+        for element in elements {
+            if element.visual().is_some_and(|visual| visual.hidden || visual.opacity == Some(0.0)) { continue; }
+            match element {
+                Element::Text { id, format, .. } | Element::Shape { id, format, .. } => {
+                    if let Some(url) = &format.hyperlink { links.push((id, url)); }
+                }
+                Element::Group { children, .. } => collect(children, links),
+                _ => {}
+            }
+        }
+    }
+    let mut links = Vec::new(); collect(elements, &mut links);
+    let mut annotations = Vec::new();
+    for (id, url) in links {
+        crate::model::validate_hyperlink(url)?;
+        let Some(bounds) = objects.iter().rev().find(|(element_id, _)| element_id == id)
+            .and_then(|(_, svg_id)| tree.node_by_id(svg_id)).and_then(|node| node.abs_layer_bounding_box()) else { continue; };
+        let left = f64::from(bounds.x()).max(0.0);
+        let top = f64::from(bounds.y()).max(0.0);
+        let right = f64::from(bounds.right()).min(width);
+        let bottom = f64::from(bounds.bottom()).min(height);
+        if right <= left || bottom <= top { continue; }
+        let rectangle: Vec<Object> = vec![(left * 0.75).into(), ((height - bottom) * 0.75).into(), (right * 0.75).into(), ((height - top) * 0.75).into()];
+        let target = reqwest::Url::parse(url).map_err(|_| Error::Invalid("invalid PDF link URL".into()))?;
+        let annotation = document.add_object(dictionary! {"Type"=>"Annot", "Subtype"=>"Link", "Rect"=>rectangle,
+            "Border"=>vec![Object::Integer(0), Object::Integer(0), Object::Integer(0)], "F"=>4,
+            "A"=>dictionary! {"S"=>"URI", "URI"=>Object::string_literal(target.as_str())}});
+        annotations.push(Object::Reference(annotation));
+    }
+    if !annotations.is_empty() { document.get_object_mut(page_id).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("Annots", annotations); }
+    Ok(())
+}
+
+fn pdf_error(error: lopdf::Error) -> Error {
+    Error::Invalid(format!("PDF semantic structure: {error}"))
+}
+
+fn pdf_unicode(value: &str) -> lopdf::Object {
+    lopdf::Object::String([vec![0xfe, 0xff], value.encode_utf16().flat_map(u16::to_be_bytes).collect()].concat(), lopdf::StringFormat::Hexadecimal)
+}
+
+struct PdfContent<'a> {
+    tag: lopdf::ObjectId,
+    role: &'static str,
+    span: Option<&'a render::RenderedText>,
+    bounds: Option<(String, [f64; 4])>,
+}
+
+fn pdf_tag(document: &mut lopdf::Document, parent: lopdf::ObjectId, role: &str) -> lopdf::ObjectId {
+    use lopdf::dictionary;
+    document.add_object(dictionary! {"Type"=>"StructElem", "S"=>lopdf::Object::Name(role.as_bytes().to_vec()), "P"=>parent, "K"=>Vec::<lopdf::Object>::new()})
+}
+
+fn pdf_element_structure<'a>(
+    document: &mut lopdf::Document,
+    parent: lopdf::ObjectId,
+    element: &Element,
+    slide: &Slide,
+    spans: &'a [render::RenderedText],
+    content: &mut Vec<PdfContent<'a>>,
+) -> Result<Option<lopdf::ObjectId>> {
+    use lopdf::{dictionary, Object};
+    let (id, x, y, width, height) = element.bounds();
+    let metadata = slide.review.as_ref().and_then(|review| review.accessibility.get(id));
+    if element.visual().is_some_and(|visual| visual.hidden) || metadata.is_some_and(|value| value.decorative == Some(true)) { return Ok(None); }
+    let tag = match element {
+        Element::Group { children, .. } => {
+            let tag = pdf_tag(document, parent, "Sect");
+            let mut tags = Vec::new();
+            for child in children {
+                if let Some(child) = pdf_element_structure(document, tag, child, slide, spans, content)? { tags.push(Object::Reference(child)); }
+            }
+            document.get_object_mut(tag).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("K", tags);
+            tag
+        }
+        Element::Table { rows, format, .. } => {
+            use crate::review::TableHeaders;
+            let policy = slide.review.as_ref().and_then(|review| review.table_headers.get(id)).copied().unwrap_or_default();
+            let table = pdf_tag(document, parent, "Table");
+            let mut row_tags = Vec::new();
+            for (row_index, row) in rows.iter().enumerate() {
+                let row_tag = pdf_tag(document, table, "TR");
+                row_tags.push(Object::Reference(row_tag));
+                let mut cells = Vec::new();
+                for (column_index, _) in row.iter().enumerate() {
+                    let merge = format.merge_at(row_index, column_index);
+                    if merge.is_some_and(|merge| (merge.row, merge.column) != (row_index, column_index)) { continue; }
+                    let column_header = row_index == 0 && matches!(policy, TableHeaders::FirstRow | TableHeaders::Both);
+                    let row_header = column_index == 0 && matches!(policy, TableHeaders::FirstColumn | TableHeaders::Both);
+                    let role = if column_header || row_header { "TH" } else { "TD" };
+                    let cell = pdf_tag(document, row_tag, role);
+                    let mut attributes = dictionary! {"O"=>"Table", "RowSpan"=>merge.map_or(1, |merge| merge.row_span) as i64, "ColSpan"=>merge.map_or(1, |merge| merge.col_span) as i64};
+                    if column_header || row_header {
+                        let scope = if column_header && row_header { "Both" } else if column_header { "Column" } else { "Row" };
+                        attributes.set("Scope", Object::Name(scope.as_bytes().to_vec()));
+                    }
+                    document.get_object_mut(cell).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("A", attributes);
+                    if let Some(span) = spans.iter().find(|span| span.element_id == format!("{id}[{row_index},{column_index}]")) {
+                        content.push(PdfContent { tag: cell, role, span: Some(span), bounds: None });
+                    }
+                    cells.push(Object::Reference(cell));
+                }
+                document.get_object_mut(row_tag).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("K", cells);
+            }
+            document.get_object_mut(table).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("K", row_tags);
+            table
+        }
+        _ => {
+            let text: Vec<_> = spans.iter().filter(|span| span.element_id == id).collect();
+            let description = metadata.and_then(|value| value.description.as_deref().or(value.title.as_deref()))
+                .or_else(|| match element { Element::Picture { alt, .. } => Some(alt.as_str()), _ => None });
+            if !text.is_empty() {
+                let tag = pdf_tag(document, parent, if matches!(element, Element::Chart { .. }) { "Figure" } else { "Div" });
+                if let Some(description) = description.filter(|description| !description.is_empty()) {
+                    document.get_object_mut(tag).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("Alt", pdf_unicode(description));
+                }
+                let mut paragraphs = Vec::new();
+                for span in text {
+                    let paragraph = pdf_tag(document, tag, "P");
+                    paragraphs.push(Object::Reference(paragraph));
+                    content.push(PdfContent { tag: paragraph, role: "P", span: Some(span), bounds: None });
+                }
+                document.get_object_mut(tag).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("K", paragraphs);
+                tag
+            } else if description.is_some() || matches!(element, Element::Picture { .. } | Element::Chart { .. }) {
+                let tag = pdf_tag(document, parent, "Figure");
+                if let Some(description) = description.filter(|description| !description.is_empty()) {
+                    document.get_object_mut(tag).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("Alt", pdf_unicode(description));
+                }
+                content.push(PdfContent { tag, role: "Figure", span: None, bounds: Some((id.into(), [x, y, width, height])) });
+                tag
+            } else { return Ok(None); }
+        }
+    };
+    if let Some(title) = metadata.and_then(|value| value.title.as_deref()) {
+        document.get_object_mut(tag).and_then(Object::as_dict_mut).map_err(pdf_error)?.set("T", pdf_unicode(title));
+    }
+    Ok(Some(tag))
+}
+
+fn pdf_text(
+    document: &mut lopdf::Document,
+    page_id: lopdf::ObjectId,
+    content: &[PdfContent<'_>],
+    tree: &svg2pdf::usvg::Tree,
+    objects: &[(String, String)],
+    height: f64,
+) -> Result<Vec<lopdf::Object>> {
+    use lopdf::{content::{Content, Operation}, dictionary, Object, Stream, StringFormat};
+    let failure = |error| Error::Invalid(format!("PDF semantic text: {error}"));
+    let mut fonts = lopdf::Dictionary::new();
+    let mut operations = vec![Operation::new("q", vec![])];
+    let mut parents = Vec::new();
+    for item in content {
+        let mcid = parents.len() as i64;
+        parents.push(Object::Reference(item.tag));
+        let tag = document.get_object_mut(item.tag).and_then(Object::as_dict_mut).map_err(failure)?;
+        tag.set("Pg", page_id);
+        tag.set("K", mcid);
+        operations.push(Operation::new("BDC", vec![Object::Name(item.role.as_bytes().to_vec()), Object::Dictionary(dictionary! {"MCID"=>mcid})]));
+        let Some(span) = item.span else {
+            if let Some((element_id, fallback)) = &item.bounds {
+                let [x, y, width, box_height] = objects.iter().rev().find(|(id, _)| id == element_id)
+                    .and_then(|(_, id)| tree.node_by_id(id)).and_then(|node| node.abs_layer_bounding_box())
+                    .map(|bounds| [bounds.x() as f64, bounds.y() as f64, bounds.width() as f64, bounds.height() as f64]).unwrap_or(*fallback);
+                let bounds: Vec<Object> = vec![(x * 0.75).into(), ((height - y - box_height) * 0.75).into(), ((x + width) * 0.75).into(), ((height - y) * 0.75).into()];
+                document.get_object_mut(item.tag).and_then(Object::as_dict_mut).map_err(failure)?.set("A", dictionary! {"O"=>"Layout", "BBox"=>bounds});
+                operations.push(Operation::new("re", vec![(x * 0.75).into(), ((height - y - box_height) * 0.75).into(), (width * 0.75).into(), (box_height * 0.75).into()]));
+                operations.push(Operation::new("n", vec![]));
+            }
+            operations.push(Operation::new("EMC", vec![]));
+            continue;
+        };
+        if span.glyphs.is_empty() {
+            operations.push(Operation::new("EMC", vec![]));
+            continue;
+        }
+        let node = tree.node_by_id(&span.svg_id).ok_or_else(|| Error::Invalid(format!("PDF text group missing: {} ({})", span.svg_id, span.element_id)))?;
+        let transform = node.abs_transform();
+        for chunk in span.glyphs.chunks(255) {
+            let mut cmap = String::from("/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def /CMapName /AISlideUnicode def /CMapType 2 def 1 begincodespacerange <0000> <FFFF> endcodespacerange\n");
+            let mut widths = Vec::new();
+            for batch in chunk.chunks(100).enumerate() {
+                cmap.push_str(&format!("{} beginbfchar\n", batch.1.len()));
+                for (offset, glyph) in batch.1.iter().enumerate() {
+                    let code = batch.0 * 100 + offset + 1;
+                    let unicode = glyph.text.encode_utf16().map(|unit| format!("{unit:04X}")).collect::<String>();
+                    cmap.push_str(&format!("<{code:04X}> <{unicode}>\n"));
+                    let advance = (glyph.width / glyph.size * 1000.0) as f32;
+                    widths.push(Object::Real(advance));
+                }
+                cmap.push_str("endbfchar\n");
+            }
+            cmap.push_str("endcmap CMapName currentdict /CMap defineresource pop end end\n");
+            let unicode_id = document.add_object(Stream::new(dictionary! {}, cmap.into_bytes()));
+            let descriptor = document.add_object(dictionary! {
+                "Type"=>"FontDescriptor", "FontName"=>"AISlideSemantic", "Flags"=>4,
+                "FontBBox"=>vec![0.into(), (-250).into(), 2000.into(), 1000.into()],
+                "ItalicAngle"=>0, "Ascent"=>1000, "Descent"=>-250, "CapHeight"=>750, "StemV"=>80,
+            });
+            let descendant = document.add_object(dictionary! {
+                "Type"=>"Font", "Subtype"=>"CIDFontType2", "BaseFont"=>"AISlideSemantic",
+                "CIDSystemInfo"=>dictionary! {"Registry"=>Object::string_literal("Adobe"), "Ordering"=>Object::string_literal("Identity"), "Supplement"=>0},
+                "FontDescriptor"=>descriptor, "CIDToGIDMap"=>"Identity", "DW"=>1000,
+                "W"=>vec![Object::Integer(1), Object::Array(widths)],
+            });
+            let font_id = document.add_object(dictionary! {
+                "Type"=>"Font", "Subtype"=>"Type0", "BaseFont"=>"AISlideSemantic",
+                "Encoding"=>"Identity-H", "DescendantFonts"=>vec![Object::Reference(descendant)], "ToUnicode"=>unicode_id,
+            });
+            let name = format!("ASem{}", fonts.len());
+            fonts.set(name.clone(), font_id);
+            operations.push(Operation::new("BT", vec![]));
+            operations.push(Operation::new("Tr", vec![3.into()]));
+            for (index, glyph) in chunk.iter().enumerate() {
+                let mut point = svg2pdf::usvg::tiny_skia_path::Point::from_xy(glyph.origin[0] as f32, glyph.origin[1] as f32);
+                transform.map_point(&mut point);
+                operations.push(Operation::new("Tf", vec![Object::Name(name.as_bytes().to_vec()), (glyph.size * 0.75).into()]));
+                operations.push(Operation::new("Tm", vec![transform.sx.into(), (-transform.ky).into(), (-transform.kx).into(), transform.sy.into(), (point.x as f64 * 0.75).into(), ((height - point.y as f64) * 0.75).into()]));
+                operations.push(Operation::new("Tj", vec![Object::String(((index + 1) as u16).to_be_bytes().to_vec(), StringFormat::Hexadecimal)]));
+            }
+            operations.push(Operation::new("ET", vec![]));
+        }
+        operations.push(Operation::new("EMC", vec![]));
+    }
+    operations.push(Operation::new("Q", vec![]));
+    let resources = document.get_object(page_id).and_then(Object::as_dict).and_then(|page| page.get(b"Resources")).map_err(failure)?.clone();
+    let mut resources = match resources { Object::Reference(id) => document.get_object(id).and_then(Object::as_dict).map_err(failure)?.clone(), Object::Dictionary(value) => value, _ => return Err(Error::Invalid("PDF resources dictionary".into())) };
+    resources.set("Font", fonts);
+    document.get_object_mut(page_id).and_then(Object::as_dict_mut).map_err(failure)?.set("Resources", resources);
+    let original = document.get_object(page_id).and_then(Object::as_dict).and_then(|page| page.get(b"Contents")).map_err(failure)?.clone();
+    let prefix = document.add_object(Stream::new(dictionary! {}, b"q\n/Artifact BMC\n".to_vec()));
+    let suffix = document.add_object(Stream::new(dictionary! {}, b"EMC\nQ\n".to_vec()));
+    let mut streams = vec![Object::Reference(prefix)];
+    match original { Object::Array(items) => streams.extend(items), item => streams.push(item) }
+    streams.push(Object::Reference(suffix));
+    document.get_object_mut(page_id).and_then(Object::as_dict_mut).map_err(failure)?.set("Contents", streams);
+    let bytes = Content { operations }.encode().map_err(failure)?;
+    document.add_page_contents(page_id, bytes).map_err(failure)?;
+    Ok(parents)
+}
+
+fn pdf_effects(svg: &str) -> Result<(String, usize)> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let parsed = roxmltree::Document::parse(svg)?;
+    let effects: Vec<_> = parsed.root_element().children().filter(|node| node.is_element()
+        && node.descendants().any(|child| child.attribute("filter").is_some())).collect();
+    if effects.is_empty() { return Ok((svg.into(), 0)); }
+    let tree = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default())
+        .map_err(|error| Error::Invalid(format!("internal effect SVG: {error}")))?;
+    let mut bytes = 0u64;
+    let mut prepared = Vec::new();
+    for element in &effects {
+        let node = element.attribute("id").and_then(|id| tree.node_by_id(id))
+            .ok_or_else(|| Error::Unsupported("generated effect object could not be resolved".into()))?;
+        let bounds = node.abs_layer_bounding_box().ok_or_else(|| Error::Unsupported("effect object has no renderable bounds".into()))?;
+        let width = (bounds.width() * 2.0).ceil() as u32;
+        let height = (bounds.height() * 2.0).ceil() as u32;
+        bytes = bytes.saturating_add(u64::from(width) * u64::from(height) * 4 * 8);
+        if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION || bytes > 32 * 1024 * 1024 {
+            return Err(Error::Limit("PDF effect raster working budget".into()));
+        }
+        prepared.push((element.range(), node, bounds, width, height));
+    }
+    let mut replacements = Vec::new();
+    let mut encoded_bytes = 0;
+    for (range, node, bounds, width, height) in prepared {
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or_else(|| Error::Limit("PDF effect allocation".into()))?;
+        resvg::render_node(node, resvg::tiny_skia::Transform::from_scale(2.0, 2.0), &mut pixmap.as_mut())
+            .ok_or_else(|| Error::Unsupported("PDF effect rendering failed".into()))?;
+        let pixels: Vec<u8> = pixmap.pixels().iter().flat_map(|pixel| {
+            let color = pixel.demultiply();
+            [color.red(), color.green(), color.blue(), color.alpha()]
+        }).collect();
+        let mut output = BoundedBytes::new(MAX_SVG_BYTES.saturating_sub(encoded_bytes) / 2);
+        image::codecs::png::PngEncoder::new(&mut output).write_image(&pixels, width, height, ExtendedColorType::Rgba8)
+            .map_err(|error| Error::Limit(format!("PDF effect encoding: {error}")))?;
+        let image = format!("<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" xlink:href=\"data:image/png;base64,{}\"/>", bounds.x(), bounds.y(), width as f32 / 2.0, height as f32 / 2.0, STANDARD.encode(output.bytes));
+        encoded_bytes += image.len();
+        if encoded_bytes + svg.len() > MAX_SVG_BYTES { return Err(Error::Limit("PDF effect SVG byte budget".into())); }
+        replacements.push((range, image));
+    }
+    let mut result = String::with_capacity(svg.len() + encoded_bytes);
+    let mut cursor = 0;
+    for (range, image) in replacements {
+        result.push_str(&svg[cursor..range.start]);
+        result.push_str(&image);
+        cursor = range.end;
+    }
+    result.push_str(&svg[cursor..]);
+    Ok((result, effects.len()))
+}
+
+#[cfg(test)]
+mod preview_cache_tests {
+    use super::*;
+
+    std::thread_local! {
+        pub(super) static SCENE_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn document() -> crate::document::Document {
+        let deck: Deck = serde_json::from_value(serde_json::json!({
+            "version": 1, "title": "Preview cache", "width": 320, "height": 320,
+            "slides": [{"id": "page", "title": "Pixels", "background": "FFFFFF", "notes": "",
+                "elements": [{"type": "rect", "id": "red", "x": 20, "y": 30,
+                    "width": 80, "height": 60, "fill": "FF0000"},
+                    {"type": "shape", "id": "approximation", "preset": "hexagon", "x": 140, "y": 30,
+                    "width": 40, "height": 40, "fill": "087F73", "stroke": "FFFFFF", "stroke_width": 0,
+                    "text": "", "font_size": 12, "color": "000000", "bold": false}]}]
+        })).unwrap();
+        crate::document::create("preview-cache".into(), deck, vec![], vec![], None).unwrap()
+    }
+
+    #[test]
+    fn preview_shrink_reuses_scene() {
+        let document = document();
+        let reference = export_static(&document.deck, &ExportOptions { scale: 0.75, ..Default::default() }).unwrap();
+        let options = PreviewOptions {
+            max_dimension: 320, max_output_bytes: reference.artifacts[0].bytes.len(), ..Default::default()
+        };
+        SCENE_RENDERS.with(|count| count.set(0));
+        let preview = preview_presentation(&document, &options).unwrap();
+        assert_eq!(preview.actual_max_dimension, 240);
+        let renders = SCENE_RENDERS.with(std::cell::Cell::get);
+        assert_eq!(renders, 1, "successful shrink must not regenerate the same page SVG");
+        assert_eq!(preview.warnings.iter().filter(|warning| warning.code == "SHAPE_APPROXIMATION").count(), 1);
+        preview_presentation(&document, &options).unwrap();
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 2, "cache must not survive a request");
+        eprintln!("PREVIEW_CACHE_METRIC successful_shrink_attempts=2 scene_generations={renders} requests=2 total_scene_generations=2");
+    }
+
+    #[test]
+    fn preview_cache_capacity_accounts_allocations_and_falls_back() {
+        let mut document = document();
+        let mut second = document.deck.slides[0].clone();
+        second.id = "second".into();
+        document.deck.slides.push(second);
+        let options = ExportOptions::default();
+        let scene = render_preview_scene(&document.deck, 0, &options).unwrap();
+        let bytes = scene.allocated_bytes();
+        assert!(bytes > scene.svg.capacity());
+        let mut cache = PreviewSceneCache::new(&PreviewOptions::default());
+        let edge = PreviewOptions::default().max_dimension as usize + 1;
+        assert!(cache.limit + std::mem::size_of::<PreviewSceneCache>() + 64 * 1024 * 1024 + edge * edge * 4 * 3 <= MAX_RENDER_BYTES);
+        assert_eq!(PreviewSceneCache::new(&PreviewOptions { max_dimension: 1600, ..Default::default() }).limit, MAX_PREVIEW_CACHE_BYTES);
+        assert_eq!(PreviewSceneCache::new(&PreviewOptions { overflow: PreviewOverflow::Error, ..Default::default() }).limit, 0);
+        cache.limit = bytes - 1;
+        SCENE_RENDERS.with(|count| count.set(0));
+        for scale in [1.0, 0.75] {
+            assert!(matches!(cache.scene(&document.deck, 0, &ExportOptions { scale, ..options.clone() }).unwrap(), PreviewSceneRef::Uncached(_)));
+        }
+        assert_eq!(cache.allocated_bytes, 0);
+        assert!(cache.entries.iter().all(Option::is_none));
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 2);
+        cache.limit = bytes;
+        let pointer = cache.scene(&document.deck, 0, &options).unwrap().as_ref().svg.as_ptr();
+        assert_eq!(cache.allocated_bytes, bytes);
+        let smaller = ExportOptions { scale: 0.75, ..options.clone() };
+        assert_eq!(cache.scene(&document.deck, 0, &smaller).unwrap().as_ref().svg.as_ptr(), pointer);
+        for _ in 0..2 {
+            assert!(matches!(cache.scene(&document.deck, 1, &smaller).unwrap(), PreviewSceneRef::Uncached(_)));
+            assert_eq!(cache.allocated_bytes, bytes);
+        }
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 5);
+        assert_eq!(cache.entries.iter().flatten().map(|entry| entry.scene.allocated_bytes()).sum::<usize>(), bytes);
+        eprintln!("PREVIEW_CACHE_METRIC retained_bytes={bytes} limit_bytes={} overflow_pages_retained=0", cache.limit);
+    }
+
+    #[test]
+    fn preview_cache_full_keeps_fallback_bytes_and_strict_stops_once() {
+        let document = document();
+        let reference = export_static(&document.deck, &ExportOptions { scale: 0.75, ..Default::default() }).unwrap();
+        let options = PreviewOptions { max_dimension: 320, max_output_bytes: reference.artifacts[0].bytes.len(), ..Default::default() };
+        let mut cache = PreviewSceneCache::new(&options);
+        cache.limit = 0;
+        SCENE_RENDERS.with(|count| count.set(0));
+        assert!(matches!(preview_attempt(&document, &options, &[0], 320, &mut cache), Err(StaticExportError::OutputBudget)));
+        let uncached = preview_attempt(&document, &options, &[0], 240, &mut cache).ok().unwrap();
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 2);
+        assert_eq!(cache.allocated_bytes, 0);
+        let cached = preview_presentation(&document, &options).unwrap();
+        assert_eq!(serde_json::to_value(uncached).unwrap(), serde_json::to_value(cached).unwrap());
+        SCENE_RENDERS.with(|count| count.set(0));
+        let error = preview_presentation(&document, &PreviewOptions { overflow: PreviewOverflow::Error, ..options.clone() }).unwrap_err();
+        assert!(matches!(error, Error::Limit(_)) && error.to_string().contains("1 attempt"));
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 1);
+        SCENE_RENDERS.with(|count| count.set(0));
+        let error = preview_presentation(&document, &PreviewOptions { max_output_bytes: 1, ..options }).unwrap_err();
+        assert!(matches!(error, Error::Limit(_)) && error.to_string().contains("3 attempt"));
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 1);
+    }
+
+    #[test]
+    fn preview_cache_does_not_bypass_scale_checks_or_retry_render_errors() {
+        let mut source = document().deck;
+        source.slides[0].elements = vec![serde_json::from_value(serde_json::json!({
+            "type": "rect", "id": "effect", "x": 0, "y": 0, "width": 300, "height": 300, "fill": "FF0000",
+            "visual": {"shadow": {"color": "000000", "opacity": 0.5, "blur": 100, "distance": 200, "angle": 45}}
+        })).unwrap()];
+        let document = crate::document::create("preview-filter".into(), source, vec![], vec![], None).unwrap();
+        let options = PreviewOptions { max_dimension: 320, max_output_bytes: 1, ..Default::default() };
+        let mut cache = PreviewSceneCache::new(&options);
+        assert!(cache.scene(&document.deck, 0, &ExportOptions { scale: 0.75, ..Default::default() }).is_ok());
+        assert!(matches!(export_static(&document.deck, &ExportOptions::default()), Err(Error::Limit(message)) if message.contains("filter working budget")));
+        for scale in [1.0, 1.25, 1.0] {
+            let scene = cache.scene(&document.deck, 0, &ExportOptions { scale, ..Default::default() }).unwrap();
+            assert!(matches!(scene, PreviewSceneRef::Uncached(_)));
+            assert!(scene.as_ref().effects_omitted);
+            assert!(scene.as_ref().warnings.iter().any(|warning| warning.code == "EFFECT_APPROXIMATION" && warning.message.contains(&format!("scale={scale}"))));
+            assert!(!scene.as_ref().svg.contains("<filter"));
+        }
+        let smaller = cache.scene(&document.deck, 0, &ExportOptions { scale: 0.5, ..Default::default() }).unwrap();
+        assert!(matches!(smaller, PreviewSceneRef::Cached(_)));
+        assert!(!smaller.as_ref().effects_omitted);
+        assert!(smaller.as_ref().svg.contains("<filter"));
+        SCENE_RENDERS.with(|count| count.set(0));
+        let error = preview_presentation(&document, &options).unwrap_err();
+        assert!(matches!(error, Error::Limit(message) if message.contains("3 attempt")));
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 2, "omitted scene must be regenerated at the smaller scale before reuse");
+        assert_eq!(cache.entries.iter().flatten().count(), 1, "omitted scenes must not be cached");
+        SCENE_RENDERS.with(|count| count.set(0));
+        let opaque = cache.scene(&document.deck, 0, &ExportOptions { scale: 0.5, ..Default::default() }).unwrap().as_ref().svg.clone();
+        let transparent = cache.scene(&document.deck, 0, &ExportOptions { scale: 0.5, transparent: true, ..Default::default() }).unwrap();
+        assert_ne!(opaque, transparent.as_ref().svg);
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 1);
+        let mut source = document.deck.clone();
+        source.slides[0].elements.push(serde_json::from_value(serde_json::json!({
+            "type":"text","id":"unsupported","x":10,"y":10,"width":280,"height":80,
+            "text":"Left\tRight","font_size":24,"color":"000000","bold":false
+        })).unwrap());
+        let document = crate::document::create("preview-unsupported".into(), source, vec![], vec![], None).unwrap();
+        SCENE_RENDERS.with(|count| count.set(0));
+        assert!(matches!(preview_presentation(&document, &options), Err(Error::Unsupported(message)) if message.contains("tab stops")));
+        assert_eq!(SCENE_RENDERS.with(std::cell::Cell::get), 1, "non-effect errors must not trigger shrink retries");
+    }
+
+    #[test]
+    fn issue16_omission_preserves_all_non_effect_svg_and_pdf_warning_denial() {
+        let mut source = document().deck;
+        source.width = 1280;
+        source.height = 720;
+        source.slides[0].elements = vec![serde_json::from_value(serde_json::json!({
+            "type":"group","id":"effects","x":40,"y":40,"width":640,"height":390,"view_width":640,"view_height":390,
+            "visual":{"rotation":10,"flip_h":true,"soft_edge":60,
+                "shadow":{"color":"000000","opacity":0.4,"blur":40,"distance":30,"angle":45},
+                "glow":{"color":"0000FF","opacity":0.3,"radius":40},
+                "reflection":{"blur":20,"distance":10,"start_opacity":0.5,"end_opacity":0,"end_position":1}},
+            "children":[{"type":"rect","id":"gradient","x":0,"y":0,"width":600,"height":300,"fill":"FF0000",
+                "visual":{"soft_edge":30,"gradient":{"kind":"linear","angle":45,
+                    "stops":[{"offset":0,"color":"FF0000","opacity":1},{"offset":1,"color":"00FF00","opacity":0.5}]}}},
+                {"type":"text","id":"label","x":20,"y":20,"width":400,"height":80,
+                    "text":"Unchanged content","font_size":24,"color":"000000","bold":true},
+                {"type":"rect","id":"opacity","x":20,"y":100,"width":80,"height":80,"fill":"0000FF","visual":{"opacity":0.7}}]
+        })).unwrap()];
+        validate_deck(&source).unwrap();
+        let original = serde_json::to_value(&source).unwrap();
+        let mut clean = original.clone();
+        for path in ["/slides/0/elements/0/visual", "/slides/0/elements/0/children/0/visual"] {
+            let style = clean.pointer_mut(path).unwrap().as_object_mut().unwrap();
+            for effect in ["shadow", "glow", "soft_edge", "reflection"] { style.remove(effect); }
+        }
+        let clean = serde_json::from_value(clean).unwrap();
+        let rendered = render::render_preview_at_scale(&source, 0, true, 1.0).unwrap();
+        assert!(rendered.effects_omitted);
+        assert_eq!(rendered.svg, render::render_slide_svg(&clean, 0, true).unwrap().svg);
+        assert_eq!(rendered.warnings.iter().filter(|warning| warning.code == "EFFECT_APPROXIMATION").count(), 1);
+        assert!(matches!(export_delivery_static(&source, &ExportOptions { format: ExportFormat::Pdf, deny_warnings: true, ..Default::default() }), Err(Error::Unsupported(message)) if message.contains("render warnings")));
+        assert_eq!(serde_json::to_value(&source).unwrap(), original);
+    }
+
+    #[test]
+    fn issue16_approximation_retains_image_and_expanded_node_limits() {
+        use base64::Engine;
+        let mut source = document().deck;
+        let picture = image::RgbaImage::from_pixel(2048, 2048, image::Rgba([255, 0, 0, 255]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        picture.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        source.slides[0].elements = (0..3).map(|index| serde_json::from_value(serde_json::json!({
+            "type":"picture","id":format!("picture-{index}"),"x":0,"y":0,"width":300,"height":300,
+            "base64":base64::engine::general_purpose::STANDARD.encode(bytes.get_ref()),"mime_type":"image/png","alt":"Synthetic",
+            "visual":{"soft_edge":100}
+        })).unwrap()).collect();
+        assert!(matches!(render::render_preview_at_scale(&source, 0, false, 1.0), Err(Error::Limit(message)) if message.contains("decoded-image budget")));
+        source.slides[0].elements.truncate(1);
+        if let Element::Picture { svg, .. } = &mut source.slides[0].elements[0] {
+            *svg = Some(base64::engine::general_purpose::STANDARD.encode("<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><image href='https://example.invalid/private'/></svg>"));
+        }
+        assert!(matches!(render::render_preview_at_scale(&source, 0, false, 4.0), Err(Error::Unsupported(message)) if message.contains("SVG") || message.contains("external")));
+        if let Element::Picture { base64, .. } = &mut source.slides[0].elements[0] { *base64 = "invalid".into(); }
+        assert!(render::render_preview_at_scale(&source, 0, false, 4.0).is_err());
+        let mut children = (0..128).map(|index| serde_json::json!({"type":"rect","id":format!("leaf-{index}"),"x":0,"y":0,"width":1,"height":1,"fill":"FF0000"})).collect::<Vec<_>>();
+        for depth in 0..7 {
+            children = vec![serde_json::json!({"type":"group","id":format!("level-{depth}"),"x":0,"y":0,"width":1,"height":1,"view_width":1,"view_height":1,
+                "visual":{"reflection":{"blur":0,"distance":0,"start_opacity":1,"end_opacity":0,"end_position":1}},"children":children})];
+        }
+        source.slides[0].elements = serde_json::from_value(serde_json::json!(children)).unwrap();
+        assert!(matches!(render::render_preview_at_scale(&source, 0, false, 1.0), Err(Error::Limit(message)) if message.contains("8192 objects") && message.contains("leaf-") && message.contains("slide page")));
+    }
+}

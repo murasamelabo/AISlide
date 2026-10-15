@@ -1,0 +1,49 @@
+﻿.modal:has(.parts-panel) { width: min(1240px, calc(100vw - 24px)); max-width: calc(100vw - 24px); height: min(980px, calc(100dvh - 24px)); padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+.modal:has(.parts-panel) > header { padding: 16px 24px; margin: 0; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.parts-panel { display: grid; grid-template-columns: 264px minmax(0, 1fr); flex: 1; min-height: 0; color: var(--text); }
+.parts-library { display: flex; flex-direction: column; gap: 16px; padding: 24px 16px; border-right: 1px solid var(--border); background: var(--surface-muted); overflow-y: auto; min-width: 0; }
+.part-search { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--input-border); }
+.part-search input { width: 100%; min-width: 0; min-height: 48px; background: transparent; border: none; padding: 10px 0; font-size: 16px; }
+.parts-count { font-size: 14px; color: var(--muted); }
+.parts-presets { display: flex; flex-direction: column; gap: 10px; }
+.part-preset { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; text-align: left; padding: 16px; border: 1px solid var(--input-border); background: var(--surface); border-radius: var(--radius); color: var(--text); min-height: 112px; overflow-wrap: anywhere; }
+.part-preset.active { border-color: var(--action); border-left-width: 4px; padding-left: 13px; }
+.part-preset:hover { background: var(--action-soft); }
+.part-preset span, .part-preset small { font-size: 14px; color: var(--muted); }
+.part-preset strong { font-size: 16px; font-weight: 700; }
+.part-editor { display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow-y: auto; padding: 20px 24px 0; gap: 18px; }
+.part-preview { width: 100%; aspect-ratio: 9 / 4; position: relative; overflow: hidden; flex-shrink: 0; border-bottom: 1px solid #e0e6e3; }
+.part-preview > [role="status"] { display: grid; place-items: center; height: 100%; font-size: 16px; color: var(--muted); }
+.part-preview-content { position: absolute; width: 1152px; height: 512px; transform-origin: top left; }
+.part-editor-fields { display: flex; flex-direction: column; gap: 18px; border: 0; margin: 0; padding: 0; min-width: 0; }
+.part-title-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.part-fields { display: flex; flex-direction: column; gap: 12px; min-width: 0; width: 100%; }
+.part-fields > .field { flex: 1; min-width: 0; }
+.part-array { min-width: 0; width: 100%; border-top: 1px solid var(--border); padding-top: 8px; }
+.part-array-heading { display: flex; align-items: center; justify-content: space-between; }
+.part-array-heading h4 { font-size: 16px; font-weight: 700; margin: 8px 0 16px; text-transform: capitalize; }
+.part-record { display: flex; align-items: flex-start; min-width: 0; gap: 6px; padding: 8px 0; }
+.part-record > .tool { flex-shrink: 0; margin-top: 16px; }
+.part-record > .field { flex: 1; min-width: 0; }
+.part-records > .part-record { border-bottom: 1px solid #e4e8e6; }
+.part-records > .part-record > .part-fields { flex-flow: row wrap; }
+.part-records > .part-record > .part-fields > .field { min-width: 110px; }
+.part-values { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+.parts-panel input, .parts-panel select, .parts-panel textarea { max-width: 100%; min-width: 0; box-sizing: border-box; }
+.part-actions { position: sticky; bottom: 0; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 16px 0; border-top: 1px solid var(--border); background: var(--surface); margin-top: auto; }
+.part-actions span { font-size: 14px; color: var(--muted); }
+.part-actions button { flex-shrink: 0; }
+.part-data-action { padding: 12px 16px; border-bottom: 1px solid #e0e6e3; }
+.part-data-action p { font-size: 14px; color: var(--danger); }
+@media (max-width: 700px) {
+  .parts-panel { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .parts-library { padding: 12px; gap: 8px; overflow: visible; border-right: none; border-bottom: 1px solid var(--border); }
+  .parts-count { display: none; }
+  .parts-presets { flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
+  .part-preset { flex: 0 0 176px; min-height: 96px; padding: 12px; }
+  .part-preset.active { padding-left: 9px; }
+  .part-editor { padding: 12px 12px 0; }
+  .part-title-fields { grid-template-columns: minmax(0, 1fr); }
+  .part-actions > span { display: none; }
+  .part-actions { justify-content: flex-end; }
+}

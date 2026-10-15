@@ -1,0 +1,140 @@
+﻿# PoC Support Matrix
+
+The independently implemented exporter follows public OPC/OOXML specifications using generic XML/ZIP libraries. This matrix describes actual support, not universal compatibility.
+
+**The current normal workflow is one standard, unencrypted PPTX.** `open_presentation` reads current native XML, not a cached scene. Studio, SDK and MCP share bounded editing in the Rust core. No-op saves preserve original bytes; supported edits preserve non-target payloads, while unrepresentable replacements fail closed. Warnings must remain visible: a successful preview is not a fidelity score. The older `import_pptx` table is retained separately below.
+
+## Current Single-File Path
+
+The documented bounded implementations are complete. Fixture-specific Office results, static-render tests and schema validation remain separate evidence.
+
+| Surface | Current supported behavior | Remaining limits |
+| --- | --- | --- |
+| Text and paragraphs (G01/G02) | Rich runs/ranges, paragraph formatting, numbering, indentation, spacing, tabs, baseline and highlight; native edit/reopen and Undo | Unknown or unrepresentable rich content remains protected; no universal Office line breaking or typography parity |
+| Search and proofing (G04) | Text/font replacement, language tags, supplied dictionary/synonyms/term translation; local-only Qwen proofread/translation with strict 8,000-scalar input/output, review and one guarded Apply/Undo | No external API for text assistance; observed Japanese tense/meaning failures require human review. [Local AI contract](authoring/local-ai.md) |
+| Selection and arrangement (G05-G09) | Multiple/marquee selection, move/resize, align/distribute/guides, typed copy/paste with new IDs, grouping/ungrouping, stacking, visibility and locking | Representable native content only; group depth 8; not arbitrary Office clipboard interchange or global collision avoidance |
+| Shapes and paths (G10/G11) | Adaptive curves with a 0.25px subdivision target for bounded polygon Boolean operations/fragment; seven-kind object-style painter; PNG slide eyedropper and numeric fallback; eight default WordArt warps | Approximation, not arbitrary Office geometry; nondefault warp adjustments reject. [WordArt contract](authoring/chart-wordart-presentation.md) |
+| Pictures and SVG (G12/G18) | PNG/JPEG editing; inert SVG including safe text/embedded PNG/JPEG; bounded EMF/WMF records; optional pinned U2NetP CPU foreground-alpha segmentation | No external fetching/scripts, arbitrary SVG/metafile support or perfect fine-hair masks; non-preemptible CPU and 768 MiB admission budget, not RSS cap; weights not bundled. [Local AI limits](authoring/local-ai.md) |
+| Tables (G13) | Cell text/format, row heights, column widths, merge/split, rendering and guarded native replacement | Unknown table structures/styles are not silently flattened |
+| Charts (G14/G15) | 24 native kinds with embedded XLSX; six SVD trendline types, forecasts, error bars, log/reverse/custom ticks, secondary axes and limited numeric formats in shared display computation | No full 3D or all Excel formats; unsupported combinations reject or report explicit format fallback. Histogram retains two schema errors/resource; some classic labels use automatic placement. [Native evidence](authoring/chart-ex.md), [display contract](authoring/chart-wordart-presentation.md) |
+| Canvas and templates (G22/G24) | Custom 320..4096 dimensions per axis, aspect controls, POTX/THMX; core/SDK/MCP POTX inspection and bounded master/layout selection, optional blank-slide creation and explicit section stripping | No universal external template compatibility; unselected opaque payloads remain embedded, custom shows remain guarded; [selection contract](api.md#selective-template-factory) |
+| Masters and themes (G23) | Native master/layout topology edits, distinct owner themes, shared-theme copy-on-write, unknown XML preservation | Referenced/unsafe removal rejects; 1-8 masters and 1-32 layouts; native import uses the first master's effective theme as default. [Master/theme contract](authoring/master-fields-themes.md) |
+| Fields and notes (G25/G27) | Rich notes with an 8,000-scalar plain projection; notes/handout-master editing; semantic inherited fields after reopen, preserving UUID/cache; datetime1..13 en-US | Explicit clock required for datetime8..13; no all-locale evaluation, native auxiliary-master deletion/notes-page resizing or handout imposition. [Contract](authoring/master-fields-themes.md) |
+| Fonts (G28) | Opt-in document-local static TTF/OTF, fsType checks, full EOT v1 embedding, measurement/fallback diagnostics; Office-style family aliases and locale-aware CJK fallback; explicit fonts shared across measurement/rendering/OOXML | At most 8 faces, 12 MiB/face and 24 MiB combined, additionally bounded by complete-document capacity; no subsetting or OS installation. Office CJK/OTF visual parity remains unqualified. [Font contract](authoring/fonts.md) |
+| Native fidelity (G29) | Current XML reading, source-bound edits, no-op byte retention and guarded Undo; symmetric subpixel native edge projection and bounded locked rectangle/picture clipping; incompatible saved part specs are warning-only unmanaged records | Transitional subset, not arbitrary PPTX/ISO Strict parity; malformed metadata and capacities still reject, unsupported large clipping may not render; [native import contract](api.md#native-edge-frames) |
+| Static output (G35) | Searchable/selectable English/Japanese Unicode over visible PDF outlines, real structure/MCID tags, alt/reading order and explicit semantic table headers; PNG-only same-document direct print; native Print/Cancel verified with no job submitted | 32 pages, 96 dpi direct print and byte limits; no editable visible PDF text, font-program redistribution, physical-print proof, Office parity or PDF/UA/WCAG certification |
+| Recovery and capacity (G37/G38) | Default large 256 slides/32 MiB document; selectable standard/legacy; opt-in Undo/Redo work copies in fixed Windows AppData or web IndexedDB v2; native persist/restart/restore exercised | OFF by default; each history 30 receipts/4 MiB; 5 entries/48 MiB each/100 MiB total; expiry on enabled-store open after 7 days. Post-security-fix native/install gate pending; non-Windows native storage fails closed |
+| Local review (G40/G41/G43) | Separate modern/legacy comments, offline GUID authors, three states and rich replies; repeated body-edit/reopen preservation; masked manual PII candidates; explicit headers consumed by PDF; effective-theme/alt checks and selective clean copies | Simple slide/shape anchor projection; only unknown new anchors; text-range/complex anchors opaque, modern slide copies and native array reordering reject. No authenticated mentions, notifications, PII proof or WCAG certification. [Phase 6 contract](authoring/review-phase6.md) |
+
+Current text and shape rendering includes modeled mixed runs and effects. Preset outlines, adjustment/text regions and Office theme effects remain approximate where not represented. Pie/doughnut require one nonnegative series with positive total; scatter X coordinates must be finite numeric categories. Factory values remain explicitly synthetic.
+
+Authored placeholders follow layout geometry and modeled formatting. Manual geometry/style edits detach inheritance; text-only edits preserve it where representable. Layout reset retains matching text, and switching/deleting templates preserves obsolete placeholder content as freeform objects. Unrelated objects are not reflowed. `set_design_field` creates real slide-number/date/footer content; supported native-reopened fields retain semantic inheritance without replacing instance UUIDs, caches or unknown extensions. See [fields and themes](authoring/master-fields-themes.md).
+
+## Legacy Import Path
+
+The following table is the historical `import_pptx` preview/preservation path and its then-current exporter baseline. Its chart counts and read-only restrictions are **not** the current `open_presentation` support matrix.
+
+| Surface | Create/export | Import preview | Non-destructive import edit |
+| --- | --- | --- | --- |
+| Text | Native text/shape text; multiline, fonts, bold/italic/underline, alignment, bullets/numbering and inert authored hyperlinks | Direct geometry and text; mixed formatting approximated | Top-level single plain run per paragraph; same paragraph count; geometry |
+| Rectangles | Native shapes and fill | Direct rectangles | Geometry only |
+| Preset shapes | 40 native presets, editable text, fill/outline, rotation | Not a full preset/style importer | Unsupported edits rejected; original parts retained |
+| Tables | Native editable cells; bounded rectangular data | Text and first-run size; theme/style approximation | Geometry only; original cells/styles preserved |
+| Charts | Native column/bar/line/pie/doughnut/area/scatter/stacked column/stacked bar/100% stacked column plus embedded editable XLSX | Original bar/column/line cache subset; other kinds may be omitted or approximated | Geometry only; original chart/workbook preserved |
+| Pictures | PNG/JPEG, alt text, crop and geometry | Bounded embedded PNG/JPEG | Geometry only; original image preserved |
+| Groups | Native nested groups, maximum depth 8 | Zero-origin supported transforms | Read-only; preserved |
+| Connectors | Native lines/arrows with sibling shape references | Supported line geometry and references | Read-only; preserved |
+| Masters/themes | 1-8 native masters, 1-32 layouts, common text/shapes/pictures, placeholders; twelve theme color slots and heading/body/script fonts | Inherited master content may be absent | Imported design parts preserved, not editable |
+| SmartArt, OLE, audio/video, effects, unknown extensions | Not authored | Preserved but not executed; may be absent from preview | No editing or activation |
+| Slide ordering | New scenes support reorder/duplicate | Original order resolved through root slide list | Original package slide structure is read-only |
+| Notes | Native speaker notes and source attribution | Best-effort plain text | Original notes preserved |
+
+Legacy import warnings must also remain visible. Zero supported visual objects can still be a successful preservation import. Unsupported edits reject instead of silently regenerating a lossy copy. The current scope is the table above and the linked feature contracts.
+
+## Workspace Operations
+
+Studio starts with one clean empty slide. The synthetic twelve-slide report is available only through the explicit **New report** command. **Browse presets** in the master editor offers seven independently authored native master/7-layout sets, with color/font roles, side margins, gutters and content/part regions. Application preserves original masters and slide content, rejects edited/foreign preset templates or capacity conflicts, and participates in Undo. Reopened documents need an existing compatible preset structure.
+
+The current single-file workflow supports blank new presentations and insert/duplicate/delete/reorder/rename commands on authored and supported reopened slides, shared by Studio, SDK and MCP. Native master/layout topology can also change within preservation and capacity guards; counts are no longer fixed. Slide duplication preserves native XML and gives copied charts independent embedded workbooks. Structural editing rejects sections/custom slide shows; deleting a slide referenced elsewhere is rejected. Source files are never overwritten. Deleted slide/notes parts are removed, but shared media, opaque data and source documents can remain; ordinary deletion is not a redaction feature.
+
+Studio offers right-click menus for canvas, slide thumbnails, layers, objects and graph nodes/connections; keyboard invocation is Shift+F10 or the context-menu key. Relevant commands remain on buttons/forms for non-pointer use. New/Open and desktop close protect unsaved changes. Unapplied text/property drafts must be applied or cancelled before saving. Save and Save As publish a new file; browser completion means a download was initiated, not that its final destination was independently verified. Opt-in local recovery is separate from native AutoSave and never overwrites the opened source.
+
+**Insert icons** has one provider/category/search palette with 60 entries per page: Lucide React 1.43.0 retains all 1,818 canonical icons and 42 categories; Azure/Entra adds 645 source identities, AWS 808 and GCP 45, for 3,316 palette entries. These counts are not distinct products or drawings. Cloud artwork requires [explicit local setup and vendor terms](authoring/cloud-icons.md); it is not bundled with source or the installer. Lucide retains color/stroke controls; cloud entries hide them and preserve original colors, proportions and prepared PNG bytes up to 512px. No runtime download or authentication is involved. Category and keyword search intersect and reset pagination. File selection, canvas drop and paste still accept PNG/JPEG or bounded inert SVG. Figma **Copy as SVG** is SVG text, not arbitrary Figma clipboard data, `.fig` parsing or account access. Supported SVG retains inert vector content plus a local PNG fallback up to 1024px; unsupported effects/external references reject. Bounded EMF/WMF conversion remains local. Graph imports use the separate raster-only path below; source-asset rights remain the user's responsibility.
+
+## Static Output And Recovery
+
+`export_static` renders represented content locally and is read-only. The prior checkpoint covered all 24 basic chart kinds with PNG/PDF tests, including histogram final-interval and pie/doughnut-legend regressions. Shared display computation now includes six trendline types, forecasts, error bars and bounded secondary/log/reverse axes. Unsupported combinations still reject; limited numeric formatting reports General fallback explicitly. Accepting a native chart does not imply every Office option can be rendered.
+
+PNG/JPEG render modeled effect filters. PDF rasterizes effect-bearing top-level objects at 2x with `PDF_EFFECT_RASTERIZED`, while other visual objects and outlines stay vector; an affected group can contain rasterized visible text. `pdf_rasterized:false` means the whole page was not flattened, not that it contains no rasters. An invisible positioned Unicode layer provides English/Japanese search and selection without embedding font programs. Visible text is not editable. Real structure tags and MCIDs carry reading order and alt text; they do not certify PDF/A, PDF/UA, WCAG or Office typography.
+
+PDF table tags consume explicit `review.table_headers`: unknown/none produce TD only; first_row uses TH Scope Column, first_column uses TH Scope Row, and both uses Scope Both at the corner. Merge spans are retained without claiming arbitrary header associations. The table-parent repair and policy mapping passed 11 focused PDF tests on 2026-09-19.
+
+Static export selects 1-32 unique pages from a document within its selected capacity profile, including the default large 256-slide profile. The 8192px edge, core 32 MiB output and separate less-than-3-MiB protocol bundle limits remain independent. Direct print prepares at most 32 opaque PNG blob pages at 96 dpi in an owned React portal under the same document body. Print media CSS hides the application only while printing; no iframe is used and CSP `frame-src 'none'` remains unchanged. A separate user click opens the system dialog. Native UI Automation matched the owned PID/command marker and localized Print/Cancel controls, then cancelled with beforeprint/afterprint evidence; no print job was submitted. Evidence: `.artifacts/g35-directprint-20260919/native-print-proof.json`. Physical printing remains unverified. See the [static/recovery API contract](api.md#static-export-and-recovery).
+
+Local recovery v2 is off by default and requires new consent to plaintext document/source/origin/history storage. At most five entries, 48 MiB each and 100 MiB total; each Undo/Redo direction is strictly 30 receipts and 4 MiB UTF-8. Core verification and the unsaved-change guard precede restoration with both histories. Windows uses fixed private AppData with a separate bounded worker; pinned directory/ancestor handles prevent rename races, and open-file validation precedes creation. Non-Windows native storage fails closed. Web storage uses IndexedDB v2; generations/CAS and cancellation prevent stale writes/deletes. Expiry runs seven days after successful checkpoint only when the enabled store opens. Disabling and v2 deletion preserve legacy v1 copies. No encrypted storage or source-PPTX overwrite is provided.
+
+Two distinct native WebView profiles exercised persist/restart/restore with Undo/Redo. The storage-security repair passed seven storage unit tests. The bounded static security review found no remaining High/Medium findings, not a full security audit.
+
+Prior Office fixtures opened and edited all 24 native chart kinds; later Sunburst fresh/edited output was separately checked. Histogram retains deliberate `val` bins and **two known SDK 3.5.1 schema errors per histogram chartEx resource**. See [chart qualification history](authoring/chart-ex.md); prior evidence is not a current all-schema/all-Office qualification.
+
+## Parts Library
+
+The current single-file path supports 111 presets in 36 categories. Shared core, SDK, MCP and Studio create ordinary editable groups, not slide-sized raster images or SmartArt. Charts retain native editable workbooks; geographic land outlines use simple native polygons. Metadata travels inside the PPTX and is optional for PowerPoint editing. Insert/update/delete and their metadata participate in the same revisioned Undo/Redo.
+
+Three additive frameless lists (`list/rows`, `list-horizontal/columns`, `list-enumeration/grid`) use aligned native text instead of repeated accent-rail blocks. Catalog recommendations describe their purposes and limits; Studio prefers them on initial category selection while preserving existing choices and drafts. Original preset rendering is unchanged. The shared authoring guide distinguishes peers from steps and comparisons; it does not automatically redesign an existing deck. See [list composition guidance](authoring/README.md#choose-a-list-composition).
+
+Horizontal/vertical flow, tree and cycle presets now use filled process panels, safe-inset arrows, subtree-aware blocks and segmented cycles. The 108 existing preset IDs remain; display names describe the revised drawings. Relationship labels use a bounded collision-avoiding placement search. All default presets and 108 inserted Japanese examples have been checked; excessive density can still be rejected rather than overlapped.
+
+Parts accept bounded typed data and use installed-font fitting with a 12px minimum. The original 108 catalog defaults have generated, reopened and rendered successfully; this does not prove every permitted input combination or universal Office parity. Percentage stacks retain raw numbers and show shares; waterfalls require reconciled totals; ties use competition ranking. The area part currently accepts one series. Pictograms use 5% units; Venn/relationship diagrams are nominal, not computed area/causal models. General map-label collision avoidance, country borders and geocoding are not provided.
+
+The preset Text and visual layout additionally fits newly inserted parts/graphs into its right-hand native region, normalizing child coordinates, text and strokes together. Updates retain the fitted canvas and placement. This explicit reduction can reach the model's 8px font floor; dense labels may require a wider layout or fewer items. Other objects and existing content are not automatically reflowed.
+
+Manual changes that disagree with stored metadata mark it stale and prevent semantic replacement, while preserving native content. Unsupported polygon point/style replacement after reopening fails closed. Insertion does not reflow existing objects.
+
+## Guided Authoring
+
+Core, SDK and MCP provide four English best-practice profiles and deterministic creation from a structured evidence-linked outline: consulting decisions, technical explanation, event presentation and reports. Guided creation makes a new document, not a replacement for an imported deck. It uses existing parts and a native headline/evidence layout; consulting multi-page decks additionally have dedicated C02 summary and C03 closing grids with the same 3-6 issue IDs, analysis references, owners, timing and criteria.
+
+The 48 consulting patterns are retained as selection guidance with explicit capabilities. Only C02/C03 and `native-part` are automatic layouts; other compound patterns require composition or manual design. Guides are available through `best_practice_profiles` and `best_practice_guide`; `validate_guided_presentation` and `create_guided_presentation` enforce bounded inputs, declared numeric evidence, full-headline support references, basic headline rules and measured text fit. They do not invent values or contact a model. Unknown values remain `xx` in qualitative bodies rather than numeric charts.
+
+`ready` is a compilation result, not proof that sources are true, a recommendation is justified, all prose quantities are sourced, all graphical conventions hold, or Office rendering is identical. Human-review requirements remain explicit. Notes retain the supplied ledger and evidence and need privacy review before redistribution. Later ordinary edits do not maintain a live proof of guideline conformance. See [the full input contract and limitations](authoring/README.md).
+
+## Architecture Graphs
+
+Studio, SDK and MCP support six native shapes (rectangle, rounded rectangle, ellipse, diamond, cylinder, cloud), attached straight/right-angle connectors, start/end arrows, dashed connectors, labels, theme colors, nested solid-outline boundaries, movement/resizing, alignment and non-nested grid. React Flow supplies canvas interaction; document behavior remains in Rust. One PPTX embeds pictures and optional metadata for offline reopen, update and Undo/Redo without the installed pack.
+
+Nodes support legacy **Card** presentation and standalone **Icon** presentation: picture above an editable label with a transparent native connection anchor. **Add service icon** starts at 160x140 with 16px text and the full asset service name; labels over 160 characters reject rather than truncate. Nodes and boundaries support choosing/changing/removing icons. Icon mode is disabled without an icon; removal returns the node to Card. Cancel retains the form. Acceptance creates one graph-local edit, followed by one document transaction on Apply; graph history remains 30 entries and 4 MiB per direction.
+
+Generic `create_graph_icon` imports still fit SVG/PNG/JPEG to 256px; prepared cloud PNGs bypass that helper, preserving originals up to 512px. Omitted presentation preserves legacy card output and its at-most-48px side icon. Images are not theme-linked. Strict `GraphIcon` accepts only validated PNG/JPEG bytes and alt text; node and boundary icons share the 3 MiB encoded-image budget. Dense labels may need wider nodes.
+
+Limits: 1-48 nodes, 64 edges, 16 boundaries and four boundary levels; absolute core coordinates in 1152x512 below an 88px title band, minimum 64x40, and 256 rendered elements per slide. Missing/cyclic parents and containment violations reject; members stay below a 40px header with 8px side/bottom padding. Ancestor movement moves descendants once even in multi-selection; boundary removal promotes children to the nearest surviving parent at unchanged absolute bounds. Native objects remain flat within the graph root except that a boundary with an icon is a nested group of its rectangle and picture; logical nesting is not nested PowerPoint groups. Node and boundary labels are embedded in their shapes and move with them in PowerPoint; node icon pictures, edge labels and badges stay separate. Graph-editor movement moves the complete node.
+
+No draw.io XML interchange, self-loops, arbitrary/curved paths, dashed boundary style, automatic obstacle/label collision avoidance or general Office parity is claimed. Grid with boundaries requires membership and fails closed for nesting. Insertions do not reflow other slide content. Unsupported native connector paths reject; external edits preserve native content and make mismatching metadata stale.
+
+Application chrome is DADS-inspired, not a certified or fully conformant DADS implementation. Fonts, actions, focus, spacing and controls are adapted; slide themes remain unchanged. Automated accessibility checks are not a complete WCAG audit.
+
+## Evidence Intake
+
+| Format | Supported behavior | Limitations |
+| --- | --- | --- |
+| CSV | Header/record parsing, original strings and record/column locators | UTF-8; no delimiter guessing or numeric imputation |
+| JSON | Scalar record arrays or header/row matrices, JSON pointers | Nested values rejected; missing fields remain null |
+| XLSX | Bounded sheets, cached values, sheet/cell locators | No formula evaluation, external relationships or macros; dates require review |
+| Text/Markdown | Plain text evidence | Never rendered as executable HTML |
+| PDF | Bounded text extraction with page locators | No page rendering or table inference; scanned pages need separate image input |
+| PNG/JPEG | Decode validation and raster metadata; optional Windows OCR | Installed OCR language required; words/regions remain unverified |
+
+Intake is capped at 2 MiB input; rasters at 1 MiB, 4096 pixels per dimension and a decoder allocation budget. Source tables allow at most 1000 rows, 32 columns, 8 sheets and 16000 total data cells. Data-report mapping selects 1-32 rows and 1-6 numeric series explicitly. XLSX cells/dimensions are preflighted before allocating ranges. PDF loading and extraction use per-stream limits; this is not an OS-level process sandbox.
+
+## Safety And Portability
+
+- Default large JSON request/response: 96 MiB; complete document: 32 MiB; archive/file-picker: 16 MiB. Standard retains 16/8/8 MiB and legacy 4/2/(3 MiB minus 1024 bytes). Original archive and decoded scene both count. Separate budgets apply to sources, images, fonts, static output and recovery.
+- Large scenes: 1-256 slides; standard 128 and legacy 32. Still 256 nodes per slide, 8192 total including templates (2048 legacy), group depth 8 and canvas 320..4096. Provenance has 296 identities with unchanged 2 MiB XML/8192-object bounds. JSON depth/count, image-work and generated-part guards remain finite.
+- New project export checks geometry, source bindings, measured text overflow and missing glyphs. Font fallback is reported. Neither chart-label fitting nor Office-native text parity is proven by these checks.
+- Raw low-level `export` and deterministic CLI `generate` are structural tools; they do not imply the project-level measured-layout gate.
+- Publication uses exclusive file creation; no original/source file is overwritten. Two-file publication is not crash-atomic. Existing destinations are rejected before publication; racing collisions are reported as partial publication without deleting public paths.
+- Hashes, source locators and inverse receipts provide integrity and concurrency checks, not authentication. Checkpoints retain local source content and must be protected accordingly.
+- Model HTTP and in-flight CLI requests support cancellation. Native blocking OCR/PDF work has bounded input but is not a hard-cancellable, isolated worker process.
+- Current native qualification is Windows 11 ARM64 running an x64 GNU Tauri build, with a native ARM64 CPU model server. Native ARM64/MSVC application builds, macOS/Linux distribution and signed installers remain unqualified.
+
+ZIP64, encrypted/legacy presentations, non-UTF-8 edited XML and signed-package edits are rejected. Source OPC relationships are never fetched and imported content is never executed. PowerPoint checks use disposable copies and are optional, never a runtime dependency.

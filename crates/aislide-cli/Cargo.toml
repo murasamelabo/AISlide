@@ -1,0 +1,17 @@
+﻿[package]
+name = "aislide-cli"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "aislide"
+path = "src/main.rs"
+
+[dependencies]
+aislide-core = { path = "../aislide-core" }
+serde_json.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

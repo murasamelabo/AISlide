@@ -1,0 +1,1112 @@
+﻿import { test, expect } from '@playwright/test';
+import { openSample, waitForCoreOperation } from './fixtures';
+import AxeBuilder from '@axe-core/playwright';
+import { readFile } from 'node:fs/promises';
+import { icons as lucideIcons } from 'lucide-react';
+import type { ArchitectureIconCatalog, ArchitectureIconAssets, Element, GraphCreation, GraphSpec } from '../../packages/client/types';
+
+test('graph feedback diagnostics show wrapping borders and shrink controls with native retention', async ({ page }) => {
+  test.setTimeout(120_000);
+  const initialized = waitForCoreOperation(page, 'create_presentation');
+  await page.goto('/');
+  await initialized;
+  await expect(page.getByRole('button', { name: 'Architecture diagram', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+  const initial: GraphSpec = { version: 1, title: 'Graph feedback diagnostics', show_title: false, nodes: [
+    { id: 'source', label: 'Gateway service', x: 100, y: 200, width: 160, height: 120, font_size: 32, group: 'region' },
+    { id: 'target', label: 'Target', x: 800, y: 200, width: 160, height: 120 },
+  ], edges: [{ id: 'boundary', source: 'source', target: 'target', source_port: 'right', target_port: 'left', label: 'Boundary link', label_font_size: 20, label_placement: { position: 0.5, side: 'above', offset: 8, on_overlap: 'warn' } }],
+  groups: [{ id: 'region', label: 'Region', x: 20, y: 80, width: 540, height: 400 }] };
+  async function previewAfter(action: () => Promise<unknown>) {
+    await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+    const requested = page.waitForRequest(request => request.url().endsWith('/api/core') && request.method() === 'POST'
+      && request.postDataJSON().op === 'create_graph' && request.postDataJSON().spec.title === initial.title);
+    const completed = page.waitForResponse(async response => response.request() === await requested);
+    await action();
+    const response = await completed;
+    expect((await requested).postDataJSON().include_diagnostics).toBe(true);
+    expect(response.ok()).toBe(true);
+    const result = await response.json() as GraphCreation;
+    expect(result.element.type).toBe('group');
+    await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+    return result;
+  }
+  async function graphJson() {
+    await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+    return JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue()) as GraphSpec;
+  }
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  await dialog.getByLabel('Graph JSON', { exact: true }).fill(JSON.stringify(initial));
+  const first = await previewAfter(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  expect(first.diagnostics.findings.map(finding => finding.code)).toEqual(expect.arrayContaining(['GRAPH_NODE_LABEL_WRAPPED', 'GRAPH_LABEL_BORDER_OVERLAP']));
+  const diagnostics = dialog.getByRole('region', { name: 'Graph diagnostics', exact: true });
+  await expect(diagnostics.getByRole('status')).toContainText('complete');
+  await expect(diagnostics.getByRole('list')).toContainText('GRAPH_NODE_LABEL_WRAPPED');
+  await expect(diagnostics.getByRole('list')).toContainText('GRAPH_LABEL_BORDER_OVERLAP');
+  await expect(dialog.getByRole('button', { name: 'Insert graph', exact: true })).toBeEnabled();
+  await dialog.getByRole('button', { name: 'Select node source', exact: true }).click();
+  await expect(dialog.getByLabel('Node label fit', { exact: true })).toHaveValue('wrap');
+  await previewAfter(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  expect((await graphJson()).nodes[0].label_fit).toBeUndefined();
+  await previewAfter(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await dialog.getByLabel('Node label fit', { exact: true }).selectOption('shrink');
+  const shrunk = await previewAfter(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  if (shrunk.element.type !== 'group') throw new Error('Expected native graph');
+  const label = shrunk.element.children.find(element => element.id.endsWith('-n-source'));
+  if (label?.type !== 'shape') throw new Error('Expected node label embedded in its shape');
+  expect(label.font_size).toBeGreaterThanOrEqual(12);
+  expect(label.font_size).toBeLessThan(32);
+  expect(await dialog.locator('.react-flow__node[data-id="source"] .graph-fitted-label .document-paragraph span').first().evaluate(element => parseFloat(getComputedStyle(element).fontSize))).toBeCloseTo(label.font_size, 2);
+  await dialog.getByLabel('Node label', { exact: true }).fill('W'.repeat(40));
+  const limited = await previewAfter(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  expect(limited.diagnostics.findings.some(finding => finding.code === 'GRAPH_NODE_LABEL_SHRINK_LIMIT')).toBe(true);
+  await expect(diagnostics.getByRole('list')).toContainText('GRAPH_NODE_LABEL_SHRINK_LIMIT');
+  await dialog.getByLabel('Node label', { exact: true }).fill('Gateway\nService');
+  const multiline = await previewAfter(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  if (multiline.element.type !== 'group') throw new Error('Expected native graph');
+  expect(multiline.element.children.find(element => element.id.endsWith('-n-source'))).toMatchObject({ text: 'Gateway\nService' });
+  await dialog.getByRole('button', { name: 'Select group region', exact: true }).click();
+  await previewAfter(() => dialog.getByRole('button', { name: 'Apply group', exact: true }).click());
+  expect((await graphJson()).groups![0].header_color).toBeUndefined();
+  await previewAfter(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await dialog.getByLabel('Group header color', { exact: true }).fill('#117744');
+  const colored = await previewAfter(() => dialog.getByRole('button', { name: 'Apply group', exact: true }).click());
+  if (colored.element.type !== 'group') throw new Error('Expected native graph');
+  expect(colored.element.children.find(element => element.id.endsWith('-g-region'))).toMatchObject({ text: 'Region', color: '117744' });
+  await expect(dialog.locator('.react-flow__node[data-id="region"] .document-paragraph span').first()).toHaveCSS('color', 'rgb(17, 119, 68)');
+  const authored = await graphJson();
+  expect(authored.nodes[0].label_fit).toBe('shrink');
+  expect(authored.groups![0].header_color).toBe('117744');
+  const strict = structuredClone(authored);
+  strict.edges![0].label_placement!.on_overlap = 'error';
+  await dialog.getByLabel('Graph JSON', { exact: true }).fill(JSON.stringify(strict));
+  const refused = page.waitForResponse(response => response.url().endsWith('/api/core') && response.request().method() === 'POST'
+    && response.request().postDataJSON().op === 'create_graph' && response.request().postDataJSON().spec.edges?.[0].label_placement?.on_overlap === 'error');
+  await dialog.getByRole('button', { name: 'Validate JSON', exact: true }).click();
+  expect((await refused).ok()).toBe(false);
+  await expect(dialog.getByRole('alert')).toBeVisible();
+  await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+  await dialog.getByLabel('Graph JSON', { exact: true }).fill(JSON.stringify(authored));
+  await previewAfter(() => dialog.getByRole('tab', { name: 'Preview', exact: true }).click());
+  await expect(dialog.locator('.graph-native-preview')).toContainText('Gateway');
+  await expect(diagnostics.getByRole('list')).toContainText('GRAPH_LABEL_BORDER_OVERLAP');
+  await dialog.getByRole('button', { name: 'Insert graph', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  const file = await download;
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: file.suggestedFilename(), mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await readFile((await file.path())!) });
+  await page.getByRole('button', { name: /^Select graph-/ }).click();
+  await page.getByRole('button', { name: 'Edit graph', exact: true }).click();
+  await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+  expect(await graphJson()).toEqual(authored);
+});
+
+test('graph authoring controls retain manual paths custom ports badges and group spacing', async ({ page }) => {
+  test.setTimeout(120_000);
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.addInitScript(() => {
+    const captured: string[] = [];
+    Object.assign(window, { graphAuthoringErrors: captured });
+    window.addEventListener('error', event => captured.push(event.message));
+  });
+  const initialized = waitForCoreOperation(page, 'create_presentation');
+  await page.goto('/');
+  await initialized;
+  await expect(page.getByRole('button', { name: 'Architecture diagram', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+  const initial: GraphSpec = { version: 1, title: 'Graph authoring controls', nodes: [
+    { id: 'source', label: 'Source', x: 80, y: 176, width: 160, height: 120, group: 'region' },
+    { id: 'target', label: 'Target', kind: 'rounded_rectangle', x: 640, y: 176, width: 400, height: 80, group: 'region' },
+  ], edges: [
+    { id: 'manual', source: 'source', target: 'target', source_port: 'right', target_port: 'left', route: 'manual', waypoints: [[500, 320], [380, 180], [660, 340]], stroke_width: 4, label: 'Request', label_color: 'AA2244', label_font_size: 20, source_offset: -0.25, target_offset: 0.25, label_placement: { position: 0.35, side: 'above', offset: 12 }, badge: { number: 7, position: 0.65, size: 28, font_size: 14, fill: 'FFFFFF', color: '112233' } },
+    { id: 'center', source: 'source', target: 'target', source_port: 'right', target_port: 'left', badge: { number: 2 } },
+  ], groups: [{ id: 'region', label: 'Region', x: 24, y: 96, width: 1104, height: 400, padding: 24, header_height: 64, header_font_size: 24 }] };
+  async function changeGraph(action: () => Promise<unknown>) {
+    await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+    const requested = page.waitForRequest(request => request.url().endsWith('/api/core') && request.method() === 'POST'
+      && request.postDataJSON().op === 'create_graph' && request.postDataJSON().spec.title === initial.title);
+    const completed = page.waitForResponse(async response => response.request() === await requested);
+    await action();
+    const response = await completed;
+    expect(response.ok()).toBe(true);
+    expect(await response.finished()).toBeNull();
+    await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+    return (await response.json() as GraphCreation).element;
+  }
+  async function graphJson() {
+    await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+    return JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue()) as GraphSpec;
+  }
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  await dialog.getByLabel('Graph JSON', { exact: true }).fill(JSON.stringify(initial));
+  let rendered = await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  const edge = dialog.locator('.react-flow__edge[data-id="manual"]');
+  const source = dialog.locator('.react-flow__node[data-id="source"]');
+  const target = dialog.locator('.react-flow__node[data-id="target"]');
+  const path = edge.locator('.react-flow__edge-path');
+  async function pathPoints() {
+    const commands = (await path.getAttribute('d'))!.match(/[ML][^ML]+/g)!;
+    return commands.map(command => command.slice(1).trim().split(/[,\s]+/).map(Number));
+  }
+  async function assertMovingAnnotations() {
+    for (const [selector, position, side, gap] of [['.graph-edge-badge', 0.7, 0, 0], ['.graph-edge-label', 0.4, -1, 16]] as const) {
+      const annotation = edge.locator(selector);
+      const width = Number(await annotation.getAttribute('width')), height = Number(await annotation.getAttribute('height'));
+      const geometry = await path.evaluate((element, fraction) => {
+        const route = element as SVGPathElement, length = route.getTotalLength(), distance = length * fraction;
+        const center = route.getPointAtLength(distance), before = route.getPointAtLength(Math.max(0, distance - 0.5)), after = route.getPointAtLength(Math.min(length, distance + 0.5));
+        const horizontal = after.x - before.x, vertical = after.y - before.y, segmentLength = Math.hypot(horizontal, vertical);
+        let normal = [-vertical / segmentLength, horizontal / segmentLength];
+        if (normal[1] > 0 || Math.abs(normal[1]) < 1e-9 && normal[0] < 0) normal = normal.map(value => -value);
+        return { x: center.x, y: center.y, normal };
+      }, position);
+      const distance = side * ((Math.abs(geometry.normal[0]) * width + Math.abs(geometry.normal[1]) * height) / 2 + gap);
+      expect(Number(await annotation.getAttribute('x')) + width / 2).toBeCloseTo(geometry.x + geometry.normal[0] * distance, 1);
+      expect(Number(await annotation.getAttribute('y')) + height / 2).toBeCloseTo(geometry.y + geometry.normal[1] * distance, 1);
+    }
+  }
+  async function assertNativeGeometry(native: Element) {
+    expect(native.type).toBe('group');
+    if (native.type !== 'group') throw new Error('Expected graph group');
+    for (const id of ['manual', 'center']) {
+      const connector = native.children.find(element => element.id.endsWith(`-e-${id}`))!;
+      if (connector.type !== 'connector') throw new Error('Expected connector');
+      const commands = (await dialog.locator(`.react-flow__edge[data-id="${id}"] .react-flow__edge-path`).getAttribute('d'))!.match(/[ML][^ML]+/g)!;
+      expect(commands).toHaveLength(connector.routing!.points.length);
+      for (const [index, point] of connector.routing!.points.entries()) {
+        const actual = commands[index].slice(1).split(',').map(Number);
+        expect(actual[0]).toBeCloseTo(connector.x + point[0] * connector.width, 2);
+        expect(actual[1]).toBeCloseTo(connector.y + point[1] * connector.height, 2);
+      }
+    }
+    const label = native.children.find(element => element.id.endsWith('-et-manual'))!;
+    for (const key of ['x', 'y', 'width', 'height'] as const) expect(Number(await edge.locator('.graph-edge-label').getAttribute(key))).toBeCloseTo(label[key], 3);
+  }
+  await expect(source.locator('.graph-native-port')).toHaveCount(2);
+  await expect(source.locator('.react-flow__handle:not(.graph-native-port)')).toHaveCount(4);
+  await expect(target.locator('.graph-native-port')).toHaveCount(2);
+  await expect(target.locator('.preset-shape path').first()).toHaveAttribute('d', /A3\.3334 16\.667/);
+  await assertNativeGeometry(rendered);
+  await expect(path).toHaveCSS('stroke-width', '4px');
+  await expect(edge.locator('.graph-edge-label .slide-text')).toHaveCSS('color', 'rgb(170, 34, 68)');
+  await expect(edge.locator('.graph-edge-label .slide-text')).toHaveCSS('font-size', '20px');
+  await expect(dialog.locator('.react-flow__edge[data-id="center"] .graph-edge-badge')).toHaveText('2');
+  await expect(dialog.locator('.react-flow__node[data-id="region"] .graph-fitted-label')).toHaveCSS('left', '28px');
+  await expect(dialog.locator('.react-flow__node[data-id="region"] .slide-text')).toHaveCSS('font-size', '24px');
+  await dialog.getByRole('button', { name: 'Select edge manual', exact: true }).click();
+  await expect(path).toHaveCSS('stroke-width', '4px');
+  await expect(dialog.getByLabel('Edge source offset', { exact: true })).toHaveValue('-0.25');
+  await dialog.getByLabel('Edge source offset', { exact: true }).fill('-0.2');
+  await dialog.getByLabel('Edge target offset', { exact: true }).fill('0.2');
+  await dialog.getByLabel('Edge line width', { exact: true }).fill('6');
+  await dialog.getByLabel('Edge label font size', { exact: true }).fill('22');
+  await dialog.getByLabel('Edge label color', { exact: true }).fill('#117744');
+  await dialog.getByLabel('Edge label side', { exact: true }).selectOption('below');
+  await dialog.getByLabel('Edge label gap', { exact: true }).fill('16');
+  await dialog.getByLabel('Edge label position', { exact: true }).fill('0.4');
+  await dialog.getByRole('button', { name: 'Add waypoint', exact: true }).click();
+  await dialog.getByLabel('Waypoint 4 x', { exact: true }).fill('760');
+  await dialog.getByLabel('Waypoint 4 y', { exact: true }).fill('300');
+  await dialog.getByRole('button', { name: 'Delete waypoint 4', exact: true }).click();
+  await dialog.getByLabel('Waypoint 2 x', { exact: true }).fill('392');
+  await dialog.getByLabel('Badge number', { exact: true }).fill('9');
+  await dialog.getByLabel('Badge position', { exact: true }).fill('0.7');
+  await dialog.getByLabel('Badge size', { exact: true }).fill('32');
+  await dialog.getByLabel('Badge font size', { exact: true }).fill('16');
+  await dialog.getByLabel('Badge fill', { exact: true }).fill('#ffeecc');
+  await dialog.getByLabel('Badge text', { exact: true }).fill('#221100');
+  rendered = await changeGraph(() => dialog.getByRole('button', { name: 'Apply edge', exact: true }).click());
+  await expect(path).toHaveCSS('stroke-width', '6px');
+  await expect(edge.locator('.graph-edge-badge')).toHaveText('9');
+  await assertNativeGeometry(rendered);
+  await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+  await expect(path).toHaveCSS('stroke-width', '4px');
+  await changeGraph(() => dialog.getByRole('button', { name: 'Redo diagram edit', exact: true }).click());
+  await dialog.getByLabel('Numbered badge', { exact: true }).uncheck();
+  await changeGraph(() => dialog.getByRole('button', { name: 'Apply edge', exact: true }).click());
+  await expect(edge.locator('.graph-edge-badge')).toHaveCount(0);
+  await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+  await dialog.getByLabel('Edge route', { exact: true }).selectOption('elbow');
+  await changeGraph(() => dialog.getByRole('button', { name: 'Apply edge', exact: true }).click());
+  await dialog.getByRole('checkbox', { name: 'Snap', exact: true }).uncheck();
+  await dialog.getByRole('button', { name: 'Select node source', exact: true }).click();
+  const elbowBounds = (await source.boundingBox())!;
+  await page.mouse.move(elbowBounds.x + elbowBounds.width / 2, elbowBounds.y + elbowBounds.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(elbowBounds.x + elbowBounds.width / 2 + 16, elbowBounds.y + elbowBounds.height / 2 + 8, { steps: 4 });
+  await assertMovingAnnotations();
+  await changeGraph(() => page.mouse.up());
+  await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+  expect((await graphJson()).edges![0].waypoints ?? []).toEqual([]);
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+  await dialog.getByRole('button', { name: 'Select edge manual', exact: true }).click();
+  await expect(dialog.getByLabel('Edge route', { exact: true })).toHaveValue('manual');
+  await dialog.getByRole('button', { name: 'Select group region', exact: true }).click();
+  await dialog.getByLabel('Group padding', { exact: true }).fill('32');
+  await dialog.getByLabel('Group header height', { exact: true }).fill('72');
+  await dialog.getByLabel('Group header font size', { exact: true }).fill('26');
+  await changeGraph(() => dialog.getByRole('button', { name: 'Apply group', exact: true }).click());
+  await expect(dialog.locator('.react-flow__node[data-id="region"] .graph-fitted-label')).toHaveCSS('left', '36px');
+  await expect(dialog.locator('.react-flow__node[data-id="region"] .graph-fitted-label')).toHaveCSS('height', '60px');
+  await dialog.locator('.react-flow__controls-fitview').click();
+  await dialog.getByRole('button', { name: 'Select node source', exact: true }).click();
+  await dialog.getByRole('checkbox', { name: 'Snap', exact: true }).uncheck();
+  const before = await pathPoints();
+  let bounds = (await source.boundingBox())!;
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width / 2 + 12, bounds.y + bounds.height / 2 + 8, { steps: 4 });
+  const during = await pathPoints();
+  expect(during).toHaveLength(5);
+  expect(during.slice(1, -1)).toEqual(before.slice(1, -1));
+  expect(during[0][0]).toBeGreaterThan(before[0][0]);
+  await assertMovingAnnotations();
+  await changeGraph(() => page.mouse.up());
+  await dialog.getByRole('button', { name: 'Select node source', exact: true }).click();
+  await page.keyboard.down('Control');
+  await target.click({ position: { x: 80, y: 60 } });
+  await page.keyboard.up('Control');
+  await expect(source).toHaveClass(/selected/);
+  await expect(target).toHaveClass(/selected/);
+  const bothBefore = await pathPoints();
+  bounds = (await source.boundingBox())!;
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width / 2 + 8, bounds.y + bounds.height / 2 + 8, { steps: 4 });
+  const bothDuring = await pathPoints();
+  for (const index of [1, 2, 3]) {
+    expect(bothDuring[index][0] - bothBefore[index][0]).toBeCloseTo(bothDuring[0][0] - bothBefore[0][0], 2);
+    expect(bothDuring[index][1] - bothBefore[index][1]).toBeCloseTo(bothDuring[0][1] - bothBefore[0][1], 2);
+  }
+  await assertMovingAnnotations();
+  rendered = await changeGraph(() => page.mouse.up());
+  await assertNativeGeometry(rendered);
+  await page.evaluate(() => document.fonts.ready);
+  await page.screenshot({ path: '.artifacts/graph-authoring-desktop.png' });
+  await page.setViewportSize({ width: 375, height: 812 });
+  await dialog.locator('.graph-canvas').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: '.artifacts/graph-authoring-mobile.png' });
+  await dialog.getByRole('button', { name: 'Select edge manual', exact: true }).click();
+  await dialog.getByLabel('Waypoint 2 x', { exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: '.artifacts/graph-authoring-mobile-controls.png' });
+  expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 960 });
+  const authored = await graphJson();
+  expect(authored.edges![0]).toMatchObject({ stroke_width: 6, label_font_size: 22, label_color: '117744', source_offset: -0.2, target_offset: 0.2, badge: { number: 9, size: 32, font_size: 16, fill: 'FFEECC', color: '221100' } });
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Preview', exact: true }).click());
+  await expect(dialog.locator('.graph-native-preview')).toContainText('9');
+  await dialog.getByRole('button', { name: 'Insert graph', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  const file = await download;
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: file.suggestedFilename(), mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await readFile((await file.path())!) });
+  await page.getByRole('button', { name: /^Select graph-/ }).click();
+  await page.getByRole('button', { name: 'Edit graph', exact: true }).click();
+  await expect(dialog.locator('.graph-edge-badge')).toHaveCount(2);
+  expect(await graphJson()).toEqual(authored);
+  expect(errors).toEqual([]);
+  expect(await page.evaluate(() => (window as unknown as { graphAuthoringErrors: string[] }).graphAuthoringErrors)).toEqual([]);
+});
+
+test('graph feedback options preserve native details, titleless geometry and PPTX editing', async ({ page }) => {
+  test.setTimeout(90_000);
+  await openSample(page);
+  await page.getByRole('button', { name: 'New presentation', exact: true }).click();
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+  async function changeGraph(action: () => Promise<unknown>) {
+    await expect(dialog.locator('.graph-actions button')).toBeEnabled();
+    const requested = page.waitForRequest(request => request.url().endsWith('/api/core')
+      && request.method() === 'POST' && request.postDataJSON().op === 'create_graph'
+      && request.postDataJSON().id === 'graph-preview' && request.postDataJSON().spec.title === 'Feedback options');
+    const completed = page.waitForResponse(async response => response.request() === await requested);
+    await action();
+    const response = await completed;
+    expect(response.ok()).toBe(true);
+    expect(await response.finished()).toBeNull();
+    await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+  }
+  async function graphJson() {
+    await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+    return JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue());
+  }
+  const initial = {
+    version: 1, title: 'Feedback options', subtitle: 'Retained subtitle',
+    nodes: [
+      { id: 'source', label: 'Source', x: 24, y: 120, width: 320, height: 200 },
+      { id: 'target', label: 'Target', x: 720, y: 120, width: 320, height: 200 },
+    ],
+    edges: [{ id: 'request', source: 'source', target: 'target', label: 'Request', route: 'elbow' }],
+  };
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  await dialog.getByLabel('Graph JSON', { exact: true }).fill(JSON.stringify(initial));
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await dialog.getByRole('button', { name: 'Select node source', exact: true }).click();
+  await expect(dialog.getByLabel('Show graph title', { exact: true })).toBeChecked();
+  await expect(dialog.getByRole('button', { name: 'Node align center', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(dialog.getByRole('button', { name: 'Node heading bold', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await dialog.getByLabel('Node label', { exact: true }).fill('Gateway');
+  await changeGraph(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  const unchangedOptions = await graphJson();
+  expect(unchangedOptions.show_title).toBeUndefined();
+  for (const key of ['detail', 'detail_font_size', 'text_align', 'heading_bold']) expect(unchangedOptions.nodes[0][key]).toBeUndefined();
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  const detailInput = dialog.getByLabel('Node detail', { exact: true });
+  await detailInput.fill('a'.repeat(241));
+  expect(await detailInput.evaluate((element: HTMLTextAreaElement) => element.checkValidity())).toBe(false);
+  await dialog.getByRole('button', { name: 'Apply node', exact: true }).click();
+  await expect(dialog.locator('.react-flow__node[data-id="source"] .graph-fitted-label .document-paragraph')).toHaveCount(1);
+  await detailInput.fill(String.fromCodePoint(0x1f680).repeat(240));
+  expect(await detailInput.evaluate((element: HTMLTextAreaElement) => element.checkValidity())).toBe(true);
+  await dialog.getByLabel('Node detail', { exact: true }).fill('First line\nSecond line');
+  await expect(dialog.getByRole('button', { name: 'Node align left', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await dialog.getByLabel('Node font size', { exact: true }).fill('24');
+  await dialog.getByLabel('Node detail font size', { exact: true }).fill('25');
+  expect(await dialog.getByLabel('Node detail font size', { exact: true }).evaluate((element: HTMLInputElement) => element.checkValidity())).toBe(false);
+  await dialog.getByLabel('Node detail font size', { exact: true }).fill('16');
+  await dialog.getByRole('button', { name: 'Node align left', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Node heading bold', exact: true }).click();
+  await changeGraph(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  const source = dialog.locator('.react-flow__node[data-id="source"]');
+  const paragraphs = source.locator('.graph-fitted-label .document-paragraph');
+  await expect(paragraphs).toHaveCount(3);
+  await expect(paragraphs.nth(0)).toContainText('Gateway');
+  await expect(paragraphs.nth(1)).toContainText('First line');
+  await expect(paragraphs.nth(2)).toContainText('Second line');
+  await expect(paragraphs.nth(0).locator('span').first()).toHaveCSS('font-weight', '400');
+  await expect(paragraphs.nth(0).locator('span').first()).toHaveCSS('font-size', '24px');
+  await expect(paragraphs.nth(1).locator('span').first()).toHaveCSS('font-size', '16px');
+  await expect(paragraphs.nth(1)).toHaveCSS('text-align', 'left');
+  await changeGraph(() => dialog.getByLabel('Show graph title', { exact: true }).uncheck());
+  await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+  await expect(dialog.getByLabel('Show graph title', { exact: true })).toBeChecked();
+  await expect(dialog.getByLabel('Graph y', { exact: true })).toHaveAttribute('min', '88');
+  await changeGraph(() => dialog.getByRole('button', { name: 'Redo diagram edit', exact: true }).click());
+  await expect(dialog.getByLabel('Show graph title', { exact: true })).not.toBeChecked();
+  await expect(dialog.getByLabel('Graph y', { exact: true })).toHaveAttribute('min', '0');
+  await expect(dialog.getByLabel('Graph title', { exact: true })).toHaveValue('Feedback options');
+  await expect(dialog.getByLabel('Graph subtitle', { exact: true })).toHaveValue('Retained subtitle');
+  await dialog.getByLabel('Graph y', { exact: true }).fill('0');
+  await dialog.getByLabel('Graph height', { exact: true }).fill('512');
+  await changeGraph(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  await expect(source).toHaveCSS('height', '512px');
+  await expect(source).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 24, 0)');
+  const refusedTitle = page.waitForResponse(response => response.url().endsWith('/api/core')
+    && response.request().method() === 'POST' && response.request().postDataJSON().op === 'create_graph'
+    && response.request().postDataJSON().spec.show_title === true);
+  await dialog.getByLabel('Show graph title', { exact: true }).check();
+  expect((await refusedTitle).ok()).toBe(false);
+  await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+  await expect(dialog.getByLabel('Show graph title', { exact: true })).not.toBeChecked();
+  await expect(dialog.getByRole('alert')).toBeVisible();
+  await expect(dialog.locator('.graph-edge-label')).toContainText('Request');
+  await dialog.locator('.react-flow__controls-fitview').click();
+  await expect.poll(() => source.locator('.react-flow__resize-control.handle.bottom.right').evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    const target = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    return target === element || element.contains(target);
+  })).toBe(true);
+  const authored = await graphJson();
+  expect(authored).toMatchObject({ show_title: false, nodes: [{ id: 'source', y: 0, height: 512, detail: 'First line\nSecond line', detail_font_size: 16, text_align: 'left', heading_bold: false }, { id: 'target' }] });
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Preview', exact: true }).click());
+  await expect(dialog.locator('.graph-native-preview')).toContainText('First line');
+  await expect(dialog.locator('.graph-native-preview')).not.toContainText('Feedback options');
+  await expect(dialog.locator('.graph-native-preview')).not.toContainText('Retained subtitle');
+  await test.info().attach('graph-feedback-titleless', { body: await page.screenshot(), contentType: 'image/png' });
+  await dialog.getByRole('button', { name: 'Insert graph', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  const file = await download;
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: file.suggestedFilename(), mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await readFile((await file.path())!) });
+  await page.getByRole('button', { name: /^Select graph-/ }).click();
+  await page.getByRole('button', { name: 'Edit graph', exact: true }).click();
+  await expect(source.locator('.graph-fitted-label')).toContainText('Second line');
+  expect(await graphJson()).toEqual(authored);
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await dialog.getByRole('button', { name: 'Select node source', exact: true }).click();
+  await dialog.getByLabel('Graph x', { exact: true }).fill('32');
+  await changeGraph(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  expect((await graphJson()).nodes[0]).toEqual({ ...authored.nodes[0], x: 32 });
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await dialog.getByLabel('Node detail', { exact: true }).fill('   ');
+  await changeGraph(() => dialog.getByRole('button', { name: 'Apply node', exact: true }).click());
+  const cleared = await graphJson();
+  expect(cleared.nodes[0].detail).toBeUndefined();
+  expect(cleared.nodes[0].detail_font_size).toBeUndefined();
+  expect(cleared.nodes[0].text_align).toBe('left');
+  expect(cleared.nodes[0].heading_bold).toBe(false);
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+  await expect(dialog.getByLabel('Node detail', { exact: true })).toHaveValue('First line\nSecond line');
+});
+
+test('relationship labels have no background and remain clear of connector paths', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'New presentation', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await expect(dialog.locator('.graph-edge-label')).toHaveCount(2);
+  await expect(dialog.locator('.react-flow__edge-textbg')).toHaveCount(0);
+  await expect(dialog.locator('.graph-edge-label').first()).toContainText('HTTPS');
+  await page.evaluate(() => document.fonts.ready);
+  const overlaps = await dialog.locator('.react-flow__edge').evaluateAll((edges) => edges.map((edge) => {
+    const label = edge.querySelector('.graph-edge-label')!;
+    const bounds = label.getBoundingClientRect();
+    const path = edge.querySelector<SVGPathElement>('.react-flow__edge-path')!;
+    const matrix = path.getScreenCTM()!;
+    const length = path.getTotalLength();
+    const crossing = Array.from({ length: 201 }, (_, index) => {
+      const point = path.getPointAtLength(length * index / 200);
+      const screen = new DOMPoint(point.x, point.y).matrixTransform(matrix);
+      return screen.x >= bounds.left && screen.x <= bounds.right && screen.y >= bounds.top && screen.y <= bounds.bottom;
+    }).some(Boolean);
+    return { crossing, width: bounds.width, height: bounds.height, background: getComputedStyle(label).backgroundColor };
+  }));
+  expect(overlaps).toHaveLength(2);
+  for (const label of overlaps) {
+    expect(label.crossing).toBe(false);
+    expect(label.width).toBeGreaterThan(0);
+    expect(label.height).toBeGreaterThan(0);
+    expect(label.background).toBe('rgba(0, 0, 0, 0)');
+  }
+  await dialog.getByRole('tab', { name: 'Preview', exact: true }).click();
+  await expect(dialog.locator('.graph-native-preview')).toContainText('HTTPS');
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  const input = dialog.getByLabel('Graph JSON', { exact: true });
+  const spec = JSON.parse(await input.inputValue());
+  spec.edges = [
+    { ...spec.edges[0], id: 'copy-et-request', label: 'First relationship' },
+    { ...spec.edges[1], id: 'request', label: 'Second relationship' },
+  ];
+  await input.fill(JSON.stringify(spec));
+  await dialog.getByRole('tab', { name: 'Canvas', exact: true }).click();
+  await expect(dialog.locator('.react-flow__edge[data-id="request"] .graph-edge-label')).toContainText('Second relationship');
+  await expect(dialog.locator('.react-flow__edge[data-id="copy-et-request"] .graph-edge-label')).toContainText('First relationship');
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+});
+
+test('direct service icon picker cancels without changing the graph or losing focus', async ({ page }) => {
+  await openSample(page);
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  const add = dialog.getByRole('button', { name: 'Add service icon', exact: true });
+  await expect(add).toBeVisible();
+  await add.click();
+  const picker = dialog.getByRole('region', { name: 'New service icon', exact: true });
+  await expect(picker.getByLabel('Search icons', { exact: true })).toBeFocused();
+  await picker.getByLabel('Search icons', { exact: true }).press('Escape');
+  await expect(picker).toHaveCount(0);
+  await expect(add).toBeFocused();
+  await expect(dialog.locator('.react-flow__node')).toHaveCount(3);
+  await expect(dialog.getByRole('button', { name: 'Undo diagram edit', exact: true })).toBeDisabled();
+});
+
+test('direct service icons keep presentation, resize, history and editable PPTX metadata', async ({ page }) => {
+  test.setTimeout(90_000);
+  await openSample(page);
+  await page.getByRole('button', { name: 'New presentation', exact: true }).click();
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await dialog.getByRole('button', { name: 'Add service icon', exact: true }).click();
+  const picker = dialog.getByRole('region', { name: 'New service icon', exact: true });
+  await picker.getByLabel('Search icons', { exact: true }).fill('orbit');
+  await picker.getByRole('button', { name: 'Orbit icon', exact: true }).click();
+  await picker.getByRole('button', { name: 'Insert icon', exact: true }).click();
+  await expect(picker).toHaveCount(0);
+  await expect(dialog.getByLabel('Node label', { exact: true })).toHaveValue('Orbit');
+  await expect(dialog.getByLabel('Node presentation', { exact: true })).toHaveValue('icon');
+  await expect(dialog.getByLabel('Graph width', { exact: true })).toHaveValue('160');
+  await expect(dialog.getByLabel('Graph height', { exact: true })).toHaveValue('140');
+  const node = dialog.locator('.react-flow__node').filter({ has: page.locator('img[alt="Orbit (Lucide)"]') });
+  await expect(node.locator('.preset-shape')).toHaveCount(0);
+  await expect(node.locator('.react-flow__handle')).toHaveCount(4);
+  await expect(node.locator('img')).toHaveJSProperty('complete', true);
+  const imageBounds = (await node.locator('.graph-node-icon').boundingBox())!;
+  const labelBounds = (await node.locator('.graph-fitted-label').boundingBox())!;
+  expect(imageBounds.y + imageBounds.height).toBeLessThan(labelBounds.y);
+  await dialog.getByLabel('Node label', { exact: true }).fill('Service gateway');
+  await dialog.getByLabel('Graph width', { exact: true }).fill('192');
+  await dialog.getByRole('button', { name: 'Apply node', exact: true }).click();
+  await expect(node).toContainText('Service gateway');
+  await dialog.getByRole('button', { name: 'Remove node icon', exact: true }).click();
+  await expect(dialog.getByLabel('Node presentation', { exact: true })).toHaveValue('card');
+  await expect(dialog.getByLabel('Node presentation', { exact: true }).locator('option[value="icon"]')).toHaveJSProperty('disabled', true);
+  await expect(dialog.locator('.graph-node-icon')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click();
+  await expect(node.locator('.preset-shape')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Redo diagram edit', exact: true }).click();
+  await expect(dialog.locator('.graph-node-icon')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click();
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  const authored = JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue());
+  const service = authored.nodes.find((entry: { label: string }) => entry.label === 'Service gateway');
+  expect(service).toMatchObject({ presentation: 'icon', width: 192, height: 140, font_size: 16, icon: { alt: 'Orbit (Lucide)' } });
+  await dialog.getByRole('tab', { name: 'Preview', exact: true }).click();
+  await expect(dialog.locator('.graph-native-preview img')).toHaveCount(1);
+  await dialog.getByRole('button', { name: 'Insert graph', exact: true }).click();
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  const file = await download;
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: file.suggestedFilename(), mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await readFile((await file.path())!) });
+  await page.getByRole('button', { name: /^Select graph-/ }).click();
+  await page.getByRole('button', { name: 'Edit graph', exact: true }).click();
+  await dialog.getByRole('button', { name: `Select node ${service.id}`, exact: true }).click();
+  await expect(dialog.getByLabel('Node presentation', { exact: true })).toHaveValue('icon');
+  await expect(node.locator('img')).toHaveAttribute('alt', 'Orbit (Lucide)');
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  expect(JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue())).toEqual(authored);
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+});
+
+test('native graph preview resizing does not trigger ResizeObserver loops', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await openSample(page);
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+  for (const width of [1440, 1100, 1280, 900, 1440]) {
+    await dialog.getByRole('tab', { name: 'Preview', exact: true }).click();
+    await expect(dialog.locator('.graph-native-preview')).toBeVisible();
+    await page.setViewportSize({ width, height: 960 });
+    await expect.poll(async () => dialog.locator('.graph-native-preview').evaluate(element => {
+      const frame = element.querySelector('.graph-native-frame')!;
+      return Math.abs(frame.getBoundingClientRect().height - element.clientWidth * 512 / 1152);
+    })).toBeLessThan(1);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await dialog.getByRole('tab', { name: 'Canvas', exact: true }).click();
+  }
+  expect(errors).toEqual([]);
+});
+
+test('four-level boundaries retain icons and absolute coordinates through drag, resize, ungroup and PPTX', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.addInitScript(() => {
+    const errors: string[] = [];
+    Object.defineProperty(window, '__aislideGraphResizeErrors', { value: errors });
+    window.addEventListener('error', (event) => {
+      if (!event.message.includes('ResizeObserver')) return;
+      errors.push(event.message);
+      console.warn('GRAPH_RESIZE_DIAGNOSTIC', JSON.stringify({ time: performance.now(), tab: document.querySelector('.graph-views [aria-selected=true]')?.textContent, preview: document.querySelector('.graph-native-preview')?.getBoundingClientRect().toJSON(), frame: document.querySelector('.graph-native-frame')?.getBoundingClientRect().toJSON() }));
+    });
+  });
+  await openSample(page);
+  await page.getByRole('button', { name: 'New presentation', exact: true }).click();
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  async function changeGraph(action: () => Promise<unknown>) {
+    await expect(dialog.locator('.graph-actions button')).toBeEnabled();
+    const requested = page.waitForRequest(request => request.url().endsWith('/api/core')
+      && request.method() === 'POST' && request.postDataJSON().op === 'create_graph'
+      && request.postDataJSON().id === 'graph-preview' && request.postDataJSON().spec.title === 'Nested services');
+    const completed = page.waitForResponse(async response => response.request() === await requested);
+    await action();
+    const response = await completed;
+    expect(response.ok()).toBe(true);
+    expect(await response.finished()).toBeNull();
+    await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+  }
+  await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+  const groups = [
+    { id: 'root', label: 'Organization', x: 24, y: 96, width: 1080, height: 408 },
+    { id: 'region', label: 'Region', parent: 'root', x: 40, y: 144, width: 1048, height: 352 },
+    { id: 'vpc', label: 'Network', parent: 'region', x: 56, y: 192, width: 1016, height: 296 },
+    { id: 'subnet', label: 'Subnet', parent: 'vpc', x: 72, y: 240, width: 984, height: 240 },
+  ];
+  const initial = { version: 1, title: 'Nested services', subtitle: '', groups: [...groups].reverse(), nodes: [{ id: 'service', label: 'Gateway', x: 96, y: 288, width: 160, height: 140, font_size: 16, group: 'subnet' }], edges: [] };
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  await dialog.getByLabel('Graph JSON', { exact: true }).fill(JSON.stringify(initial));
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await expect(dialog.locator('.graph-fitted-label')).toHaveCount(5);
+  await expect(dialog.getByRole('button', { name: 'Grid layout', exact: true })).toBeDisabled();
+  await expect(dialog.locator('.graph-layout-control')).toHaveAttribute('title', 'Grid layout is unavailable for nested boundaries.');
+  await dialog.getByRole('button', { name: 'Select group root', exact: true }).click();
+  await expect(dialog.getByLabel('Group parent', { exact: true }).locator('option')).toHaveCount(1);
+  await dialog.getByLabel('Group label', { exact: true }).fill('Organization draft');
+  await dialog.getByRole('button', { name: 'Choose group icon', exact: true }).click();
+  const picker = dialog.getByRole('region', { name: 'Boundary icon', exact: true });
+  await picker.getByLabel('Search icons', { exact: true }).press('Escape');
+  await expect(dialog.getByLabel('Group label', { exact: true })).toHaveValue('Organization draft');
+  await expect(dialog.getByRole('button', { name: 'Choose group icon', exact: true })).toBeFocused();
+  await dialog.getByRole('button', { name: 'Choose group icon', exact: true }).click();
+  await picker.getByLabel('Search icons', { exact: true }).fill('cloud');
+  await picker.getByRole('button', { name: 'Cloud icon', exact: true }).click();
+  await changeGraph(() => picker.getByRole('button', { name: 'Insert icon', exact: true }).click());
+  const root = dialog.locator('.react-flow__node[data-id="root"]');
+  await expect(root.locator('.graph-node-icon img')).toHaveAttribute('alt', 'Cloud (Lucide)');
+  await expect(root).toContainText('Organization draft');
+  const headerImage = (await root.locator('.graph-node-icon').boundingBox())!;
+  const headerLabel = (await root.locator('.graph-fitted-label').boundingBox())!;
+  expect(headerImage.x + headerImage.width).toBeLessThan(headerLabel.x);
+  await changeGraph(() => dialog.getByRole('button', { name: 'Remove group icon', exact: true }).click());
+  await expect(root.locator('.graph-node-icon')).toHaveCount(0);
+  await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+  await expect(root.locator('.graph-node-icon')).toHaveCount(1);
+  await root.focus();
+  await changeGraph(() => root.press('ArrowRight'));
+  await expect(dialog.getByLabel('Graph x', { exact: true })).toHaveValue('32');
+  const bounds = (await root.boundingBox())!;
+  const scale = bounds.width / 1080;
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + 20 * scale);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width / 2 + 8 * scale, bounds.y + 20 * scale, { steps: 6 });
+  await changeGraph(() => page.mouse.up());
+  await expect(dialog.getByLabel('Graph x', { exact: true })).toHaveValue('40');
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  const moved = JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue());
+  for (const group of groups) expect(moved.groups.find((entry: { id: string }) => entry.id === group.id)).toMatchObject({ x: group.x + 16, y: group.y });
+  expect(moved.nodes[0]).toMatchObject({ x: 112, y: 288 });
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await dialog.getByRole('button', { name: 'Select group subnet', exact: true }).click();
+  const subnet = dialog.locator('.react-flow__node[data-id="subnet"]');
+  const subnetBounds = (await subnet.boundingBox())!;
+  const nestedScale = subnetBounds.width / 984;
+  await page.mouse.move(subnetBounds.x + subnetBounds.width / 2, subnetBounds.y + 20 * nestedScale);
+  await page.mouse.down();
+  await page.mouse.move(subnetBounds.x + subnetBounds.width / 2 + 8 * nestedScale, subnetBounds.y + 20 * nestedScale, { steps: 6 });
+  await changeGraph(() => page.mouse.up());
+  await expect(dialog.getByLabel('Graph x', { exact: true })).toHaveValue('96');
+  const handle = subnet.locator('.react-flow__resize-control.handle.bottom.right');
+  expect(await handle.evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    const target = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    return target === element || element.contains(target);
+  })).toBe(true);
+  const handleBounds = (await handle.boundingBox())!;
+  await page.mouse.move(handleBounds.x + handleBounds.width / 2, handleBounds.y + handleBounds.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handleBounds.x + handleBounds.width / 2 - 16 * nestedScale, handleBounds.y + handleBounds.height / 2 - 8 * nestedScale, { steps: 6 });
+  await expect.poll(() => subnet.evaluate(element => (element as HTMLElement).offsetHeight)).toBeLessThan(240);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  expect(await page.evaluate(() => (window as unknown as { __aislideGraphResizeErrors: string[] }).__aislideGraphResizeErrors)).toEqual([]);
+  await changeGraph(() => page.mouse.up());
+  await expect(dialog.getByLabel('Graph width', { exact: true })).not.toHaveValue('984');
+  await expect(dialog.getByLabel('Graph x', { exact: true })).toHaveValue('96');
+  await expect(dialog.getByLabel('Graph y', { exact: true })).toHaveValue('240');
+  await test.info().attach('nested-resized', { body: await page.screenshot(), contentType: 'image/png' });
+  await dialog.getByRole('button', { name: 'Select group root', exact: true }).click();
+  await subnet.click({ position: { x: 60, y: 10 }, modifiers: ['ControlOrMeta'] });
+  await expect(dialog.locator('.react-flow__node.selected')).toHaveCount(2);
+  await root.focus();
+  await changeGraph(() => root.press('ArrowRight'));
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  const overlapMove = JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue());
+  expect(overlapMove.groups.find((entry: { id: string }) => entry.id === 'root')).toMatchObject({ x: 48 });
+  expect(overlapMove.groups.find((entry: { id: string }) => entry.id === 'subnet')).toMatchObject({ x: 104 });
+  expect(overlapMove.nodes[0]).toMatchObject({ x: 128, y: 288 });
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+  await dialog.getByRole('button', { name: 'Select group region', exact: true }).click();
+  await changeGraph(() => dialog.getByRole('button', { name: 'Delete graph selection', exact: true }).click());
+  await expect(dialog.locator('.react-flow__node')).toHaveCount(4);
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  const ungrouped = JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue());
+  expect(ungrouped.groups.find((entry: { id: string }) => entry.id === 'vpc')).toMatchObject({ parent: 'root', x: 72, y: 192 });
+  expect(ungrouped.nodes[0]).toMatchObject({ group: 'subnet', x: 120, y: 288 });
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+  await expect(dialog.locator('.react-flow__node')).toHaveCount(5);
+  await dialog.getByRole('button', { name: 'Select group subnet', exact: true }).click();
+  await changeGraph(() => dialog.getByRole('button', { name: 'Delete graph selection', exact: true }).click());
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  const promoted = JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue());
+  expect(promoted.nodes[0]).toMatchObject({ group: 'vpc', x: 120, y: 288 });
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Canvas', exact: true }).click());
+  await changeGraph(() => dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click());
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  const authored = JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue());
+  await changeGraph(() => dialog.getByRole('tab', { name: 'Preview', exact: true }).click());
+  await expect(dialog.locator('.graph-native-preview img')).toHaveCount(1);
+  await expect(dialog.locator('.graph-native-preview img')).toHaveJSProperty('complete', true);
+  await test.info().attach('nested-preview', { body: await page.screenshot(), contentType: 'image/png' });
+  await dialog.getByRole('button', { name: 'Insert graph', exact: true }).click();
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  const file = await download;
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: file.suggestedFilename(), mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await readFile((await file.path())!) });
+  await page.getByRole('button', { name: /^Select graph-/ }).click();
+  await page.getByRole('button', { name: 'Edit graph', exact: true }).click();
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  expect(JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue())).toEqual(authored);
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { __aislideGraphResizeErrors: string[] }).__aislideGraphResizeErrors)).toEqual([]);
+});
+
+test('boundary creation stops at four levels and invalid cycles preserve JSON and history', async ({ page }) => {
+  await openSample(page);
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  for (let level = 1; level <= 4; level++) {
+    await dialog.getByRole('button', { name: 'Boundary', exact: true }).click();
+    await expect(dialog.locator('.graph-boundary')).toHaveCount(level);
+  }
+  await dialog.getByRole('button', { name: 'Boundary', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toContainText('at most four levels');
+  await expect(dialog.locator('.graph-boundary')).toHaveCount(4);
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  const input = dialog.getByLabel('Graph JSON', { exact: true });
+  const original = JSON.parse(await input.inputValue());
+  const invalid = structuredClone(original);
+  invalid.groups[0].parent = invalid.groups[3].id;
+  const invalidJson = JSON.stringify(invalid);
+  await input.fill(invalidJson);
+  await dialog.getByRole('tab', { name: 'Canvas', exact: true }).click();
+  await expect(dialog.getByRole('tab', { name: 'JSON', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(input).toHaveValue(invalidJson);
+  await expect(dialog.getByRole('alert')).toBeVisible();
+  await input.fill(JSON.stringify(original));
+  await dialog.getByRole('tab', { name: 'Canvas', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click();
+  await expect(dialog.locator('.graph-boundary')).toHaveCount(3);
+  await dialog.getByRole('button', { name: 'Redo diagram edit', exact: true }).click();
+  await expect(dialog.locator('.graph-boundary')).toHaveCount(4);
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+});
+test('cloud presets expose every provider and preserve official PNG bytes in service nodes', async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto('/');
+  await expect(page.locator('.thumbnail')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'New presentation', exact: true })).toBeEnabled();
+  const headers = { Origin: new URL(page.url()).origin };
+  const catalogResponse = await page.request.post('/api/core', { headers, data: { op: 'architecture_icons' } });
+  expect(catalogResponse.ok()).toBe(true);
+  const catalog = await catalogResponse.json() as ArchitectureIconCatalog;
+  test.skip(!catalog.configured, 'Official cloud packs require explicit local setup; no implicit CI download or vendor-terms acceptance');
+  expect(catalog.icons).toHaveLength(1498);
+  const sql = catalog.icons.find((entry) => entry.id === 'gcp/core-product/cloud-sql')!;
+  const assetResponse = await page.request.post('/api/core', { headers, data: { op: 'architecture_icon_assets', ids: [sql.id] } });
+  expect(assetResponse.ok()).toBe(true);
+  const original = (await assetResponse.json() as ArchitectureIconAssets).icons[0];
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await dialog.getByRole('button', { name: 'Add service icon', exact: true }).click();
+  const picker = dialog.getByRole('region', { name: 'New service icon', exact: true });
+  await expect(picker.getByRole('status')).toHaveText('1818 icons');
+  for (const [provider, count] of [['azure', 645], ['aws', 808], ['gcp', 45]] as const) {
+    await picker.getByLabel('Icon provider', { exact: true }).selectOption(provider);
+    await expect(picker.getByLabel('Icon category', { exact: true }).locator('option').first()).toHaveText(`All icons (${count})`);
+    await expect(picker.getByLabel('Icon color', { exact: true })).toHaveCount(0);
+    await expect(picker.getByLabel('Icon stroke width', { exact: true })).toHaveCount(0);
+  }
+  await picker.getByLabel('Search icons', { exact: true }).fill('Cloud SQL');
+  await picker.getByRole('button', { name: `${sql.name} icon`, exact: true }).click();
+  const preview = picker.locator('.asset-preview img');
+  await expect(preview).toHaveJSProperty('complete', true);
+  await expect(preview).toHaveJSProperty('naturalWidth', original.width);
+  await picker.getByRole('button', { name: 'Insert icon', exact: true }).click();
+  await expect(picker).toHaveCount(0);
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  const spec = JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue());
+  const inserted = spec.nodes.find((entry: { label: string }) => entry.label === sql.name);
+  expect(inserted).toMatchObject({ presentation: 'icon', icon: { mime_type: 'image/png', alt: sql.name, base64: original.base64 } });
+  await dialog.getByRole('tab', { name: 'Preview', exact: true }).click();
+  await expect(dialog.locator('.graph-native-preview').getByRole('img', { name: sql.name, exact: true })).toBeVisible();
+  await expect(dialog.locator('.graph-error')).toHaveCount(0);
+});
+
+test('uninstalled cloud packs retain catalog search and never block existing Lucide icons', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('.thumbnail')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'New presentation', exact: true })).toBeEnabled();
+  const external: string[] = [];
+  page.on('request', (request) => { if (new URL(request.url()).origin !== new URL(page.url()).origin) external.push(request.url()); });
+  await page.route('**/api/core', async (route) => {
+    if (route.request().postDataJSON().op !== 'architecture_icons') { await route.continue(); return; }
+    const response = await route.fetch();
+    const catalog = await response.json() as ArchitectureIconCatalog;
+    await route.fulfill({ response, json: { ...catalog, configured: false, message: 'Cloud icon pack is not installed. Run the explicit cloud icon setup.' } });
+  });
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await dialog.getByRole('button', { name: 'Add service icon', exact: true }).click();
+  const picker = dialog.getByRole('region', { name: 'New service icon', exact: true });
+  await picker.getByLabel('Icon provider', { exact: true }).selectOption('aws');
+  await expect(picker.getByRole('alert')).toContainText('Cloud icon pack is not installed');
+  await picker.getByLabel('Search icons', { exact: true }).fill('Amazon EC2');
+  await expect(picker.getByRole('button', { name: 'Amazon Elastic Compute Cloud icon', exact: true })).toBeDisabled();
+  await expect(picker.getByRole('button', { name: 'Insert icon', exact: true })).toBeDisabled();
+  await picker.getByLabel('Icon provider', { exact: true }).selectOption('lucide');
+  await expect(picker.getByRole('alert')).toHaveCount(0);
+  await expect(picker.getByRole('status')).toHaveText('1818 icons');
+  await picker.getByLabel('Search icons', { exact: true }).fill('Database');
+  await picker.getByRole('button', { name: 'Database icon', exact: true }).click();
+  const rendered = waitForCoreOperation(page, 'create_graph');
+  await picker.getByRole('button', { name: 'Insert icon', exact: true }).click();
+  await rendered;
+  await expect(picker).toHaveCount(0);
+  await expect(dialog.locator('.graph-node-icon img')).toHaveAttribute('alt', 'Database (Lucide)');
+  await expect(dialog.locator('.graph-error')).toHaveCount(0);
+  expect(external).toEqual([]);
+});
+
+test('graph node icons retain labels, connections, history and single-PPTX editing', async ({ page }) => {
+  test.setTimeout(90_000);
+  await openSample(page);
+  await page.getByRole('button', { name: 'New presentation', exact: true }).click();
+  await expect(page.locator('.thumbnail')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await dialog.getByRole('button', { name: 'Select node api', exact: true }).click();
+  await dialog.getByLabel('Node label', { exact: true }).fill('Service API');
+  await dialog.getByRole('button', { name: 'Choose node icon', exact: true }).click();
+  const picker = dialog.getByRole('region', { name: 'Node icon', exact: true });
+  await picker.getByRole('button', { name: 'Cancel icon selection', exact: true }).click();
+  await expect(dialog.getByLabel('Node label', { exact: true })).toHaveValue('Service API');
+  await dialog.getByRole('button', { name: 'Choose node icon', exact: true }).click();
+  await expect(picker.locator('.icon-grid button')).toHaveCount(60);
+  await expect(picker.getByRole('status')).toHaveText(`${Object.keys(lucideIcons).length} icons`);
+  await picker.getByLabel('Search icons', { exact: true }).fill('orbit');
+  await picker.getByRole('button', { name: 'Orbit icon', exact: true }).click();
+  await picker.getByLabel('Icon color', { exact: true }).fill('#007a4d');
+  await picker.getByRole('button', { name: 'Insert icon', exact: true }).click();
+  await expect(picker).toHaveCount(0);
+  const node = dialog.locator('.react-flow__node[data-id="api"]');
+  const icon = node.locator('.graph-node-icon img');
+  await expect(icon).toHaveAttribute('alt', 'Orbit (Lucide)');
+  await expect(icon).toHaveJSProperty('complete', true);
+  expect(await icon.evaluate((image) => (image as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+  await expect(node).toContainText('Service API');
+  await expect(dialog.locator('.react-flow__edge')).toHaveCount(2);
+  await dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click();
+  await expect(icon).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Redo diagram edit', exact: true }).click();
+  await expect(icon).toHaveCount(1);
+  await dialog.getByRole('button', { name: 'Remove node icon', exact: true }).click();
+  await expect(icon).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click();
+  await expect(icon).toHaveCount(1);
+  await dialog.getByRole('button', { name: 'Change node icon', exact: true }).click();
+  await picker.getByLabel('Search icons', { exact: true }).fill('cloud');
+  await picker.getByRole('button', { name: 'Cloud icon', exact: true }).click();
+  await picker.getByRole('button', { name: 'Insert icon', exact: true }).click();
+  await expect(icon).toHaveAttribute('alt', 'Cloud (Lucide)');
+  await node.focus();
+  await node.press('ArrowRight');
+  await expect(dialog.getByLabel('Graph x', { exact: true })).toHaveValue('398');
+  const imageBounds = (await icon.boundingBox())!;
+  const labelBounds = (await node.locator('.graph-fitted-label').boundingBox())!;
+  expect(imageBounds.x + imageBounds.width).toBeLessThan(labelBounds.x);
+  await dialog.getByRole('tab', { name: 'Preview', exact: true }).click();
+  await expect(dialog.locator('.graph-native-preview img')).toHaveCount(1);
+  await dialog.getByRole('button', { name: 'Insert graph', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator('.slide-stage img')).toHaveCount(1);
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  const file = await download;
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: file.suggestedFilename(), mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await readFile((await file.path())!) });
+  await page.getByRole('button', { name: /^Select graph-/ }).click();
+  await page.getByRole('button', { name: 'Edit graph', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Select node api', exact: true }).click();
+  await expect(icon).toHaveAttribute('alt', 'Cloud (Lucide)');
+  await dialog.getByRole('button', { name: 'Remove node icon', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Update graph', exact: true }).click();
+  await expect(page.locator('.slide-stage img')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.slide-stage img')).toHaveCount(1);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('graph preview initialization survives repeated editor mounts without a busy error', async ({ page }) => {
+  await openSample(page);
+  for (let iteration = 0; iteration < 3; iteration++) {
+    await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+    await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+    await expect(dialog.locator('.graph-error')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  }
+});
+
+test('graph icon import rejects active SVG and invalid images without losing the node draft', async ({ page }) => {
+  await openSample(page);
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await dialog.getByRole('button', { name: 'Select node user', exact: true }).click();
+  await dialog.getByLabel('Node label', { exact: true }).fill('Retained draft');
+  await dialog.getByRole('button', { name: 'Choose node icon', exact: true }).click();
+  const picker = dialog.getByRole('region', { name: 'Node icon', exact: true });
+  const externalRequests: string[] = [];
+  page.on('request', (request) => { if (request.url().startsWith('https://example.invalid/')) externalRequests.push(request.url()); });
+  await picker.getByRole('button', { name: 'SVG', exact: true }).click();
+  await picker.getByLabel('SVG markup', { exact: true }).fill('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><image href="https://example.invalid/icon.png"/></svg>');
+  await picker.getByRole('button', { name: 'Insert SVG', exact: true }).click();
+  await expect(picker.getByRole('alert')).toContainText(/unsupported|external|inert/);
+  await picker.getByLabel('Import asset files', { exact: true }).setInputFiles({ name: 'invalid.png', mimeType: 'image/png', buffer: Buffer.from('not an image') });
+  await expect(picker.getByRole('alert')).toBeVisible();
+  await expect(dialog.locator('.graph-node-icon')).toHaveCount(0);
+  await picker.getByRole('button', { name: 'Cancel icon selection', exact: true }).click();
+  await expect(dialog.getByLabel('Node label', { exact: true })).toHaveValue('Retained draft');
+  await expect(dialog.getByRole('button', { name: 'Choose node icon', exact: true })).toBeFocused();
+  expect(externalRequests).toEqual([]);
+  await page.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  await expect(page.getByRole('button', { name: /^Select graph-/ })).toHaveCount(0);
+});
+
+test('architecture graphs can be created, edited, undone and reopened from PPTX', async ({ page }) => {
+  await openSample(page);
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await expect(dialog.locator('.react-flow__node')).toHaveCount(3);
+  await dialog.getByLabel('Graph title', { exact: true }).fill('Service topology');
+  await dialog.getByRole('button', { name: 'Select node api', exact: true }).click();
+  await dialog.getByLabel('Node label', { exact: true }).fill('Service API');
+  await dialog.getByRole('button', { name: 'Apply node', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Select edge request', exact: true }).click();
+  await dialog.getByLabel('Edge route', { exact: true }).selectOption('elbow');
+  await dialog.getByRole('button', { name: 'Apply edge', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Insert graph', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator('.slide-stage').getByText('Service API', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Edit graph', exact: true }).click();
+  await dialog.getByLabel('Graph title', { exact: true }).fill('Updated topology');
+  await dialog.getByRole('button', { name: 'Update graph', exact: true }).click();
+  await expect(page.locator('.slide-stage').getByText('Updated topology', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.slide-stage').getByText('Service topology', { exact: true })).toBeVisible();
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click();
+  const file = await download;
+  await page.getByLabel('Open PPTX file', { exact: true }).setInputFiles({ name: file.suggestedFilename(), mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await readFile((await file.path())!) });
+  await page.getByRole('button', { name: /^Select graph-/ }).click();
+  await expect(page.getByRole('button', { name: 'Edit graph', exact: true })).toBeEnabled();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('graph canvas movement and resizing survive preview while cancel preserves the slide', async ({ page }) => {
+  await openSample(page);
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  const node = dialog.locator('.react-flow__node[data-id="user"]');
+  await expect(node).toBeVisible();
+  const bounds = (await node.boundingBox())!;
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width / 2 + 40, bounds.y + bounds.height / 2 + 24, { steps: 8 });
+  await page.mouse.up();
+  await expect(dialog.getByLabel('Graph x', { exact: true })).not.toHaveValue('40');
+  const moved = Number(await dialog.getByLabel('Graph x', { exact: true }).inputValue());
+  await node.focus();
+  await node.press('ArrowRight');
+  await expect(dialog.getByLabel('Graph x', { exact: true })).toHaveValue(String(moved + 8));
+  await dialog.getByLabel('Graph width', { exact: true }).fill('208');
+  await dialog.getByRole('button', { name: 'Apply node', exact: true }).click();
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  const value = JSON.parse(await dialog.getByLabel('Graph JSON', { exact: true }).inputValue());
+  expect(value.nodes.find((entry: { id: string }) => entry.id === 'user')).toMatchObject({ x: moved + 8, width: 208 });
+  await dialog.getByRole('tab', { name: 'Preview', exact: true }).click();
+  await expect(dialog.locator('.graph-native-preview')).toContainText('Client');
+  await page.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  await expect(page.getByRole('button', { name: /^Select graph-/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeDisabled();
+});
+
+test('graph node and connection edits use undo without leaving dangling edges', async ({ page }) => {
+  await openSample(page);
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await dialog.getByRole('button', { name: 'Add ellipse node', exact: true }).click();
+  await expect(dialog.locator('.react-flow__node')).toHaveCount(4);
+  await dialog.getByLabel('Connect from', { exact: true }).selectOption('data');
+  await dialog.getByLabel('Connect to', { exact: true }).selectOption({ label: 'Ellipse' });
+  await dialog.getByRole('button', { name: 'Connect nodes', exact: true }).click();
+  await expect(dialog.locator('.react-flow__edge')).toHaveCount(3);
+  await dialog.getByRole('button', { name: /^Select node node-/ }).click();
+  await dialog.getByRole('button', { name: 'Delete graph selection', exact: true }).click();
+  await expect(dialog.locator('.react-flow__node')).toHaveCount(3);
+  await expect(dialog.locator('.react-flow__edge')).toHaveCount(2);
+  await dialog.getByRole('button', { name: 'Undo diagram edit', exact: true }).click();
+  await expect(dialog.locator('.react-flow__node')).toHaveCount(4);
+  await expect(dialog.locator('.react-flow__edge')).toHaveCount(3);
+  await dialog.getByRole('button', { name: 'Redo diagram edit', exact: true }).click();
+  await expect(dialog.locator('.react-flow__node')).toHaveCount(3);
+  await expect(dialog.locator('.graph-error')).toHaveCount(0);
+});
+
+test('graph JSON errors retain the draft and do not change the active tab', async ({ page }) => {
+  await openSample(page);
+  await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+  await dialog.getByRole('tab', { name: 'JSON', exact: true }).click();
+  const input = dialog.getByLabel('Graph JSON', { exact: true });
+  const value = JSON.parse(await input.inputValue());
+  await input.fill('{invalid');
+  await dialog.getByRole('tab', { name: 'Canvas', exact: true }).click();
+  await expect(input).toHaveValue('{invalid');
+  await expect(dialog.getByRole('tab', { name: 'JSON', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(dialog.locator('.graph-error')).toBeVisible();
+  value.nodes[0].label = 'JSON edited client';
+  await input.fill(JSON.stringify(value));
+  await dialog.getByRole('tab', { name: 'Preview', exact: true }).click();
+  await expect(dialog.locator('.graph-native-preview')).toContainText('JSON edited client');
+  await expect(dialog.locator('.graph-error')).toHaveCount(0);
+});
+
+for (const width of [1440, 390]) {
+  test(`DADS-inspired graph controls fit and are accessible at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 960 });
+    await openSample(page);
+    await page.getByRole('button', { name: 'Architecture diagram', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Architecture diagram', exact: true });
+    await expect(dialog.locator('.react-flow__node')).toHaveCount(3);
+    expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+    const results = await new AxeBuilder({ page }).include('.graph-editor').analyze();
+    expect(results.violations.filter((issue) => ['serious', 'critical'].includes(issue.impact ?? ''))).toEqual([]);
+    await page.evaluate(() => document.fonts.ready);
+    await dialog.screenshot({ path: `.artifacts/graph-editor-${width}.png` });
+    await dialog.getByRole('button', { name: 'Select node api', exact: true }).click();
+    await expect(dialog.locator('.graph-fitted-label')).toHaveCount(3);
+    await dialog.getByLabel('Node detail', { exact: true }).fill('Routes validated requests.');
+    await dialog.getByLabel('Graph height', { exact: true }).fill('160');
+    await dialog.getByLabel('Node font size', { exact: true }).fill('20');
+    await dialog.getByLabel('Node detail font size', { exact: true }).fill('14');
+    await dialog.getByRole('button', { name: 'Node align right', exact: true }).focus();
+    await dialog.getByRole('button', { name: 'Node align right', exact: true }).press('Space');
+    const updated = waitForCoreOperation(page, 'create_graph');
+    await dialog.getByRole('button', { name: 'Apply node', exact: true }).click();
+    await updated;
+    await expect(dialog.locator('.react-flow__node[data-id="api"] .graph-fitted-label')).toContainText('Routes validated requests.');
+    await expect(dialog.getByRole('button', { name: 'Node align right', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+    const titleChanged = waitForCoreOperation(page, 'create_graph');
+    await dialog.getByLabel('Show graph title', { exact: true }).uncheck();
+    await titleChanged;
+    await expect(dialog.locator('.graph-editor')).toHaveAttribute('aria-busy', 'false');
+    await page.evaluate(() => document.fonts.ready);
+    expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+    expect(await dialog.locator('.graph-topbar, .graph-properties-form, .graph-text-options').evaluateAll(elements => elements.filter(element => element.scrollWidth > element.clientWidth + 1).map(element => element.className))).toEqual([]);
+    const feedbackResults = await new AxeBuilder({ page }).include('.graph-editor').analyze();
+    expect(feedbackResults.violations.filter((issue) => ['serious', 'critical'].includes(issue.impact ?? ''))).toEqual([]);
+    await dialog.screenshot({ path: `.artifacts/graph-feedback-${width}.png` });
+    await dialog.getByRole('button', { name: 'Choose node icon', exact: true }).click();
+    const picker = dialog.getByRole('region', { name: 'Node icon', exact: true });
+    await expect(picker.getByLabel('Search icons', { exact: true })).toBeFocused();
+    expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+    const iconResults = await new AxeBuilder({ page }).include('.graph-icon-picker').analyze();
+    expect(iconResults.violations.filter((issue) => ['serious', 'critical'].includes(issue.impact ?? ''))).toEqual([]);
+    await dialog.screenshot({ path: `.artifacts/graph-icon-picker-${width}.png` });
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect x="2" y="2" width="20" height="20" rx="4" fill="#007a4d"/></svg>';
+    await picker.getByLabel('Import asset files', { exact: true }).setInputFiles({ name: 'service.svg', mimeType: 'image/svg+xml', buffer: Buffer.from(svg) });
+    await expect(picker).toHaveCount(0);
+    const icon = dialog.locator('.react-flow__node[data-id="api"] .graph-node-icon img');
+    await expect(icon).toHaveAttribute('src', /^data:image\/png;base64,/);
+    await icon.scrollIntoViewIfNeeded();
+    await expect(icon).toHaveJSProperty('complete', true);
+    await dialog.screenshot({ path: `.artifacts/graph-node-icon-${width}.png` });
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+  });
+}

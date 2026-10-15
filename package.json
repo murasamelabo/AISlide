@@ -1,0 +1,54 @@
+{
+  "name": "aislide-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/studio"
+  ],
+  "scripts": {
+    "core:build": "node tools/cargo.mjs build -p aislide-cli",
+    "core:test": "node tools/cargo.mjs test --workspace",
+    "test:bridge": "node --test tools/core-client.test.mjs tools/atomic-output.test.mjs tools/atomic-project.test.mjs",
+    "test:capacity": "npm run core:build && npm run build && node --test tools/capacity.test.mjs",
+    "test:mcp": "node --test tools/mcp.test.mjs tools/mcp-poc.test.mjs tools/references.test.mjs",
+    "test:sdk": "node --test tools/client.test.mjs",
+    "test:extraction": "node --test tools/extraction.test.mjs",
+    "test:generation": "node --test tools/generation.test.mjs",
+    "test:generation:e2e": "playwright test --config playwright.generation.config.ts",
+    "test:native": "node tools/cargo.mjs test --manifest-path apps/studio/src-tauri/Cargo.toml --bin aislide-studio",
+    "test:native:e2e": "node --test tools/native-generation.test.mjs",
+    "encoding:check": "node tools/encoding.mjs",
+    "encoding:fix": "node tools/encoding.mjs --fix",
+    "dev": "npm run dev --workspace studio -- --host 127.0.0.1",
+    "build": "npm run build --workspace studio",
+    "lint": "npm run lint --workspace studio",
+    "mcp": "node tools/mcp.mjs",
+    "tauri:dev": "node tools/cargo.mjs run --manifest-path apps/studio/src-tauri/Cargo.toml",
+    "tauri:build": "node tools/cargo.mjs build --manifest-path apps/studio/src-tauri/Cargo.toml --features custom-protocol",
+    "setup:build": "node tools/windows-setup.mjs",
+    "setup:bundle": "node tools/windows-setup.mjs --bundle",
+    "test:setup": "node --test tools/windows-setup.test.mjs",
+    "test:setup:installed": "node tools/windows-setup.test.mjs --installed",
+    "test:icons": "node --test tools/lucide-categories.test.mjs tools/lucide-search.test.mjs",
+    "demo": "node tools/demo.mjs",
+    "demo:poc": "node tools/poc-demo.mjs",
+    "demo:benchmark": "node tools/benchmark-deck.mjs",
+    "test:corpus": "node tools/corpus.mjs",
+    "model:setup": "node tools/local-model-setup.mjs",
+    "model:qualify": "node tools/qualify-local-model.mjs --mcp",
+    "dev:local-model": "node tools/local-studio.mjs",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.11.1",
+    "@playwright/test": "^1.58.0",
+    "@tauri-apps/cli": "^2.11.4",
+    "fflate": "0.8.2",
+    "sharp": "^0.35.4"
+  }
+}

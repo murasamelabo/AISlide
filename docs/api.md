@@ -1,0 +1,1287 @@
+﻿# Shared API Contracts
+
+Every operation is strict JSON with a discriminator `op`. Unknown JSON request properties fail validation; this is distinct from preserving unknown native XML or unevaluated dynamic-field kinds. The CLI reads one request from stdin and prints one response; errors use stderr and a nonzero exit code. Tauri and the development adapter share the same dispatch in `aislide-core`.
+
+`compile_report` / core `compile` validate process step labels before layout: 2-4 `body` entries, each at most 80 Unicode scalars, compared with 240 for other body layouts. Text-limit diagnostics include paths such as `report.sections[1].body[0]`, actual count and limit, without echoing content. MCP publishes the layout-dependent constraint and rejects it before calling core. Correct the named field, not every slide; successful rendering is unchanged.
+
+## Capacity Profiles
+
+Requests default to fixed `large`: 256 slides, 8192 total elements, 32 MiB complete UTF-8 document including immutable origin, 96 MiB JSON request/response, and 16 MiB raw archive. `capacity_profile: "standard"` retains 128 slides / 8 MiB document / 16 MiB wire / 8 MiB archive; `legacy` retains 32 slides / 2048 elements / 2 MiB document / 4 MiB wire. All limits apply together. Profiles are request-local, including intermediate transactions and responses, not a Deck field or global mutable context. SDK creation/open options accept `capacityProfile`; sessions retain it, and `setCapacityProfile()` validates current document and both history chains before committing a change. Unknown/null/custom/unlimited profiles reject. Capacity profiles do not themselves expand model/guided input grammar; guided authoring has a separate explicit `authoring.slide_limit` opt-in described below. Independent image/source/static-output limits remain unchanged.
+
+MCP defaults to the lightweight `compact` tool profile: JSON appears once in `content[0].text`, without a duplicate `structuredContent`. `--tool-profile full` retains legacy duplication for results up to 64 KiB. Both profiles retain the fully serialized response budget; tool profiles are independent of document capacity profiles.
+
+## Single-file PPTX
+
+`open_presentation` takes `{id, base64}` for one nonencrypted standard Open XML PPTX and returns `{document, warnings, objects, format:"open_xml_pptx"}`. It reads current native slide, master, layout, theme, table, chart and picture XML. It never uses an external scene checkpoint as the source of content. The returned immutable origin identifies the original package for copy-through edits, not a second file the caller must retain.
+
+`export_presentation` takes `{document}` and returns `{base64, filename, layout}` without a checkpoint. Supported edits patch existing XML and preserve other parts. Sources, source bindings, part specifications and stable-ID hints are stored as bounded structured Custom XML; no cached deck is embedded. Existing source staleness checks still apply. Save uses create-new semantics, not silent overwrite.
+
+SDK: `client.openPresentation(id, base64)` returns a session and warnings; `session.exportPresentation()` returns the single-file export. MCP: `open_pptx` opens the caller-supplied bytes; `export_pptx` writes only one file to the operator-approved output directory. `open_project`, `export_project`, `import_pptx` and the legacy SDK equivalents remain compatibility APIs, not the Studio file workflow.
+
+OLE containers, which include encrypted/protected Office files and legacy `.ppt`, receive an explicit format error before ZIP parsing. AISlide does not decrypt, remove labels or alter protection settings. The native reader currently supports Transitional PresentationML, not the separate ISO Strict namespace profile. Reopened designs support ID-based master/layout additions, removals and reassignment within the modeled subset and capacity limits. Unknown XML is preserved, and edits that would invalidate retained references or replace unsupported content are rejected. Supported slide structure commands are described below; complex text or chart changes outside the representable subset are rejected rather than flattened.
+
+### Stored Part Metadata
+
+Current native XML remains authoritative when opening a PPTX. Parsed saved part
+records that no longer satisfy current creation rules are excluded from active
+management, not regenerated or used to replace native figures. The returned
+`PART_METADATA_UNMANAGED` warning identifies the record index, slide and element;
+timeline label overages include `spec.data.tasks[N].label`, actual count and limit.
+Valid records remain managed. New part creation/update still enforces the current
+rules. Malformed XML, unknown metadata structure/version, invalid IDs/hashes and
+capacity violations are not ignored. No provenance-skip option bypasses these guards.
+
+An unchanged save, or Undo back to the opened state, preserves the exact source
+archive including quarantined metadata. A later edited export may omit incompatible
+records from newly written provenance; the immutable origin and native figures stay
+retained. A renamed Custom XML part is recognized by its namespace, not its filename.
+
+### Native Edge Frames
+
+Native import uses the same less-than-1px frame-overflow tolerance on all four
+edges. It normalizes only the disposable editing/rendering projection, leaving
+original XML untouched on no-op and unrelated edits. Warnings identify the native
+owner, part path, element and each edge's overflow in pixels. New authored elements
+retain strict canvas bounds; this is not a general permission for negative frames.
+
+Larger overflow can be clipped for flat axis-aligned rectangles and stretched
+PNG/JPEG pictures within existing limits. Picture clipping composes the original
+crop rather than shifting or stretching pixels. These projections are locked until
+explicit unlock; unlocking can materialize the clipped frame in a supported edit.
+Rotated, warped, grouped or otherwise unrepresentable clipping stays opaque with a
+quantified warning. This is bounded preview support, not Office visual parity.
+
+### Label-Preserving Edits
+
+For a standard unencrypted PPTX with a classification label, duplicating a slide
+with no legacy or modern comments preserves the label part, type and relationship.
+Empty modern comment lists do not require comment rewriting. Duplication that would
+rewrite nonempty comments remains guarded and reports the relevant operation.
+Signed, encrypted or edit-protected packages reject all native edits, including
+notes changes, slide insertion/removal, duplication, metadata detach and provenance
+updates. This intentionally extends the previous ordinary-edit guard, which only
+checked conventional signature part paths. Errors identify the operation and the
+detected part path, content type, relationship ID/type or namespaced XML element,
+including protection outside conventional part paths. The shared save guard reports
+`native editing` for ordinary edits (including comment changes); operation-specific
+duplication, detach, provenance and comment-write guards name their own operation
+when reached. A classification label can therefore report `modern comment editing`
+at the stricter comment-write guard, whereas a signed package rejects earlier as
+`native editing`.
+
+Protection detection uses signature package paths, OPC signature content types
+and relationships, exact `EncryptionInfo` / `EncryptedPackage` part names, XMLDSig
+`Signature`, XMLEnc `EncryptedData` and PresentationML `modifyVerifier` elements.
+Unrelated filenames containing `encryption` and vendor or unqualified elements
+with these local names are not protection markers. UTF-8 and UTF-16LE/BE XML are
+scanned without modifying the source bytes. Optional XML, including SVG and
+Custom XML, that cannot be decoded or parsed within the XML size/node/depth
+budgets, or contains a DTD, remains opaque for label-preserving native edits.
+It does not block ordinary edits and its bytes are retained. The scanner never
+expands entities, loads DTDs or raises its parsing budgets to inspect that content.
+Namespaced element checks apply only to XML that can be fully parsed within
+these budgets; opaque parts may contain uninspected markers. This is not
+validation of every package part or certification that protection is absent.
+Declared signature paths/content types/relationships still reject before
+optional XML is skipped. OPC metadata and required native parts remain strictly
+parsed within existing limits. Signature relationship checks inspect `Type`
+without resolving unrelated internal targets, so percent-encoded attachment
+names and opaque URI targets alone do not block ordinary edits. Referenced
+resources actually read or edited retain their existing target validation;
+external relationships are never fetched. Operations such as comment rewriting,
+field refresh and clean-copy retain their stricter label and XML checks.
+No-op export and supported existing label-preserving edits do not remove or downgrade
+labels. AISlide does not decrypt data, change protection or assert classification rights.
+
+## Static Export and Recovery
+
+`export_static` accepts `{document, options}` and verifies the complete document before calling the shared `export_static::export_static` renderer. Stale source bindings reject. No file, original package, document revision or history is changed. Unknown request/options fields reject.
+
+Options are `format: "png" | "jpeg" | "pdf"` (default PNG), `page_indices?: number[] | null` (zero-based output order; omitted/null means all), `scale` (0.01-16, default 1), `transparent` (default false), `jpeg_quality` (1-100, default 90), `jpeg_matte` (three RGB bytes, default white), `max_output_bytes` (1-33554432; lower-only), and `deny_warnings` (default false). Selections contain 1-32 unique existing pages, including pages beyond 32 in a larger deck. Output edges are capped at 8192 px; the core also bounds working/cumulative raster allocation. Static bundles retain their separate legacy-sized envelope: usable binary output is less than 3 MiB even though the default general protocol is 96 MiB and core output may request 32 MiB. Oversized bundles fail without returning partial files; reduce scale or select fewer pages.
+
+The result is `{files, warnings, office_parity_verified:false, pdf_rasterized:false, pdf_text_outlined, pdf_editable_text:false, pdf_tagged, pdf_searchable_text, pdf_selectable_text, pdf_semantic_overlay, pdf_ua_certified:false}`. The five format-dependent flags are true for PDF and false for images. Each file has `{filename, base64, byte_length, mime_type, page_indices, width, height}`. PNG/JPEG produce one image per page, named `report-page-NNN.png` or `.jpg` using the original one-based page number. PDF produces `report.pdf` with all selected pages in order. PDF paper size is the scene size at 96 dpi, independent of preview scale. Visible text remains outlined, not editable; an invisible positioned Unicode layer provides search/selection. This is not PDF/A, PDF/UA or WCAG certification. Pictures remain embedded rasters and Office visual parity is unverified. Render warnings include code, page index, element ID and message.
+
+PDF semantics use the renderer's shaped clusters, baselines, widths and group/rotation transforms, including rich text and table cells. `Identity-H` fonts and `ToUnicode` maps encode Unicode, including Japanese; no installed or document font programs are embedded or redistributed. Existing document-font fsType validation and license-consent gating remain in force. Semantic working data has an additional cumulative 8 MiB bound. Missing glyphs/font fallback and clipped overflow retain renderer warnings and `deny_warnings` behavior. Fully clipped clusters are omitted; complex-script cluster selection and partially clipped glyphs require viewer review. Appearance is unchanged by the invisible layer, but it is not an editable-font PDF.
+
+The PDF contains `StructTreeRoot`, `MarkInfo`, per-page `StructParents`, a `ParentTree` and marked content with MCIDs. Each selected page has a `Sect`, text has paragraph tags, and tables have correctly parented row/header/data-cell tags with merge spans. Explicit `slide.review.table_headers` controls semantics: unknown/none (including missing metadata) produce TD only; first_row produces TH with Scope Column, first_column with Scope Row, and both uses Scope Both at the corner. Visual first-row styling never implies semantic headers. Complex merged associations require manual review. `slide.review.reading_order` controls top-level logical order; absent metadata uses scene order. Groups use child order. Decorative/hidden content is excluded from semantic reading. Figure descriptions use review metadata or picture `alt`, with nonpainting tagged geometry proxies; original visual artwork is marked Artifact. Alt-text adequacy, document language, inherited-layer reading order and assistive-technology behavior are not certified.
+
+The renderer supports represented basic forms of all 24 chart kinds, plus six SVD trendline types, forecasts, error bars, secondary axes, log/reverse scales and bounded custom ticks. Numeric formatting is limited and reports General fallback; unsupported combinations reject rather than disappear. Axis options also accept `label_position` (`next_to` default, `low`, `high`, `hidden`), written as native `c:tickLblPos`; use `category_axis.label_position:"low"` for tornado, butterfly and diverging Likert bars so category names stay at the plot edge instead of the zero line. Native export places a secondary value axis at the far side (`c:crosses="max"`) so Office does not stack it beside the primary axis. Eight default WordArt presets use shaped glyph outlines. See [shared chart/WordArt display contracts](authoring/chart-wordart-presentation.md). PNG/JPEG render modeled effect filters. PDF rasterizes effect-bearing top-level objects at 2x with `PDF_EFFECT_RASTERIZED`; other visual objects and outlines remain vector. Visible text inside such an affected object/group is rasterized with it; the semantic layer remains separate. `pdf_rasterized:false` is not a promise of an entirely raster-free PDF. No Office visual parity is implied.
+
+SDK: `session.exportStatic(options?, requestOptions?)` is read-only, serialized with other session operations and rejects early/late cancellation. `client.verifyRecovery(document, requestOptions?)` calls core `verify_recovery` and returns a deeply frozen copy. `client.recoverPresentation(document, requestOptions?)` additionally creates a separate `DocumentSession` with empty Undo/Redo history. The core verifier calls `document::verify`, including shape, canonical hash, sources and native-origin checks; storage hashes are never a substitute. Hashes are unkeyed consistency checks, not authentication. Protected/unsupported origins are not decrypted, detached or bypassed.
+
+MCP: `export_static({deck_id, filename, options})` requires explicit format and an exact matching `.pdf`, `.png` or `.jpg` extension. It publishes only beneath the operator-approved output directory using the existing exclusive-file publisher. Multiple images append `-page-NNN` to the requested basename; one file keeps the requested name. Every final name is checked before publication. Racing failures can leave a partial bundle: confirmed published paths are reported and public paths are never deleted. Legacy `verify_recovery({document_json})` and `recover_presentation({document_json})` retain document-only validation and empty-history restoration. `get_session_recovery` / `recover_session({recovery_json})` exchange a versioned document/profile/receipt envelope, up to 48 MiB UTF-8 and subject to the selected profile and separate history bounds. None accesses local recovery storage.
+
+Studio's Export PDF and images panel supports current/all pages, individual downloads and sequential Download all images. It uses the existing `downloadBytes`; native saves retain `createNew:true`. Prepare never opens a window or prints. Prepare print exports at most 32 opaque PNG pages at 96 dpi into an owned React portal under the same document body, using only local PNG blob images and explicit paper size. Print media CSS hides the application only while printing. There is no iframe; CSP `frame-src 'none'` is unchanged. Only a subsequent Open print dialog click calls the owning window's `window.print()`. The system dialog controls confirmation/cancellation; no printer selection, silent job, arbitrary file/shell IPC or Office automation is exposed to SDK/MCP. Direct print is raster, not the searchable PDF; use a PDF viewer for vector output. Changing options/unmounting revokes preview URLs. On 2026-09-19, native UI Automation verified the owned PID/command marker, localized Print/Cancel controls and beforeprint/afterprint, then selected Cancel only. No job was submitted; physical printing remains unverified. Evidence: `.artifacts/g35-directprint-20260919/native-print-proof.json`.
+
+Studio recovery policy v2 starts OFF, reads its remembered consent, and persists only after explicit consent to plaintext original/source/history storage. Committed states are debounced into at most five entries, 48 MiB each / 100 MiB total; each Undo/Redo stack is strictly 30 receipts / 4 MiB UTF-8. Oversized receipts create a visible history boundary. Windows uses a separate bounded worker and fixed AppData directory; pinned directory/ancestor handles prevent rename races, with open-file validation before creation. Non-Windows native storage fails closed; web uses separate IndexedDB v2. Core validates both chains on disposable states before restoration, then Studio applies its existing unsaved-change guard. Generations/CAS and consent epochs protect concurrent save/delete; cancel/dispose suppress late writes/callbacks. Seven-day expiry runs only on opening an enabled store, not while closed. Disabling retains copies. Legacy v1 copies require explicit legacy restore/discard and are never automatically migrated/deleted. Recovery never overwrites the original PPTX.
+
+Verification: `crates/aislide-core/tests/static_api.rs`, targeted static/recovery tests in `tools/client.test.mjs` and `tools/mcp.test.mjs`, and `tests/e2e/output-recovery-workflow.spec.ts` exercise the actual product/CLI/MCP boundaries. The existing recovery module suite additionally covers storage budgets, consent races and scheduler disposal. No Office or native printing parity is claimed.
+
+The historical static gates passed 31 `export_static` and 4 `static_api` tests, including all-24 PNG/PDF output, histogram final-interval labels and pie/doughnut legends. On 2026-09-19, 11 focused PDF tests passed after the table-parent/header-policy repair; focused web/native print checks passed separately. Two native WebView profiles exercised recovery persist/restart/restore and both histories before the latest storage-security repair; seven storage unit tests passed after that repair. These are bounded checks, not full-product totals. Selecting at most 32 pages remains required; omitting selection can exceed that limit. Recovery is not source AutoSave. The [histogram Office/schema exception](authoring/chart-ex.md) is unchanged.
+
+## Document Operations
+
+### Initial Setup And Semantic Composition
+
+Core `create_presentation` accepts optional `setup:{design_preset?,theme?,font_family?}`.
+The preset is applied first, an explicit theme second, and `font_family` last
+to all four theme font roles. Creation stays at revision zero with no Undo;
+omission preserves the existing default. SDK callers pass `setup` in the
+third `createPresentation` options argument. MCP uses the same `setup` field.
+Names must refer to available fonts; this does not install or embed fonts.
+
+`compose_slide` is a typed batch operation with `slide_id`, a 1-24 character
+ASCII identifier `id`, and `spec:{title,subtitle?,footer?,style?,blocks}`.
+It accepts 1-3 vertically arranged content blocks on a new empty slide in a
+generated document. Imported native documents and nonempty slides reject;
+notes are retained. It replaces inherited page graphics with its own title,
+optional subtitle and footer, using the current theme. Use explicit editing
+or master/layout operations when an existing template must be retained.
+
+Blocks are `cards:{items:[{label,detail?}],columns?}` (1-6 cards, 1-3 columns),
+`callout:{text}`, `text:{paragraphs}`, `steps:{items}`,
+`comparison:{rows,columns,cells,corner_label?}`, `part:{spec}`, or
+`graph:{input}`. Each includes its `kind` discriminator. Parts omit explicit
+`layout`; core supplies it. Steps, comparisons, parts and graphs keep managed
+metadata and normal regeneration guards. Cards/callouts remain native editable
+shapes; plain/rich text stays editable. The same `style` object can be reused
+across slides: `title_size` 24-64 (default 40), `body_size` 16-40 (24),
+`footer_size` 10-24 (14), `padding` 8-64 (24), `card_fill` (`@lt2`), and
+`accent` (`@accent1`). All distances and sizes are slide pixels.
+Headers, cards and callouts reject measured text overflow instead of shrinking;
+managed parts retain their existing bounded fitting rules. Missing fonts,
+glyphs and visual collisions still require preview/preflight review.
+
+Pattern mode replaces `blocks` with `pattern:{id,count?,mirror?,message_band?}`
+and `slots:{<slot id>:block}`. Core resolves the [layout pattern](#layout-patterns)
+inside the deck's [design tokens](#design-tokens) and places one block per
+non-marker slot; marker slots (step connectors, numbers, the timeline axis)
+are drawn automatically, and arrows point from each slot to the next (right
+to left when `mirror` is set). `count` is inferred from the supplied slot IDs
+for variable patterns. Full-page patterns fill their own `title` slot from
+`spec.title` unless one is supplied. Pattern mode adds `statement:{text}`,
+`quote:{text,attribution?}`, `metric:{value,label,detail?}`, `label:{text}`,
+`image:{base64,mime_type,alt,fit?}` (PNG/JPEG, `contain` default or `cover`),
+`table:{rows}` and `chart:{chart}` to the block kinds; legacy stacking rejects
+them. A block fits a slot when one of its content types appears in the slot's
+`accepts` list (metrics also fill card slots). Card slots hold one card; panel
+slots lay out several. Quotations require an attribution, which fills a
+pattern `attribution` slot when present; no quotation marks are inserted.
+Title, slot text and footer use token sizes, theme slot colors and a
+`language` on every run (`ja-JP`, `ko-KR` or `en-US`, chosen from the run's
+script). Preset decks keep the preset master decorations on `preset-blank`;
+other designs hide master graphics as block mode does. `subtitle` and
+`style` reject. Undersized slots, overflowing text and unmatched slots reject
+the whole batch and name the pattern fallback. Ordinary text is not reduced;
+managed parts retain bounded fitting, and native tables may use caption size.
+Semantic recipes below reject that table fallback.
+
+### Semantic Recipes
+
+`recipe_catalog` lists five whole-page families with use/avoid cases, required
+fields, limits and eight variants. `recommend_recipes:{intent}` compares at most
+three candidates using the supplied `relationship` and `item_count`, optional
+`reader_goal`, `actual_relationship`, `source_dimensions:{width,height}` and
+`needs_exact_positions`. Missing image/conditions/coordinates remain explicit.
+Responses retain `candidates` and add `status`, `rejected` alternatives with
+codes/reasons, `next_steps`, `avoid_when` and `decision_checks`. A mismatched
+classification or an unsupported relation returns `no_suitable_recipe`; do not
+force available containers. Classification is supplied, never inferred as truth.
+These are deterministic suitability rules, not visual scores or model calls.
+
+All inputs have `version:1`, `title`, `source_caption`, `takeaway`, optional
+`notes`, optional `component_profile:"technical_briefing"`, optional
+`takeaway_emphasis:{style?,strength?,relationship?}`, and typed `data`.
+Text uses Unicode-scalar limits and LF line breaks. The profile shares component
+roles with ordinary pattern compositions; omitted profiles keep legacy design.
+
+| Recipe | Data And Limits | Variants |
+| --- | --- | --- |
+| `layer-role-map` | `kind:layer_role_map`, localized `layer_heading`/`role_heading`, 2-5 ordered `layers:{id,label,role}`; label 48, role 120 scalars | `diagram-table`, `annotated-layers` |
+| `source-reading` | `kind:source_reading`, supplied `image:{base64,mime_type,alt}`, 2-3 `readings:{label,detail}`; label 48, detail 120 scalars | `visual-left`, `visual-right`, `visual-top` |
+| `activity-outcome` | `kind:activity_outcome`, `from_label`/`to_label`, 2-3 `changes:{activity,outcome,definition}`, required visible `measurement_conditions`; labels 48, definitions/conditions 160 scalars | `shift-rows` |
+| `entity-instance-map` | `kind:entity_instance_map`, `definition:{label,detail}`, 1-4 `instances:{label,detail}`, explicit `relation_label`; label 48, detail 120, relation 24 scalars | `definition-instances` |
+| `screenshot-reading` | `kind:screenshot_reading`, supplied `image`, 1-6 `callouts:{x,y,label,detail}`; x/y are source-image fractions 0-1, label 48, detail 200 scalars | `position-callouts` |
+
+Use `visual-top` for a wide figure whose paths/labels must be traced before
+compact open readings (`media/figure-readings`). Recommendation compares actual
+contained widths on the standard 1280x720 technical profile and requires a 10%
+gain over side placement; inspect `upper_source_not_larger` and preview on the
+actual deck. Use callouts for exact controls, not the generic source-reading
+family. With the technical profile, screenshot recipes enable `detail_views`
+and accept 1-3 locations: complete original plus crops at least 1.25 display pixels
+per source pixel, with numbered markers outside the original. More
+locations or overflowing detail require split pages. Optional
+`target_region:{x,y,width,height}` supplies an exact positive source-relative
+rectangle that contains the callout point and stays inside 0-1. It is projected
+onto both the original and enlarged view, with the leader attached to its edge.
+Without it the outline identifies the expanded crop, not an inferred UI control.
+Regions that cannot fit at readable zoom reject instead of shrinking.
+Definition/instance is not
+an ordered layer stack; its node labels/details share the same typography.
+Unsupported comparison/peers/sequence/milestone/arbitrary architecture intents
+return no-fit with existing part/graph guidance rather than invented recipes.
+
+`component_styles:{deck,profile:"technical_briefing"}` returns shared
+title/body/takeaway/source/page frames, type, family, padding, alignment and
+color roles. Distances scale with the actual canvas. Recipes and ordinary
+pattern compositions pass the same optional `component_profile` before
+creation; manual authoring uses the returned roles. Existing templates are not
+automatically restyled. Technical short cards stay open; a normal supporting
+takeaway has a thin separator and explicit spacing before its text. Legacy
+omitted-profile rendering is unchanged. A band/message slot accepts rich `text`
+paragraphs or `kind:"emphasis"` with `paragraphs` and optional `emphasis`.
+`component_styles.emphasis_variants` exposes six resolved layouts with `use_when`
+and `avoid_when`: `inline`, `rule`, `outline`, `tint`, `closing`, `solid`.
+`style:"auto"` uses supplied `strength:subtle|normal|strong`
+and `relationship:supporting|standalone|contrast|conditional`; subtle content is
+inline, a normal supporting or conditional one uses a rule, a strong conditional,
+standalone or contrast one uses an outline, a strong supporting one uses a tint.
+`closing` (ruled 28px single line) and `solid` (reversed 24px single line on the
+ink role) are never chosen automatically; fixed fonts reject text that does not
+fit. Explicit style wins.
+`component_styles.message_placements` lists `lead`, `bottom`, `fold_into_body` and
+`none` with `how`, `use_when` and `avoid_when`. `pattern.lead:true` (also a
+`layout_patterns` resolution option, 56px plus one gap) adds a `lead-message` slot
+directly under the title on any non-full-page pattern; it accepts emphasis, text,
+callout or label and only the `inline` or `rule` style, and the slot is named
+`lead-message` because `split/1-2` already owns a `lead` slot. A `list/icon-rows`
+row accepts `detail_emphasis` (up to four phrases that must occur verbatim in its
+`detail`, non-overlapping); they render bold in the emphasis color while `detail`
+stays one string. `icon_columns` rejects it.
+No prose classification or severity inference is performed. `takeaway.band_frame`
+is the outer region; `text_frame` and `separator_frame` describe its default rule
+layout. Variant `surface_frame`, fill, stroke and padding-derived text frame are
+used only when that emphasis method is selected. Meaningful
+supplied icons and deliberate rich-text runs provide emphasis; they are not
+inferred from the prose. Profiled `annotated-layers` uses open role rows rather
+than large filled label rectangles; omitted-profile layer rendering is unchanged.
+The profile does not assert Office parity.
+
+Keep a page-specific selection record in the same planning ledger: reader
+question, actual relation, primary visual, selected and rejected reasons,
+emphasis claim IDs, asset keys and component roles. This is a planning record,
+not arbitrary new creation JSON. Human review checks relation meaning, original
+source-label readability, explanation anchors and repeated-role consistency.
+
+`preview_recipe:{document,slide_id,id,input,variant,max_dimension?}` prepares a
+candidate on a new empty generated slide and returns `base_revision`,
+`base_hash`, `candidate_hash` and one PNG `preview`. Existing elements, notes
+or native source slides reject. Preview does not change the document or Undo
+history, save files or fetch sources. PNG size is 160-1600px (default 1280),
+with the existing 2 MiB image budget and no automatic resolution reduction.
+
+`apply_recipe` takes the same selection plus `expected_revision` (the returned
+base revision), `expected_hash` (base hash) and `candidate_hash`. Core
+recomputes the candidate, rejects any mismatch and applies one transaction
+with one Undo. Diagram/table views use the same ordered labels and roles;
+images retain supplied bytes, full aspect and alt text. Captions, takeaway,
+notes, definitions and measurement conditions are retained. Overflow requires
+another variant or a split, not silently smaller body text or deleted fields.
+Some existing part headings and condition text remain 13px; inspect previews
+and preflight for the intended reading environment.
+
+SDK methods are `recipeCatalog`, `recommendRecipes`, `previewRecipe` and
+`applyRecipe`; the last requires all three preview anchors at runtime as well
+as in its TypeScript contract. MCP exposes the four snake-case tools through
+discovery and accepts registered PNG/JPEG `asset_id` inside source-reading
+images. Image bytes are returned as MCP image content, not repeated in JSON
+metadata. `layout_checked` means current layout/font checks only;
+`semantic_truth_verified` and `office_visual_parity_verified` remain false.
+Image rights and improvement in model output quality are not verified.
+
+### Design Tokens
+
+`design_tokens:{deck}` returns frames (`title`, `body`, `footer`,
+`full_page`), `gaps` (tight/peer/support/contrast on the 8px grid), a
+`type_scale` (title, statement, metric, body, caption, minimum 16px, 115%
+line spacing), per-script budgets (`latin`/`east_asian`: language, average
+advance in em, comfortable reading measure, characters per title line and
+title lines), theme color roles, the card style, the layout composed slides
+use and whether master graphics stay visible. An unmodified design preset on
+a 1280x720 canvas yields `source:"preset:<id>"` with that preset's margins,
+heading/body sizes and gutter-derived gaps; any other or edited design yields
+`source:"default"` with the layout-pattern body and sizes scaled to the canvas
+height. Tokens are derived on demand and never stored, so theme or preset
+changes apply to later compositions. SDK: `client.designTokens(deck)`; MCP:
+read-only `design_tokens({deck_id})`. Character budgets are approximations;
+measured text and preview remain authoritative.
+
+`layout_graph({input})` is a pure core/MCP operation; SDK `client.layoutGraph(input)`
+returns a canonical `GraphSpec`. `input` has `version:1`, `title`, optional
+`subtitle`, `show_title`, `columns` (1-8, default 3), 1-48 nodes and up to 64
+edges. Nodes use ordinary `GraphNode` properties except `x`, `y`, and `group`.
+Groups and unknown fields reject. It reuses the existing grid, retains node
+dimensions, and validates edges after placement. It is not a hierarchical
+layout engine. A `compose_slide` graph block performs this step internally
+and inserts a managed graph in the same transaction, returning graph diagnostics.
+
+Text/shape `TextFormat.padding:{left?,right?,top?,bottom?}` declares inner
+padding; omitted edges are zero and the content area must remain positive.
+`set_text_padding` changes 1-128 distinct targets without moving their frames
+or changing font sizes; individual edits detach layout inheritance. `null`
+restores legacy defaults. Explicit all-zero shape padding survives PPTX
+reopening; zero text-box padding may normalize to omission because they are
+equivalent. Legacy shape preview defaults remain 6px horizontal / 4px vertical;
+legacy export defaults remain zero. New composition cards use explicit padding.
+Padding is always measured from the element frame. DrawingML measures `bodyPr`
+insets from a preset's own text rectangle, so explicit padding on `roundRect`
+(with its `adj`), `ellipse`, `diamond`, `can` and `cloud` shapes is written as
+padding minus that rectangle's inset (negative insets are valid OOXML and
+PowerPoint honors them) and read back by adding it, rounded to whole EMU so
+reopening reproduces the padding. Resizing a native shape rewrites its insets.
+Shapes with custom connection sites use a full-frame text rectangle; other
+presets keep writing padding unchanged. An imported shape whose insets plus
+its text rectangle would leave no content area keeps the raw insets so it
+remains editable.
+Studio exposes four numeric controls and a default-reset control. Table cells
+use their existing `CellStyle.padding`, not `text_format.padding`.
+
+`set_rich_text` accepts only `slide_id`, `id` and `paragraphs`; core derives
+the canonical plain text. Empty paragraphs clear the body. Frame, padding and
+base style are retained; editing detaches inheritance. Dynamic fields require
+the dedicated field APIs. Existing raw `Element` inputs still require exact
+agreement between plain text and rich runs; validation is not weakened.
+
+### Typed Authoring Batches
+
+The optional `contrast/panels` part is distinct from a matrix. Its data is
+`{kind:"comparison_panels",panels:[left,right],transition?:boolean}`; each
+panel has `label`, 1-5 `items:{text,icon?}`, and optional `fill`, `heading_fill`,
+`heading_color`, `accent`, `icon_fill`, `body_size` (16-28, default 18). Two
+panels and matching row counts are required; label/text limits are 64/240
+Unicode scalars. Icons use the existing PNG/JPEG `GraphIcon` contract and
+MCP asset handles. Supplied symbols preserve aspect ratio in explicit layouts.
+Typography does not silently shrink. All 111 earlier presets are retained.
+See the portable
+[technical briefing style contract](../.github/skills/aislide-authoring/references/technical-panels.md).
+In `compose_slide`, request it through `kind:"part"`; the existing `comparison`
+block deliberately remains `matrix/balanced` for backward compatibility.
+
+Five further recommended briefing presets bind to dedicated data kinds:
+`list-horizontal/icon-cards` (`icon_cards`, 2-6 cards in 2-4 columns and at
+most two rows), `list/icon-rows` (`icon_rows`, 2-6 rows), `before-after/shift`
+(`shift_rows`, 2-5 from-to rows), `flow/cards` (`step_cards`, 2-4 steps with
+optional cover-cropped `image` and `icon`), `list/agenda` (`agenda`, 2-7
+items) and `list-enumeration/screenshot-callouts` (`screenshot_callouts`, one
+required `image` and 1-6 `callouts` whose `x`/`y` are 0-1 fractions of the
+source image; badges stay on the contained picture and the numbered legend uses
+one measured pitch). These parts
+render at the `PartSpec.layout` frame size instead of scaling a 1152x512 canvas;
+fonts are fixed (headings 18px, `body_size` 14-22, default 16; captions, tags
+and pills 12-13px). Card and step heights shrink to measured content, row
+pitch is capped at 112px, and overflow rejects with the failing text. An
+optional `message:{text,detail?,fill?,color?}` adds a takeaway band below the
+content, except on agendas. Legacy presets and data kinds keep their rendering;
+a briefing kind with another preset, or a briefing preset with another kind,
+rejects.
+
+Fourteen recommended business-analysis presets use the same frame-size
+rendering, fixed typography, overflow rejection and optional `message` band:
+`list-horizontal/kpi-cards` (`kpi_cards`, 1-8 cards with supplied `value`
+text, `unit`, `delta`, `status` good/bad/neutral and `comparison`; only the
+value grows, up to 44px), `horizontal-bar-graph/bullet` (`bullet_graphs`, 1-6
+rows of `actual`, `target`, 1-3 ascending `ranges` and `lower_is_better`),
+`water-fall/variance` (`variance`, 2-10 plan/actual rows and an optional total
+row; each gap is colored by whether it helps), `matrix/harvey-balls`
+(`harvey_matrix`, 0-4 quarter levels drawn as native curved freeforms),
+`matrix/heatmap` (`heatmap`, printed numbers tinted around `midpoint`, default
+the mean), `matrix/raci` (`raci`, exactly one A and at least one R per task),
+`matrix/risk` (`risk_matrix`, 1-10 risks on a 5x5 likelihood x impact grid;
+zones follow the product score 15+, 10-14, 5-9 and 1-4, and the list is ranked
+by score), `vertical-bar-graph/pareto` (`pareto`, a native combo chart with
+sorted columns plus the cumulative share and threshold on the right-hand
+0-100% axis), `line-graph/control-chart` (`control_chart`, a native line chart
+of 5-32 values; omitted limits use the individuals-chart rule mean +/- 3 x
+average moving range / 1.128, limits must satisfy lower < center < upper after
+that default, and the value axis is scaled to the data), `tree/fishbone`
+(`fishbone`, 2-6 categories with 1-3 causes and `focus` highlights),
+`flow/sankey` (`sankey`, up to five stages; a node with inflow and outflow must
+balance), `flow/journey` (`journey`, 2-6 stages, 1-4 rows, an optional -2..2
+emotion curve and one highlighted stage), `flow/swimlane` (`swimlane`, 2-5
+lanes and up to seven columns) and `correlation/c4-container` (`architecture`).
+The last two are converted to managed-graph geometry and drawn by the diagram
+engine, so connectors stay glued to their boxes. Swimlane columns follow the
+longest forward path unless `column` pins a step; `exception` and return flows
+are dashed routes through lane channels and column gutters, and flows that
+would skip past an occupied cell use the same free space. The C4 view places
+people left, external systems right and containers then databases inside the
+system boundary in at most three rows of up to three, choosing slots and ports
+that keep relation lines out of unrelated boxes. Both parts reject a route that
+would still pass through another box instead of drawing it; in PowerPoint
+their custom routes are freeform lines that keep their shape but do not follow
+a moved box. Where a label field is omitted, English defaults such as `Plan`,
+`Actual`, `Variance`, `Value`, `Cumulative` and `Emotion` are used; pass
+localized labels in the data. The catalog now has 138 entries in the same 36
+categories. These 14 entries are marked `specialized: true`: they stay
+`recommended` for agents whose data fits `use_when`, while Studio lists them
+after the general variants and never selects one as a category default.
+
+Six non-card presets share the native-frame and fixed-font validation path:
+
+| Preset | Data |
+| --- | --- |
+| `flow/open-steps` | `open_steps`: 2-5 `steps:{label,detail?}`, optional `accent`; one horizontal milestone axis |
+| `vertical-flow/rail` | `rail_steps`: the same step fields, 2-5 items; one vertical rail with explanations on the right |
+| `flow/roadmap` | `roadmap`: 2-4 `phases:{period,label,detail?,points?,outcome?}`, optional `accent`; at most four short points per phase |
+| `list-horizontal/icon-columns` | `icon_columns`: 2-4 `items:{label,detail?,icon?,accent?}` grouped by whitespace |
+| `list-horizontal/fact-columns` | `fact_columns`: 2-6 `items:{value,label,unit?,detail?,qualifier?}`, optional `columns` 2-3 and `accent`; at most two rows |
+| `list-horizontal/image-columns` | `image_columns`: 2-4 `items:{image,label,detail?,caption?}` with required approved `GraphIcon` images kept in full |
+
+Headings/body text remain 18/16px; milestone numbers and qualifiers are 14px,
+fact values 44px and units 22px. These presets never shrink typography or crop
+images to hide overflow. Labels allow 48 Unicode scalars; step/roadmap/image
+details allow 160, icon details 200, fact qualifiers 100 and image captions 80.
+Roadmap periods are one-line text up to 24 scalars; phase points allow 80 each
+and outcomes 64. Fact values/units are one-line verbatim text up to 24/12
+scalars. Values, denominators and conditions must come from supplied evidence;
+fact items never encode magnitude by area or length. Roadmap phases have equal
+categorical spacing, not a proportional time axis. Omit `layout.fit` when
+layout guidance returns `fit:"native"`; that advice describes native-size
+rendering and is not a `PartLayout.fit` enum value. Legacy IDs are unchanged.
+`node tools/briefing-demo.mjs <new-empty-directory> --editorial` creates a
+12-page synthetic before/after comparison, verifies every page, reopens its
+editable parts and checks update/Undo without overwriting an existing deck.
+
+MCP `lucide_icons({query?,category?,offset?,limit?})` searches the installed
+Lucide React library (ISC) and `lucide_icon_assets({icons:[{name,color?,
+stroke_width?,alt?}]})` renders 1-32 icons through the existing SVG icon
+preparation to 256px PNG handles. Each result carries
+`icon:{asset_id,mime_type,alt}` for part or graph icon fields. No downloads
+occur; the tools fail clearly when the host lacks `lucide-react`, `react` and
+`react-dom`. `tools/briefing-demo.mjs` builds a seven-page synthetic example
+through the official MCP SDK and verifies preflight, preview, native reopen
+and update/Undo byte identity.
+
+Search normalizes PascalCase, kebab-case, snake_case and whitespace. All query
+words must match; exact normalized names rank before name words/prefixes and
+metadata words/prefixes. Internal substring matches are not used. Actual
+installed module aliases are accepted for assets (`History` resolves to
+`RotateCcwClock`, `Fingerprint` to `FingerprintPattern` in the pinned library).
+Responses use canonical names; aliases do not duplicate the icon catalog.
+
+`apply_operations({document,expected_revision,expected_hash,operations})` accepts
+1-128 strict typed operations across existing slides, including mixed managed
+parts, graphs and ordinary element edits. Managed variants use the same
+`parts::state::change_in_deck` helper as individual insertion/update calls,
+updating native-editable objects and their `PartInstance` together in the
+batch's working deck/metadata. They do not create a new document or perform
+full document verification for every item. The input document is verified,
+each intermediate scene is preflighted, and the final commit still passes
+document transaction/native preservation guards.
+
+A changed batch produces one revision and one inverse Undo receipt; failure,
+including an invalid final specification, leaves the original document and
+history unchanged. A no-op adds no history. The document may contain at most
+128 metadata parts TOTAL, including managed graphs, in every capacity profile;
+this is not an allowance per batch or per slide. All other scene, document,
+wire, archive and history caps still apply together. No automatic fallback to
+unmanaged groups occurs on failure or timeout. The call does not render a live
+preview or require a preview candidate. Batching avoids per-item requests,
+not validation or transport costs; no measured speedup is claimed for this
+workflow. Raw JSON Patch `transaction` remains a separate API.
+
+Every operation has `op` and `slide_id`, plus the following fields:
+
+| `op` | Payload | Behavior |
+| --- | --- | --- |
+| `add_elements` | `elements` | Append 1-128 complete typed `Element` roots with final content, geometry and supported formatting; normal scene budgets still apply |
+| `add_part` | `id`, `spec: PartSpec` | Insert editable objects and managed metadata; use `spec.layout` for final placement |
+| `update_part` | `id`, `spec: PartSpec` | Replace a current managed part's specification and rendering atomically; stale metadata rejects |
+| `add_graph` | `id`, `spec: GraphSpec`, optional `layout: PartLayout \| null` | Insert a managed `diagram/custom` part with the requested placement |
+| `update_graph` | `id`, `spec: GraphSpec` | Regenerate a current managed graph, preserving its existing `PartLayout`; a `layout` field is not accepted |
+| `set_frame` | `id`, `frame` | Set geometry without changing font or stroke sizes |
+| `set_text_style` | `ids`, `style` | Overlay a nonempty partial `RunStyle` on 1-128 distinct text/shape targets, their defaults and existing runs; retain unspecified run and paragraph attributes |
+| `set_text_padding` | `ids`, required `padding` | Set explicit inner padding, or `null` for legacy defaults; retains frames/font sizes and detaches inheritance when changed |
+| `set_rich_text` | `id`, `paragraphs` | Replace ordinary text from one rich source; derive canonical text without accepting a second body |
+| `compose_slide` | `id`, `spec: CompositionSpec` | Populate a new empty generated slide with shared page styling and coordinate-free content; retains managed parts/graphs |
+| `set_slide_background` | `color` | Set RGB/theme color and disable background inheritance |
+| `set_connector` | `id`, `connector`, optional `frame` | Replace all connector settings, optionally changing its frame |
+| `set_picture_crop` | `id`, `crop` | Replace a picture's crop |
+| `set_hyperlink` | `id`, required `link` | Set a validated text/shape URL; explicit `null` clears it, an absent field is an error |
+| `set_shape_adjustment` | `id`, `adjustment` | Set a supported typed shape adjustment; not arbitrary DrawingML formulas |
+| `add_picture` | `id`, `base64`, `mime_type`, `alt`, optional `frame`, `crop` | Decode PNG/JPEG and insert at the supplied frame/crop in the same transaction; omission retains the fitted picture defaults |
+
+`Frame` is `{x,y,width,height}`: finite nonnegative coordinates, positive
+dimensions, each bounded by 4096 scene pixels, with final page/group bounds
+also enforced. Nested target coordinates are parent-local. Resizing a group
+normalizes child geometry and its view dimensions recursively, but leaves
+fonts and strokes unchanged. Absolute table column/row tracks scale
+proportionally; relative tracks retain their proportions. Text-frame edits
+detach layout inheritance. Locked/hidden targets or traversed parent groups
+reject, as do locked/hidden descendants encountered during group resizing.
+Geometry edits can make managed part metadata stale; use `updatePart` for
+semantic regeneration of a current part, not to overwrite stale manual edits.
+
+`ConnectorSettings` requires `{color,stroke_width,arrow}` and optionally
+`flip_v`, `start`, `end`, `routing`. It is a **replacement**, not a partial
+overlay: omitted endpoints/routing clear their previous values and omitted
+`flip_v` becomes false. Existing visual properties remain unchanged. The
+existing connection/routing representability checks still apply.
+`set_text_style` is the partial-style API; existing `apply_format` /
+`session.applyFormat` remains the compatible-object format painter.
+
+Partial style updates do not bypass native text guards. Imported rich text can
+reject frame-default style changes even when the same partial update works on
+authored text; use the supported rich-range/paragraph APIs where appropriate.
+Partial inherited native transforms and other unsafe updates still reject.
+Shape adjustments support only `{name:"adj",value}` for `roundRect` (0-50000),
+`chevron` and `triangle` (0-100000). Multiple named guides and arc adjustments
+are not supported.
+
+SDK: `session.applyOperations(operations,options?)`,
+`addElements(slideId,elements,options?)`,
+`setFrames(slideId,[{id,frame}],options?)`,
+`setTextStyle(slideId,{ids,style},options?)`,
+`setSlideBackground(slideId,color,options?)`,
+`setConnector(slideId,{id,connector,frame?},options?)`,
+`setPictureCrop(slideId,{id,crop},options?)`,
+`setHyperlink(slideId,{id,link},options?)`,
+`setShapeAdjustment(slideId,{id,adjustment},options?)`, and
+`addPicture(slideId,{id,base64,mime_type,alt,frame?,crop?},options?)`.
+`AuthoringOptions` accepts `expectedRevision`, `expectedHash` and `signal`;
+omitted guards use the session's current revision/hash. Existing session busy,
+late-cancellation and bounded-history rules apply. `setFrames` sends one batch
+of `set_frame` operations, not separate requests.
+
+MCP `apply_operations` substitutes `deck_id` for `document` and requires
+`expected_revision`, `expected_hash` and `operations`. Non-managed convenience
+tools use the operation names above, plus `set_frames` with `frames:[{id,frame}]`;
+their `expected_hash` is optional and their revision is required, except that
+`add_picture` retains optional revision for legacy callers. Supply both guards
+for stale-edit protection. Complete elements are preferred over inserting
+factory defaults and patching every field. Batch first, then preview/preflight
+explicitly selected pages.
+
+`add_picture` accepts `fit:"contain" | "cover" | "stretch"`. Omitted `fit` keeps the previous stretch behavior. Contain centers the cropped source within the requested frame and may reduce its final width or height. Cover retains the frame and adds centered cropping within the already-visible source region. Without a frame, fitting uses the normal picture factory frame. Crop, geometry, byte, native-preservation and Undo validation still apply. Source pixels are never resized or rewritten. Core `inspect_raster({base64,mime_type})` exposes the existing bounded decoder's pixel dimensions, SHA-256 and byte length without rendering or document mutation.
+
+The same batch also accepts `update_notes{slide_id,notes}`, `set_table_headers{slide_id,element_id,policy}`, and `set_accessibility{slide_id,element_id,metadata}`. These use the dedicated review operations' validation. Place each metadata operation after its target exists, including later in a batch that inserts that target. Notes are limited to 8000 Unicode scalars; incompatible existing rich notes fail rather than being flattened. `metadata` is a typed accessibility object or explicit `null`. Table policies remain `unknown`, `none`, `first_row`, `first_column`, or `both`. Invalid targets, native loss, capacity violations and stale guards reject the whole batch; changed batches have one Undo and unchanged batches have none. The existing individual APIs remain supported.
+
+For reusable parts/graphs, prefer managed `add_part` / `add_graph` in this
+batch over separate per-item calls. Existing individual MCP `add_part`,
+`update_part`, `add_graph` and `update_graph` remain compatible. SDK callers
+use the existing `session.applyOperations`; no new batch method is needed.
+The existing SDK `AuthoringOperation` union includes these members (shown as
+a documentation-local subset, not a new SDK export):
+
+```ts
+type ManagedAuthoringOperation =
+	| { op: 'add_part'; slide_id: string; id: string; spec: PartSpec }
+	| { op: 'update_part'; slide_id: string; id: string; spec: PartSpec }
+	| { op: 'add_graph'; slide_id: string; id: string; spec: GraphSpec; layout?: PartLayout | null }
+	| { op: 'update_graph'; slide_id: string; id: string; spec: GraphSpec };
+```
+
+Supply `PartSpec.layout` or the batch graph's top-level `layout` before
+insertion so the part fitter handles geometry and text, instead of blindly
+scaling a completed group's frame/fonts afterward. Generic child edits may
+make metadata stale and block later semantic updates, even later in the same
+batch; that rejection rolls back the entire batch.
+
+`create_part` / `create_graph` return structured ordinary groups, not managed
+instances. Passing those outputs to `add_elements` / `session.addElements`
+remains an EXPLICIT UNMANAGED choice only, not the recommended reuse path or
+an automatic timeout workaround. See the [managed MCP acceptance sequence](authoring/README.md#managed-batch-mcp-acceptance).
+
+### Managed Timeouts And Progress
+
+MCP clients should serialize core-backed AISlide calls, including previews and inspections. The bridge retains separate bounded editing, chart-preview and recovery lanes internally, but ordinary presentation reads/writes share the editing lane and return `Core is busy` instead of queueing. MCP also rejects concurrent mutations; separate document handles do not imply parallel edit capacity. Use a bounded `apply_operations` plan instead of one call per object. No unbounded queue, retry or new permission is added.
+
+After SDK input validation, MCP handlers return optional `_meta.aislide_timing` with `handler_elapsed_ms`, attempted `core_calls`, and summed `core_roundtrip_ms`. Round trips include request encoding, subprocess startup/execution and response parsing, including failed calls; they are not pure Rust CPU time. Summary-only reads report zero core calls. Timing records are isolated per asynchronous request, contain no input/document text, and are omitted if the optional bytes would exceed the existing response budget. Handler time excludes SDK prevalidation and all host/model/service wait; correlate with host events rather than subtracting it and calling the remainder inference time. There is no distinct server queue delay because busy calls are rejected.
+
+The Node core bridge retains a 20-second budget for small ordinary requests.
+Let U be the maximum of rounded-up slide count / 8, nested element count / 256,
+and encoded request bytes / 1 MiB. The scan is bounded to 256 slides and 8192
+elements. For U > 1, the document budget is `min(180, 20 + U * 10)` seconds.
+The base is the maximum of that budget, 120 seconds for requests **greater
+than 4 MiB** or recovery verification/preparation, and the operation minimum:
+60 seconds for `open_presentation` / `import_document`, or
+`60 + 5 * (selectedPages - 1)` for `preview_presentation` (1-8 pages).
+Composite `preview_slide_revision` and `prepare_delivery` receive at least
+120 seconds because they perform additional rendering/export work.
+For example, a 42-slide/1344-element document gets 80 seconds for ordinary
+work and 95 seconds for an eight-page preview. These limits cover bridge
+execution; timeout messages separately report measured elapsed time,
+including serialization and process-exit delay. Read-only timeouts report
+interrupted reads rather than an uncommitted edit.
+For `apply_operations`, N counts only top-level
+`add_part`, `update_part`, `add_graph` and `update_graph` entries, not graph
+nodes or child elements. Valid batches contain at most 128 operations.
+Individual core `insert_part`, `update_part`, `insert_graph`, `update_graph`
+and `apply_graph` count as N=1.
+
+For N>0, the timeout in seconds is `min(300, max(base, 60 + N * 5))`.
+For N=0 it remains the base. With the ordinary 20-second base, one managed
+operation gets 65 seconds, 21 get 165 seconds, and 128 get 300 seconds.
+One managed operation in a request greater than 4 MiB gets 120 seconds.
+Existing `generate`, `text_assist` and `segment_image` budgets remain
+310 seconds. These are finite execution limits, not latency guarantees,
+unlimited execution or a retry loop. Full-document transport remains;
+no persistent stateful core or differential protocol is introduced.
+
+MCP mutations, including direct element/frame/note edits and imports, plus
+preview/measurement/preflight/accessibility/validation operations optionally
+emit standard `notifications/progress`
+when `tools/call` params include `_meta.progressToken` (a string or safe
+integer, including zero); the handler receives it as `extra._meta`.
+`_meta` belongs beside `name` and `arguments`, not inside strict tool
+arguments. Cheap metadata-only reads do not start a progress timer.
+An initial notification and subsequent notifications on a five-second timer
+report elapsed time only. Slow in-flight sends skip ticks. No `total` or
+estimated completion percentage is supplied, and messages contain no slide
+text, specifications, source data or other private content. Notifications
+stop on completion, failure or abort; optional notification failure does not
+fail the mutation. No token means no progress notifications.
+
+SDK `AbortSignal`, session serialization and late-cancellation guards remain.
+The MCP client's own overall timeout may need to be at least the server
+budget, with transport margin and progress-based timeout reset where
+supported. Some clients ignore progress; a heartbeat does not extend the
+server's finite budget or guarantee client completion. Inspect current
+revision/hash after a client-side timeout before deciding on a new call;
+do not blindly retry or downgrade to unmanaged output.
+
+### Visual Authoring Loop
+
+The shared core additionally exposes the following bounded read/preview/apply operations. See [guided authoring](authoring/README.md#visual-review-and-revisions) for limits and the complete MCP workflow.
+
+| Core operation | Inputs besides op | Result |
+| --- | --- | --- |
+| `preview_presentation` | `document`, optional `options:{page_indices,max_dimension,layout,max_output_bytes,format,overflow}` | `revision`, `hash`, requested/actual max dimension, quality-reduction flag, ordered page IDs/image coordinates, PNG/JPEG images with base64/size/SHA-256 and renderer warnings |
+| `preflight_presentation` | `document`, optional `options:{page_indices,min_font_size}` | Bounded findings with IDs/scopes/bounds/evidence/suggestions; no mutation |
+| `preview_slide_revision` | `document`, `expected_revision`, `expected_hash`, `slide_id`, `edits`, optional `max_dimension` | Base/candidate hashes, before/after previews, affected IDs and stale part/source impact; no mutation |
+| `apply_slide_revision` | Same base and edits, plus `candidate_hash`, without `max_dimension` | Normal atomic transaction result with one inverse Undo receipt |
+
+Previews use the existing shared static renderer with 2MiB encoded/4MiB wire budgets, 160-1600px edges and 1-8 selected pages. `format` is `png` (default) or `jpeg` (quality 90, lossy). `overflow` is `shrink` (default) or `error`. Only encoded-byte overflow retries at the original size, then floor(75%) and floor(56.25%), minimum 160px, at most three distinct attempts. All pages are retained; other errors do not trigger retry. `requested_max_dimension`, `actual_max_dimension` and `quality_reduced` disclose dimension reduction, accompanied by `PREVIEW_DOWNSCALED`. JPEG selection itself is not a dimension reduction. Strict `overflow:"error"` forbids shrinking. Exhaustion returns suggestions, not partial pages or a promised resolution that will fit. Before/after images reserve 1MiB each. No network fetch, automatic font installation or file write is performed. Stale bindings are reported for inspection; export still rejects them. Diagnostics remain heuristics, not Office parity or full accessibility certification.
+
+SDK methods: `session.previewPresentation(options?,requestOptions?)`, `preflightPresentation(options?,requestOptions?)`, `previewSlideRevision(slideId,edits,{expectedRevision?,expectedHash?,maxDimension?,signal?})`, and `applySlideRevision(slideId,edits,{expectedRevision,expectedHash,candidateHash,signal?})`. Session reads serialize with writes and reject early/late cancellation. Pure core candidates carry no session authority; callers supply and recheck the base and candidate hashes.
+
+MCP substitutes `deck_id` for `document`. Preview tools return metadata in the first text block and standard MCP `image` blocks; `include_images:false` omits images but still renders. Compact `preview_presentation` defaults to a 640px JPEG contact sheet with a 384KiB image budget and the first eight pages. Explicit options override these defaults; `page_scope` discloses selected/unselected counts. `detail:"full"` restores the core preview defaults. Use `get_deck_summary` for metadata without rendering. `preview_slide_revision` retains only bounded edit instructions under an opaque process-local candidate ID (16 candidates, ten-minute expiry, 128KiB each). `apply_slide_revision` accepts that ID plus the exact base revision/hash rather than replacement edits. Stale/closed-deck candidates release capacity; applied candidates are single-use. No-op applies do not add history. `author_presentation` and `aislide://authoring/workflow` expose the workflow through the official MCP prompt/resource APIs.
+
+Typed edits: `translate{ids,dx,dy}`, `align{ids,alignment,relative_to}`, `set_text_frame{id,x,y,width,height}`, `replace_text{id,text}`, `update_part{id,spec}`, and `update_graph{id,spec}`. One slide, 1-16 edits and up to 32 unique targets per selection; no arbitrary JSON Patch, file path, XML or source authority. Nested text coordinates remain parent-local. Locked/hidden targets and native loss reject. Generic child edits may make managed metadata stale; the preview reports this. Existing raw `transaction` remains a separate lower-level API.
+
+### Delivery Preparation
+
+`prepare_delivery({document,expected_revision,expected_hash,options?})` returns `{revision,hash,files,manifest}` without filesystem access or document changes. SDK: `session.prepareDelivery(options?,{expectedRevision?,expectedHash?,signal?})`; the existing session read lock and early/late cancellation checks apply. Each file has `kind`, server-independent `suffix`, `mime_type`, `page_indices`, `byte_length`, `sha256`, `base64` and optional image dimensions. Native PPTX export checks, including immutable origin and stale source-binding rejection, remain authoritative.
+
+Options: `page_indices?`, `pdf:false`, `preview:"contact_sheet"` (`pages` / `none` also accepted), `notes:false`, `source_report:false`, `preflight:true`, `max_dimension:1280` (160-1600), `min_font_size:16` (8-48), and lower-only `max_output_bytes` (up to 32MiB). All options are strict. The complete PPTX is always included. Supplemental visual output/preflight is limited to eight selected pages; notes and source metadata span the whole deck. The report excludes raw source text, table rows, raw binding values and original bytes, but attributions/locators may still be sensitive. Separate plaintext notes and source-report output require explicit opt-in; the PPTX itself remains an ordinary unredacted export.
+
+MCP `finalize_presentation({deck_id,expected_revision,expected_hash,name,options?,include_images?,detail?})` prepares the same bundle, binds safe filenames, verifies hashes and budgets, then exclusively publishes beneath the startup-approved output root. Compact mode defaults to 640px and the first eight pages for supplemental previews/checks, disclosed by `page_scope` and the manifest; the PPTX always contains every slide. Explicit options override defaults; `detail:"full"` restores core defaults. At most 13 files including the manifest; 32MiB decoded total and at most 4MiB MCP response (capacity limits also apply). A thumbnail plus actual paths, hashes, sizes, check scope and manifest path are returned. `include_images:false` suppresses only the response image. Every destination is checked, all temporary files staged, and the manifest published last. Existing files are never replaced. No directory, URL or arbitrary file path is accepted from the request.
+
+The manifest format is `aislide.delivery`, version 1. It records actual producer/core versions and MCP transport, document revision/hash, file hashes, visual page scope, checks, findings and limitations. `complete` is publication success, not quality approval; preflight can report findings. No source authenticity/freshness, semantic truth, accessibility certification or Office parity is asserted. Files are not a crash-atomic group. A structured `BUNDLE_PUBLICATION_FAILED` result lists exact successful paths and pending filenames with a `not_published`, `partially_published` or `published_with_error` status. Published files are never cleaned up automatically; only owned temporary paths are removed. Cancellation after a link may leave outputs; inspect the manifest and hashes before retrying with a new name. Root checks do not establish hard immunity to hostile local path races. See [delivery workflow and example](authoring/README.md#delivery-bundles).
+
+### Office Text And Rendering
+
+Native Office text with `err` and `altLang` supports rich editing when the rest
+of its text style is representable. `RunStyle.alternative_language` represents
+`altLang`; language tags are nonempty ASCII alphanumeric/hyphen strings up to
+64 bytes. Paragraph replacement preserves a unique prior alternative language
+unless explicitly overridden. With mixed prior values, a replacement run's explicit
+`language` inherits its uniquely associated prior alternative language. Otherwise
+it must supply `alternative_language`; ambiguous mappings reject with at most eight
+prior `(lang, altLang)` pairs, without text content. Explicit alternatives take
+precedence. Changed paragraphs clear transient `err`/`dirty` flags;
+untouched XML remains unchanged. Unknown styles and fields still reject. Batch
+errors identify the operation, slide, element and first unsupported tag/attribute.
+
+Preview, preflight (scale 1) and delivery PDF (scale 2) omit shadow, glow,
+soft edge and reflection on an over-budget page's disposable rendered view.
+`EFFECT_APPROXIMATION` identifies the slide, highest-cost element, scale and
+budget totals. Fills, text, opacity and native PPTX remain unchanged; raw static
+export stays strict. Preview `quality_reduced` also covers effect omission.
+Other resource limits and unsupported-content errors remain enforced.
+
+Typed `apply_operations`, including `add_elements`, returns optional
+`render_warnings` for touched pages at the default preview scale
+`1280 / max(width,height)`, without rendering. If prediction exceeds its own
+analysis limit, `EFFECT_ANALYSIS_UNAVAILABLE` keeps the edit accepted and makes
+the missing analysis explicit; actual rendering still enforces that limit.
+SDK `session.renderWarnings` and MCP typed-edit responses expose a separate
+`renderWarnings:{revision,hash,status,warnings}` snapshot. Status is `complete`
+or `unavailable`; later accepted edits and Undo/Redo clear stale snapshots.
+Warnings are not persisted, and absence of warnings does not certify rendering
+or Office visual parity.
+
+### Selective Template Factory
+
+`inspect_template({kind:"potx",base64})` inspects up to 8 masters, 256 layouts
+and 256 sample slides before the editable document's 32-layout limit. It
+returns exact package-part IDs, names, ownership, sample count, section/custom
+show flags, limits and `source_sha256`. The SDK method is `inspectTemplate`.
+Input bytes and capacity profiles retain the ordinary archive/request guards.
+
+`import_template` / SDK `importTemplate` accepts optional POTX-only `options`:
+`{include_sample_slides?,master_ids?,master_names?,layout_ids?,layout_names?,
+strip_sections?,source_sha256?}`. Defaults keep samples, all layouts and
+sections. ID/name selectors resolve exactly and unambiguously, with combined
+limits of 8 masters and 32 layouts. Master-only selection includes its layouts;
+layout selection includes its owning masters. Retained samples must use selected
+layouts. Set `include_sample_slides:false` to create one blank slide on the first
+selected layout in source order, including templates with no source slide list.
+Supply the inspected SHA to reject changed source bytes. THMX rejects options.
+
+`strip_sections:true` removes only recognized section lists, preserving unknown
+extensions. Custom shows still block structural edits and sample removal;
+sample removal with managed references/guided records is also rejected.
+Selection is not sanitization: unselected opaque payloads remain embedded.
+Protection, macro and signature guards remain enforced. Inert external hyperlinks
+are preserved without fetching; external images/slides and unknown resource types
+remain rejected by inspection and selection.
+These selection controls are core/SDK/MCP APIs, not new Studio controls.
+
+The 3 MiB encoded image budget is deck-wide and counts identical MIME/base64/
+retained-SVG payloads once across slides, masters, layouts and auxiliary design.
+The 128-unique-image and 64 MiB raster-work limits remain. Failures report totals,
+limits, crossing owner/element, placements and distinct resources. Per-image,
+complete-document, request and archive limits still apply to repeated payloads.
+
+### Master Import
+
+`inspect_master_source({kind,base64})` accepts explicitly selected non-macro
+`pptx` or `potx` bytes. It returns `source_sha256`, dimensions, master and slide
+entries (`id`, `name`, `importable`, rejection `reason`, and master
+`layout_count`), warnings and `office_visual_parity:false`. Inspection is
+read-only and creates no document handle or stored source.
+
+`preview_master_import({document,expected_revision,expected_hash,input})`
+validates an append-only design change through the ordinary transaction
+guards, without accepting it into a session. Input contains `kind`, `base64`,
+`source_sha256`, `mode:"masters"|"slides"`, 1-8 distinct `ids`, an ASCII
+alphanumeric/underscore/hyphen `prefix` of 1-32 bytes and a nonblank `name`
+of at most 60 characters. The response contains the base revision/hash,
+candidate hash, complete candidate `design`, added `master_ids`, `layout_ids`,
+unique `preview_slides`, warnings and `office_visual_parity:false`.
+
+`import_masters` takes the same arguments plus `expected_candidate_hash`,
+recomputes the candidate and returns the normal transaction result. The
+immutable target origin, slide content, source records and bindings stay
+unchanged. A design-less authored target gains a blank default master before
+the selected additions. ID collisions, source/base/candidate mismatch, page
+dimension mismatch, eight-master/32-layout totals and selected capacity
+budgets reject before commit. One inverse receipt restores the prior design.
+
+Existing-master mode copies supported masters with their owned layouts and
+explicit source themes. Sample-slide mode creates one master/layout per
+selected slide, with visible inherited artwork and remapped connector IDs.
+Ordinary text stays fixed; existing text placeholders remain placeholders.
+Unsupported XML, shape styles, theme effects or resource relationships fail
+closed. Source fonts, notes, comments and citation metadata are not imported.
+Protection is not stripped, relationships are not fetched, and no original
+file is modified. This does not certify arbitrary Office-template fidelity.
+
+SDK: `client.inspectMasterSource(input,options?)`,
+`session.previewMasterImport(input,options?)` and
+`session.importMasters(input,candidateHash,options?)`; options include
+`signal`, `expectedRevision` and `expectedHash` for session operations.
+Existing serialization, late-cancellation and Undo checks apply. MCP uses
+the same names, replacing `document` with `deck_id`, and strict schemas;
+results are JSON-only. See [Studio and MCP workflow](authoring/README.md#import-masters-from-pptx-or-potx).
+
+The development bridge also accepts the operator-only `AISLIDE_CORE_BINARY`
+environment variable at process startup, for testing a separately built CLI
+while another connection uses the default executable. It must be an absolute
+local path, not a relative/UNC path or a request field. The default remains
+`target/debug/aislide[.exe]`; no host configuration or active connection is
+changed automatically. Configure this explicitly in a spawned MCP client's
+environment when needed, because the official SDK uses an environment allowlist.
+
+| Operation | Request fields besides op | Result |
+| --- | --- | --- |
+| `new_document` | `id`, `deck`, optional `sources`, `bindings`, `report` | Canonical document with revision 0 and content hash |
+| `transaction` | `document`, `transaction: {expected_revision, expected_hash, operations}` | Updated document, inverse receipt, changed JSON paths |
+| `undo_transaction` | `document`, `expected_revision`, `receipt` | Updated document and a receipt usable for redo |
+| `export_project` | `document` | `base64`, `filename`, `checkpoint`, `checkpoint_filename`, layout evidence |
+| `open_project` | `base64`, `checkpoint` | Verified document, only if the exact PPTX matches |
+| `import_document` | `id`, `base64` | Origin-bound document, warnings, per-object editable fields |
+
+Content JSON Patch paths start with `/deck`, `/sources`, `/bindings`, `/parts`, `/report`, `/references`, `/guided_record` or the immutable import origin. A batch has 1-128 operations; a stale revision/hash, failed test/path, oversized intermediate result or invalid final state aborts the batch. Revisions increase on real changes and Undo/Redo; no-op transactions do not create history. Deleting a part root also removes its metadata in that transaction, so Undo restores both. Core receipts are not signed capabilities and undergo the same validation as edits.
+
+### Authored Slide Import
+
+`import_slides({document,expected_revision,expected_hash,source,source_slide_ids,prefix,after?})`
+imports 1-128 distinct existing source slide IDs in selection order into a
+same-canvas target, after an existing target slide or at the end when `after`
+is omitted/null. `source` is a verified document whose `origin` must be absent
+(`None` in Rust). The prefix is 1-24 ASCII letters, digits, underscores or
+hyphens; generated slide/master/layout IDs avoid target collisions. Target
+capacity and the eight-master/32-layout totals still apply. The transaction
+produces one Undo receipt and does not change the source document.
+
+Matching master/theme/layout content is reused; unmatched required design is
+copied with the source's effective theme. Selected slides retain notes,
+supported review metadata, current authored part metadata and evidence
+bindings with their referenced source records. Stale/native part fingerprints,
+stale bindings, conflicting source hashes, native slide references and modern
+comment threads reject. All source embedded fonts require explicit embedding
+and editing license acknowledgement; matching family/style entries must have
+matching bytes and consent. Font budgets remain enforced. Differing source
+notes/handout masters cannot replace the target's auxiliary design. The
+target's compiled `report` metadata is cleared because the combined deck is
+no longer that report. Review retained notes/evidence before redistribution.
+
+SDK: `session.importSlides(sourceDocument,{source_slide_ids,prefix,after?},options?)`
+uses `AuthoringOptions`. MCP requires
+`{deck_id,expected_revision,expected_hash,source_deck_id,source_slide_ids,prefix,after?}`.
+`source_deck_id` must be an existing authored session handle; MCP accepts
+neither a source file path nor arbitrary source document JSON. This is
+separate from master import. Opening a native PPTX does not make it an
+authored source: native cross-package slide copying remains unsupported.
+Native targets retain their immutable origin and ordinary preservation
+guards, which can reject otherwise valid authored additions.
+
+## Workspace Commands
+
+| Core operation | Fields besides op | Result |
+| --- | --- | --- |
+| `create_presentation` | `id`, `title` | Revision-zero document with one blank slide and the default design |
+| `edit_slides` | `document`, `expected_revision`, `operations` | Atomic transaction and inverse receipt |
+| `edit_elements` | Same, plus `slide_id` | Atomic top-level element operation |
+| `detach_part` | `document`, `expected_revision`, `slide_id`, `id` | Remove one managed record only, preserving figures, sources, bindings and origin; one Undo |
+| `create_asset` | `id`, `base64`, `mime_type`, `alt`, `size` | Validated picture element; accepted inert SVG is retained with a PNG fallback |
+
+Slide operations, in a batch of 1-128:
+
+- `{op:"insert",id,after?,title,layout_id?}` inserts after the specified slide, or appends when omitted. An omitted layout produces a blank slide; an explicit layout creates its placeholders and fills every title placeholder with `title`. An empty title clears the placeholder's sample text; other placeholders are unchanged.
+- `{op:"duplicate",slide_id,id}` creates a copy immediately after its source. Part metadata and source bindings follow the new slide ID; stale part metadata blocks duplication with the offending slide/element and `detach_part` recovery guidance.
+- `{op:"remove",slide_id}` removes the slide and its part/binding records; the last remaining slide cannot be removed.
+- `{op:"move",slide_id,index}` moves to a zero-based index in the final list.
+- `{op:"rename",slide_id,title}` changes its displayed title, not the contents of text boxes.
+
+Slides are limited to 1-256 under the default `large` capacity profile, 1-128 under explicit `standard`, or 1-32 under `legacy`. The request-local provenance limit is 296 identities across profiles; complete-document and XML budgets still apply. Native insertion creates only the added slide/resources and relationships; existing slide bytes remain untouched when their content is unchanged. Native duplication preserves opaque slide XML and independently copies mutable resources such as chart XML and embedded workbooks. It may share immutable images and design resources. Slides carrying modern comments cannot be duplicated. A bounded origin-relative `native_source_id` is used internally for in-session copies; callers should use `edit_slides`, not set it directly.
+
+Native slide deletion removes its slide XML, dedicated notes, relationship parts and their content-type entries. Deletion is refused if a remaining object references those parts. Other shared or opaque package resources and source documents are retained; deletion is not secure redaction. Sections/custom slide shows must be handled in PowerPoint before structural changes. Copy traversal is capped at 128 related resources and 8 MiB. Original files and import origins remain unchanged.
+
+`detach_part` explicitly removes the selected managed-part record, including a
+stale record, without deleting or regenerating its native group. SDK:
+`session.detachPart(slideId,{id},{expectedRevision,expectedHash?,signal?})`.
+MCP: `detach_part({deck_id,expected_revision,expected_hash?,slide_id,id})`, discoverable
+through `discover_tools`. It has one Undo and retains manual edits, source bindings
+and the immutable origin. The group becomes ordinary geometry; `update_part` no
+longer regenerates it. Missing targets and stale requests reject; signed, encrypted
+or edit-protected native packages reject. Labels are retained.
+
+For ordinary unsigned/unprotected documents, the lower-level transaction equivalent
+is `{"op":"remove","path":"/parts/N"}` with the current revision/hash and verified
+record index. Prefer ID-based `detach_part`; indices can change after other edits.
+Never use raw patches to bypass native protection or restore cached geometry.
+
+Element operations are `{op:"duplicate",id,new_id}`, `{op:"remove",id}` or `{op:"order",id,index}`. They apply to the selected slide's top-level objects. Duplication remaps descendant IDs and connection references and copies bindings/part metadata. Removal also removes connectors that lose their target. Unsupported individual native copies fail rather than flatten custom formatting; duplicating the slide is the preservation-oriented alternative. All operations are undoable and require a current revision.
+
+Assets support PNG/JPEG, inert SVG and a bounded EMF/WMF record subset converted locally to SVG. `size` is the displayed longest side, 8-640px; aspect ratio is retained. Raster files use the existing 1 MiB, 4096px and 64 MiB decode limits. SVG is limited to 256 KiB, 2,048 elements, XML depth 32, viewport 4096px, reference depth 48 and expanded reference cost 4,096. Safe text and embedded PNG/JPEG are supported within validation limits; cycles, missing/wrong-type fragment targets, external resources, scripts, `foreignObject`, styles, filters and unsupported effects reject. Outlined paths, basic shapes, gradients, clipping and masks remain supported. Raster output has a 1024px longest side, transparency and a 1 MiB limit, and is decoded again as PNG before use. Accepted SVG bytes are retained in the picture's optional `svg` field and embedded through the native SVG picture extension alongside the PNG fallback. This is not arbitrary SVG/metafile support, HTML execution or conversion into editable shape paths. These budgets are not an OS process sandbox.
+
+SDK: `client.createPresentation(id,title?,options?)`, `session.editSlides(operations,options?)`, `session.editElements(slideId,operations,options?)`, `client.createAsset(input,options?)`, `session.addAsset(slideId,input,options?)`. Session options retain `expectedRevision` and cancellation. MCP exposes the same names with `add_asset` for insertion; mutations take `deck_id`, `expected_revision` and, for assets/elements, `slide_id`. Core/SDK `create_asset` remains stateless and has no filesystem/network authority. Compact MCP `create_asset` retains the prepared bytes under a process-local asset handle; `detail:"full"` retains the legacy complete Element result.
+
+## Guided Authoring
+
+| Operation | Inputs | Result |
+| --- | --- | --- |
+| `best_practice_profiles` | None | Four purpose-specific English profiles and default color |
+| `best_practice_guide` | `profile_id` | English common/profile guide, pattern capabilities, limits and Rust-derived `GuidedInput` schema |
+| `validate_guided_presentation` | `input: GuidedInput` | Pure preflight `{ready,issues,review_required,semantic_truth_verified:false,office_visual_parity:false}` |
+| `create_guided_presentation` | `id`, `input: GuidedInput` | New `{document,validation,profile_id,model_inference:false}`; no existing document or file is replaced |
+
+Profiles are `consulting-decision`, `technical-explainer`, `event-talk`, and `status-report`. The [guided authoring contract](authoring/README.md) defines the evidence, headline ledger, numeric JSON pointers and decision issue fields. All actual document behavior is computed in Rust; no model or source URL is contacted. `ready` means compilable input and measured text layout, not factual or semantic verification. Notes and creation records require privacy review before redistribution.
+
+Optional `input.authoring` controls reading/projection context, comfortable/compact density, standard/relaxed spacing, body font floor (12-40 scene pixels), headline size (28-64) and font family. Omission preserves legacy rendering; `{}` opts into profile defaults. Supplying only `headline_style`, `slide_limit` and/or a `ledger_notes` mode does not activate typography overrides. Existing `brand_color` remains the palette override. These are creation settings, not a retained styling policy for later part regeneration.
+
+`authoring.ledger_notes` is `full` (default, byte-for-byte legacy note text),
+`summary` (speaker text first, separator, readable question/claim/evidence
+references), or `none` (speaker text only, empty when not supplied).
+`speaker_notes` allows 4000 Unicode scalars per slide; complete notes allow
+8000 including all generated text and separators, with no silent truncation.
+Summary/none preserve the complete typed creation input, excluding duplicated
+speaker notes, in `document.guided_record:{version:1,input}`. Retrieve it via
+MCP `get_document` or SDK `session.document.guided_record`; it also roundtrips
+through project checkpoints and the PPTX's AISlide Custom XML. The separate
+record is capped at 1 MiB serialized JSON; total provenance XML remains capped
+at 2 MiB, and summary/none creation rejects input whose escaped provenance would
+exceed it. Stored records are validated structurally (XML 1.0 characters in
+strings and keys, at most 30 nesting levels below the provenance root, exact
+reread of the generated XML including CR); guided content checks run
+only at creation. Removing `/guided_record` also removes it from project and
+presentation PPTX output. `inspect_document` scans the record and `export_clean_copy`
+removes it when `sources` or `notes` is selected. `none` does not redact evidence
+from the file. The record is captured at creation, not automatically updated
+after edits or authenticated as truth.
+
+`authoring.headline_style` is `sentence` (default) or `keyword`.
+Keyword mode waives only Japanese consulting headline length and adjacent
+sentence-form variation checks. Valid `sentence_form`, logical support,
+evidence, numeric declarations, forbidden dash/self-reference checks and the
+consulting numeric-claim limit still apply. `authoring.slide_limit` is an
+integer 32-128, default 32; actual slides must number 1 through that limit and
+fit the selected capacity profile. For a 39-page technical outline use
+`profile_id:"technical-explainer"` with
+`authoring:{headline_style:"keyword",slide_limit:39}`; this sets a ceiling,
+not a request to generate missing pages. Omitted options retain prior behavior.
+
+All profiles accept `native-part` with an existing `PartSpec`. Consulting multi-page inputs require 3-6 stable issues, an opening `C02` summary and closing `C03` decision grid. Both are dedicated native templates with purpose-sized columns; analysis references must point to real body pages. The 48-item consulting catalog is selection guidance with explicit `native-template`, `composition-required`, or `guidance-only` status, not 48 implemented automatic templates.
+
+MCP exposes the same four operation names. It allocates an opaque new `deck_id` only after successful validation and cancellation checks, within the existing eight-deck limit. File output still requires a separate `export_pptx` call. SDK creation returns `{session,validation,profile_id,model_inference:false}` through `client.createGuidedPresentation(id,input,options?)`; getter/validator methods are `bestPracticeProfiles`, `bestPracticeGuide` and `validateGuidedPresentation`. Use the returned revision; creation and later manual edits are not a continuously maintained semantic-proof record.
+
+## Metadata Parts
+
+| Operation | Request fields besides op | Result |
+| --- | --- | --- |
+| `part_catalog` | None | Version, 111 presets, Rust-derived `PartSpec` schema, style and default bounds |
+| `create_part` | `id`, `spec`, optional `theme` | Validated ordinary `Element::Group`; does not create persistent metadata |
+| `insert_part` | `document`, `expected_revision`, `slide_id`, `id`, `spec` | Atomic `TransactionResult`, including part metadata and undo receipt |
+| `update_part` | Same as insert | Regenerates a current metadata part; retains placement unless an explicit layout changes it |
+
+`PartSpec` is `{version:1, preset, title, subtitle?, data, layout?}`. The 108 existing preset IDs are `<category>/balanced`, `<category>/focus` or `<category>/labeled`. Three additive open-list IDs are described below. Root IDs are nonempty and at most 40 characters; title/subtitle limits are 80/120. The catalog provides a valid synthetic example for every preset. Unknown fields and unsupported preset/data combinations fail.
+
+| New preset | Structure | Items |
+| --- | --- | --- |
+| `list/rows` | Aligned heading/detail rows, without automatic numbering | 2-8 |
+| `list-horizontal/columns` | Open columns for equal-status concepts | 2-4 |
+| `list-enumeration/grid` | Unordered text grid: two columns through four items, otherwise three | 2-8 |
+
+These use native text with `@dk1` headings and `@dk2` detail, without enclosing
+rectangles, accent rails, icons or position-based colors. They accept the same
+`items` data and layout overrides; label/detail limits remain 48/120 Unicode
+scalars and measured fitting can still reject dense text at the 12px floor.
+Their catalog entries add optional `recommended`, `use_when` and `avoid_when`
+metadata. Consumers must not assume every category has exactly three presets.
+Studio sorts recommendations first and selects them on the first visit to a
+category, while retaining explicit legacy selections, drafts and existing
+instances. Catalog entry order and the original 108 recipes remain unchanged;
+there is no automatic migration or deck-wide rearrangement.
+
+`data.kind` selects a strict union: `chart` (categories, series, x_axis/y_axis), `items` (label/detail/value, center), `tree` (id/label/parent nodes), `network` (nodes and indexed edges), `matrix` (rows, columns, rectangular cells), `groups` (named item groups), `timeline` (periods and indexed tasks), `waterfall` (steps, totals, unit), or `map` (named longitude/latitude/value points).
+
+`PartData` with `kind:"matrix"` also accepts `corner_label?: string` for the
+row/column heading intersection. Omission defaults to the empty string;
+`null` and nonstrings reject. The limit is 48 Unicode scalars, with XML 1.0
+character validation and the usual layout bounds/fit checks. It applies to
+both `matrix` and `contrast` in all three variants: `balanced`, `focus` and
+`labeled`. Balanced/focus render editable native text; labeled uses the
+native table's top-left cell. For example, use `"corner_label":"Criterion"`;
+source-provided Japanese labels are also supported with suitable fonts.
+Empty labels are omitted from canonical serialization and retain the old
+blank rendering, hashes and generated IDs. A nonempty label changes the
+specification and its derived rendering identities normally.
+
+New parts normally use theme-linked native objects at `{x:64,y:144,width:1152,height:512}`. In `preset-visual-content`, insertion instead fits the native group to that layout's `preset-visual-region`, preserving aspect ratio and normalizing child coordinates, fonts and strokes. Updates preserve the fitted coordinate space and outer placement. The ordinary compiler's text fitting bottoms out at 12px; the explicit visual-region fit follows the model's 8px floor and can require a wider layout for dense content. Chart values remain raw in embedded XLSX, including percentage stacks. This is deterministic compilation, not model inference.
+
+An explicit `layout:{x,y,width,height,show_title?}` bypasses automatic preset
+region fitting. Coordinates must be finite and nonnegative, dimensions
+positive, and both the frame values and right/bottom edges within 4096px;
+insertion must also fit the actual slide. `show_title` defaults true. False
+removes the part title/subtitle and maps its body below the former 88px band
+into the requested frame. Geometry and absolute table tracks are normalized;
+text fitting enforces a 12px floor and rejects measured overflow or missing
+glyphs. It does not guarantee that every preset fits every region. Some chart
+axis labels above that 88px boundary make title removal reject; retain the
+title or compose explicitly. Chart-internal typography is not newly qualified
+by this text/table measurement. Omitted `layout` preserves the existing
+placement path. Retain the layout specification when regenerating a part.
+
+`layout.fit` selects how the 1152x424 body canvas (1152x512 with the title)
+maps into the frame. `stretch` (default, legacy) scales each axis
+independently, so circles, arcs and hexagons become ovals when the frame aspect
+differs. `contain` scales both axes by the smaller factor and centers the
+result, leaving empty margins instead of distortion; text fitting and the 12px
+floor apply to the smaller result. Briefing parts lay out natively within the
+frame and are unaffected. With `stretch`, small square markers and images
+(number badges, milestone diamonds, icons, unit tiles) are re-squared around
+their centers so they never distort. `part_aspect({spec})` classifies the
+rendered geometry, not the category: `free` (rectangles, text, tables, native
+charts), `tolerant` (large diagonal edges, arrows, chevrons, ovals; 1.15) or
+`strict` (large circles, curved outlines, square shapes or images; 1.05), and
+categories whose area, unit count or geography encodes data are strict at
+1.02. Visual preflight reports `PART_ASPECT_DISTORTED` when a stretched part
+exceeds its measured tolerance.
+
+This placement override applies to part creation/direct insertion. Guided
+creation subsequently fits its part into the guided body region, so use
+direct insertion or complete typed elements for exact slide coordinates.
+
+`Document.parts` is optional when empty. An instance contains `slide_id`, `element_id`, `spec`, `render_sha256`, optional `native_sha256`, and `stale`. Hashes cover rendered children and original native group/resources, including chart workbooks. Root-only movement/resizing in Studio is allowed; mismatched manual/native edits mark the part stale and block semantic update. Missing fingerprints on existing native roots also mark stale. There is no automatic regeneration, no cryptographic authentication, and benign external XML reserialization can conservatively mark stale. Ordinary native objects remain available even without metadata.
+
+SDK: `client.partCatalog()`, `client.createPart({id,spec,theme?})`, `session.addPart(slideId,{id,spec},options?)`, `session.updatePart(slideId,{id,spec},options?)`, `session.detachPart(slideId,{id},options?)`. Session options accept `expectedRevision` and cancellation; detach additionally accepts `expectedHash` through `AuthoringOptions`. Late transport success after cancellation cannot commit. MCP: `part_catalog`, `create_part`, `add_part`, `update_part`, `detach_part`; mutations require `deck_id`, `expected_revision`, `slide_id`, `id` and optional `expected_hash`; add/update also require `spec`. Detach removes only metadata, retaining the native figures, manual edits and source bindings in one undoable transaction, including stale records. Protected native packages reject detach.
+
+### Layout patterns
+
+`layout_patterns` returns 54 original slide-body patterns (focus, split, stack,
+columns, grid, compound, sequence, compare, text, media and structure) with
+ratio, relationship tags, `use_when`, `avoid_when`, suggested parts, optional
+count range, fallback, spacing tokens and guidance. `resolve_layout_pattern`
+takes `{pattern_id, canvas?, body?, options?:{mirror?, message_band?,
+reference_band?, count?, body_size?}}` and returns integer slot frames with
+their kind, accepted content, minimum size, approximate full-width character
+capacity, `fits`, `issues` and `fallback`. The default body is x=48, y=120 and
+1184x540 on 1280x720; canvases narrower than 1.5:1 (for example 960x720) use a
+40px margin and narrower support/contrast gaps. `reference_band` ends the
+default body at the reserved reference band. Patterns allocate body regions only
+and do not change part rendering; they are deterministic guidance, not a
+visual-quality certification.
+
+SDK: `client.layoutPatterns()`, `client.resolveLayoutPattern(input)`,
+`client.rankLayoutPatterns({part, canvas?, part_title?})` and
+`client.partAspect(spec)`. Resolution with `options.part` adds `part_fit`
+`{distortion, fit, area_used, tolerance}` to slots that accept parts; ranking
+orders patterns by the share of the body the part fills without exceeding its
+tolerance. MCP exposes
+the read-only `layout_patterns` tool while the guide is on. `--layout-patterns on`
+(default `off`) sets the initial state: search with `query`/`relationship`, or
+pass `pattern_id` with `deck_id` or `canvas` to resolve frames. `part_preset`
+ranks patterns for that part or adds `part_fit` during resolution. When off, the
+tool is not listed, not discoverable, refused when called, and the startup server
+instruction is absent.
+
+The state can also be changed from the prompt. `set_layout_patterns({mode})` takes
+`on`, `off` or `status` and is discoverable through `discover_tools`; it is not one
+of the initial tools. It returns `{layout_patterns, changed, startup, source,
+persistent:false, instruction}`, where `source` is `startup` until `on` or `off`
+is first requested and `prompt` afterwards (`status` never changes it; `changed`
+tells whether the state actually moved). Turning it on publishes `layout_patterns` and
+returns the instruction to follow; turning it off hides it again. A real change
+sends `notifications/tools/list_changed`; repeating the same mode and `status` do
+not. The choice lasts for the server process only: it is not saved and a restart
+returns to the startup flag. Server instructions are fixed at initialization, so a
+prompt-time switch reports its guidance in the tool result instead. No document,
+file or history changes.
+
+For mixed reusable content, prefer [typed managed batches](#typed-authoring-batches)
+through `session.applyOperations` / MCP `apply_operations`. Individual managed
+MCP tools retain their legacy revision-only arguments, not `expected_hash`.
+Read metadata through MCP `get_document({deck_id})` and its `parts` array;
+there is no registered `get_part` or `get_parts` tool. This full-document read
+can include sources/origin; use `get_graph` for a narrower graph read. Export
+and reopen retain supported part metadata, but not the in-memory Undo history.
+
+## Architecture Graphs
+
+Graphs have a separate catalog, not an additional preset counted among the 111 parts.
+
+| Core operation | Fields besides op | Result |
+| --- | --- | --- |
+| `graph_catalog` | None | Six shapes, ports, routes, limits, schemas, three synthetic examples |
+| `architecture_icons` | None | Read-only `{version:1,release,configured,message,providers,icons}` compiled catalog |
+| `architecture_icon_assets` | `ids`: 1-60 distinct catalog strings, each at most 256 bytes | Read-only `{icons:[{id,base64,mime_type,alt,width,height}]}`; PNG bytes from the consented local pack |
+| `create_graph_icon` | `base64`, `mime_type`, optional `alt` | Validated `GraphIcon`; SVG to PNG, larger PNG/JPEG fitted to 256px, no document mutation |
+| `create_graph` | `id`, `spec`, optional `theme`, `include_diagnostics` | Native group by default; `{element,diagnostics}` when explicitly requested |
+| `transform_graph` | `spec`, `operations` | Validated candidate specification; no document mutation |
+| `insert_graph` / `update_graph` | `document`, `expected_revision`, `slide_id`, `id`, `spec` | Atomic transaction, metadata and inverse receipt |
+| `apply_graph` | Same identity fields, `operations` instead of `spec` | Applies operations to a current managed graph in one transaction |
+
+`GraphSpec` remains backward-compatible version 1: `{version:1,title,subtitle?,show_title?,nodes,edges?,groups?}`. Coordinates are absolute within 1152x512, with nodes/boundaries below the 88px title band by default. `show_title:false` omits title/subtitle objects and permits content from y=0; omission retains the band. Minimum size is 64x40; card nodes default to 176x80. There are 1-48 nodes, at most 64 edges and 16 boundaries, with boundary depth at most four. IDs are 1-24 ASCII letters/digits/hyphens/underscores, unique across all three collections. Root ID limit is 40 characters. Title/subtitle limits are 80/120; node labels 160, edge/boundary labels 64. The rendered scene still obeys 256 elements per slide and document size limits; not every combination of collection maxima fits.
+
+- Node: `{id,label,label_fit?,detail?,detail_font_size?,text_align?,heading_bold?,kind?,x,y,width?,height?,fill?,stroke?,color?,font_size?,group?,icon?,presentation?}`. Kinds: `rectangle`, `rounded_rectangle`, `ellipse`, `diamond`, `cylinder`, `cloud`. Font size 12-40, default 18; colors accept RGB/theme references. Default fill/outline/text: `@lt1`/`@accent1`/`@dk1`. `presentation` is `card` (default) or `icon`; icon mode requires an icon and retains the six kinds and four logical ports.
+- Edge: `{id,source,target,source_port?,target_port?,label?,route?,color?,arrow?,start_arrow?,dashed?}`. Ports: `auto`, `top`, `left`, `bottom`, `right`. Route: `straight` (default) or `elbow`. End arrow defaults true; start arrow/dashed false; color `@dk2`. Endpoints must reference distinct existing nodes.
+- Boundary: `{id,label,x,y,width,height,fill?,stroke?,parent?,icon?}`. Defaults `@lt2`/`@dk2`, with solid outlines. A member or child boundary must fit below its parent's 40px heading with 8px side/bottom padding. Missing parents, cycles, excess depth and containment violations reject. Core coordinates stay absolute; React Flow uses relative child positions only in the UI, with stable outer-first rendering.
+
+Node `detail` is a nonblank description of at most 240 characters, rendered as
+separate editable native body text below the heading with an 8px gap, not
+flattened into an image. `detail_font_size` requires detail, accepts 12-40 and
+must not exceed `font_size`; default is `max(12,font_size*0.8)`.
+`text_align` accepts left/center/right, defaulting to left with detail and
+center without it. `heading_bold` defaults true; detail text is not bold.
+Omission retains the previous label-only presentation. Small frames or long
+text can fail fitting. `diagram/custom` parts also accept an explicit
+`PartSpec.layout`; its `show_title` controls the rendered graph title, with
+the old band removed from coordinates when hiding a previously titled graph.
+Manual waypoints receive the same coordinate translation as nodes and groups.
+
+`GraphGroup.header_color?: string | null` selects an RGB/theme text color,
+defaulting to `@dk1`; it never implicitly adopts a potentially pale outline
+color. `GraphNode.label_fit` is `wrap` (default, omitted from serialization)
+or `shrink`. Shrink prefers one line, testing the final text frame in 0.5px
+steps down to 12px without altering hard newlines. If one line still cannot
+fit, normal readable wrapping remains and diagnostics report the limit.
+These options preserve legacy rendering when omitted.
+
+### Graph Diagnostics
+
+`create_graph` keeps its bare `Element` response unless
+`include_diagnostics:true` is supplied. The opt-in result is
+`{element,diagnostics:{status,findings}}`; the element is identical to the
+default result. Status is `complete`, `partial` or `unavailable`, never an
+Office or semantic-quality approval. Findings are capped at 64 and the report
+at 32 KiB, and contain `code`, `severity`, `graph_id`, `entity_id`, `element_ids`,
+`bounds:[x,y,width,height]`, `message`, and optional `slide_id`, `lines`, `font_size`.
+Bounds are in the final graph group's local coordinate space.
+
+Codes include `GRAPH_LABEL_BORDER_OVERLAP`, `GRAPH_LABEL_OVERLAP`,
+`GRAPH_NODE_LABEL_WRAPPED` (info), and `GRAPH_NODE_LABEL_SHRINK_LIMIT` (warning).
+Node-label findings name the node shape that holds the text and report its text
+frame as bounds; overlap findings and `on_overlap:error` messages likewise name
+the node or boundary shape rather than an internal label frame.
+Automatic label search includes group-border stroke strips as well as nodes,
+headers and badges; it can retain a warned fallback when space is exhausted.
+Explicit positions remain authoritative. `on_overlap:error` rejects those
+collisions, including borders; default `warn` retains the position.
+
+Successful graph insert/update/apply, including no-ops and diagram parts in
+mixed batches, add optional core transaction `diagnostics` for the final
+affected graphs. SDK mutations still return `AislideDocument`; read the
+defensive-copy `session.graphDiagnostics` snapshot, bound to revision/hash.
+MCP mutation replies expose this as optional `graphDiagnostics`. Later
+successful operations without diagnostics and Undo/Redo clear the snapshot;
+failed operations retain the previous accepted state. Diagnostic failure is
+nonfatal and reported as incomplete; it must not discard a successful edit.
+Diagnostics are not stored in documents, hashes, PPTX metadata or Undo receipts.
+
+Preflight omits a graph badge's overlap with its own connector only when
+current managed metadata, render fingerprints, actual badge attributes and
+the specified route agree. Hand-authored, stale, unverifiable and other-edge
+crossings remain reportable, as do badge/label collisions. Generic chart
+parity notices become one informational `CHART_PREVIEW` finding per selected
+page; specific `CHART_PRESENTATION` limits remain warnings. Raw renderer and
+preview warnings remain available, and `office_visual_parity` remains false.
+
+`GraphIcon` is `{base64,mime_type,alt?}` with PNG/JPEG bytes, not a path, URL or raw SVG. Set `icon` to null or omit it on a complete replacement to remove an icon; an icon-mode node must also return to `presentation: "card"`. Each payload uses the existing 1 MiB/4096px/64 MiB decoder bounds; total encoded node and boundary icons share a 3 MiB budget. Document/metadata/response budgets can reject a graph before these maxima. Use `create_graph_icon` for generic imported images: inert SVG becomes PNG at a 256px longest side, larger PNG/JPEG images are downsampled in their format, and smaller rasters retain their bytes. Prepared cloud PNGs bypass this helper to preserve originals up to 512px. Normal `create_asset` behavior is unchanged. Alt text is at most 500 characters.
+
+Omitted presentation preserves legacy card output, including the aspect-fitted picture beside the label at up to 48 graph pixels. Icon mode places a picture above an editable label with a transparent native connection anchor; Studio service icons start at 160x140 with 16px labels. Node headings and details are written as paragraphs inside the node shape (or icon-mode anchor), with text padding reproducing the fitted label frame and an 8px-scaled space before the detail, so Office moves and resizes the text with its shape. Boundary headers are likewise written inside the boundary rectangle. Centered single-frame labels raise thin top/bottom padding toward 8 px only when the measured text still fits. A boundary with an icon becomes a nested PowerPoint group of its rectangle and picture. A node icon stays a separate sibling picture because AISlide connectors attach only to siblings; direct Office movement of only the node shape does not move that picture. Edge labels and badges remain separate objects because PowerPoint connectors cannot hold text. Logical boundary nesting is metadata, not nested PowerPoint groups. Graph-editor movement moves the complete node. Vendor colors and proportions remain unchanged, not live theme bindings.
+
+Operation batches contain 1-128 entries. `put_node`, `put_edge`, `put_group` carry a complete typed `node`, `edge` or `group`. `move` takes `{ids,dx,dy}`; `remove` takes `{ids}`; `align` takes `{ids,alignment}` with left/center/right/top/middle/bottom; `layout` takes `{columns}` in 1-8. Selection is 1-120 unique existing IDs. Alignment requires at least two nodes. Moving an ancestor moves every descendant once, including multi-selection. Removing a node removes incident edges; removing boundaries promotes direct children to the nearest remaining parent without changing absolute bounds. Grid preserves sizes and fails when they do not fit; with boundaries, all nodes must belong to a group. Grid is disabled/rejected for nested boundaries. Validation is atomic.
+
+Native output uses ordinary shapes with embedded node and boundary text and attached `p:cxnSp` objects with `straightConnector1` or `bentConnector2/3/4`. Manual routes and other `routing.custom` polylines are written as open freeform `p:sp` shapes (`a:custGeom`, no fill) marked with the `urn:aislide:connector:v1` extension that keeps endpoint bindings, because PowerPoint refuses packages whose `p:cxnSp` uses custom geometry; Office edits them as freeform lines without glue, and AISlide reopens them as connectors. Editing a route that an earlier export stored in `p:cxnSp` rewrites it in the freeform form. Shape-specific connection indices are independent of logical port direction. Standard adjustment values/flips retain reverse and vertical routes. Raw connector `routing` accepts only representable 2-4 normalized points plus `start_arrow`/`dashed`; arbitrary waypoints, curves and unsupported formulas fail closed. Routing is deterministic midpoint routing, not obstacle avoidance. In Office, moving a node shape moves its embedded text; edge labels, badges and node icon pictures stay where they are.
+
+Managed graphs use `Document.parts` with preset `diagram/custom` and data `{kind:"diagram",graph:spec}`. They share native/render fingerprints, root placement preservation and Undo/Redo with parts. External edits can conservatively mark metadata stale; graph updates then fail rather than overwrite manual content. Ordinary native objects remain editable without metadata only within the supported native subset; unknown XML still guards against unsupported replacement.
+
+The recommended mixed-batch `add_graph` accepts top-level
+`layout?: PartLayout | null`; `update_graph` accepts no layout and preserves
+the existing part layout. This is distinct from `GraphSpec.show_title`.
+Use `get_document({deck_id})` and its `parts` array to inspect `spec.layout`, since
+`get_graph` returns the graph specification and stale status, not PartLayout.
+Legacy individual graph tools keep their existing payloads without a layout
+argument. Managed graphs count toward the same 128-entry metadata total.
+
+SDK: `client.graphCatalog()`, `client.createGraphIcon({base64,mime_type,alt?})`, `client.createGraph({id,spec,theme?})`, `client.transformGraph(spec,operations)`, `session.addGraph(slideId,{id,spec},options?)`, `session.updateGraph(...)`, `session.applyGraph(slideId,{id,operations},options?)`. Options include `expectedRevision` and cancellation. MCP uses `add_graph` for `insert_graph`; other names are unchanged. Mutations require `deck_id`, `expected_revision`, `slide_id`, `id` and payload. `get_graph` takes `deck_id`, `slide_id`, `id` and returns `{deck_id,revision,slide_id,element_id,spec,stale}` without unrelated sources. No new filesystem/network authority is granted.
+
+Catalog SDK methods are `client.architectureIcons(options?)` and `client.architectureIconAssets(ids,options?)`; MCP uses the two read-only core names. `configured` checks consent for this exact catalog, not all assets. Each asset batch rechecks consent and all selected file hashes, PNG magic/dimensions, 1 MiB per-file and 4 MiB raw-batch limits before any return. Strip `id`, `width` and `height` before passing assets to strict `GraphIcon`. Requests accept no paths, URLs or manifests. Only the host may set `AISLIDE_ICON_PACK_ROOT` to an absolute local version directory. Lexically invalid paths and Windows remote/unknown drives reject before filesystem probes; subsequent ancestor/opened-file checks reject symlinks and reparse points. There is no runtime network access or external-relationship fetch. See [setup, rights and concurrent-filesystem limitations](authoring/cloud-icons.md).
+
+## Source And Generation Operations
+
+`ingest` takes `input: {name, format, base64, ocr?, ocr_language?, attribution?}`. Formats are `csv`, `json`, `xlsx`, `markdown`, `text`, `pdf`, `png`, `jpeg`. Attribution fields are `citation`, `url`, `license`, optional `derived_from_sha256` and `transformation`. URLs are metadata only. The result preserves raw-byte identity and a separate extracted-content hash, source tables with exact locators, plain text, page/word evidence, and limitations.
+
+`data_report` takes a source document and `mapping: {title, period, table_index, category_column, value_columns, row_start, row_count, chart_kind}`. Indices are zero-based. It creates exactly twelve slides, native charts/tables/process graphics, and field bindings; it is deterministic source compilation, not AI generation. Missing/formula/nonnumeric selected cells fail rather than becoming zero.
+
+MCP `compile_report` compiles a supplied `ReportInput` deterministically. Its
+seven fixed section layouts are `cover`, `metrics`, `table`, `columns`,
+`statement`, `chart` and `process`; they are not a general PPTX replication
+engine. Use guided technical outlines, parts/native graphs or complete typed
+elements according to the required evidence structure and placement control.
+Design presets remain optional, unchanged styles. Typed batches do not add
+a stateful core, a general report-layout catalog, general preflight overlap
+aggregation, finding prioritization or contrast analysis. Preview shrink
+retries separately reuse at most eight request-local SVG/warning entries,
+up to 16 MiB and within the existing 128 MiB working-allocation budget.
+Only equal or smaller already-validated scales reuse scenes; parsing,
+rasterization and encoding still run at the requested scale. There is no
+cross-request cache. Ordinary transaction processing avoids unneeded JSON
+copies of unbound elements and duplicate byte scans, but still validates
+each operation, source bindings, hashes, native origins and resource limits.
+Requests still serialize complete documents and start a core process;
+latency remains workload-dependent, not constant-time.
+
+`generate` takes `input: {prompt, source_text?, slide_count, allow_remote?, max_repairs?, outline?, design_preset?, language?}`. Each outline entry is `{title, layout}`. Model configuration comes only from the host environment. `max_repairs` accepts 0 or 1, default 0; repair is a separately authorized model call for report validation, not HTTP retry. Provenance includes model, local/remote mode, source hash, duration, attempts and `verified:false`. Model output never grants filesystem/network authority. `language` (`ja` or `en`) instructs the model to write all slide text in that language. `design_preset` compiles the draft as described for `compile` and adds a `layout_budget` with per-language section and cover title character budgets to the model request; a draft that still does not fit is a validation failure eligible for the single repair.
+
+`compile` takes `report` and optional `options:{design_preset?}`. Without a preset the fixed layouts above are produced unchanged. With a preset the deck carries only that preset's master and layouts; covers fill the `preset-cover` title/subtitle placeholders (period and label as captions), and every other section becomes a pattern composition: statements use `focus/statement` then `text/reading`; columns use `split/1-1`, `columns/3`, `grid/2x2` or `columns/4` cards with `text/label-detail` fallbacks; metrics use metric cards with the body in a message band (a single metric needs a body string); tables use `compare/table-full` or `focus/full`; charts use theme accents, a top legend when none is set and `split/2-1`, `stack/2-1` or `split/3-2`; processes use `sequence/steps-h` then `sequence/steps-v`. The first candidate whose slots and text fit at token sizes wins; otherwise the error names the section and the last candidate. CLI: `generate input.json out.pptx --design-preset <id>`.
+
+The core's report schema is generated from Rust types in schema mode and further constrained by the requested count/outline. Not every OpenAI-compatible server supports every JSON Schema keyword; runtime validation remains authoritative. The pinned local llama.cpp qualification includes a regression for `items` masking `prefixItems`.
+
+## Graphics And Inspection
+
+Review operations `modern_comment`, `set_table_headers`, `check_accessibility`, `inspect_document` and `export_clean_copy` share the core/SDK/MCP contracts in [Phase 6 review](authoring/review-phase6.md). Modern threads are optional and separate from legacy comments; repeated rich-body edit/reopen preserves end-paragraph namespaces, while native thread/reply array reordering rejects rather than being silently ignored. PII candidates are masked, numeric-location manual findings and never cleanup categories. Inspection does not return content-derived paths. PDF consumes explicit table-header metadata; anchor, old-client omission and Office/assistive-technology limits remain explicit.
+
+- `object_catalog`: no fields; returns the allowlisted preset shapes, 24 chart kinds (18 classic and six chartEx) and table limits. See the [chartEx contract and histogram compatibility exception](authoring/chart-ex.md); the Office-compatible histogram encoding has two Open XML schema errors per histogram resource.
+- `create_object`: `id`, `kind` (`text`, `shape`, `table`, `chart`, `line`, `arrow`), optional `preset`, `rows`, `columns`; returns a validated element. Shape presets are OOXML names from the catalog; chart presets are chart kinds. Tables are 1-12 rows by 1-8 columns. Factory chart values are synthetic.
+- `design_defaults`: no fields; returns a theme, one master and four layouts without changing a document.
+- `design_presets`: no fields; returns seven original `{id,name,design,rules}` presets. Rules include side margin, gutter, heading/body sizes and named layout regions.
+- `design_tokens`: `deck`; returns the derived [design tokens](#design-tokens) without changing the deck.
+- `apply_design_preset`: `deck`, `preset_id`; accepts `public`, `minimal`, `stylish`, `pop`, `dynamic`, `trust` or `luxury`. Adds or replaces a verified dedicated preset master and seven layouts, retaining original masters and slide content. Foreign/edited templates, conflicting IDs and insufficient capacity fail before commit.
+- `update_design`: `deck`, `design`; validates the complete design and propagates inherited placeholder geometry/style while preserving text.
+- `apply_theme`: `deck`, `theme`; binds previous-palette RGB values to theme slots and retains unrelated custom colors. Does not install fonts or fetch resources.
+- `set_master_theme` / `set_design_field`: owner-scoped theme overrides and dynamic-field/footer updates; see the [typed master-field contract](authoring/master-fields-themes.md#interfaces). `design_capabilities` reports the supported design subset and limitations.
+- `assign_layout`: `deck`, `slide_id`, `layout_id`; assigns/resets a layout, retains matching text, creates missing placeholders and detaches obsolete ones.
+- `create_picture`: `id`, `base64`, `mime_type`, `alt`; returns a decoded, fitted picture element.
+- `create_diagram`: `id`, `steps`; returns native rectangles, text and connected arrows in a group.
+- `compile`: `report`; returns a scene and issues. `sample` returns the explicitly synthetic twelve-slide input.
+- `validate`: `deck`; returns structural status and a canonical deck with serde defaults applied.
+- `measure_layout`: `deck`; reports text/table metrics, fonts, overflow and missing glyphs, never Office parity.
+- `inspect`: `base64`; lists simple top-level text runs.
+- `patch_text`: `base64`, `part`, `shape_id`, `run_index`, `expected`, `text`; returns a new archive or an optimistic conflict.
+- `import_pptx`: `base64`; approximate scene, warnings and writable fields.
+- `save_import`: `base64`, `deck`; original bytes for no-op or narrowly patched original package.
+- `roundtrip`: `base64`; inspected no-op archive. `package_manifest`: `base64`; all part byte lengths and SHA-256 values.
+- `export`: `deck`; structural-only PPTX. `provider_status` and `ocr_status` report configuration/capability, not content quality.
+
+## Authoring Model
+
+`deck.design` is optional and contains `{theme, masters, layouts}`. Each master is `{id, name, background, elements, theme?}`; each layout is `{id, name, master_id, background?, elements}`. A master's optional theme overrides the default design theme for its layouts and slides; omitting it restores inheritance. Background colors and element colors accept six-digit RGB or `@dk1`, `@lt1`, `@dk2`, `@lt2`, `@accent1` through `@accent6`, `@hlink`, `@folHlink`. Theme slots themselves must be RGB, not references. Theme fonts are `{major, minor, east_asian, complex_script}`. See [master fields and themes](authoring/master-fields-themes.md) for owner isolation and native preservation limits.
+
+Slides optionally contain `layout_id`, `inherit_background`, `hide_master_graphics`. Text and shape elements accept `format: {italic?, underline?, alignment?, vertical?, bullet?, font_family?, hyperlink?, placeholder?, inherit_layout?, paragraphs?}`. Alignment is left/center/right/justify; vertical is top/middle/bottom; bullet is none/bullet/numbered. Fonts may be explicit names or `@major`/`@minor`. Hyperlinks are absolute HTTP(S)/mailto URLs without embedded credentials or control characters; the application never fetches or activates them.
+
+`format.paragraphs` represents rich runs and paragraph formatting, not HTML. It supports run styles, numbering, indentation, spacing and tab stops within bounded typed inputs. When paragraphs are present, the element's `text` must equal their run texts joined with newline separators. Unknown or unrepresentable native rich content remains protected rather than flattened. Font measurement and rendering do not establish Office typography parity.
+
+Optional `visual` styles represent supported transforms, visibility/locking, gradients, effects, picture masks and text warps; applicability and bounds depend on element type. These are modeled DrawingML properties, not arbitrary CSS or full Office effect support.
+
+`polygon` elements contain bounds, 3-4096 normalized finite `[x,y]` points in `[0,1]`, fill, stroke and stroke_width. Shape/polygon fill accepts `none`. Straight polygons export as a closed native DrawingML path. Optional `visual.path` adds bounded move/line/quadratic/cubic/close commands and supported compound contours with holes; `points` must match its complete point/control-point list. Native point, path and style edits require representable original geometry and affected XML. Boolean operations, including fragment, adaptively flatten supported curves with a 0.25px target before polygon clipping; this is not exact arbitrary curved geometry. Arbitrary formulas, arcs and multiple separate native path records remain unsupported and preserved.
+
+Placeholders are top-level text elements with `{kind, index}`. Kinds are title/body/subtitle/footer/date/slide_number. An inherited slide placeholder must match its layout geometry and style. Use the design/layout operations, or set `inherit_layout:false` before individual changes. These pure core operations return a candidate deck; commit it using `transaction` for revision/hash checks, source binding checks and undo. SDK session methods perform both steps under one busy guard.
+
+Master/layout-owned fields support dynamic slide numbers (`slidenum`), explicit-date caches and ordinary footer placeholder text. `refresh_fields` evaluates `datetime1..13` for `en-US`, with caller `reference_date` and optional `reference_time` (`HH:mm:ss`, required for datetime8..13). Other locales, missing times and unknown kinds retain caches and return warnings. Known field instances retain inheritance after native reopen without replacing their UUIDs, caches or raw paragraph extensions. See the [field contract](authoring/master-fields-themes.md#fields).
+
+`update_rich_notes` accepts `{document,expected_revision,slide_id,paragraphs}` and atomically synchronizes mandatory `Slide.notes` with optional `notes_paragraphs`. Notes allow 8,000 Unicode scalars; ordinary rich text still allows 4,000. `update_auxiliary_design` accepts `{document,expected_revision,design}` where design is `{width,height,notes_master?,handout_master?}` and each master is `{name,background,theme,elements}`. These are separate auxiliary masters, not slide masters requiring layouts. Both return normal transaction results and support Undo. MCP uses `deck_id`; SDK exposes `updateRichNotes` and `updateAuxiliaryDesign`. Native unsupported paragraph edits, ambiguous masters, auxiliary removal and native notes-page resizing fail closed. See [native preservation and UI limits](authoring/master-fields-themes.md#rich-notes-and-auxiliary-masters).
+
+Imported origins remain immutable. Supported design, ordinary-shape, rich-text, visual and path edits use native preservation checks against the original package. A newly modeled property is not automatically forbidden solely because it was absent before, but unsupported original XML cannot be silently replaced. Check the returned object capabilities and operation-specific limits; a preview is not authority to rewrite arbitrary imported content. No external checkpoint is required for supported single-file edits.
+
+## Capability Discovery
+
+Core/MCP `authoring_capabilities` and SDK `client.authoringCapabilities()` report supported authoring operations and limits, not a guarantee that an arbitrary imported object is writable. The [SDK method declarations](../packages/client/index.d.mts) and [payload types](../packages/client/types.ts) define search/replacement, selection, image/table/vector editing, bounded Boolean operations, review and comments. Their native preservation, revision and cancellation requirements still apply.
+
+See the [current support boundaries](support-matrix.md#current-single-file-path), [local proofing and text-format painter](authoring/proofing-format-painter.md), [local-only model assistance and segmentation](authoring/local-ai.md), [opt-in document fonts](authoring/fonts.md), [master fields and themes](authoring/master-fields-themes.md), and [chartEx contract](authoring/chart-ex.md). Capability discovery itself performs no inference and certifies neither model quality nor Office/font compatibility. Optional proofread/translation and U2NetP segmentation use the separate local-only contracts, review/revision/cancellation guards and rights requirements.
+
+## MCP Mapping
+
+### Lightweight Discovery And State
+
+The default `compact` profile initially advertises ten tools: `discover_tools`, `get_tool_schema`, `list_decks`, `get_deck_summary`, `create_presentation`, `edit_slides`, `apply_operations`, `preview_presentation`, `finalize_presentation`, and `register_asset`. `discover_tools({query?,offset?,limit?})` returns names and concise descriptions; `get_tool_schema({name})` returns one complete self-contained JSON Schema and announces a tool-list change. The initial batch schema exposes common text/rect/shape/connector elements, picture placement and metadata; `get_tool_schema({name:"apply_operations"})` exposes full table/chart/polygon/group and managed part/graph details. Four recent advanced detail requests are retained, including the complete batch schema; eviction restores the basic batch declaration without rejecting otherwise valid existing calls. Profiles control discovery and response defaults, not authorization: the full runtime validator is unchanged. `--tool-profile full` exposes all tools and restores legacy response defaults.
+
+Published schemas use local `$defs`/`$ref` within each tool, generated lazily and cached. No cross-tool schema registry is assumed. The official SDK still validates calls against the original Zod schema. The follow-up regression measurement is about 1.26MB for an expanded full list, 627KB for the referenced full list and 32KB for the default ten-tool list (previously 54KB). The initial batch schema is about 20KB; its explicitly requested full form is about 44KB. These are serialized JSON bytes, not token counts or an end-to-end timing guarantee.
+
+`list_decks()` returns current IDs, titles, revisions/hashes, slide counts, Undo/Redo state, last successful operation and last presentation export. `get_deck_summary({deck_id,offset?,limit?,slide_id?})` returns up to 32 slides (16 by default); selecting a slide instead returns paginated element IDs, parent IDs, parent-local frames and at most 160 Unicode scalars of text per element. `next_offset` identifies more entries. Neither call clones the complete document, calls core, renders, writes files or includes image bytes, original packages, source text or notes. SDK consumers can use `session.getSummary({offset?,limit?,slideId?})`. Summaries do not prove a slide is finished or visually correct.
+
+Compact successful mutation replies include current revision/hash and Undo/Redo flags. Stale revision/hash guards are unchanged: hashes are not silently omitted or replaced with the latest value. The server automatically tracks successful operations and exports; callers do not need a manual progress file to recover an open handle after context loss. This is process-local memory, not crash recovery or automatic plaintext persistence. Export or explicitly retain recovery data before reconnecting.
+
+Compact `part_catalog` returns 12 entries without examples/schema by default; `preset_id` returns one example. `architecture_icons` defaults to 20 metadata entries and supports a provider filter. Both accept `query`, `offset`, `limit`, and `detail:"full"`. Full detail without filters returns the legacy complete catalog. Generated `create_asset`, `create_graph_icon`, and `architecture_icon_assets` results use reusable asset IDs by default; `detail:"full"` preserves the original byte-bearing results. Core and SDK contracts are unchanged.
+
+### Local Asset Handles
+
+`register_assets({assets:[{path,root?}]})` registers 1-32 files atomically under
+the same approved startup roots. Results preserve input order; duplicate
+content/type reuses a handle. Failures and cancellation retain no new batch
+assets. A ctime-only filesystem change triggers one bounded content-hash
+revalidation with the same path/identity checks; changes to identity, size,
+mtime or content reject. No mutation is retried and no root is widened.
+
+`prepare_assets({assets:[{asset_id,params}]})` prepares 1-32 registered PNG/JPEG
+images using the existing core `ImageEditParams` (explicit resize, format,
+color adjustments). All prepared results are retained atomically, with
+`source_asset_id` and new/reused IDs. Original files/handles and documents are
+unchanged. Both operations are advanced discoverable MCP tools.
+
+Registration, preparation, listing and closing return `usage` with
+`scope:"process_asset_registry"`, `asset_count`, `asset_limit`,
+`remaining_assets`, `raw_byte_length`, `raw_byte_limit`,
+`remaining_raw_bytes`, and `document_budgets_included:false`.
+Raster metadata additionally reports `raster_cost.encoded_byte_length`
+(base64 payload bytes), `rgba_byte_length` (width * height * 4), and
+`document_total_included:false`. These help plan insertion, but are not a
+document capacity approval: repeated placements count toward encoded payload
+limits, unique rasters toward decode budgets, and other document content also
+consumes capacity. All previous per-file, registry and document limits remain.
+
+The operator can add up to eight repeatable `--asset-dir path` startup options. No roots are enabled implicitly by `--output-dir`, and requests cannot add or widen them. `register_asset({path:"image.png",root:0})` snapshots a relative regular file and returns `asset_id`, name, type, size and SHA-256, never bytes or absolute source paths. PNG/JPEG also return core-decoded pixel `width`/`height`; decoder identity and dimensions are checked before registration and reused by immutable hash. Invalid rasters, metadata or cancellation leave the registry unchanged. Parent traversal, absolute paths, symbolic links/junctions, alternate streams and device names reject. Root, path and handle identity, size and timestamps are checked around bounded reads. Roots must be trusted against hostile concurrent local filesystem modification; this is not an OS sandbox or a protection-removal API.
+
+Limits: PNG/JPEG 1MiB, SVG 256KiB, PPTX/POTX/THMX 16MiB, TTF/OTF 12MiB, and CSV/JSON/XLSX/Markdown/text/PDF evidence 2MiB. At most 32 immutable handles and 64MiB of raw bytes are retained, deduplicated by format and SHA-256; base64 storage additionally costs about one third. Multi-icon retention is all-or-nothing on capacity failure. `list_assets()` recovers IDs without scanning folders or returning content; `close_asset({asset_id})` releases registry bytes without changing documents that already contain the asset. Registry success validates PNG/JPEG decoding only; other formats remain validated when used. It does not establish rights, a license or Office compatibility.
+
+Existing top-level binary inputs accept exactly one of `base64` or `asset_id`; MIME type can be inferred for a handle. `apply_operations` supports handles in `add_picture`, and managed graph/part inputs support `icon:{asset_id,alt?}`. For example, `open_pptx({asset_id})` reuses registered archive bytes. Expansion is budgeted and passed through strict input validation and the same shared core, retaining type, source protection and font-consent requirements. Existing document-capacity limits can be lower than registry limits. Generated icon handles require no filesystem root; up to 32 icons can be retained per compact catalog-asset call, subject to remaining registry capacity. No URL fetch, imported relationship execution or source overwrite is added.
+
+MCP retains up to eight document and source handles. `ingest_source` returns a source handle; `compile_data_report` consumes it. `get_document` includes revision and sources, while `get_deck` retains the legacy scene-only shape. `apply_transaction` requires a revision. `update_text`, `undo`, `redo`, `add_picture`, `add_diagram`, `measure_layout`, `import_pptx`, `open_project`, `export_project` and legacy `export_pptx` use the shared document/session behavior.
+
+`object_catalog`, `design_defaults`, `design_presets` and `design_tokens` are read-only MCP tools; `design_presets` wraps its array in `{presets}` for MCP structured content and `design_tokens` takes `deck_id`. `add_object`, `update_design`, `apply_design_preset`, `apply_theme`, and `assign_layout` require `deck_id` and `expected_revision`, plus their operation-specific inputs. `add_object` also requires `slide_id`. `update_text` accepts top-level text boxes and preset-shape text. All these mutations are undoable and reject stale revisions.
+
+Only `--output-dir` enables MCP file output. Each export accepts a bounded plain filename with the exact extension required by its registered operation: `.pptx` for presentation and clean-copy exports, `.potx` or `.thmx` matching the template kind, and `.png`, `.jpg` or `.pdf` matching the static format. Legacy `export_project` accepts a `.pptx` name and derives its paired `.aislide.json` checkpoint name; it does not accept an arbitrary checkpoint path. No generic path or shell operation exists. Model tools declare external-world behavior because operator-approved remote inference is possible. Imported relationships remain inaccessible regardless of model permissions.

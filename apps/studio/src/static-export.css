@@ -1,0 +1,13 @@
+﻿.static-export { padding: 20px; min-width: 0; overflow-wrap: anywhere; }
+.static-export-options { border: 0; padding: 0; margin: 0 0 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.static-export-options .checkbox { align-self: center; }
+.static-export-options input, .static-export-options select { max-width: 100%; min-width: 0; }
+.static-export-files { padding: 0; margin: 16px 0; list-style: none; }
+.static-export-files li { display: flex; justify-content: space-between; align-items: center; gap: 16px; border-top: 1px solid #b8b8b8; padding: 12px 0; }
+.static-export-files li > span { min-width: 0; }
+.static-export-files small { display: block; margin-top: 4px; }
+.static-export-files button { flex: 0 0 auto; }
+.static-export-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.static-export-warnings { padding-left: 20px; }
+.recovery-status { padding: 4px 20px; font-size: 14px; }
+@media (max-width: 600px) { .static-export-options { grid-template-columns: minmax(0, 1fr); } .static-export-files li { flex-wrap: wrap; } }
