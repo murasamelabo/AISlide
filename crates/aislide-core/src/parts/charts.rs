@@ -19,8 +19,10 @@ pub(super) fn render(drawing: &mut Drawing, category: &str, variant: usize, data
     let chart_bounds = match variant { 1 => [48.0,108.0,740.0,344.0], 2 => [48.0,100.0,720.0,360.0], _ => [64.0,104.0,1024.0,348.0] };
     drawing.chart(kind, categories.clone(), series.clone(), chart_bounds);
     if !kind.is_polar() {
-        drawing.text(x_axis,[chart_bounds[0],470.0,chart_bounds[2],28.0],16.0,"@dk2",false,TextAlign::Center);
-        drawing.text(if kind==ChartKind::PercentStackedColumn { "Share (%)" } else {y_axis},[chart_bounds[0],76.0,chart_bounds[2],24.0],14.0,"@dk2",false,TextAlign::Left);
+        // An empty label draws nothing, so it cannot cross the title band that `layout.show_title:false` removes.
+        if !x_axis.is_empty() { drawing.text(x_axis,[chart_bounds[0],470.0,chart_bounds[2],28.0],16.0,"@dk2",false,TextAlign::Center); }
+        let unit = if kind==ChartKind::PercentStackedColumn { "Share (%)" } else {y_axis};
+        if !unit.is_empty() { drawing.text(unit,[chart_bounds[0],76.0,chart_bounds[2],24.0],14.0,"@dk2",false,TextAlign::Left); }
     }
     if variant == 1 {
         let value = series[0].values.last().copied().unwrap_or(0.0);
@@ -49,7 +51,7 @@ fn waterfall(drawing: &mut Drawing, variant: usize, data: &PartData) -> Result<(
     let span=(maximum-minimum).max(1.0); let bottom=if variant==2 {400.0} else {440.0}; let height=bottom-140.0;
     let ordinate=|value:f64| bottom-(value-minimum)/span*height; let slot=1040.0/steps.len() as f64;
     drawing.line([64.0,ordinate(0.0)],[1104.0,ordinate(0.0)],false,"@dk2");
-    drawing.text(unit,[64.0,82.0,400.0,26.0],16.0,"@dk2",false,TextAlign::Left);
+    if !unit.is_empty() { drawing.text(unit,[64.0,82.0,400.0,26.0],16.0,"@dk2",false,TextAlign::Left); }
     for (index,(step,(from,to))) in steps.iter().zip(segments.iter()).enumerate() {
         let left=64.0+index as f64*slot+slot*0.16; let width=slot*0.68; let upper=ordinate(from.max(*to)); let lower=ordinate(from.min(*to));
         let shade=if step.total {"@dk1"} else if step.value>=0.0 {"@accent1"} else {"@accent2"};

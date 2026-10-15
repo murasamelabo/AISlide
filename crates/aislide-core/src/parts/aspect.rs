@@ -45,7 +45,7 @@ fn encoding(category: &str) -> Result<Encoding> {
         .ok_or_else(|| Error::Invalid(format!("part category {category} must declare its aspect encoding")))
 }
 
-fn frame(element: &Element) -> [f64; 4] {
+pub(super) fn frame(element: &Element) -> [f64; 4] {
     match element {
         Element::Text { x, y, width, height, .. } | Element::Rect { x, y, width, height, .. } | Element::Polygon { x, y, width, height, .. }
         | Element::Shape { x, y, width, height, .. } | Element::Table { x, y, width, height, .. } | Element::Chart { x, y, width, height, .. }

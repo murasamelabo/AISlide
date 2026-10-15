@@ -344,7 +344,10 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
             if let Element::Group { children, .. } = &mut result { drop(children.drain(..2)); }
         }
         let content_top = if layout.show_title { 0.0 } else if category == "venn" && variant == 1 { 80.0 } else { 88.0 };
-        adopt_layout(&mut result, layout, content_top, 512.0 - content_top, theme, &BTreeSet::new())?;
+        adopt_layout(&mut result, layout, content_top, 512.0 - content_top, theme, &BTreeSet::new()).map_err(|error| match error {
+            Error::Invalid(message) if message.starts_with("part body crosses the removed title band") => Error::Invalid(format!("{} ({})", message, spec.preset)),
+            other => other,
+        })?;
     }
     for element in crate::model::element_list(std::slice::from_ref(&result)) {
         if let Element::Text { id, font_size, .. } = element {
@@ -375,14 +378,33 @@ fn graph_part(id: &str, spec: &PartSpec, graph: &crate::graphs::GraphSpec, theme
     Ok(result)
 }
 
+/// What a part element is, for an error message: its quoted text when it has some, otherwise its kind.
+fn describe_element(element: &Element) -> String {
+    match element {
+        Element::Text { text, .. } | Element::Shape { text, .. } if !text.is_empty() => format!("text \"{}\"", text.chars().take(40).collect::<String>()),
+        Element::Text { .. } => "an empty text box".into(),
+        Element::Rect { .. } => "a rectangle".into(),
+        Element::Polygon { .. } => "a polygon".into(),
+        Element::Shape { .. } => "a shape".into(),
+        Element::Table { .. } => "a table".into(),
+        Element::Chart { .. } => "a chart".into(),
+        Element::Picture { .. } => "a picture".into(),
+        Element::Connector { .. } => "a connector".into(),
+        Element::Group { .. } => "a group".into(),
+    }
+}
+
 fn transform_layout_element(element: &mut Element, horizontal: f64, vertical: f64, content_top: f64) -> Result<()> {
+    let top = aspect::frame(element)[1];
+    if top < content_top {
+        return Err(Error::Invalid(format!("part body crosses the removed title band: {} starts at y={top} but the band ends at y={content_top}; keep layout.show_title:true or remove that element", describe_element(element))));
+    }
     match element {
         Element::Text { x, y, width, height, .. } | Element::Rect { x, y, width, height, .. }
         | Element::Polygon { x, y, width, height, .. } | Element::Shape { x, y, width, height, .. }
         | Element::Table { x, y, width, height, .. } | Element::Chart { x, y, width, height, .. }
         | Element::Picture { x, y, width, height, .. } | Element::Connector { x, y, width, height, .. }
         | Element::Group { x, y, width, height, .. } => {
-            if *y < content_top { return Err(Error::Invalid("part body crosses the removed title band".into())); }
             *x *= horizontal; *y = (*y - content_top) * vertical;
             *width *= horizontal; *height *= vertical;
         }

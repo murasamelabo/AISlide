@@ -216,14 +216,20 @@ removes the part title/subtitle band; omission defaults true. Explicit-region
 fitting normalizes geometry and absolute table tracks, normally enforces a
 12px text floor and can reject overflow or missing glyphs. Explicitly small
 graph annotations have the exception described below. Enlarge the region or reduce
-content when it cannot fit. Some chart axis labels occupy the removed 88px
-band and make title removal reject. Chart-internal typography has not been
+content when it cannot fit. With `show_title:false`, a non-empty `y_axis`,
+a waterfall `unit` and the fixed `Share (%)` unit of
+`100-add-vertical-bar-graph` sit inside the removed 88px band and make title
+removal reject; the error quotes that text and the preset. Empty axis labels and
+units draw nothing, so a chart without them keeps its frame. Chart-internal typography has not been
 newly qualified by these checks. Omitted layout retains previous placement.
 `fit:"contain"` scales the part uniformly and centers it, keeping circles and
 arcs round in frames whose aspect differs from the part canvas; the default
 `stretch` keeps legacy per-axis scaling but re-squares small markers and
 images. Preflight flags `PART_ASPECT_DISTORTED` when a stretched part exceeds
-the tolerance measured from its rendered geometry.
+the tolerance measured from its rendered geometry. A diagram reclaims the 88px
+title band only when its own `GraphSpec.show_title` is true and the layout
+removes it; with `GraphSpec.show_title:false` the part keeps its full 512px
+height whatever `layout.show_title` says, and preflight measures that height.
 
 For graphs, `GraphSpec.show_title:false` allows content at y=0 instead of
 reserving the 88px title band on the 1152x512 graph canvas. Node `detail`

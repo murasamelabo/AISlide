@@ -1240,3 +1240,46 @@ fn three_set_venn_labels_do_not_cross_circle_outlines() {
     let label=element["children"].as_array().unwrap().iter().find(|child|child["text"]=="共通の目的").unwrap();
     assert!(label["width"].as_f64().unwrap()>=5.0*label["font_size"].as_f64().unwrap()+8.0,"Japanese center label should not leave a one-character line");
 }
+
+fn chart_spec(preset: &str, x_axis: &str, y_axis: &str, show_title: bool) -> Value {
+    // A scatter plot reads its categories as numeric X coordinates.
+    let categories = if preset.starts_with("scatter/") { json!(["10", "20", "30"]) } else { json!(["Q1", "Q2", "Q3"]) };
+    json!({"version":1,"preset":preset,"title":"chart",
+        "layout":{"x":64,"y":144,"width":1152,"height":if show_title { 512 } else { 424 },"show_title":show_title},
+        "data":{"kind":"chart","categories":categories,"series":[{"name":"Rows","values":[1,2,3]}],"x_axis":x_axis,"y_axis":y_axis}})
+}
+
+fn text_elements(part: &Value) -> Vec<&Value> { part["children"].as_array().unwrap().iter().filter(|child| child["type"] == "text").collect() }
+
+#[test]
+fn issue17_charts_without_axis_labels_can_drop_the_title_band() {
+    // Axis labels are optional; an empty one must not leave a text element in the removed 88px title band.
+    // 100-add-vertical-bar-graph always prints its fixed "Share (%)" unit and is covered by the next-but-one test.
+    for preset in ["line-graph/balanced", "horizontal-bar-graph/labeled", "vertical-bar-graph/balanced", "add-vertical-bar-graph/focus", "area-graph/balanced", "scatter/balanced", "pie-chart/balanced"] {
+        let part = execute_request(json!({"op":"create_part","id":"c","spec":chart_spec(preset, "", "", false)}))
+            .unwrap_or_else(|error| panic!("{preset} without axis labels must accept show_title:false: {error}"));
+        let empty: Vec<_> = text_elements(&part).into_iter().filter(|text| text["text"] == "").collect();
+        assert!(empty.is_empty(), "{preset} must not draw empty text elements: {empty:?}");
+    }
+}
+
+#[test]
+fn issue17_waterfall_without_a_unit_can_drop_the_title_band() {
+    let spec = json!({"version":1,"preset":"water-fall/balanced","title":"steps","layout":{"x":64,"y":144,"width":1152,"height":424,"show_title":false},
+        "data":{"kind":"waterfall","unit":"","steps":[{"label":"Start","value":10,"total":true},{"label":"Gain","value":4,"total":false},{"label":"End","value":14,"total":true}]}});
+    let part = execute_request(json!({"op":"create_part","id":"w","spec":spec})).expect("an empty unit draws nothing and must not cross the title band");
+    assert!(text_elements(&part).iter().all(|text| text["text"] != ""), "no empty unit text");
+}
+
+#[test]
+fn issue17_axis_labels_that_really_cross_the_title_band_are_explained() {
+    for (preset, x_axis, y_axis, culprit) in [("line-graph/balanced", "", "Units", "text \"Units\""), ("100-add-vertical-bar-graph/balanced", "", "", "text \"Share (%)\"")] {
+        let error = execute_request(json!({"op":"create_part","id":"c","spec":chart_spec(preset, x_axis, y_axis, false)})).unwrap_err().to_string();
+        assert!(error.contains("title band"), "{preset}: {error}");
+        assert!(error.contains(preset), "the error must name the preset: {error}");
+        assert!(error.contains(culprit), "the error must name the label that crosses the band: {error}");
+        assert!(error.contains("show_title"), "the error must say how to recover: {error}");
+    }
+    // The same labels are accepted when the layout keeps its title.
+    execute_request(json!({"op":"create_part","id":"c","spec":chart_spec("line-graph/balanced", "", "Units", true)})).unwrap();
+}
