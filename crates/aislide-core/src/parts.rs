@@ -331,9 +331,9 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
     drawing.text(&spec.title, [16.0, 0.0, 1120.0, 40.0], 28.0, "@dk1", true, TextAlign::Left);
     drawing.text(&spec.subtitle, [16.0, 44.0, 1120.0, 26.0], 16.0, "@dk2", false, TextAlign::Left);
     if catalog::CATEGORIES.iter().take(10).any(|entry| entry.0 == category) { charts::render(&mut drawing, category, variant, &spec.data)?; }
-    else { diagrams::render(&mut drawing, category, variant, &spec.data)?; }
+    else { diagrams::render(&mut drawing, category, variant, &spec.data, theme)?; }
     let fixed_sizes: std::collections::BTreeMap<_, _> = drawing.elements.iter().filter_map(|element| match element {
-        Element::Text { id, text, font_size, .. } if category == "contrast" && variant == 3 && !text.is_empty() => Some((id.clone(), *font_size)),
+        Element::Text { id, text, font_size, .. } if category == "contrast" && variant == 3 && !text.is_empty() => Some((id.clone(), (*font_size, drawing.place_of(id).map(str::to_owned)))),
         _ => None,
     }).collect();
     if spec.layout.is_none() { crate::layout::fit_part_text(&mut drawing.elements,theme)?; }
@@ -351,7 +351,11 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
     }
     for element in crate::model::element_list(std::slice::from_ref(&result)) {
         if let Element::Text { id, font_size, .. } = element {
-            if fixed_sizes.get(id).is_some_and(|expected| *font_size < *expected) { return Err(Error::Invalid(format!("comparison panel text {id} does not fit its fixed font size; shorten the text, enlarge the part or split the slide"))); }
+            if let Some((expected, place)) = fixed_sizes.get(id) {
+                if *font_size < *expected {
+                    return Err(Error::Invalid(format!("comparison panel text {} does not fit its fixed font size; shorten the text, enlarge the part or split the slide", place.as_deref().unwrap_or(id))));
+                }
+            }
         }
     }
     Ok(result)
@@ -508,9 +512,12 @@ fn layout_overflow(element: &Element, theme: &crate::design::Theme) -> Result<Op
     }))
 }
 
-pub(super) struct Drawing { prefix: String, pub elements: Vec<Element> }
+pub(super) struct Drawing { prefix: String, pub elements: Vec<Element>, places: std::collections::BTreeMap<String, String> }
 impl Drawing {
-    pub fn new(prefix: &str) -> Self { Self { prefix: prefix.into(), elements: Vec::new() } }
+    pub fn new(prefix: &str) -> Self { Self { prefix: prefix.into(), elements: Vec::new(), places: Default::default() } }
+    /// Name the spec field the NEXT element stands for, so an error can say `panels[0].label` instead of an element ID.
+    pub fn name_next(&mut self, place: String) { self.places.insert(self.id(), place); }
+    pub fn place_of(&self, id: &str) -> Option<&str> { self.places.get(id).map(String::as_str) }
     pub fn id(&self) -> String { format!("{}-{}", self.prefix, self.elements.len()) }
     pub fn text(&mut self, text: &str, bounds: [f64; 4], size: f64, color: &str, bold: bool, alignment: TextAlign) {
         let [x, y, width, height] = bounds;

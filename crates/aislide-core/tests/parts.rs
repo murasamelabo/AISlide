@@ -1283,3 +1283,106 @@ fn issue17_axis_labels_that_really_cross_the_title_band_are_explained() {
     // The same labels are accepted when the layout keeps its title.
     execute_request(json!({"op":"create_part","id":"c","spec":chart_spec("line-graph/balanced", "", "Units", true)})).unwrap();
 }
+
+/// The frame maps the 1152x424 content area at scale 1.0, so heading bands keep their authored 42px height.
+fn panel_spec(before_label: &str, after_label: &str, row: &str) -> Value {
+    json!({"version":1,"preset":"contrast/panels","title":"panels","layout":{"x":64,"y":144,"width":1152,"height":424,"show_title":false},
+        "data":{"kind":"comparison_panels","panels":[
+            {"label":before_label,"items":[{"text":row}]},
+            {"label":after_label,"items":[{"text":row}]}]}})
+}
+
+/// The roundRect heading band of a panel: the shape whose height is 42px on the 512px canvas.
+fn heading_bands(part: &Value) -> Vec<&Value> {
+    part["children"].as_array().unwrap().iter().filter(|child| child["preset"] == "roundRect" && (child["height"].as_f64().unwrap() - 42.0).abs() < 0.5).collect()
+}
+
+#[test]
+fn issue16_long_panel_headings_fit_without_shrinking() {
+    for (before, after) in [("Before (until 2026-09-23)", "After (from 2026-09-23)"), ("旧（2026-09-23 より前）", "新（2026-09-23 から）")] {
+        let part = execute_request(json!({"op":"create_part","id":"p","spec":panel_spec(before, after, "Short row")}))
+            .unwrap_or_else(|error| panic!("{before}: a heading that fits the panel must not fail: {error}"));
+        for label in [before, after] {
+            let heading = part["children"].as_array().unwrap().iter().find(|child| child["text"] == label).unwrap_or_else(|| panic!("heading {label} missing"));
+            assert_eq!(heading["font_size"], 18.0, "{label} keeps its 18px heading size");
+        }
+        let bands = heading_bands(&part);
+        assert_eq!(bands.len(), 2, "one heading band per panel");
+        for band in bands {
+            assert!(band["width"].as_f64().unwrap() <= 480.0 + 0.5, "the band must stay inside the panel: {band}");
+        }
+    }
+}
+
+#[test]
+fn issue16_the_issue_report_frame_also_succeeds() {
+    // The frame from the report: 1152x512 with the title band removed.
+    let mut spec = panel_spec("Before (until 2026-09-23)", "After (from 2026-09-23)", "Short row");
+    spec["layout"]["height"] = json!(512);
+    execute_request(json!({"op":"create_part","id":"p","spec":spec})).expect("the reported frame must succeed");
+}
+
+#[test]
+fn issue16_short_panel_headings_keep_their_compact_band() {
+    let part = execute_request(json!({"op":"create_part","id":"p","spec":panel_spec("Before", "After", "Short row")})).unwrap();
+    let bands = heading_bands(&part);
+    assert_eq!(bands.len(), 2);
+    for band in bands { assert!((band["width"].as_f64().unwrap() - 216.0).abs() < 0.5, "a short heading keeps the 216px band: {band}"); }
+}
+
+#[test]
+fn issue16_the_band_grows_with_the_heading() {
+    let width = |label: &str| {
+        let part = execute_request(json!({"op":"create_part","id":"p","spec":panel_spec(label, label, "Short row")})).unwrap();
+        heading_bands(&part)[0]["width"].as_f64().unwrap()
+    };
+    let (short, medium, long) = (width("Before"), width("Before (until 2026-09-23)"), width("Quarterly operating review before"));
+    assert!(short <= medium && medium <= long, "{short} {medium} {long}");
+    assert!(medium > short, "a 25-character heading needs a wider band than a short one");
+}
+
+#[test]
+fn issue16_errors_name_the_panel_and_the_field_that_does_not_fit() {
+    let too_long = "A".repeat(64);
+    let error = execute_request(json!({"op":"create_part","id":"p","spec":panel_spec(&too_long, "After", "Short row")})).unwrap_err().to_string();
+    assert!(error.contains("panels[0].label"), "{error}");
+    assert!(!error.contains("p-"), "no internal element id in the message: {error}");
+    // Five rows leave 67px per row, so a long body cannot keep its fixed 28px size (the unframed part, as in the crowded-panels test).
+    let crowded = "Repeated synthetic words. ".repeat(8);
+    let rows = |long_at: Option<usize>| -> Vec<Value> { (0..5).map(|row| json!({"text": if Some(row) == long_at { crowded.as_str() } else { "Short row" }})).collect() };
+    let spec = |first: Vec<Value>, second: Vec<Value>| json!({"version":1,"preset":"contrast/panels","title":"panels","data":{"kind":"comparison_panels","panels":[
+        {"label":"Before","body_size":28,"items":first},{"label":"After","body_size":28,"items":second}]}});
+    execute_request(json!({"op":"create_part","id":"p","spec":spec(rows(None), rows(None))})).expect("short rows fit");
+    let error = execute_request(json!({"op":"create_part","id":"p","spec":spec(rows(Some(2)), rows(None))})).unwrap_err().to_string();
+    assert!(error.contains("panels[0].items[2].text"), "the row, not the heading, is at fault: {error}");
+    assert!(!error.contains("p-"), "{error}");
+    let error = execute_request(json!({"op":"create_part","id":"p","spec":spec(rows(None), rows(Some(1)))})).unwrap_err().to_string();
+    assert!(error.contains("panels[1].items[1].text"), "{error}");
+    assert!(error.contains("shorten") && error.contains("split"), "the message keeps its recovery advice: {error}");
+}
+
+#[test]
+fn issue16_heading_band_is_always_inside_the_panel_and_holds_the_text_on_one_line() {
+    // The band is measured, so assert properties rather than character counts that depend on the installed font.
+    let mut previous = 0.0;
+    for label in ["Hi", "Before", "Before (until 2026-09-23)", "Quarterly operating review before", "Quarterly operating review before it", "旧（2026-09-23 より前）"] {
+        let part = execute_request(json!({"op":"create_part","id":"p","spec":panel_spec(label, "After", "Short row")}));
+        let Ok(part) = part else { continue };
+        let band = heading_bands(&part)[0]["width"].as_f64().unwrap();
+        assert!((216.0..=480.0).contains(&band), "{label}: the band {band} must stay between 216 and 480px");
+        let text = part["children"].as_array().unwrap().iter().find(|child| child["text"] == label).unwrap();
+        assert!((text["width"].as_f64().unwrap() - (band - 40.0)).abs() < 0.01, "{label}: the text box follows the band");
+        assert_eq!(text["font_size"], 18.0, "{label}");
+        if label.is_ascii() { assert!(band >= previous, "{label}: the band must not shrink as the heading grows ({band} < {previous})"); previous = band; }
+    }
+}
+
+#[test]
+fn issue16_a_heading_that_cannot_fit_is_rejected_at_its_field() {
+    for label in ["A".repeat(64), "あ".repeat(40)] {
+        let error = execute_request(json!({"op":"create_part","id":"p","spec":panel_spec(&label, "After", "Short row")})).unwrap_err().to_string();
+        assert!(error.contains("panels[0].label"), "{error}");
+        assert!(error.contains("shorten"), "{error}");
+        assert!(!error.contains("p-"), "no element id: {error}");
+    }
+}

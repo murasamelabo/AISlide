@@ -350,9 +350,13 @@ The optional `contrast/panels` part is distinct from a matrix. Its data is
 panel has `label`, 1-5 `items:{text,icon?}`, and optional `fill`, `heading_fill`,
 `heading_color`, `accent`, `icon_fill`, `body_size` (16-28, default 18). Two
 panels and matching row counts are required; label/text limits are 64/240
-Unicode scalars. Icons use the existing PNG/JPEG `GraphIcon` contract and
-MCP asset handles. Supplied symbols preserve aspect ratio in explicit layouts.
-Typography does not silently shrink. All 111 earlier presets are retained.
+Unicode scalars. The heading band is measured: it widens with its label from
+216px up to 480px, and a heading that does not fit on one line at 18px bold
+within 480px is rejected at `panels[i].label`. Icons use the existing PNG/JPEG
+`GraphIcon` contract and MCP asset handles. Supplied symbols preserve aspect
+ratio in explicit layouts. Typography does not silently shrink: a text that
+cannot keep its fixed size is reported by its place, `panels[i].label` or
+`panels[i].items[j].text`. All 111 earlier presets are retained.
 See the portable
 [technical briefing style contract](../.github/skills/aislide-authoring/references/technical-panels.md).
 In `compose_slide`, request it through `kind:"part"`; the existing `comparison`
