@@ -728,9 +728,12 @@ Supply the inspected SHA to reject changed source bytes. THMX rejects options.
 extensions. Custom shows still block structural edits and sample removal;
 sample removal with managed references/guided records is also rejected.
 Selection is not sanitization: unselected opaque payloads remain embedded.
-Protection, macro and signature guards remain enforced. Inert external hyperlinks
-are preserved without fetching; external images/slides and unknown resource types
-remain rejected by inspection and selection.
+Protection, macro and signature guards remain enforced. Classification labels are
+retained, as in default import and native edits, so a labelled template can be
+inspected and selected; its label parts, content types and relationships are
+kept byte for byte, and AISlide neither verifies nor changes the label. Inert
+external hyperlinks are preserved without fetching; external images/slides and
+unknown resource types remain rejected by inspection and selection.
 These selection controls are core/SDK/MCP APIs, not new Studio controls.
 
 The 3 MiB encoded image budget is deck-wide and counts identical MIME/base64/

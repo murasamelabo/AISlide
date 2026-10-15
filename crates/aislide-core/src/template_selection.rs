@@ -18,7 +18,8 @@ struct Topology { main: String, masters: Vec<Master>, layouts: Vec<Layout>, slid
 fn checked_source(bytes: Vec<u8>) -> Result<Package> {
     let package = Package::open(bytes)?;
     super::safe(&package)?;
-    crate::review::ensure_unprotected(&package)?;
+    // Classification labels stay in the package, as they do for default import and native edits; signatures, encryption and write protection still reject.
+    crate::review::ensure_native_write(&package, "template inspection/selection")?;
     let main = super::main_part(&package)?;
     if super::content_type(&package, &main)? != POTX { return Err(Error::Unsupported("template factory requires explicitly selected non-macro POTX".into())); }
     for path in package.part_names().into_iter().filter(|path| path.ends_with(".rels")) {

@@ -474,7 +474,8 @@ fn inspection_is_bounded_and_selection_rejects_unsafe_packages_before_discarding
     let base = section_source();
     let options = templates::TemplateImportOptions { include_sample_slides:false, strip_sections:true, ..Default::default() };
     let mut variants = vec![vec![0xd0,0xcf,0x11,0xe0,0xa1,0xb1,0x1a,0xe1]];
-    for path in ["ppt/vbaProject.bin", "_xmlsignatures/sig1.xml", "docMetadata/LabelInfo.xml"] {
+    // A classification label is not protection: docMetadata/LabelInfo.xml is accepted and kept (see the issue20_* tests).
+    for path in ["ppt/vbaProject.bin", "_xmlsignatures/sig1.xml"] {
         let mut parts = Package::open(base.clone()).unwrap().parts().clone(); parts.insert(path.into(), b"<protected/>".to_vec()); variants.push(Package::from_parts(parts).unwrap().save().unwrap());
     }
     let mut package = Package::open(base.clone()).unwrap();
@@ -586,4 +587,105 @@ fn template_factories_reject_macros_protection_and_unsafe_theme_targets() {
         package.replace_part(path, xml.into_bytes()).unwrap();
         assert!(templates::load_thmx(package.save().unwrap()).is_err(), "{target}");
     }
+}
+
+const LABEL_PATH: &str = "docMetadata/LabelInfo.xml";
+
+fn labelled(bytes: Vec<u8>) -> Vec<u8> {
+    let package = Package::open(bytes).unwrap();
+    let types = package.text("[Content_Types].xml").unwrap().replace("</Types>", "<Override PartName=\"/docMetadata/LabelInfo.xml\" ContentType=\"application/vnd.ms-office.classificationlabels+xml\"/></Types>");
+    let relationships = package.text("_rels/.rels").unwrap().replace("</Relationships>", "<Relationship Id=\"synthetic-label\" Type=\"http://schemas.microsoft.com/office/2020/02/relationships/classificationlabels\" Target=\"docMetadata/LabelInfo.xml\"/></Relationships>");
+    let mut parts = package.parts().clone();
+    parts.insert("[Content_Types].xml".into(), types.into_bytes());
+    parts.insert("_rels/.rels".into(), relationships.into_bytes());
+    parts.insert(LABEL_PATH.into(), b"<clbl:labelList xmlns:clbl=\"http://schemas.microsoft.com/office/2020/mipLabelMetadata\"><clbl:label id=\"{00112233-4455-6677-8899-aabbccddeeff}\" enabled=\"1\"/></clbl:labelList>".to_vec());
+    Package::from_parts(parts).unwrap().save().unwrap()
+}
+
+fn first_layout_only(inspection: &serde_json::Value) -> templates::TemplateImportOptions {
+    let first = inspection["layouts"][0]["id"].as_str().unwrap().to_string();
+    serde_json::from_value(serde_json::json!({"include_sample_slides":false,"layout_ids":[first],"source_sha256":inspection["source_sha256"]})).unwrap()
+}
+
+#[test]
+fn issue20_labelled_template_is_inspected_and_selected_like_an_unlabelled_one() {
+    // 14 layouts fit the default import; 40 exceed the 32-layout design limit, so only inspect + select can reach them.
+    for (name, plain) in [("14 layouts", synthetic_source(14, 1)), ("40 layouts", synthetic_source(40, 2))] {
+        let source = labelled(plain.clone());
+        let plain_inspection = templates::inspect_potx(plain.clone()).unwrap();
+        let inspection = templates::inspect_potx(source.clone()).unwrap();
+        for field in ["masters", "layouts", "sample_slide_count", "has_sections", "has_custom_shows"] {
+            assert_eq!(inspection[field], plain_inspection[field], "{name}: inspection {field} matches the unlabelled template");
+        }
+        assert_ne!(inspection["source_sha256"], plain_inspection["source_sha256"], "the digest binds the labelled bytes");
+
+        let imported = templates::load_potx_with_options("labelled".into(), source.clone(), &first_layout_only(&inspection)).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let plain_imported = templates::load_potx_with_options("plain".into(), plain.clone(), &first_layout_only(&plain_inspection)).unwrap();
+        assert_eq!(serde_json::to_value(&imported.deck).unwrap(), serde_json::to_value(&plain_imported.deck).unwrap(), "{name}: the labelled selection builds the same deck");
+        assert_editable(&imported);
+
+        let original = Package::open(source).unwrap();
+        let exported = exported_package(&imported);
+        assert_eq!(exported.part(LABEL_PATH).unwrap(), original.part(LABEL_PATH).unwrap(), "{name}: the label part is kept byte for byte");
+        assert!(exported.text("[Content_Types].xml").unwrap().contains("application/vnd.ms-office.classificationlabels+xml"), "{name}: its content type override is kept");
+        assert!(exported.text("_rels/.rels").unwrap().contains("http://schemas.microsoft.com/office/2020/02/relationships/classificationlabels"), "{name}: its relationship is kept");
+    }
+}
+
+#[test]
+fn issue20_every_template_entry_point_agrees_on_a_labelled_template() {
+    let source = labelled(synthetic_source(14, 1));
+    let inspection = templates::inspect_potx(source.clone()).unwrap();
+    let by_default = templates::load_potx("default".into(), source.clone()).unwrap();
+    let with_defaults = templates::load_potx_with_options("options".into(), source.clone(), &templates::TemplateImportOptions::default()).unwrap();
+    let blank = templates::load_potx_with_options("blank".into(), source.clone(), &first_layout_only(&inspection)).unwrap();
+    assert_eq!(serde_json::to_value(&by_default.deck).unwrap(), serde_json::to_value(&with_defaults.deck).unwrap());
+    for document in [&by_default, &with_defaults, &blank] {
+        assert!(exported_package(document).part(LABEL_PATH).is_ok(), "the label part survives every way of importing the template");
+    }
+}
+
+#[test]
+fn issue20_labelled_template_still_rejects_signatures_encryption_and_write_protection() {
+    let source = labelled(synthetic_source(14, 1));
+    let options = templates::TemplateImportOptions { include_sample_slides: false, ..Default::default() };
+    let mut variants: Vec<(&str, Vec<u8>)> = Vec::new();
+    for path in ["_xmlsignatures/sig1.xml", "ppt/vbaProject.bin", "docProps/encryptedPackage"] {
+        let mut parts = Package::open(source.clone()).unwrap().parts().clone();
+        parts.insert(path.into(), b"<protected/>".to_vec());
+        variants.push((path, Package::from_parts(parts).unwrap().save().unwrap()));
+    }
+    let mut package = Package::open(source.clone()).unwrap();
+    let mut xml = package.text("ppt/presentation.xml").unwrap().to_owned();
+    xml.insert_str(xml.rfind("</").unwrap(), "<p:modifyVerifier/>");
+    package.replace_part("ppt/presentation.xml", xml.into_bytes()).unwrap();
+    variants.push(("modifyVerifier", package.save().unwrap()));
+    let mut package = Package::open(source.clone()).unwrap();
+    let types = package.text("[Content_Types].xml").unwrap().replace("</Types>", "<Override PartName=\"/ppt/signature.xml\" ContentType=\"application/vnd.openxmlformats-package.digital-signature-xmlsignature+xml\"/></Types>");
+    package.replace_part("[Content_Types].xml", types.into_bytes()).unwrap();
+    variants.push(("signature content type", package.save().unwrap()));
+    for (name, bytes) in variants {
+        assert!(templates::inspect_potx(bytes.clone()).is_err(), "{name}: inspection must reject a labelled template that is also protected");
+        assert!(templates::load_potx_with_options("protected".into(), bytes, &options).is_err(), "{name}: selection must reject a labelled template that is also protected");
+    }
+}
+
+#[test]
+fn issue20_master_import_keeps_refusing_labelled_sources() {
+    // Only template inspection and selection changed; copying masters out of a labelled presentation is still unsupported.
+    let request = serde_json::json!({"op":"inspect_master_source","kind":"potx","base64":STANDARD.encode(labelled(synthetic_source(14, 1)))});
+    let error = aislide_core::execute_request(request).unwrap_err().to_string();
+    assert!(error.contains("labelled"), "{error}");
+}
+
+#[test]
+fn issue20_undeclared_label_part_is_accepted_and_kept_like_in_native_edits() {
+    // A docMetadata/LabelInfo.xml without content-type override or relationship is a label as well, not a protection marker.
+    let mut parts = Package::open(synthetic_source(14, 1)).unwrap().parts().clone();
+    parts.insert(LABEL_PATH.into(), b"<clbl:labelList xmlns:clbl=\"http://schemas.microsoft.com/office/2020/mipLabelMetadata\"/>".to_vec());
+    let source = Package::from_parts(parts).unwrap().save().unwrap();
+    let inspection = templates::inspect_potx(source.clone()).unwrap();
+    let imported = templates::load_potx_with_options("undeclared".into(), source.clone(), &first_layout_only(&inspection)).unwrap();
+    let original = Package::open(source).unwrap();
+    assert_eq!(exported_package(&imported).part(LABEL_PATH).unwrap(), original.part(LABEL_PATH).unwrap());
 }
