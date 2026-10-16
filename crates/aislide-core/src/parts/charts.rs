@@ -56,7 +56,7 @@ fn waterfall(drawing: &mut Drawing, variant: usize, data: &PartData, titleless: 
     let span=(maximum-minimum).max(1.0); let bottom=if variant==2 {400.0} else {440.0}; let height=bottom-140.0;
     let ordinate=|value:f64| bottom-(value-minimum)/span*height; let slot=1040.0/steps.len() as f64;
     drawing.line([64.0,ordinate(0.0)],[1104.0,ordinate(0.0)],false,"@dk2");
-    if !unit.is_empty() { drawing.text(unit,[64.0,if titleless {88.0} else {82.0},400.0,26.0],16.0,"@dk2",false,TextAlign::Left); }
+    if !unit.is_empty() { drawing.text(unit,[64.0,if titleless {88.0} else {82.0},400.0,if titleless {22.0} else {26.0}],16.0,"@dk2",false,TextAlign::Left); }
     for (index,(step,(from,to))) in steps.iter().zip(segments.iter()).enumerate() {
         let left=64.0+index as f64*slot+slot*0.16; let width=slot*0.68; let upper=ordinate(from.max(*to)); let lower=ordinate(from.min(*to));
         let shade=if step.total {"@dk1"} else if step.value>=0.0 {"@accent1"} else {"@accent2"};

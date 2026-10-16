@@ -452,6 +452,31 @@ fn issue18_ordinary_small_text_is_still_a_warning() {
 }
 
 #[test]
+fn pr21_manually_shrunken_stale_part_text_stays_a_warning() {
+    let document = execute_request(json!({"op":"create_presentation","id":"stale-small","title":"Stale text"})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,
+        "slide_id":"slide-1","id":"part","spec":example("list-horizontal/icon-cards")})).unwrap();
+    let children = inserted["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap();
+    let index = children.iter().position(|child| child["type"] == "text" && child["font_size"].as_f64() == Some(16.0)).unwrap();
+    let id = children[index]["id"].clone();
+    let updated = execute_request(json!({"op":"transaction","document":inserted["document"],"transaction":{
+        "expected_revision":inserted["document"]["revision"],"expected_hash":inserted["document"]["hash"],
+        "operations":[{"op":"replace","path":format!("/deck/slides/0/elements/0/children/{index}/font_size"),"value":9}]
+    }})).unwrap();
+    assert_eq!(updated["document"]["parts"][0]["stale"], true);
+    let report = execute_request(json!({"op":"preflight_presentation","document":updated["document"]})).unwrap();
+    let finding = small_text(&report).into_iter().find(|finding| finding["element_ids"].as_array().unwrap().contains(&id)).unwrap();
+    assert_eq!(finding["severity"], "warning", "{finding}");
+    assert!(!finding["message"].as_str().unwrap().contains("fixed"), "{finding}");
+    assert!(!finding["message"].as_str().unwrap().contains("preset does not let"), "{finding}");
+    let undone = execute_request(json!({"op":"undo_transaction","document":updated["document"],
+        "expected_revision":updated["document"]["revision"],"receipt":updated["receipt"]})).unwrap();
+    assert_ne!(undone["document"]["parts"][0]["stale"], true);
+    let restored = execute_request(json!({"op":"preflight_presentation","document":undone["document"]})).unwrap();
+    assert!(small_text(&restored).iter().all(|finding| finding["severity"] == "info"));
+}
+
+#[test]
 fn issue18_part_text_the_author_can_resize_is_still_a_warning() {
     // Comparison panels have a body_size lever (16-28px), so their text is not fixed typography and must keep warning.
     let spec = json!({"version":1,"preset":"contrast/panels","title":"panels","data":{"kind":"comparison_panels","panels":[

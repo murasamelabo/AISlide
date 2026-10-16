@@ -1290,6 +1290,26 @@ fn issue17_nonempty_units_remain_visible_without_a_title_band() {
     execute_request(json!({"op":"create_part","id":"w","spec":spec})).unwrap();
 }
 
+#[test]
+fn pr21_titleless_waterfall_units_do_not_overlap_value_labels() {
+    for variant in ["balanced", "focus", "labeled"] {
+        for (titleless, unit) in [(true, "Units"), (true, ""), (false, "Units")] {
+            let document = execute_request(json!({"op":"create_presentation","id":"waterfall-overlap","title":"Synthetic"})).unwrap();
+            let spec = json!({"version":1,"preset":format!("water-fall/{variant}"),"title":"Synthetic",
+                "layout":{"x":64,"y":144,"width":1152,"height":if titleless {424} else {512},"show_title":!titleless},
+                "data":{"kind":"waterfall","unit":unit,"steps":[
+                    {"label":"Start","value":10,"total":true},{"label":"Gain","value":20,"total":false},{"label":"End","value":30,"total":true}]}});
+            let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":"waterfall","spec":spec})).unwrap();
+            let part = &inserted["document"]["deck"]["slides"][0]["elements"][0];
+            let values = text_elements(part);
+            if !unit.is_empty() { assert!(values.iter().any(|text| text["text"] == unit)); }
+            let report = execute_request(json!({"op":"preflight_presentation","document":inserted["document"]})).unwrap();
+            assert!(!report["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "TEXT_OVERLAP"),
+                "{variant}, titleless={titleless}, unit={unit}: {report}");
+        }
+    }
+}
+
 /// The frame maps the 1152x424 content area at scale 1.0, so heading bands keep their authored 42px height.
 fn panel_spec(before_label: &str, after_label: &str, row: &str) -> Value {
     json!({"version":1,"preset":"contrast/panels","title":"panels","layout":{"x":64,"y":144,"width":1152,"height":424,"show_title":false},
@@ -1390,5 +1410,19 @@ fn issue16_a_heading_that_cannot_fit_is_rejected_at_its_field() {
         assert!(error.contains("panels[0].label"), "{error}");
         assert!(error.contains("shorten"), "{error}");
         assert!(!error.contains("p-"), "no element id: {error}");
+    }
+
+}
+
+#[test]
+fn pr21_small_panel_frames_report_public_field_in_floor_errors() {
+    for (width, height) in [(576, 212), (288, 106)] {
+        let mut spec = panel_spec("Before", "After", "Short row");
+        spec["layout"]["width"] = json!(width);
+        spec["layout"]["height"] = json!(height);
+        let error = execute_request(json!({"op":"create_part","id":"p","spec":spec})).unwrap_err().to_string();
+        assert!(error.contains("panels[0].label"), "{width}x{height}: {error}");
+        assert!(error.contains("12px") && error.contains("shorten"), "{error}");
+        assert!(!error.contains("p-"), "internal identity must not leak in the diagnostic: {error}");
     }
 }

@@ -338,7 +338,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		let objects = page_objects(deck, page)?;
 		// Text a managed part draws at sizes its preset fixes (tags, captions, badges) cannot be raised from the spec, so it is information;
 		// a body_size the author lowered below the floor stays a warning (see parts::fixed_typography).
-		let fixed_part = |object: &Object<'_>| object.owner.and_then(|owner| document.parts.iter().find(|part| part.slide_id == slide.id && part.element_id == owner)).filter(|part| crate::parts::fixed_typography(&part.spec, options.min_font_size));
+		let fixed_part = |object: &Object<'_>| object.owner.and_then(|owner| document.parts.iter().find(|part| part.slide_id == slide.id && part.element_id == owner)).filter(|part| !part.stale && crate::parts::fixed_typography(&part.spec, options.min_font_size));
 		let rendered = crate::render::render_with_effect_policy(deck, page, false, 1.0, crate::render::EffectPolicy::Preflight)?;
 		let mut chart_notices: Vec<&Object<'_>> = Vec::new();
 		for warning in rendered.warnings {

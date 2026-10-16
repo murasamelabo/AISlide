@@ -349,7 +349,20 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
         Element::Text { id, text, font_size, .. } if category == "contrast" && variant == 3 && !text.is_empty() => Some((id.clone(), (*font_size, drawing.place_of(id).map(str::to_owned)))),
         _ => None,
     }).collect();
-    if spec.layout.is_none() { crate::layout::fit_part_text(&mut drawing.elements,theme)?; }
+    let fit_error = |error| match error {
+        Error::Invalid(message) => {
+            for (id, (_, place)) in &fixed_sizes {
+                if let Some(place) = place {
+                    if let Some(reason) = message.strip_prefix(&format!("part text {id} ")) {
+                        return Error::Invalid(format!("part text {place} {reason}"));
+                    }
+                }
+            }
+            Error::Invalid(message)
+        }
+        other => other,
+    };
+    if spec.layout.is_none() { crate::layout::fit_part_text(&mut drawing.elements,theme).map_err(&fit_error)?; }
     let mut result = Element::Group { visual: None, id: id.into(), x: 64.0, y: 144.0, width: 1152.0, height: 512.0, view_width: 1152.0, view_height: 512.0, children: drawing.elements };
     validate_elements(std::slice::from_ref(&result), (1280.0, 720.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
     if let Some(layout) = &spec.layout {
@@ -359,7 +372,7 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
         let content_top = if layout.show_title { 0.0 } else if category == "venn" && variant == 1 { 80.0 } else { 88.0 };
         adopt_layout(&mut result, layout, content_top, 512.0 - content_top, theme, &BTreeSet::new()).map_err(|error| match error {
             Error::Invalid(message) if message.starts_with("part body crosses the removed title band") => Error::Invalid(format!("{} ({})", message, spec.preset)),
-            other => other,
+            other => fit_error(other),
         })?;
     }
     for element in crate::model::element_list(std::slice::from_ref(&result)) {
@@ -567,6 +580,22 @@ pub(super) fn display(value: f64) -> String { if value.abs() >= 1e9 { format!("{
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn removed_title_band_rejects_crossing_body_without_mutating_it() {
+        let mut element: Element = serde_json::from_value(json!({"type":"text","id":"crossing",
+            "x":40,"y":76,"width":300,"height":24,"text":"Synthetic unit","font_size":14,"color":"@dk1","bold":false})).unwrap();
+        let before = serde_json::to_value(&element).unwrap();
+        let error = transform_layout_element(&mut element, 1.0, 1.0, 88.0).unwrap_err().to_string();
+        assert!(error.contains("part body crosses the removed title band"), "{error}");
+        assert!(error.contains("text \"Synthetic unit\"") && error.contains("y=76") && error.contains("88"), "{error}");
+        assert!(error.contains("show_title:true"), "{error}");
+        assert_eq!(serde_json::to_value(&element).unwrap(), before);
+        let mut boundary = element.clone();
+        if let Element::Text { y, .. } = &mut boundary { *y = 88.0; }
+        transform_layout_element(&mut boundary, 1.0, 1.0, 88.0).unwrap();
+        assert_eq!(aspect::frame(&boundary)[1], 0.0);
+    }
 
     #[test]
     fn titleless_venn_layout_preserves_body_content_for_all_variants() {

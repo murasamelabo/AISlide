@@ -228,8 +228,10 @@ above is a rejection, while preflight's `min_font_size` (default 16px, 8-48) is 
 readability target that only reports `SMALL_TEXT`. A part's own tags, captions,
 badges and labels are drawn at sizes its preset fixes (for example the 13px tag and
 caption of `list-horizontal/icon-cards`, or the text of `list/agenda`), so the spec
-offers no way to raise them; `SMALL_TEXT` on that text is `info`, names the part and
-its preset, and does not count as a warning. Text you can resize stays a warning:
+offers no way to raise them; `SMALL_TEXT` on that text in a non-stale managed part is
+`info`, names the part and its preset, and does not count as a warning. A manually
+edited (stale) part keeps the ordinary warning because its text no longer
+necessarily reflects the preset. Text you can resize stays a warning:
 a `body_size` below the floor (14-22px, default 16px, on the presets that have one),
 the `body_size` of `contrast/panels`, and any loose text. Raising `body_size` to the
 floor clears that warning. Omitted layout retains previous placement.
