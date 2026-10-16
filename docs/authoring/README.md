@@ -216,11 +216,13 @@ removes the part title/subtitle band; omission defaults true. Explicit-region
 fitting normalizes geometry and absolute table tracks, normally enforces a
 12px text floor and can reject overflow or missing glyphs. Explicitly small
 graph annotations have the exception described below. Enlarge the region or reduce
-content when it cannot fit. With `show_title:false`, a non-empty `y_axis`,
-a waterfall `unit` and the fixed `Share (%)` unit of
-`100-add-vertical-bar-graph` sit inside the removed 88px band and make title
-removal reject; the error quotes that text and the preset. Empty axis labels and
-units draw nothing, so a chart without them keeps its frame. Chart-internal typography has not been
+content when it cannot fit. With `show_title:false`, nonempty axis labels and
+waterfall units remain visible below the removed title band. The fixed
+`Share (%)` unit of `100-add-vertical-bar-graph` is retained too. Where needed,
+the chart frame's top moves down while its bottom and data stay unchanged.
+Empty axis labels and units draw nothing. Other body elements crossing the
+removed band still reject with the element and preset in the error.
+Chart-internal typography has not been
 newly qualified by these checks. There are two text floors: the 12px layout floor
 above is a rejection, while preflight's `min_font_size` (default 16px, 8-48) is a
 readability target that only reports `SMALL_TEXT`. A part's own tags, captions,

@@ -74,7 +74,24 @@ and relationships, exact `EncryptionInfo` / `EncryptedPackage` part names, XMLDS
 `Signature`, XMLEnc `EncryptedData` and PresentationML `modifyVerifier` elements.
 Unrelated filenames containing `encryption` and vendor or unqualified elements
 with these local names are not protection markers. UTF-8 and UTF-16LE/BE XML are
-scanned without modifying the source bytes. Optional XML, including SVG and
+scanned without modifying the source bytes. Content-type declarations are indexed
+once per scan; Override precedence, exact spelling for lookup and case-insensitive
+duplicate-declaration rejection are unchanged. After bounded decoding, the
+label-preserving native scan skips element DOM construction only when all three
+protection element names are absent. A name's presence still requires the same
+namespace-aware check; strict operations never use this absence shortcut.
+The opt-in `native_note_edit_release_benchmark` test measures note-edit
+transactions on already-edited native documents (30, 128 and 256 text slides,
+plus 30 slides with images and charts). `transact` runs the native save guard
+during verification and sealing. Fixture construction, explicit export, Undo
+and CLI startup are outside the measured interval. Each case uses two warmups
+and nine samples and records fixture, input, result and exported-PPTX hashes.
+Set `AISLIDE_BENCH_OUTPUT` to a new JSON filename and `AISLIDE_BENCH_VARIANT` to
+a descriptive label, then run
+`node tools/cargo.mjs test --release -p aislide-core --test native_protection_scan_bench -- --ignored --exact native_note_edit_release_benchmark`.
+For before/after comparisons, use identical compiler/profile/flags and reverse
+variant order in a second batch. Shared-PC timings are not a latency guarantee.
+Optional XML, including SVG and
 Custom XML, that cannot be decoded or parsed within the XML size/node/depth
 budgets, or contains a DTD, remains opaque for label-preserving native edits.
 It does not block ordinary edits and its bytes are retained. The scanner never
@@ -977,9 +994,11 @@ insertion must also fit the actual slide. `show_title` defaults true. False
 removes the part title/subtitle and maps its body below the former 88px band
 into the requested frame. Geometry and absolute table tracks are normalized;
 text fitting enforces a 12px floor and rejects measured overflow or missing
-glyphs. It does not guarantee that every preset fits every region. Some chart
-axis labels above that 88px boundary make title removal reject; retain the
-title or compose explicitly. Chart-internal typography is not newly qualified
+glyphs. It does not guarantee that every preset fits every region. Titleless
+charts keep nonempty axis labels and units, including `Share (%)`: the unit is
+placed below the removed band and the native chart frame is shortened at its top
+without changing its bottom edge or data. Waterfall units are also retained.
+Other body elements crossing the removed band still reject. Chart-internal typography is not newly qualified
 by this text/table measurement. Omitted `layout` preserves the existing
 placement path. Retain the layout specification when regenerating a part.
 

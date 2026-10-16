@@ -1014,3 +1014,96 @@ fn static_field_projection_uses_current_page_order_without_mutating_caches() {
     assert_eq!(actual_svg, expected_svg);
     assert_eq!(serde_json::to_value(&source).unwrap(), before);
 }
+
+#[test]
+fn pr14_protection_element_names_outside_elements_do_not_block_native_edits() {
+    let p = "http://schemas.openxmlformats.org/presentationml/2006/main";
+    let all = "Signature EncryptedData modifyVerifier";
+    // The three names appear, but never as an element of a protection namespace: comment, text, attribute, other namespaces.
+    let xmls = [
+        format!("<data><!-- {all} --></data>"),
+        format!("<data>{all}</data>"),
+        format!("<data note='{all}'/>"),
+        format!("<data xmlns='urn:synthetic:vendor'><Signature/><EncryptedData/><modifyVerifier/></data>"),
+        format!("<v:Signature xmlns:v='urn:synthetic:vendor'><v:EncryptedData/></v:Signature>"),
+        // Same local name, but not the presentation namespace; the real element is {p}modifyVerifier.
+        format!("<modifyVerifier xmlns='urn:synthetic:not-{p}'/>"),
+        format!("<data xmlns:p='{p}'><p:modifyVerifierLike/><p:Signatures/></data>"),
+    ];
+    let mut cases: Vec<(String, Vec<u8>)> = xmls.iter().map(|xml| (xml.clone(), xml.clone().into_bytes())).collect();
+    for xml in &xmls {
+        let declared = format!("<?xml version='1.0' encoding='UTF-16'?>{xml}");
+        for little_endian in [true, false] {
+            for bom in [true, false] { cases.push((format!("{xml} as UTF-16 {}{}", if little_endian { "LE" } else { "BE" }, if bom { " with BOM" } else { "" }), pr24_utf16(&declared, little_endian, bom))); }
+        }
+    }
+    for (name, payload) in cases {
+        let bytes = pr24_package("customXml/vendor.xml", "application/xml", payload.clone());
+        let original = open(&bytes);
+        assert_eq!(save(&original), bytes, "{name}");
+        let changed = document::transact(&original, Transaction {
+            expected_revision: original.revision, expected_hash: original.hash.clone(),
+            operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Edited synthetic notes"}])).unwrap(),
+        }).unwrap_or_else(|error| panic!("{name}: rejected as protected: {error}"));
+        let saved = save(&changed.document);
+        assert_eq!(Package::open(saved.clone()).unwrap().part("customXml/vendor.xml").unwrap(), payload, "{name}");
+        assert_eq!(open(&saved).deck.slides[0].notes, "Edited synthetic notes", "{name}");
+    }
+}
+
+#[test]
+fn pr14_real_markers_block_native_edits_in_every_namespace_form_and_encoding() {
+    let p = "http://schemas.openxmlformats.org/presentationml/2006/main";
+    let ds = "http://www.w3.org/2000/09/xmldsig#";
+    let enc = "http://www.w3.org/2001/04/xmlenc#";
+    let mut cases: Vec<(String, String, String)> = Vec::new();
+    for (namespace, name) in [(p, "modifyVerifier"), (ds, "Signature"), (enc, "EncryptedData")] {
+        for xml in [
+            // Default namespace, prefix, nested below other elements, and next to comments that mention all three names.
+            format!("<{name} xmlns='{namespace}'/>"),
+            format!("<m:{name} xmlns:m='{namespace}'/>"),
+            format!("<data><inner><m:{name} xmlns:m='{namespace}'/></inner></data>"),
+            format!("<data><!-- Signature EncryptedData modifyVerifier --><m:{name} xmlns:m='{namespace}'/></data>"),
+            format!("<data xmlns='{namespace}'><{name}/></data>"),
+        ] { cases.push((xml.clone(), xml, name.to_owned())); }
+    }
+    let mut encoded: Vec<(String, Vec<u8>, String)> = cases.iter().map(|(label, xml, name)| (label.clone(), xml.clone().into_bytes(), name.clone())).collect();
+    for (label, xml, name) in &cases {
+        let declared = format!("<?xml version='1.0' encoding='UTF-16'?>{xml}");
+        for little_endian in [true, false] {
+            for bom in [true, false] { encoded.push((format!("{label} as UTF-16 {}{}", if little_endian { "LE" } else { "BE" }, if bom { " with BOM" } else { "" }), pr24_utf16(&declared, little_endian, bom), name.clone())); }
+        }
+    }
+    for (label, payload, marker) in encoded {
+        let bytes = pr24_package("customXml/vendor.xml", "application/xml", payload);
+        let original = open(&bytes);
+        let error = document::transact(&original, Transaction {
+            expected_revision: original.revision, expected_hash: original.hash.clone(),
+            operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Must not commit"}])).unwrap(),
+        }).err().unwrap_or_else(|| panic!("{label}: protected marker allowed native editing")).to_string();
+        assert!(error.contains("native editing") && error.contains("customXml/vendor.xml") && error.contains(&marker), "{label}: {error}");
+        assert_eq!(save(&original), bytes, "{label}");
+    }
+}
+
+#[test]
+fn pr14_strict_operations_still_inspect_xml_without_protection_element_names() {
+    // Only the label-preserving native scan may skip an XML part by element name; strict operations also look for classification labels.
+    for namespace in ["http://schemas.microsoft.com/office/2020/mipLabelMetadata", "urn:synthetic:sensitivitylabel"] {
+        let mut parts = Package::open(pptx::export_pptx(&deck()).unwrap()).unwrap().parts().clone();
+        parts.insert("docProps/core.xml".into(), format!("<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\"><label:protected xmlns:label=\"{namespace}\"/></cp:coreProperties>").into_bytes());
+        let bytes = Package::from_parts(parts).unwrap().save().unwrap();
+        let original = open(&bytes);
+        // Label-preserving native edits keep the label and succeed.
+        let edited = document::transact(&original, Transaction {
+            expected_revision: original.revision, expected_hash: original.hash.clone(),
+            operations: serde_json::from_value(json!([{"op":"replace","path":"/deck/slides/0/notes","value":"Edited synthetic notes"}])).unwrap(),
+        }).unwrap_or_else(|error| panic!("{namespace}: native edit rejected: {error}"));
+        assert!(Package::open(save(&edited.document)).unwrap().text("docProps/core.xml").unwrap().contains(namespace));
+        // Strict operations still refuse it.
+        let options = review::CleanCopyOptions { new_document_id: "clean".into(), categories: [review::InspectionCategory::Notes].into_iter().collect(), confirmed: true };
+        let error = review::export_clean_copy(&original, &options).err().unwrap_or_else(|| panic!("{namespace}: clean copy accepted a label")).to_string();
+        assert!(error.contains("protected") || error.contains("label"), "{namespace}: {error}");
+        assert_eq!(save(&original), bytes);
+    }
+}

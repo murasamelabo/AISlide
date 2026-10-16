@@ -343,7 +343,7 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
     let mut drawing = Drawing::new(&format!("{id}-{}", &format!("{:x}",Sha256::digest(identity))[..10]));
     drawing.text(&spec.title, [16.0, 0.0, 1120.0, 40.0], 28.0, "@dk1", true, TextAlign::Left);
     drawing.text(&spec.subtitle, [16.0, 44.0, 1120.0, 26.0], 16.0, "@dk2", false, TextAlign::Left);
-    if catalog::CATEGORIES.iter().take(10).any(|entry| entry.0 == category) { charts::render(&mut drawing, category, variant, &spec.data)?; }
+    if catalog::CATEGORIES.iter().take(10).any(|entry| entry.0 == category) { charts::render(&mut drawing, category, variant, &spec.data, spec.layout.as_ref().is_some_and(|layout| !layout.show_title))?; }
     else { diagrams::render(&mut drawing, category, variant, &spec.data, theme)?; }
     let fixed_sizes: std::collections::BTreeMap<_, _> = drawing.elements.iter().filter_map(|element| match element {
         Element::Text { id, text, font_size, .. } if category == "contrast" && variant == 3 && !text.is_empty() => Some((id.clone(), (*font_size, drawing.place_of(id).map(str::to_owned)))),

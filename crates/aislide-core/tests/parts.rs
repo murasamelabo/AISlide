@@ -793,7 +793,7 @@ fn bounded_part_geometry_scales_without_blindly_scaling_text_or_strokes() {
 }
 
 #[test]
-fn bounded_part_layout_rejects_invalid_frames_and_body_clipping() {
+fn bounded_part_layout_rejects_invalid_frames_and_nonfinite_geometry() {
     for layout in [
         json!({"x":-1,"y":0,"width":1152,"height":512}),
         json!({"x":0,"y":-1,"width":1152,"height":512}),
@@ -810,8 +810,7 @@ fn bounded_part_layout_rejects_invalid_frames_and_body_clipping() {
     }
     let mut spec = column_spec();
     spec["layout"] = json!({"x":0,"y":0,"width":1152,"height":424,"show_title":false});
-    let error = execute_request(json!({"op":"create_part","id":"clipped","spec":spec})).unwrap_err();
-    assert!(error.to_string().contains("title band"));
+    execute_request(json!({"op":"create_part","id":"titleless","spec":spec})).unwrap();
     let mut parsed: aislide_core::parts::PartSpec = serde_json::from_value(spec).unwrap();
     for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         parsed.layout.as_mut().unwrap().width = invalid;
@@ -1272,16 +1271,23 @@ fn issue17_waterfall_without_a_unit_can_drop_the_title_band() {
 }
 
 #[test]
-fn issue17_axis_labels_that_really_cross_the_title_band_are_explained() {
-    for (preset, x_axis, y_axis, culprit) in [("line-graph/balanced", "", "Units", "text \"Units\""), ("100-add-vertical-bar-graph/balanced", "", "", "text \"Share (%)\"")] {
-        let error = execute_request(json!({"op":"create_part","id":"c","spec":chart_spec(preset, x_axis, y_axis, false)})).unwrap_err().to_string();
-        assert!(error.contains("title band"), "{preset}: {error}");
-        assert!(error.contains(preset), "the error must name the preset: {error}");
-        assert!(error.contains(culprit), "the error must name the label that crosses the band: {error}");
-        assert!(error.contains("show_title"), "the error must say how to recover: {error}");
+fn issue17_nonempty_units_remain_visible_without_a_title_band() {
+    for (preset, unit) in [("line-graph/balanced", "Units"), ("100-add-vertical-bar-graph/balanced", "Share (%)")] {
+        let part = execute_request(json!({"op":"create_part","id":"c","spec":chart_spec(preset, "Time", unit, false)})).unwrap();
+        let children = part["children"].as_array().unwrap();
+        let label = children.iter().find(|element| element["text"] == unit).expect("unit must not be dropped");
+        let chart = children.iter().find(|element| element["type"] == "chart").unwrap();
+        assert!(label["y"].as_f64().unwrap() >= 0.0);
+        assert!(label["y"].as_f64().unwrap() + label["height"].as_f64().unwrap() <= chart["y"].as_f64().unwrap());
+        assert!(children.iter().any(|element| element["text"] == "Time"));
     }
-    // The same labels are accepted when the layout keeps its title.
     execute_request(json!({"op":"create_part","id":"c","spec":chart_spec("line-graph/balanced", "", "Units", true)})).unwrap();
+    let mut spec = json!({"version":1,"preset":"water-fall/balanced","title":"steps","layout":{"x":64,"y":144,"width":1152,"height":424,"show_title":false},
+        "data":{"kind":"waterfall","unit":"Units","steps":[{"label":"Start","value":10,"total":true},{"label":"Gain","value":4,"total":false},{"label":"End","value":14,"total":true}]}});
+    execute_request(json!({"op":"create_part","id":"w","spec":spec})).unwrap();
+    spec["layout"]["show_title"] = json!(true);
+    spec["layout"]["height"] = json!(512);
+    execute_request(json!({"op":"create_part","id":"w","spec":spec})).unwrap();
 }
 
 /// The frame maps the 1152x424 content area at scale 1.0, so heading bands keep their authored 42px height.
