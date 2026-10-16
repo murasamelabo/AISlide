@@ -36,10 +36,11 @@ Recommendation-only work permits selection, not editing or rendering.
 - Show the selected specialist, reason and target slide IDs before delegation.
   Custom purposes need no forced specialist.
   Recommendation-only requests stop after the selection; do not invoke a specialist.
-- Invoke each specialist once per scope; combine same-skill assignments and limit
-  secondary work to assigned slides. Pass purpose, audience, scope and the same ledger.
-  Return here without recursive planning, editing or rendering. If unavailable,
-  disclose it and use the reference without installation.
+- Invoke each selected specialist at most once per scope; combine same-skill
+  assignments. A secondary purpose is limited to its assigned slides. Pass purpose,
+  audience, scope and the same ledger. Return here without recursive planning,
+  editing or rendering.
+  If unavailable, disclose it and use the matching reference section without installing anything.
 
 ## Build one plan
 

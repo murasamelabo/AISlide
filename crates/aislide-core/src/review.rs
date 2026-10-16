@@ -519,20 +519,24 @@ fn content_types(package: &crate::package::Package) -> Result<BTreeMap<String, S
     if !parsed.root_element().has_tag_name((CT, "Types")) { return Err(Error::Invalid("[Content_Types].xml: OPC content types root".into())); }
     let mut overrides = BTreeSet::new();
     let mut defaults = BTreeSet::new();
+    let mut override_types = BTreeMap::new();
+    let mut default_types = BTreeMap::new();
     for node in parsed.root_element().children().filter(|node| node.is_element()) {
-        let (key, entries) = if node.has_tag_name((CT, "Override")) {
-            (node.attribute("PartName").ok_or_else(|| Error::Invalid("[Content_Types].xml: override part name missing".into()))?, &mut overrides)
+        let (key, entries, types) = if node.has_tag_name((CT, "Override")) {
+            (node.attribute("PartName").ok_or_else(|| Error::Invalid("[Content_Types].xml: override part name missing".into()))?, &mut overrides, &mut override_types)
         } else if node.has_tag_name((CT, "Default")) {
-            (node.attribute("Extension").ok_or_else(|| Error::Invalid("[Content_Types].xml: default extension missing".into()))?, &mut defaults)
+            (node.attribute("Extension").ok_or_else(|| Error::Invalid("[Content_Types].xml: default extension missing".into()))?, &mut defaults, &mut default_types)
         } else { return Err(Error::Invalid("[Content_Types].xml: unknown content type declaration".into())); };
         if key.is_empty() || node.attribute("ContentType").is_none_or(str::is_empty) { return Err(Error::Invalid("[Content_Types].xml: empty content type declaration".into())); }
         if !entries.insert(key.to_ascii_lowercase()) { return Err(Error::Invalid(format!("[Content_Types].xml: duplicate content type declaration {key}"))); }
+        if let Some(kind) = node.attribute("ContentType") { types.insert(key, kind); }
     }
     let mut result = BTreeMap::new();
+    let mut part_name = String::new();
     for path in package.part_names() {
-        let kind = parsed.root_element().children().find(|node| node.has_tag_name((CT, "Override")) && node.attribute("PartName") == Some(format!("/{path}").as_str()))
-            .or_else(|| parsed.root_element().children().find(|node| node.has_tag_name((CT, "Default")) && node.attribute("Extension") == path.rsplit('.').next())).and_then(|node| node.attribute("ContentType"));
-        if let Some(kind) = kind { result.insert(path.into(), kind.into()); }
+        part_name.clear(); part_name.push('/'); part_name.push_str(path);
+        let kind = override_types.get(part_name.as_str()).or_else(|| path.rsplit('.').next().and_then(|extension| default_types.get(extension)));
+        if let Some(kind) = kind { result.insert(path.into(), (*kind).into()); }
     }
     Ok(result)
 }
@@ -583,6 +587,8 @@ fn protection_xml<'a>(package: &'a crate::package::Package, path: &str) -> Resul
     std::str::from_utf8(bytes).map(Cow::Borrowed).map_err(|_| Error::Unsupported(format!("{path}: unsupported XML encoding")))
 }
 
+const PROTECTION_ELEMENT_NAMES: [&str; 3] = ["Signature", "EncryptedData", "modifyVerifier"];
+
 fn ensure_protection(package: &crate::package::Package, preserve_labels: bool) -> Result<()> {
     for path in package.part_names() {
         let lower = path.to_ascii_lowercase();
@@ -610,6 +616,8 @@ fn ensure_protection(package: &crate::package::Package, preserve_labels: bool) -
                 Err(Error::Unsupported(_) | Error::Limit(_)) if preserve_labels => continue,
                 Err(error) => return Err(error),
             };
+            // Absence is sufficient to skip native element checks; presence still requires namespace-aware parsing.
+            if preserve_labels && !PROTECTION_ELEMENT_NAMES.iter().any(|name| xml.contains(name)) { continue; }
             let parsed = match crate::pptx::parse(&xml) {
                 Ok(parsed) => parsed,
                 // Native reads validate required parts; optional XML outside the scan budget remains opaque.
@@ -808,4 +816,98 @@ pub fn export_clean_copy(document: &crate::document::Document, options: &CleanCo
     let clean: crate::document::Document = serde_json::from_value(crate::document::open_presentation(options.new_document_id.clone(), bytes.clone())?["document"].clone())?;
     let inspection = inspect_document(&clean)?;
     Ok(CleanCopy { bytes, document: clean, inspection })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::Package;
+
+    fn content_types_by_search(package: &Package) -> Result<BTreeMap<String, String>> {
+        let parsed = crate::pptx::parse(package.text("[Content_Types].xml")?)?;
+        if !parsed.root_element().has_tag_name((CT, "Types")) { return Err(Error::Invalid("[Content_Types].xml: OPC content types root".into())); }
+        let mut overrides = BTreeSet::new();
+        let mut defaults = BTreeSet::new();
+        for node in parsed.root_element().children().filter(|node| node.is_element()) {
+            let (key, entries) = if node.has_tag_name((CT, "Override")) {
+                (node.attribute("PartName").ok_or_else(|| Error::Invalid("[Content_Types].xml: override part name missing".into()))?, &mut overrides)
+            } else if node.has_tag_name((CT, "Default")) {
+                (node.attribute("Extension").ok_or_else(|| Error::Invalid("[Content_Types].xml: default extension missing".into()))?, &mut defaults)
+            } else { return Err(Error::Invalid("[Content_Types].xml: unknown content type declaration".into())); };
+            if key.is_empty() || node.attribute("ContentType").is_none_or(str::is_empty) { return Err(Error::Invalid("[Content_Types].xml: empty content type declaration".into())); }
+            if !entries.insert(key.to_ascii_lowercase()) { return Err(Error::Invalid(format!("[Content_Types].xml: duplicate content type declaration {key}"))); }
+        }
+        let mut result = BTreeMap::new();
+        for path in package.part_names() {
+            let kind = parsed.root_element().children().find(|node| node.has_tag_name((CT, "Override")) && node.attribute("PartName") == Some(format!("/{path}").as_str()))
+                .or_else(|| parsed.root_element().children().find(|node| node.has_tag_name((CT, "Default")) && node.attribute("Extension") == path.rsplit('.').next())).and_then(|node| node.attribute("ContentType"));
+            if let Some(kind) = kind { result.insert(path.into(), kind.into()); }
+        }
+        Ok(result)
+    }
+
+    fn same_as_search(declarations: &str, paths: &[&str]) -> Result<BTreeMap<String, String>> {
+        let mut parts: BTreeMap<String, Vec<u8>> = paths.iter().map(|path| ((*path).to_owned(), b"<part/>".to_vec())).collect();
+        parts.insert("[Content_Types].xml".into(), format!("<Types xmlns=\"{CT}\">{declarations}</Types>").into_bytes());
+        let package = Package::from_parts(parts).unwrap();
+        let expected = content_types_by_search(&package);
+        let actual = content_types(&package);
+        match (&expected, &actual) {
+            (Ok(expected), Ok(actual)) => assert_eq!(expected, actual, "{declarations}"),
+            (Err(expected), Err(actual)) => assert_eq!(expected.to_string(), actual.to_string(), "{declarations}"),
+            _ => panic!("{declarations}: search gave {expected:?}, tables gave {actual:?}"),
+        }
+        actual
+    }
+
+    #[test]
+    fn content_type_indexes_preserve_precedence_spelling_and_extension_rules() {
+        let kinds = same_as_search("<Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/ppt/slides/slide1.xml\" ContentType=\"slide\"/>", &["ppt/slides/slide1.xml", "ppt/slides/slide2.xml"]).unwrap();
+        assert_eq!(kinds.get("ppt/slides/slide1.xml").map(String::as_str), Some("slide"));
+        assert_eq!(kinds.get("ppt/slides/slide2.xml").map(String::as_str), Some("application/xml"));
+        let kinds = same_as_search("<Default Extension=\"XML\" ContentType=\"upper\"/><Override PartName=\"/PPT/slides/slide1.xml\" ContentType=\"upper-path\"/>", &["ppt/slides/slide1.xml"]).unwrap();
+        assert!(kinds.is_empty());
+        let kinds = same_as_search("<Default Extension=\"EncryptionInfo\" ContentType=\"whole-path\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/>", &["EncryptionInfo", "ppt/EncryptionInfo", "ppt/dir.d/EncryptionInfo", "ppt/EncryptionInfo.xml"]).unwrap();
+        assert_eq!(kinds.get("EncryptionInfo").map(String::as_str), Some("whole-path"));
+        assert!(!kinds.contains_key("ppt/EncryptionInfo"));
+        assert!(!kinds.contains_key("ppt/dir.d/EncryptionInfo"));
+    }
+
+    #[test]
+    fn invalid_content_type_declarations_keep_their_errors() {
+        for (declarations, message) in [
+            ("<Default Extension=\"xml\" ContentType=\"a\"/><Default Extension=\"XML\" ContentType=\"b\"/>", "duplicate content type declaration XML"),
+            ("<Override PartName=\"/a.xml\" ContentType=\"a\"/><Override PartName=\"/A.XML\" ContentType=\"b\"/>", "duplicate content type declaration /A.XML"),
+            ("<Override PartName=\"/a.xml\" ContentType=\"\"/>", "empty content type declaration"),
+            ("<Override PartName=\"/a.xml\"/>", "empty content type declaration"),
+            ("<Default Extension=\"\" ContentType=\"a\"/>", "empty content type declaration"),
+            ("<Default ContentType=\"a\"/>", "default extension missing"),
+            ("<Override ContentType=\"a\"/>", "override part name missing"),
+            ("<Unknown Extension=\"xml\" ContentType=\"a\"/>", "unknown content type declaration"),
+        ] {
+            assert!(same_as_search(declarations, &["a.xml"]).unwrap_err().to_string().contains(message));
+        }
+        same_as_search("<Default Extension=\"xml\" ContentType=\"a\"/><Override PartName=\"xml\" ContentType=\"b\"/>", &["xml", "a.xml"]).unwrap();
+    }
+
+    #[test]
+    fn content_type_indexes_match_reference_on_generated_packages() {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |bound: usize| { state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407); ((state >> 33) as usize) % bound };
+        let extensions = ["xml", "XML", "rels", "png", "Png", "bin", "x.y", "EncryptionInfo", "noextension"];
+        let names = ["ppt/slides/slide1.xml", "ppt/slides/slide2.XML", "ppt/media/image1.png", "ppt/media/image2.PNG", "docProps/core.xml", "x/y.z.rels", "EncryptionInfo", "ppt/Encrypted.bin", "noextension", "dir.d/noextension"];
+        for _ in 0..600 {
+            let mut declarations = String::new();
+            for _ in 0..next(10) {
+                if next(2) == 0 {
+                    let name = names[next(names.len())];
+                    let name = if next(5) == 0 { name.to_ascii_uppercase() } else { name.to_owned() };
+                    declarations.push_str(&format!("<Override PartName=\"/{name}\" ContentType=\"type-{}\"/>", next(100)));
+                } else {
+                    declarations.push_str(&format!("<Default Extension=\"{}\" ContentType=\"type-{}\"/>", extensions[next(extensions.len())], next(100)));
+                }
+            }
+            let _ = same_as_search(&declarations, &names);
+        }
+    }
 }

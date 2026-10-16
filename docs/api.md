@@ -74,7 +74,24 @@ and relationships, exact `EncryptionInfo` / `EncryptedPackage` part names, XMLDS
 `Signature`, XMLEnc `EncryptedData` and PresentationML `modifyVerifier` elements.
 Unrelated filenames containing `encryption` and vendor or unqualified elements
 with these local names are not protection markers. UTF-8 and UTF-16LE/BE XML are
-scanned without modifying the source bytes. Optional XML, including SVG and
+scanned without modifying the source bytes. Content-type declarations are indexed
+once per scan; Override precedence, exact spelling for lookup and case-insensitive
+duplicate-declaration rejection are unchanged. After bounded decoding, the
+label-preserving native scan skips element DOM construction only when all three
+protection element names are absent. A name's presence still requires the same
+namespace-aware check; strict operations never use this absence shortcut.
+The opt-in `native_note_edit_release_benchmark` test measures note-edit
+transactions on already-edited native documents (30, 128 and 256 text slides,
+plus 30 slides with images and charts). `transact` runs the native save guard
+during verification and sealing. Fixture construction, explicit export, Undo
+and CLI startup are outside the measured interval. Each case uses two warmups
+and nine samples and records fixture, input, result and exported-PPTX hashes.
+Set `AISLIDE_BENCH_OUTPUT` to a new JSON filename and `AISLIDE_BENCH_VARIANT` to
+a descriptive label, then run
+`node tools/cargo.mjs test --release -p aislide-core --test native_protection_scan_bench -- --ignored --exact native_note_edit_release_benchmark`.
+For before/after comparisons, use identical compiler/profile/flags and reverse
+variant order in a second batch. Shared-PC timings are not a latency guarantee.
+Optional XML, including SVG and
 Custom XML, that cannot be decoded or parsed within the XML size/node/depth
 budgets, or contains a DTD, remains opaque for label-preserving native edits.
 It does not block ordinary edits and its bytes are retained. The scanner never
@@ -350,9 +367,13 @@ The optional `contrast/panels` part is distinct from a matrix. Its data is
 panel has `label`, 1-5 `items:{text,icon?}`, and optional `fill`, `heading_fill`,
 `heading_color`, `accent`, `icon_fill`, `body_size` (16-28, default 18). Two
 panels and matching row counts are required; label/text limits are 64/240
-Unicode scalars. Icons use the existing PNG/JPEG `GraphIcon` contract and
-MCP asset handles. Supplied symbols preserve aspect ratio in explicit layouts.
-Typography does not silently shrink. All 111 earlier presets are retained.
+Unicode scalars. The heading band is measured: it widens with its label from
+216px up to 480px, and a heading that does not fit on one line at 18px bold
+within 480px is rejected at `panels[i].label`. Icons use the existing PNG/JPEG
+`GraphIcon` contract and MCP asset handles. Supplied symbols preserve aspect
+ratio in explicit layouts. Typography does not silently shrink: a text that
+cannot keep its fixed size is reported by its place, `panels[i].label` or
+`panels[i].items[j].text`. All 111 earlier presets are retained.
 See the portable
 [technical briefing style contract](../.github/skills/aislide-authoring/references/technical-panels.md).
 In `compose_slide`, request it through `kind:"part"`; the existing `comparison`
@@ -724,9 +745,12 @@ Supply the inspected SHA to reject changed source bytes. THMX rejects options.
 extensions. Custom shows still block structural edits and sample removal;
 sample removal with managed references/guided records is also rejected.
 Selection is not sanitization: unselected opaque payloads remain embedded.
-Protection, macro and signature guards remain enforced. Inert external hyperlinks
-are preserved without fetching; external images/slides and unknown resource types
-remain rejected by inspection and selection.
+Protection, macro and signature guards remain enforced. Classification labels are
+retained, as in default import and native edits, so a labelled template can be
+inspected and selected; its label parts, content types and relationships are
+kept byte for byte, and AISlide neither verifies nor changes the label. Inert
+external hyperlinks are preserved without fetching; external images/slides and
+unknown resource types remain rejected by inspection and selection.
 These selection controls are core/SDK/MCP APIs, not new Studio controls.
 
 The 3 MiB encoded image budget is deck-wide and counts identical MIME/base64/
@@ -970,9 +994,11 @@ insertion must also fit the actual slide. `show_title` defaults true. False
 removes the part title/subtitle and maps its body below the former 88px band
 into the requested frame. Geometry and absolute table tracks are normalized;
 text fitting enforces a 12px floor and rejects measured overflow or missing
-glyphs. It does not guarantee that every preset fits every region. Some chart
-axis labels above that 88px boundary make title removal reject; retain the
-title or compose explicitly. Chart-internal typography is not newly qualified
+glyphs. It does not guarantee that every preset fits every region. Titleless
+charts keep nonempty axis labels and units, including `Share (%)`: the unit is
+placed below the removed band and the native chart frame is shortened at its top
+without changing its bottom edge or data. Waterfall units are also retained.
+Other body elements crossing the removed band still reject. Chart-internal typography is not newly qualified
 by this text/table measurement. Omitted `layout` preserves the existing
 placement path. Retain the layout specification when regenerating a part.
 
@@ -1247,6 +1273,8 @@ Published schemas use local `$defs`/`$ref` within each tool, generated lazily an
 Compact successful mutation replies include current revision/hash and Undo/Redo flags. Stale revision/hash guards are unchanged: hashes are not silently omitted or replaced with the latest value. The server automatically tracks successful operations and exports; callers do not need a manual progress file to recover an open handle after context loss. This is process-local memory, not crash recovery or automatic plaintext persistence. Export or explicitly retain recovery data before reconnecting.
 
 Compact `part_catalog` returns 12 entries without examples/schema by default; `preset_id` returns one example. `architecture_icons` defaults to 20 metadata entries and supports a provider filter. Both accept `query`, `offset`, `limit`, and `detail:"full"`. Full detail without filters returns the legacy complete catalog. Generated `create_asset`, `create_graph_icon`, and `architecture_icon_assets` results use reusable asset IDs by default; `detail:"full"` preserves the original byte-bearing results. Core and SDK contracts are unchanged.
+
+`validate_deck({deck_id,detail?})` returns `structurally_valid`, the slide count and warnings in every profile. The validated deck is the one the session already holds, so it is returned only with `detail:"full"`. The core `validate` operation is unchanged and still returns the canonical deck. For a 12-slide report deck the MCP response is about 163 bytes instead of about 21.9KB. The call checks structure and geometry only and does not prove Office visual parity or text fit.
 
 ### Local Asset Handles
 

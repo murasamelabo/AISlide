@@ -290,6 +290,19 @@ pub(super) fn validate_spec(spec: &PartSpec) -> Result<(&str, usize)> {
     Ok((category, variant))
 }
 
+/// Whether a part's text below the preflight floor is a size the preset fixes (tags, captions, badges), which the spec cannot change.
+/// A `body_size` the author lowered below `floor` is their own choice and stays actionable: raising it clears the finding.
+pub(crate) fn fixed_typography(spec: &PartSpec, floor: f64) -> bool {
+    if briefing::kind(&spec.data).is_none() { return false; }
+    // Presets with a body_size lever draw the body at `body_size` (default 16px); the other presets have no body lever.
+    let body = match &spec.data {
+        PartData::IconCards { body_size, .. } | PartData::IconRows { body_size, .. } | PartData::ShiftRows { body_size, .. }
+        | PartData::StepCards { body_size, .. } | PartData::ScreenshotCallouts { body_size, .. } => Some(body_size.unwrap_or(briefing::BODY)),
+        _ => None,
+    };
+    body.is_none_or(|size| size + 0.01 >= floor)
+}
+
 pub fn create(id: &str, spec: &PartSpec) -> Result<Element> { create_with_theme(id, spec, &crate::design::Theme::default()) }
 
 pub(crate) fn graph_render_context(id: &str, spec: &PartSpec) -> Result<(String, crate::graphs::GraphSpec, f64)> {
@@ -297,11 +310,14 @@ pub(crate) fn graph_render_context(id: &str, spec: &PartSpec) -> Result<(String,
     graph_context(id, spec, graph)
 }
 
+/// A diagram whose own title is removed by the layout shifts up by the 88px title band; every other part keeps its full height.
+pub(crate) fn graph_title_band_removed(graph: &crate::graphs::GraphSpec, layout: &PartLayout) -> bool { graph.show_title && !layout.show_title }
+
 fn graph_context(id: &str, spec: &PartSpec, graph: &crate::graphs::GraphSpec) -> Result<(String, crate::graphs::GraphSpec, f64)> {
     let Some(layout) = &spec.layout else { return Ok((id.into(), graph.clone(), 512.0)); };
     let mut rendered_graph = graph.clone();
     rendered_graph.show_title = graph.show_title && layout.show_title;
-    let content_height = if graph.show_title && !layout.show_title {
+    let content_height = if graph_title_band_removed(graph, layout) {
         for node in &mut rendered_graph.nodes { node.y -= 88.0; }
         for group in &mut rendered_graph.groups { group.y -= 88.0; }
         for edge in &mut rendered_graph.edges { for point in &mut edge.waypoints { point[1] -= 88.0; } }
@@ -327,13 +343,26 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
     let mut drawing = Drawing::new(&format!("{id}-{}", &format!("{:x}",Sha256::digest(identity))[..10]));
     drawing.text(&spec.title, [16.0, 0.0, 1120.0, 40.0], 28.0, "@dk1", true, TextAlign::Left);
     drawing.text(&spec.subtitle, [16.0, 44.0, 1120.0, 26.0], 16.0, "@dk2", false, TextAlign::Left);
-    if catalog::CATEGORIES.iter().take(10).any(|entry| entry.0 == category) { charts::render(&mut drawing, category, variant, &spec.data)?; }
-    else { diagrams::render(&mut drawing, category, variant, &spec.data)?; }
+    if catalog::CATEGORIES.iter().take(10).any(|entry| entry.0 == category) { charts::render(&mut drawing, category, variant, &spec.data, spec.layout.as_ref().is_some_and(|layout| !layout.show_title))?; }
+    else { diagrams::render(&mut drawing, category, variant, &spec.data, theme)?; }
     let fixed_sizes: std::collections::BTreeMap<_, _> = drawing.elements.iter().filter_map(|element| match element {
-        Element::Text { id, text, font_size, .. } if category == "contrast" && variant == 3 && !text.is_empty() => Some((id.clone(), *font_size)),
+        Element::Text { id, text, font_size, .. } if category == "contrast" && variant == 3 && !text.is_empty() => Some((id.clone(), (*font_size, drawing.place_of(id).map(str::to_owned)))),
         _ => None,
     }).collect();
-    if spec.layout.is_none() { crate::layout::fit_part_text(&mut drawing.elements,theme)?; }
+    let fit_error = |error| match error {
+        Error::Invalid(message) => {
+            for (id, (_, place)) in &fixed_sizes {
+                if let Some(place) = place {
+                    if let Some(reason) = message.strip_prefix(&format!("part text {id} ")) {
+                        return Error::Invalid(format!("part text {place} {reason}"));
+                    }
+                }
+            }
+            Error::Invalid(message)
+        }
+        other => other,
+    };
+    if spec.layout.is_none() { crate::layout::fit_part_text(&mut drawing.elements,theme).map_err(&fit_error)?; }
     let mut result = Element::Group { visual: None, id: id.into(), x: 64.0, y: 144.0, width: 1152.0, height: 512.0, view_width: 1152.0, view_height: 512.0, children: drawing.elements };
     validate_elements(std::slice::from_ref(&result), (1280.0, 720.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
     if let Some(layout) = &spec.layout {
@@ -341,11 +370,18 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
             if let Element::Group { children, .. } = &mut result { drop(children.drain(..2)); }
         }
         let content_top = if layout.show_title { 0.0 } else if category == "venn" && variant == 1 { 80.0 } else { 88.0 };
-        adopt_layout(&mut result, layout, content_top, 512.0 - content_top, theme, &BTreeSet::new())?;
+        adopt_layout(&mut result, layout, content_top, 512.0 - content_top, theme, &BTreeSet::new()).map_err(|error| match error {
+            Error::Invalid(message) if message.starts_with("part body crosses the removed title band") => Error::Invalid(format!("{} ({})", message, spec.preset)),
+            other => fit_error(other),
+        })?;
     }
     for element in crate::model::element_list(std::slice::from_ref(&result)) {
         if let Element::Text { id, font_size, .. } = element {
-            if fixed_sizes.get(id).is_some_and(|expected| *font_size < *expected) { return Err(Error::Invalid(format!("comparison panel text {id} does not fit its fixed font size; shorten the text, enlarge the part or split the slide"))); }
+            if let Some((expected, place)) = fixed_sizes.get(id) {
+                if *font_size < *expected {
+                    return Err(Error::Invalid(format!("comparison panel text {} does not fit its fixed font size; shorten the text, enlarge the part or split the slide", place.as_deref().unwrap_or(id))));
+                }
+            }
         }
     }
     Ok(result)
@@ -372,14 +408,33 @@ fn graph_part(id: &str, spec: &PartSpec, graph: &crate::graphs::GraphSpec, theme
     Ok(result)
 }
 
+/// What a part element is, for an error message: its quoted text when it has some, otherwise its kind.
+fn describe_element(element: &Element) -> String {
+    match element {
+        Element::Text { text, .. } | Element::Shape { text, .. } if !text.is_empty() => format!("text \"{}\"", text.chars().take(40).collect::<String>()),
+        Element::Text { .. } => "an empty text box".into(),
+        Element::Rect { .. } => "a rectangle".into(),
+        Element::Polygon { .. } => "a polygon".into(),
+        Element::Shape { .. } => "a shape".into(),
+        Element::Table { .. } => "a table".into(),
+        Element::Chart { .. } => "a chart".into(),
+        Element::Picture { .. } => "a picture".into(),
+        Element::Connector { .. } => "a connector".into(),
+        Element::Group { .. } => "a group".into(),
+    }
+}
+
 fn transform_layout_element(element: &mut Element, horizontal: f64, vertical: f64, content_top: f64) -> Result<()> {
+    let top = aspect::frame(element)[1];
+    if top < content_top {
+        return Err(Error::Invalid(format!("part body crosses the removed title band: {} starts at y={top} but the band ends at y={content_top}; keep layout.show_title:true or remove that element", describe_element(element))));
+    }
     match element {
         Element::Text { x, y, width, height, .. } | Element::Rect { x, y, width, height, .. }
         | Element::Polygon { x, y, width, height, .. } | Element::Shape { x, y, width, height, .. }
         | Element::Table { x, y, width, height, .. } | Element::Chart { x, y, width, height, .. }
         | Element::Picture { x, y, width, height, .. } | Element::Connector { x, y, width, height, .. }
         | Element::Group { x, y, width, height, .. } => {
-            if *y < content_top { return Err(Error::Invalid("part body crosses the removed title band".into())); }
             *x *= horizontal; *y = (*y - content_top) * vertical;
             *width *= horizontal; *height *= vertical;
         }
@@ -483,9 +538,12 @@ fn layout_overflow(element: &Element, theme: &crate::design::Theme) -> Result<Op
     }))
 }
 
-pub(super) struct Drawing { prefix: String, pub elements: Vec<Element> }
+pub(super) struct Drawing { prefix: String, pub elements: Vec<Element>, places: std::collections::BTreeMap<String, String> }
 impl Drawing {
-    pub fn new(prefix: &str) -> Self { Self { prefix: prefix.into(), elements: Vec::new() } }
+    pub fn new(prefix: &str) -> Self { Self { prefix: prefix.into(), elements: Vec::new(), places: Default::default() } }
+    /// Name the spec field the NEXT element stands for, so an error can say `panels[0].label` instead of an element ID.
+    pub fn name_next(&mut self, place: String) { self.places.insert(self.id(), place); }
+    pub fn place_of(&self, id: &str) -> Option<&str> { self.places.get(id).map(String::as_str) }
     pub fn id(&self) -> String { format!("{}-{}", self.prefix, self.elements.len()) }
     pub fn text(&mut self, text: &str, bounds: [f64; 4], size: f64, color: &str, bold: bool, alignment: TextAlign) {
         let [x, y, width, height] = bounds;
@@ -522,6 +580,22 @@ pub(super) fn display(value: f64) -> String { if value.abs() >= 1e9 { format!("{
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn removed_title_band_rejects_crossing_body_without_mutating_it() {
+        let mut element: Element = serde_json::from_value(json!({"type":"text","id":"crossing",
+            "x":40,"y":76,"width":300,"height":24,"text":"Synthetic unit","font_size":14,"color":"@dk1","bold":false})).unwrap();
+        let before = serde_json::to_value(&element).unwrap();
+        let error = transform_layout_element(&mut element, 1.0, 1.0, 88.0).unwrap_err().to_string();
+        assert!(error.contains("part body crosses the removed title band"), "{error}");
+        assert!(error.contains("text \"Synthetic unit\"") && error.contains("y=76") && error.contains("88"), "{error}");
+        assert!(error.contains("show_title:true"), "{error}");
+        assert_eq!(serde_json::to_value(&element).unwrap(), before);
+        let mut boundary = element.clone();
+        if let Element::Text { y, .. } = &mut boundary { *y = 88.0; }
+        transform_layout_element(&mut boundary, 1.0, 1.0, 88.0).unwrap();
+        assert_eq!(aspect::frame(&boundary)[1], 0.0);
+    }
 
     #[test]
     fn titleless_venn_layout_preserves_body_content_for_all_variants() {

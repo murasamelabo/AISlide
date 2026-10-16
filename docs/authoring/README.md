@@ -216,14 +216,33 @@ removes the part title/subtitle band; omission defaults true. Explicit-region
 fitting normalizes geometry and absolute table tracks, normally enforces a
 12px text floor and can reject overflow or missing glyphs. Explicitly small
 graph annotations have the exception described below. Enlarge the region or reduce
-content when it cannot fit. Some chart axis labels occupy the removed 88px
-band and make title removal reject. Chart-internal typography has not been
-newly qualified by these checks. Omitted layout retains previous placement.
+content when it cannot fit. With `show_title:false`, nonempty axis labels and
+waterfall units remain visible below the removed title band. The fixed
+`Share (%)` unit of `100-add-vertical-bar-graph` is retained too. Where needed,
+the chart frame's top moves down while its bottom and data stay unchanged.
+Empty axis labels and units draw nothing. Other body elements crossing the
+removed band still reject with the element and preset in the error.
+Chart-internal typography has not been
+newly qualified by these checks. There are two text floors: the 12px layout floor
+above is a rejection, while preflight's `min_font_size` (default 16px, 8-48) is a
+readability target that only reports `SMALL_TEXT`. A part's own tags, captions,
+badges and labels are drawn at sizes its preset fixes (for example the 13px tag and
+caption of `list-horizontal/icon-cards`, or the text of `list/agenda`), so the spec
+offers no way to raise them; `SMALL_TEXT` on that text in a non-stale managed part is
+`info`, names the part and its preset, and does not count as a warning. A manually
+edited (stale) part keeps the ordinary warning because its text no longer
+necessarily reflects the preset. Text you can resize stays a warning:
+a `body_size` below the floor (14-22px, default 16px, on the presets that have one),
+the `body_size` of `contrast/panels`, and any loose text. Raising `body_size` to the
+floor clears that warning. Omitted layout retains previous placement.
 `fit:"contain"` scales the part uniformly and centers it, keeping circles and
 arcs round in frames whose aspect differs from the part canvas; the default
 `stretch` keeps legacy per-axis scaling but re-squares small markers and
 images. Preflight flags `PART_ASPECT_DISTORTED` when a stretched part exceeds
-the tolerance measured from its rendered geometry.
+the tolerance measured from its rendered geometry. A diagram reclaims the 88px
+title band only when its own `GraphSpec.show_title` is true and the layout
+removes it; with `GraphSpec.show_title:false` the part keeps its full 512px
+height whatever `layout.show_title` says, and preflight measures that height.
 
 For graphs, `GraphSpec.show_title:false` allows content at y=0 instead of
 reserving the 88px title band on the 1152x512 graph canvas. Node `detail`

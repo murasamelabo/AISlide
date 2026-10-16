@@ -2,11 +2,11 @@
 use crate::{model::{Element, TextAlign}, Error, Result};
 use std::f64::consts::PI;
 
-pub(super) fn render(drawing: &mut Drawing, category: &str, variant: usize, data: &PartData) -> Result<()> {
+pub(super) fn render(drawing: &mut Drawing, category: &str, variant: usize, data: &PartData, theme: &crate::design::Theme) -> Result<()> {
     match category {
         "tree" => tree(drawing,variant,data),
         "correlation" => network(drawing,variant,data),
-        "contrast" if variant == 3 => comparison_panels(drawing, data),
+        "contrast" if variant == 3 => comparison_panels(drawing, data, theme),
         "matrix" | "contrast" => matrix(drawing,variant,data),
         "set" | "list-set" => groups(drawing,category,variant,data),
         "gantt-chart" => timeline(drawing,variant,data),
@@ -32,7 +32,31 @@ pub(super) fn render(drawing: &mut Drawing, category: &str, variant: usize, data
     }
 }
 
-fn comparison_panels(drawing: &mut Drawing, data: &PartData) -> Result<()> {
+/// Widest heading band that still sits inside a 528px panel with a 24px margin on each side.
+const HEADING_BAND_LIMIT: f64 = 480.0;
+/// The band the heading always had; a heading that fits it keeps exactly this width.
+const HEADING_BAND_MINIMUM: f64 = 216.0;
+const HEADING_BAND_STEP: f64 = 8.0;
+const HEADING_INSET: f64 = 40.0;
+
+/// Narrowest band (216-480px, in 8px steps) in which the label stays on one line at its fixed 18px bold size.
+/// The test is the one the fixed-size check applies afterwards (`fit_size` at 18px), so a label that gets a band here
+/// cannot then fail that check. `None` means even the widest band is too narrow.
+fn heading_band_width(label: &str, theme: &crate::design::Theme) -> Result<Option<f64>> {
+    let format = crate::model::TextFormat { alignment: TextAlign::Center, font_family: Some("@minor".into()), vertical: crate::model::VerticalAlign::Middle, ..Default::default() };
+    let fits = |band: f64| -> Result<bool> { Ok(crate::layout::fit_size(label, band - HEADING_INSET, 24.0, [18.0, 18.0], true, &format, theme)?.is_some()) };
+    let steps = ((HEADING_BAND_LIMIT - HEADING_BAND_MINIMUM) / HEADING_BAND_STEP).round() as u32;
+    if !fits(HEADING_BAND_LIMIT)? { return Ok(None); }
+    // Fitting is monotonic in the width, so search for the first step that fits.
+    let (mut low, mut high) = (0u32, steps);
+    while low < high {
+        let middle = (low + high) / 2;
+        if fits(HEADING_BAND_MINIMUM + f64::from(middle) * HEADING_BAND_STEP)? { high = middle; } else { low = middle + 1; }
+    }
+    Ok(Some(HEADING_BAND_MINIMUM + f64::from(low) * HEADING_BAND_STEP))
+}
+
+fn comparison_panels(drawing: &mut Drawing, data: &PartData, theme: &crate::design::Theme) -> Result<()> {
     let PartData::ComparisonPanels { panels, transition } = data else { return Err(Error::Invalid("comparison panel data required".into())); };
     for (panel_index, panel) in panels.iter().enumerate() {
         let left = if panel_index == 0 { 16.0 } else { 608.0 };
@@ -44,9 +68,12 @@ fn comparison_panels(drawing: &mut Drawing, data: &PartData) -> Result<()> {
         let body_size = panel.body_size.unwrap_or(18.0);
         drawing.shape("roundRect", [left, 88.0, 528.0, 424.0], fill, fill);
         if let Some(Element::Shape { visual, .. }) = drawing.elements.last_mut() { *visual = Some(crate::visual::VisualStyle { adjustments: vec![crate::visual::ShapeAdjustment { name: "adj".into(), value: 4000 }], ..Default::default() }); }
-        drawing.shape("roundRect", [left + 24.0, 104.0, 216.0, 42.0], heading_fill, heading_fill);
+        let band = heading_band_width(&panel.label, theme)?.ok_or_else(|| Error::Invalid(format!(
+            "comparison panel heading panels[{panel_index}].label is too long for its panel; it must fit on one line within {HEADING_BAND_LIMIT:.0}px at 18px bold, so shorten the heading")))?;
+        drawing.shape("roundRect", [left + 24.0, 104.0, band, 42.0], heading_fill, heading_fill);
         if let Some(Element::Shape { visual, .. }) = drawing.elements.last_mut() { *visual = Some(crate::visual::VisualStyle { adjustments: vec![crate::visual::ShapeAdjustment { name: "adj".into(), value: 50000 }], ..Default::default() }); }
-        drawing.text(&panel.label, [left + 44.0, 113.0, 176.0, 24.0], 18.0, heading_color, true, TextAlign::Center);
+        drawing.name_next(format!("panels[{panel_index}].label"));
+        drawing.text(&panel.label, [left + 44.0, 113.0, band - 40.0, 24.0], 18.0, heading_color, true, TextAlign::Center);
         if let Some(Element::Text { format, .. }) = drawing.elements.last_mut() { format.vertical = crate::model::VerticalAlign::Middle; }
         let has_icons = panel.items.iter().any(|item| item.icon.is_some());
         let text_left = left + if has_icons { 88.0 } else { 24.0 };
@@ -66,6 +93,7 @@ fn comparison_panels(drawing: &mut Drawing, data: &PartData) -> Result<()> {
                 }
                 drawing.elements.push(picture);
             }
+            drawing.name_next(format!("panels[{panel_index}].items[{row_index}].text"));
             drawing.text(&item.text, [text_left, top + 10.0, text_width, row_height - 20.0], body_size, "@dk1", false, TextAlign::Left);
             if let Some(Element::Text { format, .. }) = drawing.elements.last_mut() { format.vertical = crate::model::VerticalAlign::Middle; }
             if row_index + 1 < panel.items.len() { drawing.rect([text_left, top + row_height - 1.0, text_width, 1.0], if panel_index == 0 { "D2DBEB" } else { "B5DBD8" }); }

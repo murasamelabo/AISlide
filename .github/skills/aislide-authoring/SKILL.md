@@ -41,7 +41,7 @@ Skills do not connect MCP. Label synthetic data.
 	(1-32). Use returned `asset_id` and dimensions; never regenerate/output base64
 	through the model. Optional `prepare_assets` batches explicit resize/format
 	changes and preserves originals. Use `fit:"contain"` or intentional `fit:"cover"`.
-	Omitting `fit` stretches (legacy). Retain attribution.
+	Omitting `fit` uses legacy stretch. Retain attribution.
 7. Batch 1-128 `apply_operations`; after targets exist include `update_notes`,
 	`set_table_headers`, `set_accessibility`. One Undo; atomic rejection.
 	Use planned revision/hash; never refresh to force a stale plan.

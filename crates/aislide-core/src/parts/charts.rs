@@ -1,9 +1,9 @@
 ﻿use super::{Drawing, PartData, accent, display};
 use crate::{model::{ChartKind, ChartSeries, TextAlign}, Error, Result};
 
-pub(super) fn render(drawing: &mut Drawing, category: &str, variant: usize, data: &PartData) -> Result<()> {
+pub(super) fn render(drawing: &mut Drawing, category: &str, variant: usize, data: &PartData, titleless: bool) -> Result<()> {
     if category == "infographic" { return infographic(drawing, variant, data); }
-    if category == "water-fall" { return waterfall(drawing, variant, data); }
+    if category == "water-fall" { return waterfall(drawing, variant, data, titleless); }
     let PartData::Chart { categories, series, x_axis, y_axis } = data else { return Err(Error::Invalid("chart preset requires chart data".into())); };
     let kind = match category {
         "pie-chart" => if variant == 1 { ChartKind::Pie } else { ChartKind::Doughnut },
@@ -16,11 +16,18 @@ pub(super) fn render(drawing: &mut Drawing, category: &str, variant: usize, data
     let series: Vec<_> = series.iter().enumerate().map(|(index, entry)| ChartSeries { name:entry.name.clone(),values:entry.values.clone(),color:accent(index), ..Default::default() }).collect();
     crate::model::validate_chart_kind(kind, categories, &series)?;
     if kind == ChartKind::Area && series.len() > 1 { return Err(Error::Invalid("area overview currently requires a single series to avoid occluded data".into())); }
-    let chart_bounds = match variant { 1 => [48.0,108.0,740.0,344.0], 2 => [48.0,100.0,720.0,360.0], _ => [64.0,104.0,1024.0,348.0] };
+    let unit = if kind==ChartKind::PercentStackedColumn { "Share (%)" } else { y_axis };
+    let mut chart_bounds = match variant { 1 => [48.0,108.0,740.0,344.0], 2 => [48.0,100.0,720.0,360.0], _ => [64.0,104.0,1024.0,348.0] };
+    if titleless && !kind.is_polar() && !unit.is_empty() {
+        let shift = 116.0 - chart_bounds[1];
+        chart_bounds[1] += shift;
+        chart_bounds[3] -= shift;
+    }
     drawing.chart(kind, categories.clone(), series.clone(), chart_bounds);
     if !kind.is_polar() {
-        drawing.text(x_axis,[chart_bounds[0],470.0,chart_bounds[2],28.0],16.0,"@dk2",false,TextAlign::Center);
-        drawing.text(if kind==ChartKind::PercentStackedColumn { "Share (%)" } else {y_axis},[chart_bounds[0],76.0,chart_bounds[2],24.0],14.0,"@dk2",false,TextAlign::Left);
+        // An empty label draws nothing, so it cannot cross the title band that `layout.show_title:false` removes.
+        if !x_axis.is_empty() { drawing.text(x_axis,[chart_bounds[0],470.0,chart_bounds[2],28.0],16.0,"@dk2",false,TextAlign::Center); }
+        if !unit.is_empty() { drawing.text(unit,[chart_bounds[0],if titleless {88.0} else {76.0},chart_bounds[2],24.0],14.0,"@dk2",false,TextAlign::Left); }
     }
     if variant == 1 {
         let value = series[0].values.last().copied().unwrap_or(0.0);
@@ -42,14 +49,14 @@ pub(super) fn render(drawing: &mut Drawing, category: &str, variant: usize, data
     Ok(())
 }
 
-fn waterfall(drawing: &mut Drawing, variant: usize, data: &PartData) -> Result<()> {
+fn waterfall(drawing: &mut Drawing, variant: usize, data: &PartData, titleless: bool) -> Result<()> {
     let PartData::Waterfall { steps, unit } = data else { return Err(Error::Invalid("waterfall requires steps with explicit totals".into())); };
     let mut running=0.0; let mut segments=Vec::new(); let mut minimum=0.0f64; let mut maximum=0.0f64;
     for step in steps { let from=if step.total {0.0} else {running}; let to=if step.total {step.value} else {running+step.value}; running=to; minimum=minimum.min(from).min(to); maximum=maximum.max(from).max(to); segments.push((from,to)); }
     let span=(maximum-minimum).max(1.0); let bottom=if variant==2 {400.0} else {440.0}; let height=bottom-140.0;
     let ordinate=|value:f64| bottom-(value-minimum)/span*height; let slot=1040.0/steps.len() as f64;
     drawing.line([64.0,ordinate(0.0)],[1104.0,ordinate(0.0)],false,"@dk2");
-    drawing.text(unit,[64.0,82.0,400.0,26.0],16.0,"@dk2",false,TextAlign::Left);
+    if !unit.is_empty() { drawing.text(unit,[64.0,if titleless {88.0} else {82.0},400.0,if titleless {22.0} else {26.0}],16.0,"@dk2",false,TextAlign::Left); }
     for (index,(step,(from,to))) in steps.iter().zip(segments.iter()).enumerate() {
         let left=64.0+index as f64*slot+slot*0.16; let width=slot*0.68; let upper=ordinate(from.max(*to)); let lower=ordinate(from.min(*to));
         let shade=if step.total {"@dk1"} else if step.value>=0.0 {"@accent1"} else {"@accent2"};

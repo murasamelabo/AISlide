@@ -793,7 +793,7 @@ fn bounded_part_geometry_scales_without_blindly_scaling_text_or_strokes() {
 }
 
 #[test]
-fn bounded_part_layout_rejects_invalid_frames_and_body_clipping() {
+fn bounded_part_layout_rejects_invalid_frames_and_nonfinite_geometry() {
     for layout in [
         json!({"x":-1,"y":0,"width":1152,"height":512}),
         json!({"x":0,"y":-1,"width":1152,"height":512}),
@@ -810,8 +810,7 @@ fn bounded_part_layout_rejects_invalid_frames_and_body_clipping() {
     }
     let mut spec = column_spec();
     spec["layout"] = json!({"x":0,"y":0,"width":1152,"height":424,"show_title":false});
-    let error = execute_request(json!({"op":"create_part","id":"clipped","spec":spec})).unwrap_err();
-    assert!(error.to_string().contains("title band"));
+    execute_request(json!({"op":"create_part","id":"titleless","spec":spec})).unwrap();
     let mut parsed: aislide_core::parts::PartSpec = serde_json::from_value(spec).unwrap();
     for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         parsed.layout.as_mut().unwrap().width = invalid;
@@ -1239,4 +1238,191 @@ fn three_set_venn_labels_do_not_cross_circle_outlines() {
     let element=execute_request(json!({"op":"create_part","id":"venn-ja","spec":japanese})).unwrap();
     let label=element["children"].as_array().unwrap().iter().find(|child|child["text"]=="共通の目的").unwrap();
     assert!(label["width"].as_f64().unwrap()>=5.0*label["font_size"].as_f64().unwrap()+8.0,"Japanese center label should not leave a one-character line");
+}
+
+fn chart_spec(preset: &str, x_axis: &str, y_axis: &str, show_title: bool) -> Value {
+    // A scatter plot reads its categories as numeric X coordinates.
+    let categories = if preset.starts_with("scatter/") { json!(["10", "20", "30"]) } else { json!(["Q1", "Q2", "Q3"]) };
+    json!({"version":1,"preset":preset,"title":"chart",
+        "layout":{"x":64,"y":144,"width":1152,"height":if show_title { 512 } else { 424 },"show_title":show_title},
+        "data":{"kind":"chart","categories":categories,"series":[{"name":"Rows","values":[1,2,3]}],"x_axis":x_axis,"y_axis":y_axis}})
+}
+
+fn text_elements(part: &Value) -> Vec<&Value> { part["children"].as_array().unwrap().iter().filter(|child| child["type"] == "text").collect() }
+
+#[test]
+fn issue17_charts_without_axis_labels_can_drop_the_title_band() {
+    // Axis labels are optional; an empty one must not leave a text element in the removed 88px title band.
+    // 100-add-vertical-bar-graph always prints its fixed "Share (%)" unit and is covered by the next-but-one test.
+    for preset in ["line-graph/balanced", "horizontal-bar-graph/labeled", "vertical-bar-graph/balanced", "add-vertical-bar-graph/focus", "area-graph/balanced", "scatter/balanced", "pie-chart/balanced"] {
+        let part = execute_request(json!({"op":"create_part","id":"c","spec":chart_spec(preset, "", "", false)}))
+            .unwrap_or_else(|error| panic!("{preset} without axis labels must accept show_title:false: {error}"));
+        let empty: Vec<_> = text_elements(&part).into_iter().filter(|text| text["text"] == "").collect();
+        assert!(empty.is_empty(), "{preset} must not draw empty text elements: {empty:?}");
+    }
+}
+
+#[test]
+fn issue17_waterfall_without_a_unit_can_drop_the_title_band() {
+    let spec = json!({"version":1,"preset":"water-fall/balanced","title":"steps","layout":{"x":64,"y":144,"width":1152,"height":424,"show_title":false},
+        "data":{"kind":"waterfall","unit":"","steps":[{"label":"Start","value":10,"total":true},{"label":"Gain","value":4,"total":false},{"label":"End","value":14,"total":true}]}});
+    let part = execute_request(json!({"op":"create_part","id":"w","spec":spec})).expect("an empty unit draws nothing and must not cross the title band");
+    assert!(text_elements(&part).iter().all(|text| text["text"] != ""), "no empty unit text");
+}
+
+#[test]
+fn issue17_nonempty_units_remain_visible_without_a_title_band() {
+    for (preset, unit) in [("line-graph/balanced", "Units"), ("100-add-vertical-bar-graph/balanced", "Share (%)")] {
+        let part = execute_request(json!({"op":"create_part","id":"c","spec":chart_spec(preset, "Time", unit, false)})).unwrap();
+        let children = part["children"].as_array().unwrap();
+        let label = children.iter().find(|element| element["text"] == unit).expect("unit must not be dropped");
+        let chart = children.iter().find(|element| element["type"] == "chart").unwrap();
+        assert!(label["y"].as_f64().unwrap() >= 0.0);
+        assert!(label["y"].as_f64().unwrap() + label["height"].as_f64().unwrap() <= chart["y"].as_f64().unwrap());
+        assert!(children.iter().any(|element| element["text"] == "Time"));
+    }
+    execute_request(json!({"op":"create_part","id":"c","spec":chart_spec("line-graph/balanced", "", "Units", true)})).unwrap();
+    let mut spec = json!({"version":1,"preset":"water-fall/balanced","title":"steps","layout":{"x":64,"y":144,"width":1152,"height":424,"show_title":false},
+        "data":{"kind":"waterfall","unit":"Units","steps":[{"label":"Start","value":10,"total":true},{"label":"Gain","value":4,"total":false},{"label":"End","value":14,"total":true}]}});
+    execute_request(json!({"op":"create_part","id":"w","spec":spec})).unwrap();
+    spec["layout"]["show_title"] = json!(true);
+    spec["layout"]["height"] = json!(512);
+    execute_request(json!({"op":"create_part","id":"w","spec":spec})).unwrap();
+}
+
+#[test]
+fn pr21_titleless_waterfall_units_do_not_overlap_value_labels() {
+    for variant in ["balanced", "focus", "labeled"] {
+        for (titleless, unit) in [(true, "Units"), (true, ""), (false, "Units")] {
+            let document = execute_request(json!({"op":"create_presentation","id":"waterfall-overlap","title":"Synthetic"})).unwrap();
+            let spec = json!({"version":1,"preset":format!("water-fall/{variant}"),"title":"Synthetic",
+                "layout":{"x":64,"y":144,"width":1152,"height":if titleless {424} else {512},"show_title":!titleless},
+                "data":{"kind":"waterfall","unit":unit,"steps":[
+                    {"label":"Start","value":10,"total":true},{"label":"Gain","value":20,"total":false},{"label":"End","value":30,"total":true}]}});
+            let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":"waterfall","spec":spec})).unwrap();
+            let part = &inserted["document"]["deck"]["slides"][0]["elements"][0];
+            let values = text_elements(part);
+            if !unit.is_empty() { assert!(values.iter().any(|text| text["text"] == unit)); }
+            let report = execute_request(json!({"op":"preflight_presentation","document":inserted["document"]})).unwrap();
+            assert!(!report["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "TEXT_OVERLAP"),
+                "{variant}, titleless={titleless}, unit={unit}: {report}");
+        }
+    }
+}
+
+/// The frame maps the 1152x424 content area at scale 1.0, so heading bands keep their authored 42px height.
+fn panel_spec(before_label: &str, after_label: &str, row: &str) -> Value {
+    json!({"version":1,"preset":"contrast/panels","title":"panels","layout":{"x":64,"y":144,"width":1152,"height":424,"show_title":false},
+        "data":{"kind":"comparison_panels","panels":[
+            {"label":before_label,"items":[{"text":row}]},
+            {"label":after_label,"items":[{"text":row}]}]}})
+}
+
+/// The roundRect heading band of a panel: the shape whose height is 42px on the 512px canvas.
+fn heading_bands(part: &Value) -> Vec<&Value> {
+    part["children"].as_array().unwrap().iter().filter(|child| child["preset"] == "roundRect" && (child["height"].as_f64().unwrap() - 42.0).abs() < 0.5).collect()
+}
+
+#[test]
+fn issue16_long_panel_headings_fit_without_shrinking() {
+    for (before, after) in [("Before (until 2026-09-23)", "After (from 2026-09-23)"), ("旧（2026-09-23 より前）", "新（2026-09-23 から）")] {
+        let part = execute_request(json!({"op":"create_part","id":"p","spec":panel_spec(before, after, "Short row")}))
+            .unwrap_or_else(|error| panic!("{before}: a heading that fits the panel must not fail: {error}"));
+        for label in [before, after] {
+            let heading = part["children"].as_array().unwrap().iter().find(|child| child["text"] == label).unwrap_or_else(|| panic!("heading {label} missing"));
+            assert_eq!(heading["font_size"], 18.0, "{label} keeps its 18px heading size");
+        }
+        let bands = heading_bands(&part);
+        assert_eq!(bands.len(), 2, "one heading band per panel");
+        for band in bands {
+            assert!(band["width"].as_f64().unwrap() <= 480.0 + 0.5, "the band must stay inside the panel: {band}");
+        }
+    }
+}
+
+#[test]
+fn issue16_the_issue_report_frame_also_succeeds() {
+    // The frame from the report: 1152x512 with the title band removed.
+    let mut spec = panel_spec("Before (until 2026-09-23)", "After (from 2026-09-23)", "Short row");
+    spec["layout"]["height"] = json!(512);
+    execute_request(json!({"op":"create_part","id":"p","spec":spec})).expect("the reported frame must succeed");
+}
+
+#[test]
+fn issue16_short_panel_headings_keep_their_compact_band() {
+    let part = execute_request(json!({"op":"create_part","id":"p","spec":panel_spec("Before", "After", "Short row")})).unwrap();
+    let bands = heading_bands(&part);
+    assert_eq!(bands.len(), 2);
+    for band in bands { assert!((band["width"].as_f64().unwrap() - 216.0).abs() < 0.5, "a short heading keeps the 216px band: {band}"); }
+}
+
+#[test]
+fn issue16_the_band_grows_with_the_heading() {
+    let width = |label: &str| {
+        let part = execute_request(json!({"op":"create_part","id":"p","spec":panel_spec(label, label, "Short row")})).unwrap();
+        heading_bands(&part)[0]["width"].as_f64().unwrap()
+    };
+    let (short, medium, long) = (width("Before"), width("Before (until 2026-09-23)"), width("Quarterly operating review before"));
+    assert!(short <= medium && medium <= long, "{short} {medium} {long}");
+    assert!(medium > short, "a 25-character heading needs a wider band than a short one");
+}
+
+#[test]
+fn issue16_errors_name_the_panel_and_the_field_that_does_not_fit() {
+    let too_long = "A".repeat(64);
+    let error = execute_request(json!({"op":"create_part","id":"p","spec":panel_spec(&too_long, "After", "Short row")})).unwrap_err().to_string();
+    assert!(error.contains("panels[0].label"), "{error}");
+    assert!(!error.contains("p-"), "no internal element id in the message: {error}");
+    // Five rows leave 67px per row, so a long body cannot keep its fixed 28px size (the unframed part, as in the crowded-panels test).
+    let crowded = "Repeated synthetic words. ".repeat(8);
+    let rows = |long_at: Option<usize>| -> Vec<Value> { (0..5).map(|row| json!({"text": if Some(row) == long_at { crowded.as_str() } else { "Short row" }})).collect() };
+    let spec = |first: Vec<Value>, second: Vec<Value>| json!({"version":1,"preset":"contrast/panels","title":"panels","data":{"kind":"comparison_panels","panels":[
+        {"label":"Before","body_size":28,"items":first},{"label":"After","body_size":28,"items":second}]}});
+    execute_request(json!({"op":"create_part","id":"p","spec":spec(rows(None), rows(None))})).expect("short rows fit");
+    let error = execute_request(json!({"op":"create_part","id":"p","spec":spec(rows(Some(2)), rows(None))})).unwrap_err().to_string();
+    assert!(error.contains("panels[0].items[2].text"), "the row, not the heading, is at fault: {error}");
+    assert!(!error.contains("p-"), "{error}");
+    let error = execute_request(json!({"op":"create_part","id":"p","spec":spec(rows(None), rows(Some(1)))})).unwrap_err().to_string();
+    assert!(error.contains("panels[1].items[1].text"), "{error}");
+    assert!(error.contains("shorten") && error.contains("split"), "the message keeps its recovery advice: {error}");
+}
+
+#[test]
+fn issue16_heading_band_is_always_inside_the_panel_and_holds_the_text_on_one_line() {
+    // The band is measured, so assert properties rather than character counts that depend on the installed font.
+    let mut previous = 0.0;
+    for label in ["Hi", "Before", "Before (until 2026-09-23)", "Quarterly operating review before", "Quarterly operating review before it", "旧（2026-09-23 より前）"] {
+        let part = execute_request(json!({"op":"create_part","id":"p","spec":panel_spec(label, "After", "Short row")}));
+        let Ok(part) = part else { continue };
+        let band = heading_bands(&part)[0]["width"].as_f64().unwrap();
+        assert!((216.0..=480.0).contains(&band), "{label}: the band {band} must stay between 216 and 480px");
+        let text = part["children"].as_array().unwrap().iter().find(|child| child["text"] == label).unwrap();
+        assert!((text["width"].as_f64().unwrap() - (band - 40.0)).abs() < 0.01, "{label}: the text box follows the band");
+        assert_eq!(text["font_size"], 18.0, "{label}");
+        if label.is_ascii() { assert!(band >= previous, "{label}: the band must not shrink as the heading grows ({band} < {previous})"); previous = band; }
+    }
+}
+
+#[test]
+fn issue16_a_heading_that_cannot_fit_is_rejected_at_its_field() {
+    for label in ["A".repeat(64), "あ".repeat(40)] {
+        let error = execute_request(json!({"op":"create_part","id":"p","spec":panel_spec(&label, "After", "Short row")})).unwrap_err().to_string();
+        assert!(error.contains("panels[0].label"), "{error}");
+        assert!(error.contains("shorten"), "{error}");
+        assert!(!error.contains("p-"), "no element id: {error}");
+    }
+
+}
+
+#[test]
+fn pr21_small_panel_frames_report_public_field_in_floor_errors() {
+    for (width, height) in [(576, 212), (288, 106)] {
+        let mut spec = panel_spec("Before", "After", "Short row");
+        spec["layout"]["width"] = json!(width);
+        spec["layout"]["height"] = json!(height);
+        let error = execute_request(json!({"op":"create_part","id":"p","spec":spec})).unwrap_err().to_string();
+        assert!(error.contains("panels[0].label"), "{width}x{height}: {error}");
+        assert!(error.contains("12px") && error.contains("shorten"), "{error}");
+        assert!(!error.contains("p-"), "internal identity must not leak in the diagnostic: {error}");
+    }
 }

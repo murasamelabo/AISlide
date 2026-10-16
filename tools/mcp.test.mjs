@@ -3663,3 +3663,42 @@ test('MCP generates, edits and saves with the GUI closed', async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('MCP validate_deck omits the validated deck unless detail is full', async () => {
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const client = new Client({ name: 'aislide-validate-test', version: '1.0.0' });
+  const raw = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    return result.content[0].text;
+  };
+  try {
+    await client.connect(transport);
+    const tool = (await client.listTools()).tools.find(candidate => candidate.name === 'validate_deck');
+    assert.ok(tool.inputSchema.properties.detail, 'validate_deck documents its detail parameter');
+    assert.match(tool.description, /detail=full/);
+    const compiled = JSON.parse(await raw('compile_report', { report: JSON.parse(await raw('sample_report')) }));
+    assert.equal(compiled.slides, 12);
+    const deck_id = compiled.deck_id;
+
+    const defaultText = await raw('validate_deck', { deck_id });
+    const summaryText = await raw('validate_deck', { deck_id, detail: 'summary' });
+    const fullText = await raw('validate_deck', { deck_id, detail: 'full' });
+    const defaultResult = JSON.parse(defaultText);
+    assert.equal(defaultResult.structurally_valid, true);
+    assert.equal(defaultResult.slides, 12);
+    assert.ok(Array.isArray(defaultResult.warnings) && defaultResult.warnings.length > 0, 'the structure-only warning is kept');
+    assert.equal('deck' in defaultResult, false, 'the validated deck is not echoed by default');
+    assert.deepEqual(JSON.parse(summaryText), defaultResult, 'summary is the same small response');
+
+    const { deck: returned, ...rest } = JSON.parse(fullText);
+    assert.deepEqual(rest, defaultResult, 'detail=full only adds the deck');
+    assert.deepEqual(returned, JSON.parse(await raw('get_deck', { deck_id })), 'the returned deck is the session deck that was validated');
+    assert.ok(Buffer.byteLength(fullText) > 20 * Buffer.byteLength(defaultText), `the default response (${Buffer.byteLength(defaultText)} bytes) is far smaller than the full one (${Buffer.byteLength(fullText)} bytes)`);
+
+    const invalid = await client.callTool({ name: 'validate_deck', arguments: { deck_id, detail: 'everything' } });
+    assert.equal(invalid.isError, true, 'an unknown detail value is rejected');
+  } finally {
+    await client.close();
+  }
+});
