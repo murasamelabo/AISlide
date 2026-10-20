@@ -1724,10 +1724,89 @@ test('graph authoring SDK retains routes annotations sites and group layout thro
   assert.deepEqual(reopened.session.document.parts[0].spec.data.graph, authored);
 });
 
+test('showcase selection hotspots persist typed appearance and remain transient', async () => {
+  const client = new AislideClient(requestCore);
+  const catalog = await client.partCatalog();
+  const spec = structuredClone(catalog.presets.find(preset => preset.id === 'interactive/summary').example);
+  spec.data.spec.appearance = 'showcase';
+  spec.layout = { x: 0, y: 0, width: 1280, height: 720, show_title: true };
+  const compiled = await client.compileInteractive({ id: 'showcase', spec });
+  assert.ok(compiled.views.every(view => view.hotspots.length >= 1 && view.hotspots.length <= 8));
+  const session = await client.createPresentation('showcase-sdk', 'Synthetic rich selection');
+  await session.addPart('slide-1', { id: 'showcase', spec });
+  const source = await session.exportPresentation();
+  const { session: reopened } = await client.openPresentation('showcase-reopened', source.base64);
+  assert.equal(reopened.document.parts[0].spec.data.spec.appearance, 'showcase');
+  const next = structuredClone(reopened.document.parts[0].spec);
+  next.data.spec.initial_state.selected_id = 'resource';
+  await reopened.updatePart('slide-1', { id: 'showcase', spec: next });
+  assert.equal(reopened.document.parts[0].spec.data.spec.initial_state.selected_id, 'resource');
+  await reopened.undo();
+  assert.equal((await reopened.exportPresentation()).base64, source.base64);
+});
+
+test('PowerPoint SDK export is opt-in, compiles real states and retains the editable source', async () => {
+  const client = new AislideClient(requestCore);
+  const catalog = await client.partCatalog();
+  const spec = catalog.presets.find(preset => preset.id === 'interactive/dashboard').example;
+  const session = await client.createPresentation('office-sdk', 'Synthetic Office component');
+  await session.addPart('slide-1', { id: 'office', spec });
+  const before = structuredClone(session.document);
+  const payload = await client.compileInteractive({ id: 'office', spec });
+  assert.ok(payload.views.length > 1);
+  const options = { runtime_url: 'https://localhost:4198/office.html', catalog: { kind: 'file_system', location: '\\\\localhost\\AISlideAddins' } };
+  const result = await session.exportPowerpointInteractive(options);
+  assert.equal(result.components, 1);
+  assert.equal(result.powerpoint_playback_verified, false);
+  assert.equal(result.requires_addin_installation, true);
+  assert.ok(result.warnings.every(item => item.warning.code && item.warning.message));
+  assert.deepEqual(session.document, before);
+  const manifest = await client.powerpointAddinManifest(options.runtime_url);
+  assert.equal(manifest.manifest, result.manifest);
+  await assert.rejects(() => session.exportCopilotInteractive({ acknowledged_experimental: false }), /acknowledged_experimental=true/);
+  const experiment = await session.exportCopilotInteractive({ acknowledged_experimental: true });
+  assert.equal(experiment.catalog_id, 'fa000000210');
+  assert.equal(experiment.experimental, true);
+  assert.equal(experiment.public_authoring_api_verified, false);
+  assert.equal(experiment.powerpoint_playback_verified, false);
+  assert.equal(experiment.manifest, undefined);
+  assert.deepEqual(session.document, before);
+  const lab = await session.exportCopilotInteractive({ acknowledged_experimental: true, javascript_labs: [{ slide_id: 'slide-1', element_id: 'office', kind: 'simulator' }] });
+  assert.equal(lab.javascript_lab_components, 1);
+  assert.equal(lab.powerpoint_playback_verified, false);
+  assert.deepEqual(session.document, before);
+  const reopened = await client.openPresentation('office-sdk-reopen', result.base64);
+  assert.ok(reopened.warnings.some(message => message.includes('HTML was not executed')));
+  assert.equal((await reopened.session.exportPresentation()).base64, result.base64);
+  await assert.rejects(() => session.exportPowerpointInteractive({ ...options, catalog: { kind: 'developer' } }), /unknown variant/);
+});
+
+test('interactive SDK preview is transient and persists only explicitly saved defaults', async () => {
+  const client = new AislideClient(requestCore);
+  const catalog = await client.partCatalog();
+  const spec = catalog.presets.find(preset => preset.id === 'interactive/dashboard').example;
+  const session = await client.createPresentation('interactive-sdk', 'Synthetic interactive example');
+  await session.addPart('slide-1', { id: 'interactive', spec });
+  const before = structuredClone(session.document);
+  const preview = await client.previewInteractive({ id: 'interactive', spec, state: { selected_id: 'resource', group_id: 'after', scale: 'logarithmic' } });
+  assert.equal(preview.powerpoint_interactive, false);
+  assert.equal(preview.executes_imported_html, false);
+  assert.equal(preview.state.selected_id, 'resource');
+  assert.deepEqual(session.document, before);
+  const next = structuredClone(spec);
+  next.data.spec.initial_state = preview.state;
+  await session.updatePart('slide-1', { id: 'interactive', spec: next });
+  const exported = await session.exportPresentation();
+  const reopened = await client.openPresentation('interactive-reopen', exported.base64);
+  assert.deepEqual(reopened.session.document.parts[0].spec.data.spec.initial_state, preview.state);
+  await session.undo();
+  assert.deepEqual(session.document.deck, before.deck);
+});
+
 test('metadata parts share catalog, revisioned updates, undo and single PPTX persistence', async () => {
   const client = new AislideClient(requestCore);
   const catalog = await client.partCatalog();
-  assert.equal(catalog.presets.length, 138);
+  assert.equal(catalog.presets.length, 143);
   const spec = catalog.presets.find((preset) => preset.id === 'vertical-bar-graph/balanced').example;
   const deck = { version: 1, title: 'Parts', width: 1280, height: 720, slides: [{ id: 'slide', title: 'Parts', background: 'FFFFFF', notes: 'Synthetic fixture', elements: [] }] };
   const session = await client.createDocument({ id: 'parts-sdk', deck });

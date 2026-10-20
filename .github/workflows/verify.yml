@@ -59,6 +59,18 @@ jobs:
         run: node --test --test-concurrency=1 tools/geometry.test.mjs tools/proofing.test.mjs tools/fonts.test.mjs tools/local-ai.test.mjs tools/capacity.test.mjs
       - name: Lint Studio
         run: npm run lint
+      - name: Generate interactive playback fixtures
+        run: |
+          node tools/office-interactive-demo.mjs --runtime-url https://localhost:4198/office.html --catalog '\\localhost\AISlideAddins' --out .artifacts\office-interactive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/office-interactive-demo.mjs --experimental-copilot --out .artifacts\copilot-interactive
+      - name: Test exported interactive HTML in Edge
+        run: npx --no-install playwright test --config playwright.office.config.ts
+      - name: Test live JavaScript expression experiments
+        run: |
+          node tools/javascript-lab-demo.mjs --out .artifacts\javascript-expression-lab
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/verify-javascript-lab.mjs --directory .artifacts\javascript-expression-lab
       - name: Test editor in Edge
         run: npm run test:e2e
       - name: Test generation in Edge with a local fixture

@@ -488,6 +488,41 @@ test('Japanese editing skill is portable and separates meaning from presentation
   assert.match(guide, /japanese-editing\/SKILL\.md/);
 });
 
+test('interactive playback checklist is required by the authoring skill and Windows CI', async () => {
+  const skillUrl = new URL('../.github/skills/aislide-authoring/SKILL.md', import.meta.url);
+  const skill = await readFile(skillUrl, 'utf8');
+  assert.ok(Buffer.byteLength(skill) < 6000);
+  const link = skill.match(/\[mandatory playback checks\]\(([^)]+)\)/);
+  assert.ok(link, 'The short authoring skill must route interactive deliveries through the checklist');
+  assert.equal(link[1], '../../../docs/authoring/powerpoint-interactive.md#mandatory-creation-and-delivery-checklist');
+  const guide = await readFile(new URL(link[1].split('#')[0], skillUrl), 'utf8');
+  for (const required of [
+    '## Mandatory creation and delivery checklist', 'actual exported HTML', 'shared runtime',
+    'Rebuild before export', 'Re-export to a new directory/filename', 'Rust compile time',
+    "PPTX's exported `aislideInteractive`", 'served asset', 'it does not embed `contentBlockHtml`',
+    "throw 'CLI build failed", "throw 'Own-add-in fixture generation failed",
+    "throw 'Copilot fixture generation failed", "throw 'Playback checks failed",
+    'actual native canvas dimensions', 'internal vertical scrolling', '`scrollIntoView()`',
+    '1324×746', '864×408', '640×300', '390×900', '440px', '1000 CSS pixels',
+    'visible detail/chart', 'PowerPoint interaction unverified', 'SHA-256',
+    'AISLIDE_COPILOT_TEST_DIR',
+  ]) assert.ok(guide.includes(required), `Missing playback prevention guidance: ${required}`);
+  assert.match(guide, /not a\s+runtime export-blocking gate/);
+  const index = await readFile(new URL('../docs/authoring/README.md', import.meta.url), 'utf8');
+  assert.ok(index.includes('powerpoint-interactive.md#mandatory-creation-and-delivery-checklist'));
+  const workflow = await readFile(new URL('../.github/workflows/verify.yml', import.meta.url), 'utf8');
+  for (const command of [
+    'npm run core:build -- --locked',
+    'node tools/office-interactive-demo.mjs --runtime-url',
+    'node tools/office-interactive-demo.mjs --experimental-copilot',
+    'npx --no-install playwright test --config playwright.office.config.ts',
+    'node tools/javascript-lab-demo.mjs --out .artifacts\\javascript-expression-lab',
+    'node tools/verify-javascript-lab.mjs --directory .artifacts\\javascript-expression-lab',
+  ]) assert.ok(workflow.includes(command), `Missing playback CI command: ${command}`);
+  assert.ok(workflow.indexOf('npm run core:build') < workflow.indexOf('Generate interactive playback fixtures'));
+  assert.ok(workflow.indexOf('Generate interactive playback fixtures') < workflow.indexOf('Test exported interactive HTML in Edge'));
+});
+
 test('reference guidance and CI include the publication workflow within the skill budget', async () => {
   const skill = await readFile(new URL('../.github/skills/aislide-authoring/SKILL.md', import.meta.url), 'utf8');
   assert.ok(Buffer.byteLength(skill) <= 6000);

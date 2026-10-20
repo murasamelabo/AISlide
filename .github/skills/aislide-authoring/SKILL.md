@@ -15,14 +15,14 @@ Skills do not connect MCP. Label synthetic data.
 
 ## Short Workflow
 
-1. Confirm audience, purpose, required pages, evidence, source images and notes.
-	Never invent data or redraw required source images.
-2. Use `list_decks` / `get_deck_summary` for IDs. Discover advanced tools; fetch
+1. Confirm audience, purpose, pages, evidence, images and notes.
+	Never invent data or redraw source images.
+2. Get IDs via `list_decks` / `get_deck_summary`; fetch
 	`get_tool_schema({name:"apply_operations"})` before advanced elements, rich text,
 	composition, parts or graphs.
-3. Choose `compile_report`, guided authoring or `create_presentation`. Set
-	`setup:{design_preset,font_family,theme?}` before content. Confirm installed
-	glyph coverage; font names do not install/embed.
+3. Use `compile_report`, guided authoring or `create_presentation`. Set
+	`setup:{design_preset,font_family,theme?}` before content. Check installed
+	glyph coverage; names do not install/embed fonts.
 4. Reuse title/header/footer/body regions and styles. On generated empty slides,
 	`compose_slide` accepts 1-3 blocks: cards, callout, text, steps, comparison, part
 	or graph. Reuse `style`; default card padding is 24px. Native/nonempty slides
@@ -32,19 +32,19 @@ Skills do not connect MCP. Label synthetic data.
 	On a request to use/skip patterns, call `set_layout_patterns` (on/off/status).
 	Optional `component_styles` / `component_profile:"technical_briefing"` shares
 	roles across recipes, patterns and manual elements; preserve imported templates.
-5. For a requested icon-led briefing style, read `references/technical-panels.md`.
+5. For icon-led briefings, read `references/technical-panels.md`.
 	Prefer managed parts/graphs. A composition graph block takes coordinate-free
 	`input` and inserts managed metadata in one operation. `layout_graph` returns
 	a bounded grid GraphSpec, not a hierarchical layout: 1-48 nodes, 64 edges,
 	1-8 columns (default 3), no groups or node resizing.
 6. Register approved local images with `register_asset` or atomic `register_assets`
 	(1-32). Use returned `asset_id` and dimensions; never regenerate/output base64
-	through the model. Optional `prepare_assets` batches explicit resize/format
-	changes and preserves originals. Use `fit:"contain"` or intentional `fit:"cover"`.
+	through the model. `prepare_assets` batches explicit resize/format changes,
+	preserving originals. Use `fit:"contain"` or intentional `fit:"cover"`.
 	Omitting `fit` uses legacy stretch. Retain attribution.
 7. Batch 1-128 `apply_operations`; after targets exist include `update_notes`,
 	`set_table_headers`, `set_accessibility`. One Undo; atomic rejection.
-	Use planned revision/hash; never refresh to force a stale plan.
+	Never refresh revision/hash to force a stale plan.
 8. `set_text_padding` must leave positive content space; `null` resets defaults.
 	`set_rich_text` takes paragraphs; core derives plain text; empty input clears.
 	Use dedicated dynamic-field operations; keep plain/rich validation.
@@ -58,24 +58,26 @@ Skills do not connect MCP. Label synthetic data.
 	 notes, headers, alt text, Japanese glyphs/fallbacks, inner padding, overflow and
 	 graph collisions. Composition text rejects overflow; managed parts
 	 keep bounded fitting. Structure is not Office visual parity.
-11. Export under a new approved filename. Verify actual path, hash, page count and
+11. For interactive exports, follow [mandatory playback checks](../../../docs/authoring/powerpoint-interactive.md#mandatory-creation-and-delivery-checklist):
+	 test exported HTML after clicks, not snapshots; rebuild and re-export embedded fixes.
+	 Export under a new approved filename. Verify path, hash, page count and
 	 review scope. Report unmet requirements, substitutions and unverified items.
 	 Never overwrite originals, publish, deploy or install without authorization.
 
 ## Limits And Recovery
 
-- Asset roots come only from startup `--asset-dir`; no request widens permission
-  or fetches external relationships. Registry: 32 handles / 64MiB raw. PNG/JPEG:
+- Asset roots use startup `--asset-dir`; never widen permissions
+  or fetch external relationships. Registry: 32 handles / 64MiB raw. PNG/JPEG:
   1MiB; SVG: 256KiB; archives: 16MiB; fonts: 12MiB; evidence: 2MiB. `usage` is
 	registry-only; `raster_cost` is not document capacity approval. Closing handles
-	does not remove document images. Registration/preparation is atomic.
+	retains document images. Registration/preparation is atomic.
 - Report bodies: at most 4 items. Process: 2-4 labels, each 80 Unicode scalars;
-  other bodies: 240. Notes: 8000. Fix the reported field path; do not silently
-  reduce agreed pages/content. Cards: 1-6 items, at most 3 columns.
+  other bodies: 240. Notes: 8000. Fix field paths; never drop agreed content.
+  Cards: 1-6 items, at most 3 columns.
 - Fix validation/capacity inputs without bypassing guards or flattening managed
   objects. On busy, stop parallel calls and await the existing operation, no polls.
-  After timeout/cancellation inspect summaries and output manifests; do not assume
-  nothing happened. Save work before reconnecting: handles are process-local.
+  After timeout/cancellation inspect summaries/manifests. Save before reconnecting:
+  handles are process-local.
 - `_meta.aislide_timing` is not model latency or pure CPU time; do not claim speedups.
 
 ## Select And Review The Expression
@@ -83,10 +85,10 @@ Skills do not connect MCP. Label synthetic data.
 Use the [selection discriminators](references/technical-panels.md#selection-discriminators).
 Record question, relation, primary visual, selected/rejected reasons, emphasis and
 style roles. `recommend_recipes` accepts goal/dimensions/position need; inspect
-rejected/no-fit, then preview. Check relations, source readability, anchors and
-role consistency, not just overflow. Never infer facts or edit managed children.
+rejected/no-fit, then preview. Check relations, readable sources, anchors and
+styles, not only overflow. Never infer facts or edit managed children.
 
 ## Further Detail
 
-With a source checkout, consult `<repo>/docs/api.md` and `<repo>/docs/authoring/README.md`.
-For user-level installs, do not assume a relative path to the repo.
+Source docs: `<repo>/docs/api.md`, `<repo>/docs/authoring/README.md`.
+User installs cannot assume repo-relative paths.

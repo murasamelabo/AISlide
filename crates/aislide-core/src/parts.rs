@@ -62,6 +62,7 @@ impl PartLayout {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PartData {
+    Interactive { spec: crate::interactive::Spec },
     ComparisonPanels { panels: Vec<ComparisonPanel>, #[serde(default)] transition: bool },
     IconCards { cards: Vec<IconCard>, #[serde(default, skip_serializing_if = "Option::is_none")] columns: Option<usize>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] numbered: bool, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     IconRows { rows: Vec<IconRow>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] boxed: bool, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
@@ -192,6 +193,7 @@ fn count(length: usize, minimum: usize, maximum: usize) -> Result<()> { if !(min
 
 fn validate_data(data: &PartData) -> Result<()> {
     match data {
+        PartData::Interactive { spec } => crate::interactive::validate(spec)?,
         PartData::ComparisonPanels { panels, .. } => {
             count(panels.len(), 2, 2)?;
             if panels[0].items.len() != panels[1].items.len() { return Err(Error::Invalid("comparison panels require paired row counts".into())); }
@@ -263,6 +265,11 @@ pub(super) fn validate_spec(spec: &PartSpec) -> Result<(&str, usize)> {
     valid_text(&spec.subtitle, 120)?;
     if let Some(layout) = &spec.layout { layout.validate()?; }
     if spec.version != 1 { return Err(Error::Invalid("part version".into())); }
+    if let PartData::Interactive { spec: interactive } = &spec.data {
+        if spec.preset != format!("interactive/{}", interactive.template.name()) { return Err(Error::Invalid("interactive preset must match its template".into())); }
+        crate::interactive::validate(interactive)?;
+        return Ok(("interactive",0));
+    }
     if spec.preset == "contrast/panels" {
         if !matches!(spec.data, PartData::ComparisonPanels { .. }) { return Err(Error::Invalid("contrast/panels requires comparison_panels data".into())); }
         validate_data(&spec.data)?;
@@ -332,6 +339,9 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
     valid_text(id,40)?; if id.is_empty() {return Err(Error::Invalid("part identity".into()));}
     crate::design::validate_theme(theme)?;
     let (category,variant)=validate_spec(spec)?;
+    if let PartData::Interactive { spec: interactive } = &spec.data {
+        return crate::interactive::create(id,spec,interactive,&interactive.initial_state,theme);
+    }
     if let Some(graph) = process::graph(spec, theme)? { return graph_part(id, spec, &graph, theme); }
     if briefing::kind(&spec.data).is_some() { return briefing::create(id, spec, theme); }
     if let PartData::Diagram { graph } = &spec.data {
@@ -527,7 +537,7 @@ fn measured_slack(element: &Element, theme: &crate::design::Theme, ids: &[String
     Ok(if slack.is_finite() { slack.max(0.0) } else { 0.0 })
 }
 
-fn layout_overflow(element: &Element, theme: &crate::design::Theme) -> Result<Option<(String, bool)>> {
+pub(crate) fn layout_overflow(element: &Element, theme: &crate::design::Theme) -> Result<Option<(String, bool)>> {
     let measured = crate::layout::measure_layout(&measurement_deck(element, theme))?;
     Ok(measured.measurements.iter().find(|measurement| measurement.overflow || measurement.missing_glyphs > 0).map(|measurement| {
         let text = crate::model::element_list(std::slice::from_ref(element)).into_iter().find_map(|candidate| match candidate {
@@ -538,7 +548,7 @@ fn layout_overflow(element: &Element, theme: &crate::design::Theme) -> Result<Op
     }))
 }
 
-pub(super) struct Drawing { prefix: String, pub elements: Vec<Element>, places: std::collections::BTreeMap<String, String> }
+pub(crate) struct Drawing { prefix: String, pub elements: Vec<Element>, places: std::collections::BTreeMap<String, String> }
 impl Drawing {
     pub fn new(prefix: &str) -> Self { Self { prefix: prefix.into(), elements: Vec::new(), places: Default::default() } }
     /// Name the spec field the NEXT element stands for, so an error can say `panels[0].label` instead of an element ID.

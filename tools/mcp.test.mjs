@@ -3049,6 +3049,89 @@ test('P1 MCP finalization publishes a traceable new bundle without changing the 
   } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test('MCP PowerPoint content export publishes add-in and integrity manifests last without overwriting', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-office-content-'));
+  const client = new Client({ name: 'office-integration', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic Office component' });
+    const catalog = await call('part_catalog', { preset_id: 'interactive/dashboard', detail: 'full' });
+    const spec = catalog.presets[0].example;
+    await call('add_part', { deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'office', spec });
+    const before = await call('get_document', { deck_id });
+    const options = { runtime_url: 'https://localhost:4198/office.html', catalog: { kind: 'file_system', location: '\\\\localhost\\AISlideAddins' } };
+    assert.ok((await call('compile_interactive', { id: 'office', spec })).views.length > 1);
+    const rich = structuredClone(spec);
+    rich.data.spec.appearance = 'showcase';
+    rich.layout = { x: 0, y: 0, width: 1280, height: 720, show_title: true };
+    const richPayload = await call('compile_interactive', { id: 'rich-office', spec: rich });
+    assert.ok(richPayload.views.every(view => view.hotspots.length > 0));
+    const result = await call('export_powerpoint_interactive', { deck_id, filename: 'office.pptx', options });
+    assert.equal(result.powerpoint_playback_verified, false);
+    assert.deepEqual(await readdir(directory).then(names => names.sort()), ['office.addin.xml', 'office.manifest.json', 'office.pptx']);
+    assert.equal(result.paths.at(-1), join(directory, 'office.manifest.json'));
+    const receipt = JSON.parse(await readFile(join(directory, 'office.manifest.json'), 'utf8'));
+    for (const file of receipt.files) assert.equal(createHash('sha256').update(await readFile(join(directory, file.filename))).digest('hex'), file.sha256);
+    const failed = await client.callTool({ name: 'export_powerpoint_interactive', arguments: { deck_id, filename: 'office.pptx', options } });
+    assert.equal(failed.isError, true);
+    assert.equal((await client.callTool({ name: 'export_copilot_interactive', arguments: { deck_id, filename: 'copilot.pptx', acknowledged_experimental: false } })).isError, true);
+    const experiment = await call('export_copilot_interactive', { deck_id, filename: 'copilot.pptx', acknowledged_experimental: true });
+    assert.equal(experiment.catalog_id, 'fa000000210');
+    assert.equal(experiment.experimental, true);
+    assert.equal(experiment.powerpoint_playback_verified, false);
+    assert.equal(experiment.paths.length, 2);
+    const experimentReceipt = JSON.parse(await readFile(join(directory, 'copilot.manifest.json'), 'utf8'));
+    assert.equal(createHash('sha256').update(await readFile(join(directory, 'copilot.pptx'))).digest('hex'), experimentReceipt.files[0].sha256);
+    assert.equal((await readdir(directory)).some(name => name === 'copilot.addin.xml'), false);
+    assert.equal((await client.callTool({ name: 'export_copilot_interactive', arguments: { deck_id, filename: 'copilot.pptx', acknowledged_experimental: true } })).isError, true);
+    const lab = await call('export_copilot_interactive', { deck_id, filename: 'javascript-lab.pptx', acknowledged_experimental: true,
+      javascript_labs: [{ slide_id: 'slide-1', element_id: 'office', kind: 'simulator' }] });
+    assert.equal(lab.javascript_lab_components, 1);
+    assert.equal(lab.powerpoint_playback_verified, false);
+    assert.equal((await client.callTool({ name: 'export_copilot_interactive', arguments: { deck_id, filename: 'bad-lab.pptx', acknowledged_experimental: true,
+      javascript_labs: [{ slide_id: 'slide-1', element_id: 'office', kind: 'arbitrary_code', html: '<script/>' }] } })).isError, true);
+    assert.deepEqual(await call('get_document', { deck_id }), before);
+  } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('MCP interactive prototypes validate typed data and preview without document changes', async () => {
+  const client = new Client({ name: 'interactive-integration-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const catalog = await call('part_catalog', { query: 'interactive', detail: 'full' });
+    assert.equal(catalog.presets.length, 5);
+    const tools = await client.listTools();
+    assert.equal(tools.tools.find(tool => tool.name === 'preview_interactive').annotations.readOnlyHint, true);
+    for (const entry of catalog.presets) {
+      const preview = await call('preview_interactive', { id: 'interactive', spec: entry.example, state: { selected_id: 'resource' } });
+      assert.equal(preview.state.selected_id, 'resource');
+      assert.equal(preview.powerpoint_interactive, false);
+      assert.equal(preview.executes_imported_html, false);
+    }
+    const spec = catalog.presets.find(entry => entry.id === 'interactive/dashboard').example;
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic interactive example' });
+    await call('add_part', { deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'interactive', spec });
+    const before = await call('get_document', { deck_id });
+    await call('preview_interactive', { id: 'interactive', spec, state: { selected_id: 'resource', group_id: 'after' } });
+    assert.deepEqual(await call('get_document', { deck_id }), before);
+    const bad = structuredClone(spec);
+    bad.data.spec.html = '<script>throw new Error("untrusted")</script>';
+    assert.equal((await client.callTool({ name: 'preview_interactive', arguments: { id: 'bad', spec: bad } })).isError, true);
+  } finally { await client.close(); }
+});
+
 test('MCP open list recommendations render native text and keep failed edits atomic', async () => {
   const client = new Client({ name: 'open-list-integration-test', version: '1.0.0' });
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
@@ -3060,7 +3143,7 @@ test('MCP open list recommendations render native text and keep failed edits ato
   try {
     await client.connect(transport);
     const catalog = await call('part_catalog');
-    assert.equal(catalog.presets.length, 138);
+    assert.equal(catalog.presets.length, 143);
     for (const id of ['list/rows', 'list-horizontal/columns', 'list-enumeration/grid']) {
       const preset = catalog.presets.find(entry => entry.id === id);
       assert.equal(preset.recommended, true);

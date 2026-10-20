@@ -290,7 +290,21 @@ export type SankeyLink = { from: string; to: string; value: number }
 export type JourneyRow = { label: string; cells: string[]; boxed?: boolean }
 export type ArchitectureElement = { id: string; label: string; kind: 'person' | 'container' | 'database' | 'external'; detail?: string }
 export type ArchitectureRelation = { from: string; to: string; label?: string }
+export type InteractiveTemplate = 'summary' | 'dashboard' | 'timeline' | 'comparison' | 'map'
+export type InteractiveState = { selected_id: string; group_id?: string | null; dimension?: number; scale?: 'linear' | 'logarithmic' }
+export type InteractiveSpec = { version: 1; template: InteractiveTemplate; appearance?: 'plain' | 'showcase'; source: string; groups?: { id: string; label: string }[]; dimensions?: string[]; items: {
+  id: string; label: string; detail: string; action?: string; group_id?: string | null; value?: number | null; unit?: string;
+  values?: string[]; metrics?: { label: string; value: string; qualifier: string }[]
+}[]; initial_state: InteractiveState }
+export type InteractivePreview = { element: Element; state: InteractiveState; visible_ids: string[]; powerpoint_interactive: false; executes_imported_html: false; transient: true; limitations: string[] }
+export type OfficeInteractivePayload = { version: 1; title: string; template: InteractiveTemplate; source: string; groups: { id: string; label: string }[]; dimensions: string[]; items: { id: string; label: string; group_id?: string | null }[]; initial_state: InteractiveState; colors: Record<string, string>; font_family: string; views: { state: InteractiveState; element: Element; hotspots?: { item_id: string; x: number; y: number; width: number; height: number }[]; controls_frame?: Frame }[] }
+export type PowerpointInteractiveOptions = { runtime_url: string; catalog: { kind: 'file_system'; location: string } }
+export type PowerpointInteractiveExport = { base64: string; filename: string; manifest: string; addin_id: string; components: number; powerpoint_playback_verified: false; requires_addin_installation: true; requires_https_runtime: true; warnings: { slide_id: string; element_id: string; warning: { code: string; message: string } }[]; limitations: string[] }
+export type JavascriptLabKind = 'simulator' | 'network' | 'priority' | 'playback' | 'comparison' | 'quiz' | 'explorer' | 'canvas'
+export type JavascriptLabSelection = { slide_id: string; element_id: string; kind: JavascriptLabKind }
+export type CopilotInteractiveExport = { base64: string; filename: string; catalog_id: 'fa000000210'; store_type: 'sdxcatalog'; components: number; javascript_lab_components: number; experimental: true; public_authoring_api_verified: false; powerpoint_playback_verified: false; warnings: PowerpointInteractiveExport['warnings']; limitations: string[] }
 export type PartData =
+  | { kind: 'interactive'; spec: InteractiveSpec }
   | { kind: 'comparison_panels'; panels: ComparisonPanel[]; transition?: boolean }
   | { kind: 'icon_cards'; cards: IconCard[]; columns?: number | null; numbered?: boolean; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'icon_rows'; rows: IconRow[]; boxed?: boolean; body_size?: number | null; message?: PartMessage | null }

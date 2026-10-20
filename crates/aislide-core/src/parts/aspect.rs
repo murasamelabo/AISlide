@@ -17,7 +17,8 @@ pub enum Sensitivity { Free, Tolerant, Strict }
 pub enum Encoding { None, Area, Count, Geography }
 
 /// Every category declares whether its data meaning lives in shape, area, count or geography.
-const ENCODINGS: [(&str, Encoding); 36] = [
+const ENCODINGS: [(&str, Encoding); 37] = [
+    ("interactive", Encoding::None),
     ("pie-chart", Encoding::None), ("vertical-bar-graph", Encoding::None), ("add-vertical-bar-graph", Encoding::None), ("100-add-vertical-bar-graph", Encoding::None),
     ("horizontal-bar-graph", Encoding::None), ("area-graph", Encoding::None), ("water-fall", Encoding::None), ("line-graph", Encoding::None),
     ("infographic", Encoding::Count), ("scatter", Encoding::None), ("tree", Encoding::None), ("pyramid", Encoding::None), ("flow", Encoding::None),
@@ -102,6 +103,7 @@ pub(crate) fn restore_marker(element: &mut Element, horizontal: f64, vertical: f
 
 /// Height of the canvas region mapped into a part layout frame.
 pub fn content_height(spec: &PartSpec) -> f64 {
+    if matches!(spec.data, super::PartData::Interactive { .. }) { return spec.layout.as_ref().map_or(512.0,|layout|layout.height); }
     let Some(layout) = &spec.layout else { return 512.0 };
     // A diagram only loses the title band when its own title was drawn there (mirrors `graph_context`).
     if let super::PartData::Diagram { graph } = &spec.data { return if super::graph_title_band_removed(graph, layout) { 424.0 } else { 512.0 }; }
@@ -111,7 +113,12 @@ pub fn content_height(spec: &PartSpec) -> f64 {
 pub fn profile(spec: &PartSpec) -> Result<AspectProfile> {
     let category = spec.preset.split('/').next().unwrap_or_default();
     let encoding = encoding(category)?;
-    let canvas = [CANVAS_WIDTH, content_height(spec)];
+    let canvas = if matches!(spec.data, super::PartData::Interactive { .. }) {
+        spec.layout.as_ref().map_or([CANVAS_WIDTH,512.0],|layout|[layout.width,layout.height])
+    } else { [CANVAS_WIDTH, content_height(spec)] };
+    if matches!(spec.data, super::PartData::Interactive { .. }) {
+        return Ok(AspectProfile {layout:"native",canvas,sensitivity:Sensitivity::Free,encoding,markers:0,tolerance:None,reasons:vec!["typed interactive view lays out natively; no HTML execution".into()]});
+    }
     if super::briefing::kind(&spec.data).is_some() {
         return Ok(AspectProfile { layout: "native", canvas, sensitivity: Sensitivity::Free, encoding, markers: 0, tolerance: None, reasons: vec!["lays out natively inside the frame".into()] });
     }
@@ -169,11 +176,14 @@ pub fn excessive_distortion(spec: &PartSpec) -> Result<Option<(f64, AspectProfil
 
 #[cfg(test)]
 mod tests {
-    use crate::parts::catalog::CATEGORIES;
+    use std::collections::BTreeSet;
 
     #[test]
     fn every_catalog_category_declares_an_encoding() {
-        for (category, ..) in CATEGORIES { super::encoding(category).unwrap(); }
-        assert_eq!(super::ENCODINGS.len(), CATEGORIES.len());
+        let catalog=crate::parts::catalog::catalog();
+        let categories:BTreeSet<_>=catalog["presets"].as_array().unwrap().iter()
+            .map(|preset|preset["category"].as_str().unwrap()).collect();
+        for category in &categories { super::encoding(category).unwrap(); }
+        assert_eq!(super::ENCODINGS.len(), categories.len());
     }
 }
