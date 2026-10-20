@@ -1,6 +1,7 @@
 ﻿import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { readFile } from 'node:fs/promises';
+import { request as httpRequest } from 'node:http';
 import { resolve } from 'node:path';
 import { unzipSync } from 'fflate';
 
@@ -54,6 +55,29 @@ test('self-contained experimental Copilot HTML executes all five generated views
 async function fixture(template: string) {
   return JSON.parse(await readFile(resolve('.artifacts', 'office-interactive', `${template}.json`), 'utf8'));
 }
+
+test('Office query parameters preserve asset routing without widening host or path access', async ({ request }) => {
+  for (const asset of ['office.html','runtime.mjs','runtime.css','preview.json']) {
+    const plain=await request.get(`/${asset}`);
+    const queried=await request.get(`/${asset}?_host_Info=PowerPoint%24Win32%2416.01%24en-US&v=2`);
+    expect(plain.status()).toBe(200);
+    expect(queried.status()).toBe(200);
+    expect(await queried.body()).toEqual(await plain.body());
+    const head=await request.head(`/${asset}?v=2`);
+    expect(head.status()).toBe(200);
+    expect((await head.body()).length).toBe(0);
+  }
+  expect((await request.get('/office.html?x=1',{headers:{Host:'attacker.invalid:4198'}})).status()).toBe(403);
+  expect((await request.post('/office.html?x=1')).status()).toBe(405);
+  for (const path of ['/unknown.html?v=2','/%2e%2e/package.json?v=2','//attacker.invalid/office.html?v=2']) {
+    const status=await new Promise<number|undefined>((resolve,reject) => {
+      const req=httpRequest({hostname:'127.0.0.1',port:4198,path},response => {response.resume();resolve(response.statusCode);});
+      req.on('error',reject);
+      req.end();
+    });
+    expect(status).toBe(404);
+  }
+});
 
 test('all playback types fill a constrained host without becoming a clipped sidebar preview', async ({ page }) => {
   for (const template of ['summary', 'dashboard', 'timeline', 'comparison', 'map']) {

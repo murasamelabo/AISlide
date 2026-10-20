@@ -37,7 +37,8 @@ export function OfficeExportPanel({ session, onBusy }: { session: DocumentSessio
     </div> : <>
     <p>This development export uses an AISlide-owned Office content add-in. It can run generated HTML controls inside a supported PowerPoint host only after the recipient installs the manifest and trusts/reaches its HTTPS runtime. Network-share catalogs are Windows testing only, not production deployment.</p>
     <label className="field">Trusted HTTPS runtime URL<input aria-label="PowerPoint runtime URL" value={runtime} maxLength={2048} disabled={busy} onChange={event => { setRuntime(event.target.value); update() }} /></label>
-    <label className="field">Trusted catalog UNC path<input aria-label="PowerPoint catalog UNC path" placeholder="\\server\AISlideAddins" value={catalog} maxLength={2048} disabled={busy} onChange={event => { setCatalog(event.target.value); update() }} /></label>
+    <label className="field">Trusted catalog UNC path<input aria-label="PowerPoint catalog UNC path" aria-describedby="catalog-disclosure" placeholder="\\server\AISlideAddins" value={catalog} maxLength={2048} disabled={busy} onChange={event => { setCatalog(event.target.value); update() }} /></label>
+    <p id="catalog-disclosure">The catalog UNC path, including its server/share names, is stored in the PPTX and visible to recipients. Use only a path approved for distribution.</p>
     </>}
     {error && <p className="error" role="alert">{error}</p>}
     <button className="primary" disabled={busy || (target === 'copilot' ? !acknowledged : !catalog.trim())} onClick={() => void prepare()}>{busy ? 'Preparing playback export' : 'Prepare PowerPoint interactive export'}</button>

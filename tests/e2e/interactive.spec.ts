@@ -18,6 +18,7 @@ test('PowerPoint content export is explicit and downloads separate playback and 
   const dialog = page.getByRole('dialog', { name: 'PowerPoint interactive export', exact: true });
   const prepare = dialog.getByRole('button', { name: 'Prepare PowerPoint interactive export', exact: true });
   await expect(prepare).toBeDisabled();
+  await expect(dialog.getByLabel('PowerPoint catalog UNC path', { exact: true })).toHaveAccessibleDescription(/server\/share names.*stored in the PPTX.*visible to recipients/);
   await dialog.getByLabel('PowerPoint catalog UNC path', { exact: true }).fill('C:\\not-a-catalog');
   await prepare.click();
   await expect(dialog.getByRole('alert')).toContainText('UNC path');

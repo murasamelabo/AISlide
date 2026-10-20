@@ -128,7 +128,7 @@ pub(super) fn draw(d:&mut Drawing,part:&PartSpec,spec:&Spec,state:&State,w:f64,h
             detail(d,selected,[right,top,right_width,body]);
         }
         Template::Dashboard=>{
-            text(d,match state.scale {Scale::Linear=>"件数 / 線形スケール",Scale::Logarithmic=>"件数 / 対数スケール log(1 + 値)"},[left,top,left_width,30.0],18.0,"@dk1",true);
+            text(d,match state.scale {Scale::Linear=>"線形スケール",Scale::Logarithmic=>"対数スケール log(1 + 値)"},[left,top,left_width,30.0],18.0,"@dk1",true);
             let pitch=(body-48.0)/items.len() as f64;
             let maximum=items.iter().filter_map(|item|item.value).fold(0.0_f64,f64::max);
             for (item,[_,y,_,_]) in targets.iter().copied() {

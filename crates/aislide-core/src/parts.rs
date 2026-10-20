@@ -266,6 +266,7 @@ pub(super) fn validate_spec(spec: &PartSpec) -> Result<(&str, usize)> {
     if let Some(layout) = &spec.layout { layout.validate()?; }
     if spec.version != 1 { return Err(Error::Invalid("part version".into())); }
     if let PartData::Interactive { spec: interactive } = &spec.data {
+        if spec.title.trim().is_empty() { return Err(Error::Invalid("interactive.title: nonempty text is required, including when show_title is false".into())); }
         if spec.preset != format!("interactive/{}", interactive.template.name()) { return Err(Error::Invalid("interactive preset must match its template".into())); }
         crate::interactive::validate(interactive)?;
         return Ok(("interactive",0));

@@ -1,6 +1,6 @@
 ﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile, readdir, symlink, truncate, mkdir, rename } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, readdir, symlink, truncate, mkdir, rename, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -3050,7 +3050,7 @@ test('P1 MCP finalization publishes a traceable new bundle without changing the 
 });
 
 test('MCP PowerPoint content export publishes add-in and integrity manifests last without overwriting', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'aislide-office-content-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'aislide-office-content-')));
   const client = new Client({ name: 'office-integration', version: '1.0.0' });
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {

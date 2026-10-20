@@ -17,7 +17,7 @@ Skills do not connect MCP. Label synthetic data.
 
 1. Confirm audience, purpose, pages, evidence, images and notes.
 	Never invent data or redraw source images.
-2. Get IDs via `list_decks` / `get_deck_summary`; fetch
+2. IDs: `list_decks` / `get_deck_summary`. Use `discover_tools`, then
 	`get_tool_schema({name:"apply_operations"})` before advanced elements, rich text,
 	composition, parts or graphs.
 3. Use `compile_report`, guided authoring or `create_presentation`. Set
@@ -44,7 +44,7 @@ Skills do not connect MCP. Label synthetic data.
 	Omitting `fit` uses legacy stretch. Retain attribution.
 7. Batch 1-128 `apply_operations`; after targets exist include `update_notes`,
 	`set_table_headers`, `set_accessibility`. One Undo; atomic rejection.
-	Never refresh revision/hash to force a stale plan.
+	Use planned revision/hash; never force a stale plan.
 8. `set_text_padding` must leave positive content space; `null` resets defaults.
 	`set_rich_text` takes paragraphs; core derives plain text; empty input clears.
 	Use dedicated dynamic-field operations; keep plain/rich validation.
@@ -58,8 +58,8 @@ Skills do not connect MCP. Label synthetic data.
 	 notes, headers, alt text, Japanese glyphs/fallbacks, inner padding, overflow and
 	 graph collisions. Composition text rejects overflow; managed parts
 	 keep bounded fitting. Structure is not Office visual parity.
-11. For interactive exports, follow [mandatory playback checks](../../../docs/authoring/powerpoint-interactive.md#mandatory-creation-and-delivery-checklist):
-	 test exported HTML after clicks, not snapshots; rebuild and re-export embedded fixes.
+11. Interactive exports: [mandatory playback checks](../../../docs/authoring/powerpoint-interactive.md#mandatory-creation-and-delivery-checklist).
+	 Test exported HTML after clicks; rebuild/re-export fixes.
 	 Export under a new approved filename. Verify path, hash, page count and
 	 review scope. Report unmet requirements, substitutions and unverified items.
 	 Never overwrite originals, publish, deploy or install without authorization.
@@ -85,8 +85,8 @@ Skills do not connect MCP. Label synthetic data.
 Use the [selection discriminators](references/technical-panels.md#selection-discriminators).
 Record question, relation, primary visual, selected/rejected reasons, emphasis and
 style roles. `recommend_recipes` accepts goal/dimensions/position need; inspect
-rejected/no-fit, then preview. Check relations, readable sources, anchors and
-styles, not only overflow. Never infer facts or edit managed children.
+rejected/no-fit, then preview. Check relations, source readability, anchors and
+role consistency, not just overflow. Never infer facts or edit managed children.
 
 ## Further Detail
 

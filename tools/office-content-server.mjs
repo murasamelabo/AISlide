@@ -44,9 +44,11 @@ const handler = async (request, response) => {
   };
   try {
     let bytes, type;
-    if (request.url === '/preview.json' && preview) { bytes = preview; type = 'application/json; charset=utf-8'; }
+    // Match only the original allowlisted path; Office may append host/query data.
+    const pathname = request.url?.split('?', 1)[0];
+    if (pathname === '/preview.json' && preview) { bytes = preview; type = 'application/json; charset=utf-8'; }
     else {
-      const asset = assets.get(request.url);
+      const asset = assets.get(pathname);
       if (!asset) { finish(404, 'Unknown asset'); return; }
       bytes = await readFile(join(root, 'apps', 'office-content', asset[0]));
       type = asset[1];

@@ -492,6 +492,9 @@ test('interactive playback checklist is required by the authoring skill and Wind
   const skillUrl = new URL('../.github/skills/aislide-authoring/SKILL.md', import.meta.url);
   const skill = await readFile(skillUrl, 'utf8');
   assert.ok(Buffer.byteLength(skill) < 6000);
+  assert.ok(skill.includes('`discover_tools`'), 'Advanced interactive tools must be discoverable in compact mode');
+  assert.ok(skill.includes('Use planned revision/hash'));
+  assert.ok(skill.includes('role consistency'));
   const link = skill.match(/\[mandatory playback checks\]\(([^)]+)\)/);
   assert.ok(link, 'The short authoring skill must route interactive deliveries through the checklist');
   assert.equal(link[1], '../../../docs/authoring/powerpoint-interactive.md#mandatory-creation-and-delivery-checklist');

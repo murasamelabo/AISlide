@@ -20,6 +20,25 @@ the observed `id="fa000000210"`, `version="1.0.0.0"`, `store="en-US"`,
 not the AISlide add-in's JSON settings object. Changing the ID alone is not
 sufficient.
 
+### Observation provenance and approval boundary
+
+The catalog tuple and property encoding were observed during prototype
+development by read-only ZIP/XML inspection of a locally supplied PowerPoint example.
+Only the reference attributes, JSON-string shape and fallback structure were
+used to implement this compatibility experiment. The supplied presentation
+and its HTML/JavaScript are not redistributed, fetched or executed.
+All emitted HTML, runtime logic and synthetic sample content are AISlide's.
+
+The project owner explicitly requested this catalog experiment and its
+publication. That request is not Microsoft permission, legal clearance or
+proof that Microsoft's service terms permit third-party authoring. Unlike the
+publicly specified Office content-add-in packaging, this observed catalog
+contract is undocumented. Maintainers and recipients must evaluate applicable
+terms and organizational policy before distributing or enabling it; use the
+AISlide-owned add-in or static PPTX path when that approval is unavailable.
+No Microsoft endorsement, supported SDK contract or live-host validation is
+claimed.
+
 AISlide embeds its own trusted runtime, CSS and validated compiled views into
 that HTML. Data is escaped for script contexts; the renderer uses safe text/rect
 DOM operations and makes no network requests. Imported HTML, scripts and the
@@ -330,6 +349,19 @@ a JSON **data** property, and an embedded PNG snapshot. `mc:AlternateContent`
 also retains the native editable group fallback. PowerPoint can recognize the
 content add-in even when it cannot activate its runtime. The static PNG and
 typed settings are stored in the PPTX and must be treated as disclosed content.
+The own-add-in catalog's full UNC path, including server and share names, is
+also stored in `we:reference/@store` and visible to recipients. Supply only a
+catalog path approved for the delivery audience; removing a visible label does
+not remove that package metadata.
+
+Interactive parts require a nonempty `title`, even with `show_title:false`:
+the runtime uses it as the accessible name of the playback region. Empty and
+whitespace-only values reject during shared-core validation, before export.
+The showcase appearance currently has Japanese fixed labels; the plain/runtime
+controls use English and the JavaScript experiments use Japanese. Full locale
+selection is not implemented. Dashboard values retain caller-supplied units;
+the scale heading is unit-neutral and must not describe percentages, money or
+other quantities as counts.
 
 The HTML runtime uses only compiled rectangle/text primitives and safe DOM
 text operations. It does not evaluate source strings, load item URLs, read

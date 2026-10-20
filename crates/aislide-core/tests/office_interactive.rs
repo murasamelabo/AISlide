@@ -4,6 +4,47 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use aislide_core::package::Package;
 
 #[test]
+fn interactive_titles_are_required_even_when_the_visible_title_is_hidden() {
+    let catalog=execute_request(json!({"op":"part_catalog"})).unwrap();
+    for entry in catalog["presets"].as_array().unwrap().iter().filter(|entry|entry["category"]=="interactive") {
+        for appearance in ["plain","showcase"] {
+            for show_title in [true,false] {
+                for title in [""," \t\n ","\u{3000}"] {
+                    let mut spec=entry["example"].clone();
+                    spec["title"]=json!(title);
+                    spec["data"]["spec"]["appearance"]=json!(appearance);
+                    spec["layout"]=json!({"x":0,"y":0,"width":1280,"height":720,"show_title":show_title});
+                    for op in ["create_part","preview_interactive","compile_interactive"] {
+                        let error=execute_request(json!({"op":op,"id":"blank-title","spec":spec})).expect_err("blank interactive title must not produce an unusable runtime");
+                        assert!(error.to_string().contains("interactive.title"),"{op}: {error}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn showcase_dashboard_heading_does_not_invent_a_count_unit() {
+    let catalog=execute_request(json!({"op":"part_catalog"})).unwrap();
+    let original=&catalog["presets"].as_array().unwrap().iter().find(|entry|entry["id"]=="interactive/dashboard").unwrap()["example"];
+    for unit in ["件","%","円","USD",""] {
+        for scale in ["linear","logarithmic"] {
+            let mut spec=original.clone();
+            spec["data"]["spec"]["appearance"]=json!("showcase");
+            spec["data"]["spec"]["initial_state"]["scale"]=json!(scale);
+            spec["layout"]=json!({"x":0,"y":0,"width":1280,"height":720,"show_title":true});
+            for item in spec["data"]["spec"]["items"].as_array_mut().unwrap() {item["unit"]=json!(unit);}
+            let view=execute_request(json!({"op":"create_part","id":"units","spec":spec})).unwrap();
+            let texts:Vec<_>=view["children"].as_array().unwrap().iter().filter_map(|child|child["text"].as_str()).collect();
+            assert!(!texts.iter().any(|text|text.starts_with("件数 /")),"unit {unit}: {texts:?}");
+            assert!(texts.contains(&if scale=="linear" {"線形スケール"} else {"対数スケール log(1 + 値)"}));
+            if !unit.is_empty() {assert!(texts.iter().any(|text|text.ends_with(&format!(" {unit}"))));}
+        }
+    }
+}
+
+#[test]
 fn javascript_lab_export_accepts_only_explicit_trusted_kinds_and_preserves_source() {
     let catalog=execute_request(json!({"op":"part_catalog"})).unwrap();
     let mut spec=catalog["presets"].as_array().unwrap().iter().find(|entry|entry["id"]=="interactive/summary").unwrap()["example"].clone();
