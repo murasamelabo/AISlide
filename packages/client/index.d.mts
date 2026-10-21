@@ -39,6 +39,9 @@ export class AislideClient {
   request<T>(request: unknown, options?: RequestOptions): Promise<T>
   /** Current core schemas and limits; does not certify Office rendering. */
   authoringCapabilities(options?: RequestOptions): Promise<AuthoringCapabilities>
+  previewInteractive(input: { id: string; spec: PartSpec; state?: import('./types').InteractiveState; theme?: Theme }, options?: RequestOptions): Promise<import('./types').InteractivePreview>
+  compileInteractive(input: { id: string; spec: PartSpec; theme?: Theme }, options?: RequestOptions): Promise<import('./types').OfficeInteractivePayload>
+  powerpointAddinManifest(runtimeUrl: string, options?: RequestOptions): Promise<{ manifest: string; addin_id: string }>
   computeChartPresentation(input: import('./types').ChartData, options?: RequestOptions): Promise<import('./types').ChartPresentation>
   renderElementPreview(element: Extract<Element, { type: 'chart' | 'text' | 'shape' }>, theme?: Theme, options?: RequestOptions): Promise<import('./types').ElementPreview>
   textAssist(input: TextAssistInput, options?: RequestOptions): Promise<TextAssistance>
@@ -219,4 +222,6 @@ export class DocumentSession {
   redo(options?: RequestOptions): Promise<AislideDocument>
   exportProject(options?: RequestOptions): Promise<ProjectExport>
   exportPresentation(options?: RequestOptions): Promise<PresentationExport>
+  exportPowerpointInteractive(input: import('./types').PowerpointInteractiveOptions, options?: RequestOptions): Promise<import('./types').PowerpointInteractiveExport>
+  exportCopilotInteractive(input: { acknowledged_experimental: true; javascript_labs?: import('./types').JavascriptLabSelection[] }, options?: RequestOptions): Promise<import('./types').CopilotInteractiveExport>
 }

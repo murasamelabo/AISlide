@@ -1,0 +1,9 @@
+﻿.interactive-panel { display: grid; gap: 16px; min-width: 0; }
+.interactive-actions, .interactive-controls, .interactive-items { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+.interactive-controls .field { flex: 1 1 200px; }
+.interactive-items button[aria-pressed="true"] { border: 2px solid var(--accent, #005bac); color: var(--accent, #005bac); font-weight: 700; }
+.interactive-preview { position: relative; width: 100%; overflow: hidden; border: 1px solid var(--line, #c4c4c4); background: white; }
+.interactive-preview[aria-busy="true"] { opacity: .55; }
+.interactive-source { overflow-wrap: anywhere; }
+.interactive-panel textarea { width: 100%; font: 14px/1.5 monospace; }
+@media (max-width: 600px) { .interactive-controls { display: grid; } .interactive-controls .field { min-width: 0; } }

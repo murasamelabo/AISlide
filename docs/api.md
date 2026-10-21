@@ -433,8 +433,9 @@ would still pass through another box instead of drawing it; in PowerPoint
 their custom routes are freeform lines that keep their shape but do not follow
 a moved box. Where a label field is omitted, English defaults such as `Plan`,
 `Actual`, `Variance`, `Value`, `Cumulative` and `Emotion` are used; pass
-localized labels in the data. The catalog now has 138 entries in the same 36
-categories. These 14 entries are marked `specialized: true`: they stay
+localized labels in the data. Including the five interactive prototypes, the
+catalog now has 143 entries in 37 categories. These 14 analysis entries are
+marked `specialized: true`: they stay
 `recommended` for agents whose data fits `use_when`, while Studio lists them
 after the general variants and never selects one as a category default.
 
@@ -947,7 +948,7 @@ MCP exposes the same four operation names. It allocates an opaque new `deck_id` 
 
 | Operation | Request fields besides op | Result |
 | --- | --- | --- |
-| `part_catalog` | None | Version, 111 presets, Rust-derived `PartSpec` schema, style and default bounds |
+| `part_catalog` | None | Version, 143 presets (including five interactive prototypes), Rust-derived `PartSpec` schema, style and default bounds |
 | `create_part` | `id`, `spec`, optional `theme` | Validated ordinary `Element::Group`; does not create persistent metadata |
 | `insert_part` | `document`, `expected_revision`, `slide_id`, `id`, `spec` | Atomic `TransactionResult`, including part metadata and undo receipt |
 | `update_part` | Same as insert | Regenerates a current metadata part; retains placement unless an explicit layout changes it |
@@ -1025,6 +1026,111 @@ direct insertion or complete typed elements for exact slide coordinates.
 `Document.parts` is optional when empty. An instance contains `slide_id`, `element_id`, `spec`, `render_sha256`, optional `native_sha256`, and `stale`. Hashes cover rendered children and original native group/resources, including chart workbooks. Root-only movement/resizing in Studio is allowed; mismatched manual/native edits mark the part stale and block semantic update. Missing fingerprints on existing native roots also mark stale. There is no automatic regeneration, no cryptographic authentication, and benign external XML reserialization can conservatively mark stale. Ordinary native objects remain available even without metadata.
 
 SDK: `client.partCatalog()`, `client.createPart({id,spec,theme?})`, `session.addPart(slideId,{id,spec},options?)`, `session.updatePart(slideId,{id,spec},options?)`, `session.detachPart(slideId,{id},options?)`. Session options accept `expectedRevision` and cancellation; detach additionally accepts `expectedHash` through `AuthoringOptions`. Late transport success after cancellation cannot commit. MCP: `part_catalog`, `create_part`, `add_part`, `update_part`, `detach_part`; mutations require `deck_id`, `expected_revision`, `slide_id`, `id` and optional `expected_hash`; add/update also require `spec`. Detach removes only metadata, retaining the native figures, manual edits and source bindings in one undoable transaction, including stale records. Protected native packages reject detach.
+
+### Interactive parts (prototype)
+
+The catalog includes `interactive/summary`, `interactive/dashboard`,
+`interactive/timeline`, `interactive/comparison`, and `interactive/map`:
+143 presets across 37 categories. These are typed components, not imported
+HTML or a connection to PowerPoint Copilot's private web-extension catalog.
+
+Core operation `preview_interactive` and SDK
+`client.previewInteractive({id,spec,state?,theme?})` return
+`{element,state,visible_ids,powerpoint_interactive:false,executes_imported_html:false,transient:true,limitations}`.
+The MCP tool has the same input. The native group is a read-only projection;
+previewing does not modify any document, revision, or Undo history.
+
+Use a catalog example with `data:{kind:"interactive",spec:{version:1,template,
+source,groups,dimensions,items,initial_state}}`. Each item has a stable ASCII
+`id`, `label`, `detail`, optional `action`, `group_id`, nonnegative `value`,
+`unit`, qualitative dimension `values`, and up to three `metrics` with
+`label`, textual `value`, and `qualifier`. There are 2–8 items and at most four
+groups/dimensions. The source and metric qualifiers are caller-supplied
+evidence, not factual verification; catalog values are explicitly synthetic.
+
+`data.spec.appearance:"showcase"` opts into native rich presentation for the
+same five templates (minimum 1200×720); omitted/default `"plain"` retains
+existing output. Rich compiled views may include
+`hotspots:[{item_id,x,y,width,height}]`. These are bounded, unique visible item
+IDs and use the same geometry as the native card/bar/stage drawing. The HTML
+runtime exposes them as keyboard-operable selection buttons; arbitrary HTML,
+URLs or actions are not accepted. They only change transient selection.
+Rich views also include `controls_frame:{x,y,width,height}` inside the native
+view. The runtime anchors compact controls to that frame, hides duplicate
+item buttons and lets the drawing fill the canvas. Plain views keep their
+existing controls. Control-frame geometry rejects unknown fields, negative
+sizes and out-of-view bounds.
+
+State is `{selected_id,group_id?,dimension?:0,scale?:"linear"}`. A selected
+item must exist and belong to the active group. Dashboard logarithmic bars
+use `log(1 + value)` so zero is defined; the displayed values remain original
+values and the scale is labeled. Comparison values remain qualitative text.
+Timeline represents ordered stages, not a date axis.
+
+Call `add_part` / `update_part` (or their batch variants) with a new
+`initial_state` to save the chosen default and its native representation in
+one undoable transaction. Metadata and the default survive a single-PPTX
+save/open. Manual native child edits use existing stale-part guards.
+Rendering uses native-sized text and rejects insufficient space instead of
+silently shrinking labels. The default frame is 1152×512; minimum 960×480.
+
+The separate experimental `export_copilot_interactive` operation uses the
+observed `fa000000210` / `sdxcatalog` / `en-US` reference with a JSON-string
+`contentBlockHtml` containing AISlide-generated self-contained HTML. It requires
+`acknowledged_experimental:true`; SDK:
+`session.exportCopilotInteractive({acknowledged_experimental:true})`. MCP also
+requires `deck_id`, a new `filename` and approved output directory. It publishes
+the PPTX and integrity manifest only, not an AISlide Office manifest. This is
+not a supported public Copilot authoring API or verified Copilot-host playback;
+no imported HTML is copied/executed and no licensing/policy checks are bypassed.
+The own-add-in path below remains unchanged.
+
+For an explicit built-in JavaScript experiment, that same SDK/core/MCP export
+also accepts `javascript_labs:[{slide_id,element_id,kind}]`, at most eight
+unique existing managed interactive roots. The only kinds are `simulator`,
+`network`, `priority`, `playback`, `comparison`, `quiz`, `explorer`, and `canvas`.
+The core embeds an AISlide-owned, compile-time runtime and synthetic example
+data; callers cannot supply JavaScript, HTML, URLs, or external modules.
+Unknown kinds/fields, duplicate/missing targets and over-capacity selections
+reject. Normal typed parts and the own-add-in path remain unchanged.
+
+These lab pages perform live local computations and interactions rather than
+switching precomputed views. They reset on reload and do not persist or transmit
+input. Their native group/PNG fallback is an **explanatory summary**, not an
+identical screenshot of the live experiment; retain the ordinary editable PPTX
+for explaining the operation offline. `javascript_lab_components` reports the
+selected count and `powerpoint_playback_verified` remains false. See the
+[JavaScript expression experiments](authoring/powerpoint-interactive.md#javascript-expression-experiments).
+The core supplies their native component `canvas:{width,height}` to the trusted
+runtime (960–4096 by 480–4096). Layout is budgeted at that size and contained
+uniformly in the WebView, rather than using viewport-width web reflow.
+Explanatory text and long tables are paged; short native canvases can switch
+visual/control panels without losing state. Delivery checks must reject internal
+vertical scrolling and clipped controls, not merely hide scrollbars.
+
+Opt-in `compile_interactive`, `powerpoint_addin_manifest`, and
+`export_powerpoint_interactive` provide the separate
+[PowerPoint content add-in path](authoring/powerpoint-interactive.md). It
+requires an installed AISlide-owned add-in, a trusted Windows development UNC
+catalog and a trusted HTTPS runtime. The export includes active references,
+JSON typed-state views, a PNG snapshot and native group MCE fallback; it never
+impersonates Copilot or executes imported HTML. SDK equivalents are
+`client.compileInteractive({id,spec,theme?})`,
+`client.powerpointAddinManifest(runtimeUrl)` and
+`session.exportPowerpointInteractive({runtime_url,catalog:{kind:"file_system",
+location}})`. Source session/history are unchanged. The MCP export requires the
+approved output directory and a new PPTX filename; its integrity manifest is
+published last. Runtime interactions never write Office settings.
+
+Studio's **Interactive part** dialog provides template selection, keyboard
+buttons, group/dimension/scale controls, stage navigation and JSON validation.
+Close/reset does not save transient interactions; **Save default** explicitly
+inserts/updates the part. Ordinary PPTX, PDF and PNG exports contain only the
+native/static default view. They do **not** activate the Office add-in; select
+the explicit PowerPoint interactive export for that separate runtime path.
+Neither path executes imported HTML, fetches imported external relationships,
+or adds support for importing Strict-OOXML Copilot web extensions. The Studio
+CSP is unchanged.
 
 ### Layout patterns
 

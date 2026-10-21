@@ -85,7 +85,7 @@ fn open_list_presets_keep_content_without_decorative_boxes_rails_or_numbers() {
 fn open_list_catalog_recommends_new_compositions_and_retains_legacy_ids() {
     let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
     let presets = catalog["presets"].as_array().unwrap();
-    assert_eq!(presets.len(), 138);
+    assert_eq!(presets.len(), 143);
     for (category, variant) in [("list", "rows"), ("list-horizontal", "columns"), ("list-enumeration", "grid")] {
         let id = format!("{category}/{variant}");
         let entry = presets.iter().find(|entry| entry["id"] == id).unwrap_or_else(|| panic!("missing {id}"));
@@ -957,9 +957,10 @@ fn editable_polygons_and_transparent_shapes_round_trip_as_native_geometry() {
 }
 
 #[test]
-fn every_category_has_three_distinct_bounded_native_presets() {
+fn every_legacy_category_has_three_distinct_bounded_native_presets() {
     let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
-    let presets: Vec<_> = catalog["presets"].as_array().unwrap().iter().filter(|preset| preset["recommended"] != true).collect();
+    let presets: Vec<_> = catalog["presets"].as_array().unwrap().iter()
+        .filter(|preset| preset["category"] != "interactive" && preset["recommended"] != true).collect();
     assert_eq!(presets.len(), 108);
     let mut categories = std::collections::BTreeMap::<String, Vec<Value>>::new();
     let mut failures = Vec::new();
