@@ -212,6 +212,43 @@ pub fn open_presentation(id: String, bytes: Vec<u8>) -> Result<Value> {
     open_presentation_with_profile(id, bytes, crate::limits::CapacityProfile::default())
 }
 
+pub(crate) fn projection_warnings(document: &Document, pages: &[usize]) -> Result<Vec<crate::export_static::RenderWarning>> {
+    let Some(origin) = document.origin.as_ref().filter(|origin| origin.native) else { return Ok(Vec::new()); };
+    let bytes = STANDARD.decode(&origin.base64).map_err(|_| Error::Invalid("native origin encoding".into()))?;
+    let source = crate::native::read(&crate::package::Package::open(bytes)?)?;
+    let mut warnings = Vec::new();
+    let mut inspect = |page_index: usize, binding: &crate::native::NativePart, elements: &[crate::model::Element]| {
+        let projected: BTreeSet<_> = element_list(elements).into_iter().map(|element| element.bounds().0).collect();
+        for id in binding.nodes.keys().filter(|id| !projected.contains(id.as_str())) {
+            warnings.push(crate::export_static::RenderWarning {
+                code: "NATIVE_OBJECT_NOT_PREVIEWED".into(), page_index, element_id: id.clone(),
+                message: format!("Native object {id} in {} is retained in the PPTX but has no editing projection and is not drawn in this preview; inspect it in Office", binding.path),
+            });
+        }
+    };
+    for &page in pages {
+        let slide = document.deck.slides.get(page).ok_or_else(|| Error::Invalid("projection warning page index out of range".into()))?;
+        let source_id = slide.native_source_id.as_deref().unwrap_or(&slide.id);
+        if let (Some(binding), Some(source_slide)) = (source.slides.iter().find(|part| part.id == source_id), source.deck.slides.iter().find(|slide| slide.id == source_id)) {
+            inspect(page, binding, &source_slide.elements);
+        }
+        let layout = document.deck.design.as_ref().and_then(|design| {
+            slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)).or_else(|| design.layouts.first())
+        });
+        if let (Some(layout), Some(design)) = (layout, source.deck.design.as_ref()) {
+            if let (Some(binding), Some(projected)) = (source.layouts.iter().find(|part| part.id == layout.id), design.layouts.iter().find(|candidate| candidate.id == layout.id)) {
+                inspect(page, binding, &projected.elements);
+            }
+            if !slide.hide_master_graphics {
+                if let (Some(binding), Some(projected)) = (source.masters.iter().find(|part| part.id == layout.master_id), design.masters.iter().find(|candidate| candidate.id == layout.master_id)) {
+                    inspect(page, binding, &projected.elements);
+                }
+            }
+        }
+    }
+    Ok(warnings)
+}
+
 pub fn open_presentation_with_profile(id: String, bytes: Vec<u8>, capacity_profile: crate::limits::CapacityProfile) -> Result<Value> {
     if bytes.len() > capacity_profile.limits().archive_bytes { return Err(Error::Limit("selected profile archive budget".into())); }
     let package = crate::package::Package::open(bytes.clone())?;

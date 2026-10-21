@@ -43,6 +43,22 @@ Preserved: IDs, coordinates, dimensions, rotation/flips, paths, shape presets/ad
 
 Object snapshots are a strict union. Legacy `{run, paragraph, vertical}` text snapshots still work. New text snapshots optionally include surface, effects and the already-supported text warp. Filled objects copy fill, compatible outline, opacity, gradient and effects. Pictures copy opacity/effects only; masks remain geometry. Rectangles cannot receive a nonzero outline because that element type has no outline field. A shape snapshot with a surface requires a compatible filled text shape, not a plain text box.
 
+Text snapshots paint their supplied run properties across all target text. A
+mixed-run target can therefore lose its bold/color/size distinctions; the core
+returns `FORMAT_PAINTER_RUNS_UNIFIED` in `render_warnings`, also exposed through
+SDK `session.renderWarnings` and the MCP `renderWarnings` response snapshot.
+This is intentional format-painter behavior, not an appearance-only patch.
+
+For fill/effects without text changes, `apply_format` accepts
+`{kind:"filled",surface,effects}` on text-bearing shapes too. More narrowly,
+`apply_operations` supports `set_surface` with
+`{ids,surface:{fill?,stroke?,stroke_width?,opacity?,gradient?}}` and `set_effects`
+with `{ids,effects:{shadow?,glow?,soft_edge?,reflection?}}`. Omitted properties
+are retained; `null` clears opacity, gradient or an effect. A supplied effect is
+a complete typed value, not a nested merge. Empty patches reject. These updates
+retain mixed text, geometry, z-order and reading order, use the normal target/
+parent lock and native-preservation guards, and create one Undo per batch.
+
 Tables require the same row/column count, copy base font size plus per-cell fill, outline, padding, alignment and text style, and retain target track geometry and merges. Each rich source cell uses its first paragraph/run as the style reference for the target cell's existing paragraphs/runs; it does not clone mixed source content. Charts require matching series count and copy series colors, legend, data-label formatting and axis number formats. Chart family, series names/values, axis scales, trendlines, error data and statistical/hierarchy options stay unchanged. Invalid chart-family/style combinations reject atomically.
 
 ## Slide Eyedropper

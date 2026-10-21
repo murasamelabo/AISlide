@@ -76,10 +76,44 @@ impl RunStyle {
     pub(crate) fn frame(size: f64, color: &str, bold: bool, format: &TextFormat) -> Self {
         Self { bold: Some(bold), italic: Some(format.italic), underline: Some(format.underline), font_size: Some(size), color: Some(color.into()), font_family: Some(format.font_family.clone().unwrap_or_else(|| "@minor".into())), baseline: None, highlight: None, language: Some("ja-JP".into()), alternative_language: None }
     }
+
+    pub(crate) fn same_frame_style(&self, other: &Self) -> bool {
+        self.bold == other.bold && self.italic == other.italic && self.underline == other.underline
+            && self.font_size == other.font_size && self.color == other.color && self.font_family == other.font_family
+    }
 }
 
 pub fn plain_text(paragraphs: &[RichParagraph]) -> String {
     paragraphs.iter().map(|paragraph| paragraph.runs.iter().map(|run| run.text.as_str()).collect::<String>()).collect::<Vec<_>>().join("\n")
+}
+
+pub(crate) fn paragraph_metrics(styles: &[RunStyle], fallback: f64, spacing: Option<Spacing>) -> (f64, f64) {
+    let maximum = styles.iter().filter_map(|style| style.font_size).reduce(f64::max).unwrap_or(fallback);
+    let height = match spacing.unwrap_or(Spacing::Percent(115000)) {
+        Spacing::Percent(value) => maximum * value as f64 / 100000.0,
+        Spacing::Points(value) => value as f64 / 75.0,
+    };
+    (maximum, height.max(maximum))
+}
+
+pub(crate) fn paragraph_runs(paragraph: &RichParagraph, format: &TextFormat, index: usize) -> Vec<RichRun> {
+    let mut runs = paragraph.runs.clone();
+    let bullet = paragraph.bullet.unwrap_or(format.bullet);
+    if bullet != Bullet::None {
+        let marker = if bullet == Bullet::Bullet {
+            paragraph.bullet_character.clone().unwrap_or_else(|| "\u{2022}".into())
+        } else {
+            let number = paragraph.number_start.unwrap_or(1) + index as u32;
+            match paragraph.numbering.as_deref() {
+                Some("arabicParenR") => format!("{number})"),
+                Some("arabicParenBoth") => format!("({number})"),
+                Some("arabicPlain") => number.to_string(),
+                _ => format!("{number}."),
+            }
+        };
+        runs.insert(0, RichRun { text: format!("{marker} "), ..Default::default() });
+    }
+    runs
 }
 
 pub fn validate_paragraphs(paragraphs: &[RichParagraph]) -> Result<()> {
@@ -120,7 +154,14 @@ pub(crate) fn deserialize_paragraphs<'de, D: serde::Deserializer<'de>>(deseriali
 pub fn validate_element(element: &Element) -> Result<()> {
     if let Element::Text { text, format, .. } | Element::Shape { text, format, .. } = element {
         validate_paragraphs(&format.paragraphs)?;
-        if !format.paragraphs.is_empty() && plain_text(&format.paragraphs) != *text { return Err(Error::Invalid("plain text must equal joined rich paragraph run texts".into())); }
+        if !format.paragraphs.is_empty() {
+            let expected = plain_text(&format.paragraphs);
+            if expected != *text {
+                let preview: String = expected.chars().take(160).collect();
+                let suffix = if expected.chars().count() > 160 { " (truncated)" } else { "" };
+                return Err(Error::Invalid(format!("plain text must equal rich paragraph run texts joined with newline (\\n) between paragraphs; expected text {preview:?}{suffix}. Use set_rich_text to derive text from paragraphs")));
+            }
+        }
     }
     Ok(())
 }

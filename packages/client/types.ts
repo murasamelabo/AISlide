@@ -119,7 +119,7 @@ export type AuxiliaryMaster = { name: string; background: string; theme: Theme; 
 export type AuxiliaryDesign = { width: number; height: number; notes_master?: AuxiliaryMaster | null; handout_master?: AuxiliaryMaster | null }
 export type DesignField = { master_id: string; layout_id?: string | null; kind: 'slide_number' | 'date' | 'footer'; reference_date: string; text?: string }
 export type DesignCapabilities = { master_theme_override: true; default_theme_preserves_explicit_masters: true; native_theme_copy_on_write: true; field_kinds: KnownFieldKind[]; placeholder_kinds: DesignField['kind'][]; scopes: ('master' | 'layout')[]; reference_date: string; page_number_projection: true; native_fields: true; native_field_cache_refresh: true; unknown_fields: string; notes_master: true; handout_master: true; rich_notes: true; table_fields: false; office_recalculation_verified: false; studio: { master_theme: true; master_layout_fields: true; review_field_scope: true }; limitations: string[] }
-export type SlideLayout = { id: string; name: string; master_id: string; background: string | null; elements: Element[] }
+export type SlideLayout = { id: string; name: string; master_id: string; source_id?: string; background: string | null; elements: Element[] }
 export type Design = { theme: Theme; masters: Master[]; layouts: SlideLayout[] }
 export type MasterSourceInput = { kind: 'pptx' | 'potx'; base64: string }
 export type MasterSourceInspection = { kind: MasterSourceInput['kind']; source_sha256: string; width: number; height: number; masters: { id: string; name: string; layout_count: number; importable: boolean; reason: string | null }[]; slides: { id: string; name: string; importable: boolean; reason: string | null }[]; warnings: string[]; office_visual_parity: false }
@@ -239,6 +239,8 @@ export type AuthoringOperation =
   | { op: 'add_elements'; slide_id: string; elements: Element[] }
   | { op: 'set_frame'; slide_id: string; id: string; frame: Frame }
   | { op: 'set_text_style'; slide_id: string; ids: string[]; style: RunStyle }
+  | { op: 'set_surface'; slide_id: string; ids: string[]; surface: SurfacePatch }
+  | { op: 'set_effects'; slide_id: string; ids: string[]; effects: EffectsPatch }
   | { op: 'set_text_padding'; slide_id: string; ids: string[]; padding: TextPadding | null }
   | { op: 'set_rich_text'; slide_id: string; id: string; paragraphs: RichParagraph[] }
   | { op: 'compose_slide'; slide_id: string; id: string; spec: CompositionSpec }
@@ -412,6 +414,8 @@ export type ProofIssue = { word: string; start: number; end: number; suggestions
 export type ProofResult = { language: string; sample_dictionary: boolean; complete_dictionary: false; issues: ProofIssue[]; synonyms: string[]; translation: string | null }
 export type PaintEffects = Pick<VisualStyle, 'shadow' | 'glow' | 'soft_edge' | 'reflection'>
 export type SurfaceStyle = { fill: string; stroke: string | null; stroke_width: number | null; opacity: number | null; gradient: Gradient | null }
+export type SurfacePatch = { fill?: string; stroke?: string; stroke_width?: number; opacity?: number | null; gradient?: Gradient | null }
+export type EffectsPatch = PaintEffects
 export type TextFormatSnapshot = { run: Omit<RunStyle, 'highlight' | 'language' | 'alternative_language'>; paragraph: RichParagraph & { runs: [] }; vertical: 'top' | 'middle' | 'bottom'; surface?: SurfaceStyle | null; effects?: PaintEffects | null; text_warp?: TextWarp | null }
 export type FormatSnapshot = TextFormatSnapshot
   | { kind: 'filled'; surface: SurfaceStyle; effects: PaintEffects }
@@ -440,6 +444,7 @@ export type EditedImage = { base64: string; mime_type: 'image/png' | 'image/jpeg
 export type ApplyImageEditInput = { id: string; image: EditedImage }
 export type TableOperation =
   | { op: 'update_format'; format: TableFormat }
+  | { op: 'replace_format'; format: TableFormat }
   | { op: 'set_cell_style'; row: number; column: number; style: TableCellStyle }
   | { op: 'set_cell_text'; row: number; column: number; text: string }
   | { op: 'merge'; region: TableMerge }

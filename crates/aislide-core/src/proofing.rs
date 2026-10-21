@@ -8,7 +8,7 @@ pub const MAX_DICTIONARY_BYTES: usize = 512 * 1024;
 #[serde(untagged)]
 pub enum FormatSnapshot { Text(TextSnapshot), Object(ObjectSnapshot) }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PaintEffects {
     pub shadow: Option<crate::visual::Shadow>,
@@ -29,11 +29,92 @@ impl PaintEffects {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SurfaceStyle {
     pub fill: String, pub stroke: Option<String>, pub stroke_width: Option<f64>,
     pub opacity: Option<f64>, pub gradient: Option<crate::visual::Gradient>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SurfacePatch {
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")] pub fill: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")] pub stroke: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")] pub stroke_width: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")] pub opacity: Option<Option<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")] pub gradient: Option<Option<crate::visual::Gradient>>,
+}
+
+impl SurfacePatch {
+    pub(crate) fn apply(&self, element: &mut Element) -> Result<()> {
+        if *self == Self::default() { return Err(Error::Invalid("set_surface requires at least one supplied property".into())); }
+        let mut surface = SurfaceStyle::copy(element).ok_or_else(|| Error::Unsupported("set_surface requires a filled rect, shape or polygon".into()))?;
+        if matches!(element, Element::Rect { .. }) && (self.stroke.is_some() || self.stroke_width.is_some()) {
+            return Err(Error::Unsupported("set_surface outlines require a shape or polygon, not a rect".into()));
+        }
+        let before = surface.clone();
+        if let Some(value) = &self.fill { surface.fill = value.clone(); }
+        if let Some(value) = &self.stroke { surface.stroke = Some(value.clone()); }
+        if let Some(value) = self.stroke_width { surface.stroke_width = Some(value); }
+        if let Some(value) = self.opacity { surface.opacity = value; }
+        if let Some(value) = &self.gradient { surface.gradient = value.clone(); }
+        if surface != before { surface.apply(element)?; }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EffectsPatch {
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")] pub shadow: Option<Option<crate::visual::Shadow>>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")] pub glow: Option<Option<crate::visual::Glow>>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")] pub soft_edge: Option<Option<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")] pub reflection: Option<Option<crate::visual::Reflection>>,
+}
+
+impl EffectsPatch {
+    pub(crate) fn apply(&self, element: &mut Element) -> Result<()> {
+        if *self == Self::default() { return Err(Error::Invalid("set_effects requires at least one supplied property".into())); }
+        if element.visual_mut().is_none() { return Err(Error::Unsupported("set_effects target has no visual effects".into())); }
+        let mut effects = PaintEffects::copy(element);
+        let before = effects.clone();
+        if let Some(value) = &self.shadow { effects.shadow = value.clone(); }
+        if let Some(value) = &self.glow { effects.glow = value.clone(); }
+        if let Some(value) = self.soft_edge { effects.soft_edge = value; }
+        if let Some(value) = &self.reflection { effects.reflection = value.clone(); }
+        if effects != before { effects.apply(element)?; }
+        Ok(())
+    }
+}
+
+pub(crate) fn mixed_text_targets(deck: &Deck, slide_id: &str, ids: &[String], snapshot: &FormatSnapshot) -> Vec<String> {
+    let FormatSnapshot::Text(snapshot) = snapshot else { return Vec::new(); };
+    let Some(slide) = deck.slides.iter().find(|slide| slide.id == slide_id) else { return Vec::new(); };
+    slide.elements.iter().filter_map(|element| {
+        let (text, format, size, color, bold) = match element {
+            Element::Text { text, format, font_size, color, bold, .. } | Element::Shape { text, format, font_size, color, bold, .. }
+                if ids.iter().any(|id| id == element.bounds().0) => (text, format, *font_size, color, *bold),
+            _ => return None,
+        };
+        if text.is_empty() { return None; }
+        let mut styles = format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).filter(|run| !run.text.is_empty()).map(|run| {
+            let mut resolved = RunStyle::frame(size, color, bold, format);
+            resolved.overlay(&run.style);
+            RunStyle {
+                bold: snapshot.run.bold.and(resolved.bold),
+                italic: snapshot.run.italic.and(resolved.italic),
+                underline: snapshot.run.underline.and(resolved.underline),
+                font_size: snapshot.run.font_size.and(resolved.font_size),
+                color: snapshot.run.color.as_ref().and_then(|_| resolved.color.clone()),
+                font_family: snapshot.run.font_family.as_ref().and_then(|_| resolved.font_family.clone()),
+                baseline: snapshot.run.baseline.and(resolved.baseline),
+                ..Default::default()
+            }
+        });
+        let first = styles.next()?;
+        styles.any(|style| style != first).then(|| element.bounds().0.to_owned())
+    }).collect()
 }
 
 impl SurfaceStyle {

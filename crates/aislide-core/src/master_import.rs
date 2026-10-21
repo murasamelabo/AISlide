@@ -250,7 +250,7 @@ fn candidate(document: &Document, revision: u64, hash: &str, input: &MasterImpor
                 let layout_id = format!("{}-l{}", input.prefix, layout_ids.len() + 1);
                 let background = crate::design::slide_background(slide, Some(source_design)).to_owned();
                 design.masters.push(Master { id: master_id.clone(), name, background, elements: Vec::new(), theme: Some(crate::design::master_theme(source_design, &master.id).clone()) });
-                design.layouts.push(SlideLayout { id: layout_id.clone(), name: if slide.title.chars().count() <= 100 { slide.title.clone() } else { format!("{} {}", input.name, index + 1) }, master_id: master_id.clone(), background: None, elements });
+                design.layouts.push(SlideLayout { id: layout_id.clone(), name: if slide.title.chars().count() <= 100 { slide.title.clone() } else { format!("{} {}", input.name, index + 1) }, master_id: master_id.clone(), source_id: None, background: None, elements });
                 layout_ids.push(layout_id);
             }
         }

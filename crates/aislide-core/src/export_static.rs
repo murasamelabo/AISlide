@@ -297,6 +297,7 @@ fn preview_attempt(
         mime_type: artifact.mime_type, width: artifact.width, height: artifact.height,
     }).collect();
     let mut warnings = output.warnings;
+    warnings.extend(crate::document::projection_warnings(document, selected)?);
     if document.bindings.iter().any(|binding| binding.stale) {
         warnings.push(RenderWarning { code: "SOURCE_BINDINGS_STALE".into(), page_index: pages[0].page_index, element_id: String::new(), message: "Preview includes stale source bindings; undo or rebind before export".into() });
     }

@@ -487,7 +487,7 @@ fn native_topology_add_move_remove_and_undo_retains_unknown_parts() {
     let mut deck = original.deck.clone();
     let design = deck.design.as_mut().unwrap();
     design.masters.push(Master { id: "brand-master".into(), name: "Brand master".into(), background: "@accent1".into(), elements: vec![], theme: None });
-    design.layouts.push(SlideLayout { id: "brand-layout".into(), name: "Brand layout".into(), master_id: "brand-master".into(), background: None, elements: vec![] });
+    design.layouts.push(SlideLayout { id: "brand-layout".into(), name: "Brand layout".into(), master_id: "brand-master".into(), source_id: None, background: None, elements: vec![] });
     deck.slides[0].layout_id = Some("brand-layout".into());
     let changed = change(&original, deck);
     let output = save(&changed.document);
@@ -542,7 +542,7 @@ fn simultaneous_native_master_layout_and_slide_addition_writes_real_theme_and_ar
     let design = deck.design.as_mut().unwrap();
     design.theme.colors.insert("accent2".into(), "FEDCBA".into());
     design.masters.push(Master { id: "new-master".into(), name: "New & master".into(), background: "@lt1".into(), elements: vec![aislide_core::model::Element::Rect { visual: None, id: "brand-band".into(), x: 0.0, y: 0.0, width: 1280.0, height: 20.0, fill: "@accent2".into() }], theme: None });
-    design.layouts.push(SlideLayout { id: "new-layout".into(), name: "New layout".into(), master_id: "new-master".into(), background: None, elements: vec![] });
+    design.layouts.push(SlideLayout { id: "new-layout".into(), name: "New layout".into(), master_id: "new-master".into(), source_id: None, background: None, elements: vec![] });
     let mut slide = deck.slides[0].clone(); slide.id = "new-slide".into(); slide.layout_id = Some("new-layout".into()); slide.notes = "New speaker notes".into(); deck.slides.push(slide);
     let output = save(&change(&original, deck).document);
     let package = Package::open(output.clone()).unwrap();
@@ -562,7 +562,7 @@ fn different_native_themes_are_retained_and_default_theme_edits_are_owner_scoped
     let mut original = source();
     let design = original.deck.design.as_mut().unwrap();
     design.masters.push(Master { id: "second".into(), name: "Second".into(), background: "@lt1".into(), elements: vec![], theme: None });
-    design.layouts.push(SlideLayout { id: "second-layout".into(), name: "Second layout".into(), master_id: "second".into(), background: None, elements: vec![] });
+    design.layouts.push(SlideLayout { id: "second-layout".into(), name: "Second layout".into(), master_id: "second".into(), source_id: None, background: None, elements: vec![] });
     let original = document::create("topology".into(), original.deck, vec![], vec![], None).unwrap();
     let mut package = Package::open(save(&original)).unwrap();
     let xml = package.text("ppt/theme/theme3.xml").unwrap().replace("087F73", "ABC123");
@@ -602,8 +602,8 @@ fn retained_topology_rows_keep_unknown_attributes() {
     let mut deck = original.deck.clone();
     let design = deck.design.as_mut().unwrap();
     design.masters.push(Master { id: "extra".into(), name: "Extra".into(), background: "@lt1".into(), elements: vec![], theme: None });
-    design.layouts.push(SlideLayout { id: "extra-layout".into(), name: "Extra layout".into(), master_id: "extra".into(), background: None, elements: vec![] });
-    design.layouts.push(SlideLayout { id: "main-extra-layout".into(), name: "Main extra layout".into(), master_id: "master-1".into(), background: None, elements: vec![] });
+    design.layouts.push(SlideLayout { id: "extra-layout".into(), name: "Extra layout".into(), master_id: "extra".into(), source_id: None, background: None, elements: vec![] });
+    design.layouts.push(SlideLayout { id: "main-extra-layout".into(), name: "Main extra layout".into(), master_id: "master-1".into(), source_id: None, background: None, elements: vec![] });
     let output = Package::open(save(&change(&original, deck).document)).unwrap();
     for (path, count) in [("ppt/presentation.xml", 1), ("ppt/slideMasters/slideMaster1.xml", 4)] {
         let parsed = roxmltree::Document::parse(output.text(path).unwrap()).unwrap();
@@ -661,7 +661,7 @@ fn shared_native_theme_is_cloned_without_losing_unknown_xml_or_other_owner_bytes
     let mut deck = source().deck;
     let design = deck.design.as_mut().unwrap();
     design.masters.push(Master { id: "second".into(), name: "Second".into(), background: "@lt1".into(), elements: vec![], theme: None });
-    design.layouts.push(SlideLayout { id: "second-layout".into(), name: "Second".into(), master_id: "second".into(), background: None, elements: vec![] });
+    design.layouts.push(SlideLayout { id: "second-layout".into(), name: "Second".into(), master_id: "second".into(), source_id: None, background: None, elements: vec![] });
     let mut package = Package::open(aislide_core::pptx::export_pptx(&deck).unwrap()).unwrap();
     let rel = "ppt/slideMasters/_rels/slideMaster2.xml.rels";
     package.replace_part(rel, package.text(rel).unwrap().replace("theme3.xml", "theme1.xml").into_bytes()).unwrap();

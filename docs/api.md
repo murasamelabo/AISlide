@@ -513,6 +513,8 @@ Every operation has `op` and `slide_id`, plus the following fields:
 | `update_graph` | `id`, `spec: GraphSpec` | Regenerate a current managed graph, preserving its existing `PartLayout`; a `layout` field is not accepted |
 | `set_frame` | `id`, `frame` | Set geometry without changing font or stroke sizes |
 | `set_text_style` | `ids`, `style` | Overlay a nonempty partial `RunStyle` on 1-128 distinct text/shape targets, their defaults and existing runs; retain unspecified run and paragraph attributes |
+| `set_surface` | `ids`, `surface` | Overlay supplied fill/outline/opacity/gradient on 1-128 rect/shape/polygon targets without changing rich text; outlines require shape/polygon |
+| `set_effects` | `ids`, `effects` | Overlay supplied shadow/glow/soft-edge/reflection on 1-128 visual targets without changing rich text |
 | `set_text_padding` | `ids`, required `padding` | Set explicit inner padding, or `null` for legacy defaults; retains frames/font sizes and detaches inheritance when changed |
 | `set_rich_text` | `id`, `paragraphs` | Replace ordinary text from one rich source; derive canonical text without accepting a second body |
 | `compose_slide` | `id`, `spec: CompositionSpec` | Populate a new empty generated slide with shared page styling and coordinate-free content; retains managed parts/graphs |
@@ -539,8 +541,31 @@ semantic regeneration of a current part, not to overwrite stale manual edits.
 overlay: omitted endpoints/routing clear their previous values and omitted
 `flip_v` becomes false. Existing visual properties remain unchanged. The
 existing connection/routing representability checks still apply.
-`set_text_style` is the partial-style API; existing `apply_format` /
-`session.applyFormat` remains the compatible-object format painter.
+`set_text_style`, `set_surface` and `set_effects` are partial-style APIs.
+`surface` accepts `{fill?,stroke?,stroke_width?,opacity?,gradient?}`;
+`effects` accepts `{shadow?,glow?,soft_edge?,reflection?}`. Omitted properties
+are preserved; explicit `null` clears opacity, gradient or an effect. A supplied
+gradient/effect is a complete typed value, not a nested property merge. Empty
+patches reject. These updates retain text runs, geometry, z-order and reading
+order, so appearance changes do not require deleting and re-adding a shape.
+
+`apply_format` / `session.applyFormat` remains the compatible-object format
+painter. A text snapshot applies its supplied run style across all target text,
+which can unify mixed formatting. Such changes return
+`FORMAT_PAINTER_RUNS_UNIFIED` in core `render_warnings` and SDK/MCP
+`renderWarnings`. To replace only appearance with this API, use
+`{kind:"filled",surface,effects}`; it also accepts text-bearing shapes and leaves
+their rich text unchanged.
+
+`edit_table` / `session.editTable` applies typed table operations atomically.
+`{op:"update_format",format:{column_widths:{unit:"relative",values:[2,1,1]}}}`
+changes only column widths: omitted row heights, cell styles and merges remain.
+Each supplied `cells` or `merges` array replaces that whole array; `[]` clears it.
+Explicit `null` on `column_widths` or `row_heights` restores equal tracks;
+`{format:{}}` is a no-op. Use `set_cell_style` for one cell, or
+`{op:"replace_format",format:{...}}` for intentional full replacement, where
+omitted properties are cleared. Grid, merge, native-preservation and Undo guards
+remain enforced.
 
 Partial style updates do not bypass native text guards. Imported rich text can
 reject frame-default style changes even when the same partial update works on
@@ -679,6 +704,20 @@ SDK methods: `session.previewPresentation(options?,requestOptions?)`, `preflight
 
 MCP substitutes `deck_id` for `document`. Preview tools return metadata in the first text block and standard MCP `image` blocks; `include_images:false` omits images but still renders. Compact `preview_presentation` defaults to a 640px JPEG contact sheet with a 384KiB image budget and the first eight pages. Explicit options override these defaults; `page_scope` discloses selected/unselected counts. `detail:"full"` restores the core preview defaults. Use `get_deck_summary` for metadata without rendering. `preview_slide_revision` retains only bounded edit instructions under an opaque process-local candidate ID (16 candidates, ten-minute expiry, 128KiB each). `apply_slide_revision` accepts that ID plus the exact base revision/hash rather than replacement edits. Stale/closed-deck candidates release capacity; applied candidates are single-use. No-op applies do not add history. `author_presentation` and `aislide://authoring/workflow` expose the workflow through the official MCP prompt/resource APIs.
 
+For `preview_presentation`, `preflight_presentation` and
+`finalize_presentation`, page selection is nested under `options.page_indices`,
+for example `{deck_id,options:{page_indices:[0]}}`. Indices are zero-based.
+A top-level `page_indices` is rejected with guidance showing the correct nesting.
+
+`TEXT_OVERLAP` uses positioned, clipped shaped-glyph metric bounds, including
+paragraph/run sizes, padding, alignment, vertical placement and group transforms.
+A label at the top of a container no longer makes its entire frame collide with
+the contained text. Real label/body intersections still warn. This is not exact
+ink intersection; rotated bounds are conservative and warped text uses its
+content frame. Native objects retained without an editing projection return
+`NATIVE_OBJECT_NOT_PREVIEWED` in preview warnings and preflight findings, rather
+than disappearing without a diagnostic. The original XML remains retained.
+
 Typed edits: `translate{ids,dx,dy}`, `align{ids,alignment,relative_to}`, `set_text_frame{id,x,y,width,height}`, `replace_text{id,text}`, `update_part{id,spec}`, and `update_graph{id,spec}`. One slide, 1-16 edits and up to 32 unique targets per selection; no arbitrary JSON Patch, file path, XML or source authority. Nested text coordinates remain parent-local. Locked/hidden targets and native loss reject. Generic child edits may make managed metadata stale; the preview reports this. Existing raw `transaction` remains a separate lower-level API.
 
 ### Delivery Preparation
@@ -740,6 +779,15 @@ layout selection includes its owning masters. Retained samples must use selected
 layouts. Set `include_sample_slides:false` to create one blank slide on the first
 selected layout in source order, including templates with no source slide list.
 Supply the inspected SHA to reject changed source bytes. THMX rejects options.
+
+Inspected IDs such as `ppt/slideLayouts/slideLayout2.xml` are package-part
+identities used by import selectors, not document layout IDs. Imported layout
+records expose this identity as `source_id` alongside document `id`, `name` and
+`master_id`. MCP `import_template` returns compact `masters` and `layouts`
+metadata, and `get_deck_summary` / SDK `session.getSummary()` lists it without
+image or original-package bytes. Use the document `id`, or an unambiguous exact
+layout name, for `insert` and `assign_layout`. Missing/ambiguous layout errors
+list the available document IDs/names and explain package-part ID mismatches.
 
 `strip_sections:true` removes only recognized section lists, preserving unknown
 extensions. Custom shows still block structural edits and sample removal;
@@ -1164,6 +1212,24 @@ Operation batches contain 1-128 entries. `put_node`, `put_edge`, `put_group` car
 
 Native output uses ordinary shapes with embedded node and boundary text and attached `p:cxnSp` objects with `straightConnector1` or `bentConnector2/3/4`. Manual routes and other `routing.custom` polylines are written as open freeform `p:sp` shapes (`a:custGeom`, no fill) marked with the `urn:aislide:connector:v1` extension that keeps endpoint bindings, because PowerPoint refuses packages whose `p:cxnSp` uses custom geometry; Office edits them as freeform lines without glue, and AISlide reopens them as connectors. Editing a route that an earlier export stored in `p:cxnSp` rewrites it in the freeform form. Shape-specific connection indices are independent of logical port direction. Standard adjustment values/flips retain reverse and vertical routes. Raw connector `routing` accepts only representable 2-4 normalized points plus `start_arrow`/`dashed`; arbitrary waypoints, curves and unsupported formulas fail closed. Routing is deterministic midpoint routing, not obstacle avoidance. In Office, moving a node shape moves its embedded text; edge labels, badges and node icon pictures stay where they are.
 
+For native routes (`custom` omitted/false), normalize the frame to the route's
+bounding box. After horizontal/vertical flips, the start must be `[0,0]` and the
+end a different corner with coordinates 0 or 1. Accepted examples:
+
+| Preset | Points after flips |
+| --- | --- |
+| `straightConnector1` | `[[0,0],[1,0]]`, `[[0,0],[0,1]]` or `[[0,0],[1,1]]` |
+| `bentConnector2` | `[[0,0],[1,0],[1,1]]` |
+| `bentConnector3` | `[[0,0],[0,1],[1,1]]` or `[[0,0],[t,0],[t,1],[1,1]]` |
+| `bentConnector4` | `[[0,0],[0,t],[1,t],[1,1]]` |
+
+Here `t` is in 0..1 at 1/100000 adjustment precision. Reverse routes use the
+corresponding reflected coordinates. An interior horizontal line such as
+`[[0,0.5],[1,0.5]]` is not a native preset: change its frame and use
+`[[0,0],[1,0]]`, or set `routing.custom:true` to retain the interior path as a
+freeform line. Validation errors show the rejected points and both remedies;
+the API does not silently move or resize the frame.
+
 Managed graphs use `Document.parts` with preset `diagram/custom` and data `{kind:"diagram",graph:spec}`. They share native/render fingerprints, root placement preservation and Undo/Redo with parts. External edits can conservatively mark metadata stale; graph updates then fail rather than overwrite manual content. Ordinary native objects remain editable without metadata only within the supported native subset; unknown XML still guards against unsupported replacement.
 
 The recommended mixed-batch `add_graph` accepts top-level
@@ -1236,11 +1302,25 @@ Review operations `modern_comment`, `set_table_headers`, `check_accessibility`, 
 
 ## Authoring Model
 
-`deck.design` is optional and contains `{theme, masters, layouts}`. Each master is `{id, name, background, elements, theme?}`; each layout is `{id, name, master_id, background?, elements}`. A master's optional theme overrides the default design theme for its layouts and slides; omitting it restores inheritance. Background colors and element colors accept six-digit RGB or `@dk1`, `@lt1`, `@dk2`, `@lt2`, `@accent1` through `@accent6`, `@hlink`, `@folHlink`. Theme slots themselves must be RGB, not references. Theme fonts are `{major, minor, east_asian, complex_script}`. See [master fields and themes](authoring/master-fields-themes.md) for owner isolation and native preservation limits.
+`deck.design` is optional and contains `{theme, masters, layouts}`. Each master is `{id, name, background, elements, theme?}`; each layout is `{id, name, master_id, source_id?, background?, elements}`. `source_id` records an imported package-part identity, not an alias accepted by layout assignment. A master's optional theme overrides the default design theme for its layouts and slides; omitting it restores inheritance. Background colors and element colors accept six-digit RGB or `@dk1`, `@lt1`, `@dk2`, `@lt2`, `@accent1` through `@accent6`, `@hlink`, `@folHlink`. Theme slots themselves must be RGB, not references. Theme fonts are `{major, minor, east_asian, complex_script}`. Native solid/table fills, gradients and effects consistently normalize standard `bg1/tx1/bg2/tx2` aliases to `lt1/dk1/lt2/dk2`; this does not implement custom master color-map remapping. See [master fields and themes](authoring/master-fields-themes.md) for owner isolation and native preservation limits.
 
 Slides optionally contain `layout_id`, `inherit_background`, `hide_master_graphics`. Text and shape elements accept `format: {italic?, underline?, alignment?, vertical?, bullet?, font_family?, hyperlink?, placeholder?, inherit_layout?, paragraphs?}`. Alignment is left/center/right/justify; vertical is top/middle/bottom; bullet is none/bullet/numbered. Fonts may be explicit names or `@major`/`@minor`. Hyperlinks are absolute HTTP(S)/mailto URLs without embedded credentials or control characters; the application never fetches or activates them.
 
 `format.paragraphs` represents rich runs and paragraph formatting, not HTML. It supports run styles, numbering, indentation, spacing and tab stops within bounded typed inputs. When paragraphs are present, the element's `text` must equal their run texts joined with newline separators. Unknown or unrepresentable native rich content remains protected rather than flattened. Font measurement and rendering do not establish Office typography parity.
+
+For example, paragraphs containing `First` and `Second` require
+`text:"First\nSecond"`, not `text:"First Second"`. Mismatch errors explain the
+newline join and show at most 160 Unicode scalars of the expected text, with a
+truncation marker when needed. `set_rich_text` derives the canonical text instead
+of requiring it twice. Measurement and rendering share rich-paragraph font-size
+and line-height calculations: explicit run sizes determine the paragraph size;
+frame defaults apply only to unspecified styles and empty paragraphs. AISlide
+measurement includes the same synthesized inline bullet/numbering runs as
+rendering, so their font size and width also contribute to wrapping and line
+height. Hanging indentation remains an approximation, not Office parity. AISlide
+exports separate frame defaults when run styles override them, so reopening does
+not promote the first large/bold run into the defaults for the remaining
+paragraphs. Uniform multiline text retains its legacy plain-text editing path.
 
 Optional `visual` styles represent supported transforms, visibility/locking, gradients, effects, picture masks and text warps; applicability and bounds depend on element type. These are modeled DrawingML properties, not arbitrary CSS or full Office effect support.
 
@@ -1269,6 +1349,10 @@ The default `compact` profile initially advertises ten tools: `discover_tools`, 
 Published schemas use local `$defs`/`$ref` within each tool, generated lazily and cached. No cross-tool schema registry is assumed. The official SDK still validates calls against the original Zod schema. The follow-up regression measurement is about 1.26MB for an expanded full list, 627KB for the referenced full list and 32KB for the default ten-tool list (previously 54KB). The initial batch schema is about 20KB; its explicitly requested full form is about 44KB. These are serialized JSON bytes, not token counts or an end-to-end timing guarantee.
 
 `list_decks()` returns current IDs, titles, revisions/hashes, slide counts, Undo/Redo state, last successful operation and last presentation export. `get_deck_summary({deck_id,offset?,limit?,slide_id?})` returns up to 32 slides (16 by default); selecting a slide instead returns paginated element IDs, parent IDs, parent-local frames and at most 160 Unicode scalars of text per element. `next_offset` identifies more entries. Neither call clones the complete document, calls core, renders, writes files or includes image bytes, original packages, source text or notes. SDK consumers can use `session.getSummary({offset?,limit?,slideId?})`. Summaries do not prove a slide is finished or visually correct.
+
+Summaries also include `masters:[{id,name}]` and
+`layouts:[{id,name,master_id,source_id?}]`. These bounded metadata lists are
+independent of slide/element pagination and contain no design element payloads.
 
 Compact successful mutation replies include current revision/hash and Undo/Redo flags. Stale revision/hash guards are unchanged: hashes are not silently omitted or replaced with the latest value. The server automatically tracks successful operations and exports; callers do not need a manual progress file to recover an open handle after context loss. This is process-local memory, not crash recovery or automatic plaintext persistence. Export or explicitly retain recovery data before reconnecting.
 

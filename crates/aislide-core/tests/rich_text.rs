@@ -571,6 +571,138 @@ fn rich_measurement_uses_run_sizes_and_reports_missing_glyphs() {
 }
 
 #[test]
+fn rich_rendering_uses_actual_run_sizes_not_larger_frame_defaults() {
+    let mut input = text_element();
+    input["text"] = json!("First line\nSecond line");
+    input["width"] = json!(260);
+    input["height"] = json!(40);
+    input["format"] = json!({"paragraphs":[
+        {"runs":[{"text":"First line","style":{"font_size":12}}]},
+        {"runs":[{"text":"Second line","style":{"font_size":12}}]}
+    ]});
+    let source = deck(input.clone());
+    let measured = execute_request(json!({"op":"measure_layout","deck":source})).unwrap();
+    assert_eq!(measured["measurements"][0]["overflow"], false);
+    assert!((measured["measurements"][0]["measured_height"].as_f64().unwrap() - 27.6).abs() < 0.01);
+    let preview = execute_request(json!({"op":"render_element_preview","element":input})).unwrap();
+    assert!(!preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "TEXT_OVERFLOW"), "{preview}");
+}
+
+#[test]
+fn rich_bullet_markers_use_the_same_line_height_in_measurement_and_rendering() {
+    for bullet in ["bullet", "numbered"] {
+        let mut input = text_element();
+        input["text"] = json!("Item");
+        input["width"] = json!(260);
+        input["height"] = json!(20);
+        input["font_size"] = json!(40);
+        input["format"] = json!({"paragraphs":[{"bullet":bullet,"runs":[{"text":"Item","style":{"font_size":12}}]}]});
+        let measured = execute_request(json!({"op":"measure_layout","deck":deck(input.clone())})).unwrap();
+        let preview = execute_request(json!({"op":"render_element_preview","element":input})).unwrap();
+        let rendered_overflow = preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "TEXT_OVERFLOW");
+        assert!(rendered_overflow);
+        assert_eq!(measured["measurements"][0]["overflow"], rendered_overflow, "{bullet}: {measured}");
+        assert!((measured["measurements"][0]["measured_height"].as_f64().unwrap() - 46.0).abs() < 0.01);
+    }
+}
+
+#[test]
+fn rich_frame_defaults_and_text_fit_survive_native_roundtrip() {
+    let mut input = text_element();
+    input["text"] = json!("1  step\nHeading text\nBody text that wraps onto a second line here");
+    input["width"] = json!(260);
+    input["height"] = json!(130);
+    input["font_size"] = json!(16);
+    input["color"] = json!("112233");
+    input["format"] = json!({"padding":{"left":0,"right":0,"top":0,"bottom":0},"paragraphs":[
+        {"space_after":{"kind":"points","value":300},"runs":[
+            {"text":"1","style":{"font_size":40,"bold":true,"color":"F6E162"}},
+            {"text":"  step","style":{"font_size":15}}
+        ]},
+        {"space_after":{"kind":"points","value":300},"runs":[{"text":"Heading text","style":{"font_size":19,"bold":true}}]},
+        {"runs":[{"text":"Body text that wraps onto a second line here"}]}
+    ]});
+    let source = deck(input);
+    let bytes = export_deck(source.clone());
+    let reopened = open(&bytes);
+    let actual = &reopened["deck"]["slides"][0]["elements"][0];
+    assert_eq!(actual["font_size"].as_f64(), Some(16.0));
+    assert_eq!(actual["bold"], false);
+    assert_eq!(actual["color"], "112233");
+    let original = execute_request(json!({"op":"new_document","id":"rich-fit","deck":source})).unwrap();
+    let mut heights = Vec::new();
+    for document in [&original, &reopened] {
+        let measured = execute_request(json!({"op":"measure_layout","deck":document["deck"]})).unwrap();
+        assert_eq!(measured["measurements"][0]["overflow"], false, "{measured}");
+        heights.push(measured["measurements"][0]["measured_height"].as_f64().unwrap());
+        let preview = execute_request(json!({"op":"preview_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
+        assert!(!preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "TEXT_OVERFLOW"), "{preview}");
+        let checked = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
+        assert!(!checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "TEXT_OVERFLOW"), "{checked}");
+    }
+    assert!((heights[0] - heights[1]).abs() < 0.05, "{heights:?}");
+    assert_eq!(export_document(&reopened), bytes);
+}
+
+#[test]
+fn rich_native_base_size_uses_paragraph_defaults_not_first_run() {
+    let bytes = body_fixture("<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz='3000' b='1'/><a:t>1</a:t></a:r><a:r><a:rPr sz='1200'/><a:t> body</a:t></a:r><a:endParaRPr sz='1200'/></a:p></p:txBody>");
+    let document = open(&bytes);
+    let actual = &document["deck"]["slides"][0]["elements"][0];
+    assert_eq!(actual["font_size"].as_f64(), Some(16.0));
+    assert_eq!(actual["bold"], false);
+    assert_eq!(actual["format"]["paragraphs"][0]["runs"][0]["style"]["font_size"].as_f64(), Some(40.0));
+    assert_eq!(actual["format"]["paragraphs"][0]["runs"][1]["style"]["font_size"].as_f64(), Some(16.0));
+}
+
+#[test]
+fn uniform_rich_frames_remain_legacy_and_copyable_after_native_reopen() {
+    let mut input = text_element();
+    input["format"] = json!({"paragraphs":[{"runs":[{"text":"日本😀 English"}]}]});
+    let bytes = export_deck(deck(input));
+    let document = open(&bytes);
+    assert!(document["deck"]["slides"][0]["elements"][0]["format"].get("paragraphs").is_none());
+    let style = execute_request(json!({"op":"copy_format","document":document,"slide_id":"slide-1","id":"text-1"})).unwrap();
+    assert_eq!(style["run"]["font_size"].as_f64(), Some(24.0));
+    assert_eq!(export_document(&document), bytes);
+}
+
+#[test]
+fn uniform_multiline_native_text_preserves_plain_frame_editing() {
+    let mut input = text_element();
+    input["text"] = json!("Quarterly performance\nMultiline heading");
+    input["font_size"] = json!(42);
+    input["bold"] = json!(true);
+    input["color"] = json!("123456");
+    let document = open(&export_deck(deck(input)));
+    let current = &document["deck"]["slides"][0]["elements"][0];
+    assert_eq!(current["bold"], true);
+    assert_eq!(current["color"], "123456");
+    assert!(current["format"].get("paragraphs").is_none());
+    let mut next = current.clone();
+    next["text"] = json!("Updated heading\nStill plain text");
+    let edited = transact(&document, next).unwrap();
+    assert_eq!(open(&export_document(&edited["document"]))["deck"]["slides"][0]["elements"][0]["text"], "Updated heading\nStill plain text");
+}
+
+#[test]
+fn rich_text_mismatch_errors_show_newline_joining_and_bounded_expected_text() {
+    let mut input = text_element();
+    input["text"] = json!("First Second");
+    input["format"] = json!({"paragraphs":[{"runs":[{"text":"First"}]},{"runs":[{"text":"Second"}]}]});
+    let error = execute_request(json!({"op":"export","deck":deck(input.clone())})).unwrap_err().to_string();
+    for hint in ["newline (\\n)", "\"First\\nSecond\"", "set_rich_text"] { assert!(error.contains(hint), "{error}"); }
+    input["text"] = json!("First\nSecond");
+    assert!(execute_request(json!({"op":"export","deck":deck(input.clone())})).is_ok());
+    input["text"] = json!("wrong");
+    input["format"]["paragraphs"] = json!([{"runs":[{"text":"😀".repeat(400)}]}]);
+    let error = execute_request(json!({"op":"export","deck":deck(input)})).unwrap_err().to_string();
+    assert!(error.contains("(truncated)"));
+    assert_eq!(error.matches('😀').count(), 160);
+    assert!(error.chars().count() < 500);
+}
+
+#[test]
 fn native_empty_paragraphs_accept_rich_insertions() {
     for paragraph in ["<a:p/>", "<a:p><a:pPr/><a:endParaRPr lang='en-US' sz='1800'/></a:p>"] {
         let bytes = body_fixture(&format!("<p:txBody><a:bodyPr/><a:lstStyle/>{paragraph}</p:txBody>"));

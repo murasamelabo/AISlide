@@ -78,7 +78,14 @@ fn formatted_text_body(writer: &mut XmlWriter, name: &str, text: &str, size: f64
     empty(writer, "a:noAutofit", &[]);
     writer.end_element();
     writer.start_element("a:lstStyle");
-    if format.placeholder.is_some() {
+    let preserve_frame = name == "p:txBody" && !format.paragraphs.is_empty() && {
+        let frame = crate::rich_text::RunStyle::frame(size, shade, bold, format);
+        format.paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()) || format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| {
+            let mut resolved = frame.clone(); resolved.overlay(&run.style);
+            !resolved.same_frame_style(&frame)
+        })
+    };
+    if format.placeholder.is_some() || preserve_frame {
         writer.start_element("a:lvl1pPr"); paragraph_properties(writer, size, format);
         run_properties(writer, "a:defRPr", size, shade, bold, format, None, theme);
         writer.end_element();

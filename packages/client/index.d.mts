@@ -27,6 +27,8 @@ export type SessionSummary = {
   document_id: string; revision: number; hash: string; title: string; width: number; height: number; slide_count: number
   capacity_profile: CapacityProfile; can_undo: boolean; can_redo: boolean; busy: boolean; next_offset: number | null
   slides: { id: string; title: string; element_count: number; has_notes: boolean }[]
+  masters: { id: string; name: string }[]
+  layouts: { id: string; name: string; master_id: string; source_id?: string }[]
   slide_id?: string; element_count?: number
   elements?: { id: string; type: Element['type']; parent_id: string | null; frame: Frame; text_preview?: string; text_truncated?: boolean; child_count?: number }[]
 }

@@ -70,7 +70,7 @@ fn color(node: Node<'_, '_>, default: &str) -> String {
     if let Some(rgb) = child(fill, A, "srgbClr").and_then(|node| node.attribute("val")) { return rgb.into(); }
     if let Some(rgb) = child(fill, A, "sysClr").and_then(|node| node.attribute("lastClr")) { return rgb.into(); }
     if let Some(slot) = child(fill, A, "schemeClr").and_then(|node| node.attribute("val")) {
-        let slot = match slot { "tx1" => "dk1", "bg1" => "lt1", "tx2" => "dk2", "bg2" => "lt2", other => other };
+        let slot = crate::design::color_slot(slot);
         if crate::design::COLOR_KEYS.contains(&slot) { return format!("@{slot}"); }
     }
     default.into()
@@ -137,8 +137,16 @@ fn text_format(package: &Package, part: &str, body: Node<'_, '_>, template: Opti
         }
         if explicit { format.padding = Some(padding); }
     }
-    let run = body.descendants().find(|node| node.has_tag_name((A, "rPr")));
-    for node in [list.and_then(|node| child(node, A, "defRPr")), paragraph.and_then(|node| child(node, A, "defRPr")), run].into_iter().flatten() {
+    let first_paragraph = child(body, A, "p");
+    let single_run = body.descendants().filter(|node| node.has_tag_name((A, "r")) || node.has_tag_name((A, "fld"))).count() == 1;
+    let first_run = body.descendants().find(|node| node.has_tag_name((A, "rPr")));
+    let paragraphs = read_rich_paragraphs(body, &inherited_style, &inherited_format);
+    let uniform_runs = paragraphs.as_ref().ok().is_some_and(|paragraphs| {
+        let mut runs = paragraphs.iter().flat_map(|paragraph| &paragraph.runs);
+        runs.next().is_some_and(|first| runs.all(|run| run.style.same_frame_style(&first.style)))
+    });
+    let run = (single_run || uniform_runs).then_some(first_run).flatten();
+    for node in [run, first_paragraph.and_then(|node| child(node, A, "endParaRPr")), list.and_then(|node| child(node, A, "defRPr")), paragraph.and_then(|node| child(node, A, "defRPr"))].into_iter().flatten() {
         size = number(node, "sz", size * 75.0) / 75.0;
         shade = color(node, &shade);
         if let Some(value) = node.attribute("b") { bold = value == "1" || value == "true"; }
@@ -147,8 +155,11 @@ fn text_format(package: &Package, part: &str, body: Node<'_, '_>, template: Opti
         if let Some(family) = child(node, A, "latin").and_then(|node| node.attribute("typeface")) { format.font_family = Some(match family { "+mj-lt" => "@major", "+mn-lt" => "@minor", value => value }.into()); }
         if let Some(id) = child(node, A, "hlinkClick").and_then(|node| node.attribute((R, "id"))) { format.hyperlink = hyperlink(package, part, id)?; }
     }
+    if let Some(id) = first_run.and_then(|node| child(node, A, "hlinkClick")).and_then(|node| node.attribute((R, "id"))) {
+        format.hyperlink = hyperlink(package, part, id)?;
+    }
     format.inherit_layout = false;
-    if let Ok(paragraphs) = read_rich_paragraphs(body, &inherited_style, &inherited_format) {
+    if let Ok(paragraphs) = paragraphs {
         let frame = crate::rich_text::RunStyle::frame(size, &shade, bold, &format);
         let complex = !(8.0..=120.0).contains(&size) || paragraphs.iter().any(|paragraph| {
             paragraph.runs.len() != 1 || paragraph.runs.iter().any(|run| run.style != frame || run.field.is_some())
@@ -618,7 +629,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
             let path = layout.attribute((R, "id")).and_then(|id| targets.get(id)).ok_or_else(|| Error::Invalid("layout relationship missing".into()))?;
             let id = identity(path, format!("layout-{}", layouts.len() + 1));
             let (name, background, elements, binding) = read_part(package, path, id.clone(), scale, &elements, &mut warnings, metadata.as_ref(), canvas)?;
-            layouts.push(SlideLayout { id, name, master_id: master_id.clone(), background, elements }); layout_parts.push(binding);
+            layouts.push(SlideLayout { id, name, master_id: master_id.clone(), source_id: Some(path.clone()), background, elements }); layout_parts.push(binding);
         }
         masters.push(Master { id: master_id, name, background: background.unwrap_or_else(|| "@lt1".into()), elements, theme: override_theme }); master_parts.push(binding);
     }

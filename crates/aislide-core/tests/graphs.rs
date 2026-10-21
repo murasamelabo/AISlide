@@ -504,7 +504,8 @@ fn feedback_native_roundtrip_undo_and_strict_failure_are_atomic() {
     let inserted = execute_request(json!({"op":"insert_graph","document":document,"expected_revision":0,"slide_id":"slide-1","id":"flow","spec":spec})).unwrap();
     let before = inserted["document"].clone();
     let preflight = execute_request(json!({"op":"preflight_presentation","document":before})).unwrap();
-    assert!(preflight["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "TEXT_OVERLAP" && finding["severity"] == "warning" && finding["element_ids"].as_array().unwrap().iter().any(|id| id.as_str().unwrap().ends_with("-et-e1"))));
+    // These node/label frames overlap, but their positioned text does not.
+    assert!(!preflight["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "TEXT_OVERLAP" && finding["element_ids"].as_array().unwrap().iter().any(|id| id.as_str().unwrap().ends_with("-et-e1"))), "{preflight}");
     let mut strict = spec.clone(); strict["edges"][0]["label_placement"]["on_overlap"] = json!("error");
     let error = execute_request(json!({"op":"update_graph","document":before,"expected_revision":1,"slide_id":"slide-1","id":"flow","spec":strict})).unwrap_err().to_string();
     assert!(error.contains("e1") && error.contains("-n-xdr"), "{error}");

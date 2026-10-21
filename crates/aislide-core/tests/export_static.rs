@@ -1079,6 +1079,7 @@ fn master_layout_theme_layers_and_hidden_master_graphics_are_resolved() {
         }],
         layouts: vec![SlideLayout {
             id: "layout".into(),
+            source_id: None,
             name: "layout".into(),
             master_id: "master".into(),
             background: Some("0000FF".into()),

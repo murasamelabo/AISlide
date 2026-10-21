@@ -71,6 +71,32 @@ await reopened.session.editSlides([
 
 `client.createAsset()` is stateless; `session.addAsset()` inserts under revision, cancellation and Undo guards. Accepted inert SVG is retained as a native SVG picture with an inspected transparent PNG fallback, not converted into editable shape paths. Arbitrary SVG, active content and external references are rejected. Native slide copies retain original XML and independently copy chart/workbook resources. Unsupported custom shows/sections or unsafe native copies fail without changing the session. Default `large` permits 256 slides / 32 MiB complete document; explicit `standard` retains 128 / 8 MiB and `legacy` 32 / 2 MiB. Constructor and create/open options accept `capacityProfile`; session operations preserve it. `setCapacityProfile()` verifies before changing the selection. `recoveryEnvelope` and `client.recoverSession()` preserve verified bounded Undo/Redo; legacy document-only recovery starts empty history.
 
+## Partial Appearance and Table Updates
+
+Use partial operations to change appearance without flattening mixed text or
+deleting/re-adding the shape:
+
+```js
+await session.applyOperations([
+  { op: 'set_surface', slide_id: slideId, ids: ['callout'], surface: { fill: '225566' } },
+  { op: 'set_effects', slide_id: slideId, ids: ['callout'], effects: { glow: null } },
+], { expectedRevision: session.revision, expectedHash: session.document.hash });
+```
+
+Omitted properties remain unchanged; `null` clears opacity, gradient or an
+effect. `applyFormat` remains a format painter: text snapshots may unify mixed
+run styles and expose `FORMAT_PAINTER_RUNS_UNIFIED` through `renderWarnings`.
+Use `{kind:'filled',surface,effects}` to replace appearance only.
+
+`editTable`'s `update_format` is partial: omitted tracks, cells and merges are
+preserved. Supplied cell/merge arrays replace the whole array (`[]` clears it);
+`null` clears a track. Use `replace_format` for explicit complete replacement.
+
+`session.getSummary()` lists compact `masters` and `layouts` metadata without
+copying design elements. Imported layouts include `source_id` (the inspected
+package-part path) and the document `id`; use the document ID or an unambiguous
+layout name with `assignLayout` and slide insertion.
+
 ## Master Presets
 
 For content-oriented authoring on a generated empty slide, reuse one style

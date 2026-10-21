@@ -69,20 +69,20 @@ fn measure_rich(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width
     let mut measured_width = 0.0f32; let mut measured_height = 0.0f32; let mut lines = 0; let mut missing = 0;
     let mut used = BTreeSet::new(); let mut requested = String::new();
     let spacing_pixels = |spacing: Spacing, size: f64| match spacing { Spacing::Percent(value) => size * value as f64 / 100000.0, Spacing::Points(value) => value as f64 / 75.0 };
-    for paragraph in &format.paragraphs {
-        let styles: Vec<_> = paragraph.runs.iter().map(|run| { let mut style = RunStyle::frame(size, "@dk1", bold, format); style.overlay(&run.style); style }).collect();
-        let families: Vec<_> = paragraph.runs.iter().zip(&styles).map(|(run, style)| crate::fonts::requested_family(&run.text, style.font_family.as_deref(), theme).to_owned()).collect();
+    for (index, paragraph) in format.paragraphs.iter().enumerate() {
+        let runs = crate::rich_text::paragraph_runs(paragraph, format, index);
+        let styles: Vec<_> = runs.iter().map(|run| { let mut style = RunStyle::frame(size, "@dk1", bold, format); style.overlay(&run.style); style }).collect();
+        let families: Vec<_> = runs.iter().zip(&styles).map(|(run, style)| crate::fonts::requested_family(&run.text, style.font_family.as_deref(), theme).to_owned()).collect();
         if requested.is_empty() { requested = families.first().cloned().unwrap_or_else(|| theme.fonts.minor.clone()); }
-        let maximum_size = styles.iter().filter_map(|style| style.font_size).reduce(f64::max).unwrap_or(size);
-        let line_height = spacing_pixels(paragraph.line_spacing.unwrap_or(Spacing::Percent(115000)), maximum_size).max(maximum_size);
-        let margin = paragraph.margin_left.map(|value| value as f64 / 9525.0).unwrap_or(if paragraph.bullet.unwrap_or(format.bullet) == Bullet::None { 0.0 } else { size });
-        let positive_indent = paragraph.indent.unwrap_or(0).max(0) as f64 / 9525.0;
-        let tab_reserve = if paragraph.runs.iter().any(|run| run.text.contains('\t')) { paragraph.tabs.last().map_or(maximum_size * 4.0, |tab| tab.position as f64 / 9525.0) } else { 0.0 };
-        let inset = margin + positive_indent + tab_reserve;
+        let (maximum_size, line_height) = crate::rich_text::paragraph_metrics(&styles, size, paragraph.line_spacing);
+        let margin = paragraph.margin_left.map_or(0.0, |value| value as f64 / 9525.0);
+        let indent = paragraph.indent.unwrap_or(0) as f64 / 9525.0;
+        let tab_reserve = if runs.iter().any(|run| run.text.contains('\t')) { paragraph.tabs.last().map_or(maximum_size * 4.0, |tab| tab.position as f64 / 9525.0) } else { 0.0 };
+        let inset = (margin + indent).max(0.0) + tab_reserve;
         let default_attrs = Attrs::new().family(Family::Name(&requested));
         let mut buffer = Buffer::new(fonts, Metrics::new(maximum_size as f32, line_height as f32));
         buffer.set_size(Some((width - inset).max(1.0) as f32), None); buffer.set_wrap(Wrap::WordOrGlyph);
-        buffer.set_rich_text(paragraph.runs.iter().zip(&styles).zip(&families).map(|((run, style), family)| {
+        buffer.set_rich_text(runs.iter().zip(&styles).zip(&families).map(|((run, style), family)| {
             let attrs = Attrs::new().family(Family::Name(family)).weight(crate::fonts::weight(fonts, family, style.bold.unwrap_or(bold), style.italic.unwrap_or(false))).style(if style.italic.unwrap_or(false) { Style::Italic } else { Style::Normal }).metrics(Metrics::new(style.font_size.unwrap_or(size) as f32, line_height as f32));
             (run.text.as_str(), attrs)
         }), &default_attrs, Shaping::Advanced, None);

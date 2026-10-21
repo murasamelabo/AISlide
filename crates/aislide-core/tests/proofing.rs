@@ -53,6 +53,31 @@ fn painter_is_read_only_then_atomic_preserving_content_geometry_and_semantics() 
 }
 
 #[test]
+fn text_painting_warns_about_mixed_runs_but_filled_snapshots_preserve_them() {
+    let mut scene = document()["deck"].clone();
+    let target = &mut scene["slides"][0]["elements"][1];
+    target["type"] = json!("shape");
+    target["preset"] = json!("roundRect");
+    target["fill"] = json!("0B2A4A");
+    target["stroke"] = json!("000000");
+    target["stroke_width"] = json!(1);
+    target["format"]["paragraphs"][0]["runs"][0]["style"]["bold"] = json!(true);
+    target["visual"] = json!({"glow":{"color":"F6E162","opacity":0.5,"radius":4}});
+    let state = execute_request(json!({"op":"new_document","id":"mixed-painter","deck":scene})).unwrap();
+    let mut style = execute_request(json!({"op":"copy_format","document":state,"slide_id":"slide","id":"target"})).unwrap();
+    style["effects"]["glow"] = serde_json::Value::Null;
+    let painted = execute_request(json!({"op":"apply_format","document":state,"expected_revision":0,"slide_id":"slide","ids":["target"],"style":style})).unwrap();
+    let warning = painted["render_warnings"].as_array().unwrap().iter().find(|warning| warning["code"] == "FORMAT_PAINTER_RUNS_UNIFIED").unwrap();
+    assert_eq!(warning["element_id"], "target");
+    assert!(warning["message"].as_str().unwrap().contains("kind:\"filled\""));
+    let appearance = json!({"kind":"filled","surface":style["surface"],"effects":style["effects"]});
+    let changed = execute_request(json!({"op":"apply_format","document":state,"expected_revision":0,"slide_id":"slide","ids":["target"],"style":appearance})).unwrap();
+    assert_eq!(changed["document"]["deck"]["slides"][0]["elements"][1]["format"], state["deck"]["slides"][0]["elements"][1]["format"]);
+    assert!(changed["document"]["deck"]["slides"][0]["elements"][1]["visual"].get("glow").is_none());
+    assert!(changed.get("render_warnings").is_none());
+}
+
+#[test]
 fn synonym_and_term_translation_import_is_bounded_strict_and_offline() {
     let content = json!({"language":"en-US","words":["report"],"synonyms":{"report":["summary"]},"translations":{"ja-JP":{"report":"報告"}}}).to_string();
     let dictionary = execute_request(json!({"op":"import_proofing_dictionary","language":"en-US","format":"json","content":content})).unwrap();
@@ -149,7 +174,7 @@ fn phase2_object_painter_native_styles_preserve_data_and_undo() {
         let open = |bytes: serde_json::Value| execute_request(json!({"op":"open_presentation","id":"object-style","base64":bytes})).unwrap()["document"].clone();
         for document in [fresh.clone(),open(save(&fresh))] {
             let bytes = save(&document);
-            let style = execute_request(json!({"op":"copy_format","document":document,"slide_id":"slide","id":"source"})).unwrap();
+            let style = execute_request(json!({"op":"copy_format","document":document,"slide_id":"slide","id":"source"})).unwrap_or_else(|error| panic!("{} native={}: {error}", source["type"], document["origin"].is_object()));
             let result = execute_request(json!({"op":"apply_format","document":document,"expected_revision":document["revision"],"slide_id":"slide","ids":["target"],"style":style})).unwrap();
             let before = &document["deck"]["slides"][0]["elements"][1];
             let after = &result["document"]["deck"]["slides"][0]["elements"][1];

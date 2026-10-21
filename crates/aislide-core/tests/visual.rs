@@ -41,6 +41,89 @@ fn visual_transform_fill_effects_are_native_and_reopen() {
 }
 
 #[test]
+fn theme_aliases_are_shared_by_native_gradient_fill_and_effect_colors() {
+    for (alias, slot) in [("bg1","lt1"),("tx1","dk1"),("bg2","lt2"),("tx2","dk2")] {
+        let shade = format!("@{slot}");
+        let mut element = shape();
+        element["fill"] = json!(shade);
+        element["visual"] = json!({
+            "gradient":{"kind":"linear","angle":0,"stops":[{"offset":0,"color":shade,"opacity":0.5},{"offset":1,"color":shade,"opacity":0}]},
+            "glow":{"color":shade,"opacity":0.5,"radius":2},
+            "shadow":{"color":shade,"opacity":0.5,"blur":1,"distance":2,"angle":45}
+        });
+        let mut package = Package::open(export(deck(element))).unwrap();
+        let xml = package.text("ppt/slides/slide1.xml").unwrap().replace(&format!("val=\"{slot}\""), &format!("val=\"{alias}\""));
+        package.replace_part("ppt/slides/slide1.xml", xml.into_bytes()).unwrap();
+        let bytes = package.save().unwrap();
+        let result = execute_request(json!({"op":"open_presentation","id":"theme-alias","base64":STANDARD.encode(&bytes)})).unwrap();
+        assert!(!result["warnings"].as_array().unwrap().iter().any(|warning| warning.as_str().unwrap().contains("retained unsupported")), "{alias}: {}", result["warnings"]);
+        let actual = &result["document"]["deck"]["slides"][0]["elements"][0];
+        assert_eq!(actual["fill"], shade);
+        for color in [&actual["visual"]["gradient"]["stops"][0]["color"], &actual["visual"]["gradient"]["stops"][1]["color"], &actual["visual"]["glow"]["color"], &actual["visual"]["shadow"]["color"]] {
+            assert_eq!(color, &json!(shade));
+        }
+        let preview = execute_request(json!({"op":"render_element_preview","element":actual})).unwrap();
+        assert!(!preview["svg"].as_str().unwrap().is_empty());
+        assert_eq!(saved(&result["document"]), bytes);
+    }
+}
+
+#[test]
+fn retained_native_objects_remain_visible_as_preview_and_preflight_warnings() {
+    let mut package = Package::open(export(deck(shape()))).unwrap();
+    let xml = package.text("ppt/slides/slide1.xml").unwrap().replace("prst=\"roundRect\"", "prst=\"unsupportedPreset\"");
+    package.replace_part("ppt/slides/slide1.xml", xml.into_bytes()).unwrap();
+    let bytes = package.save().unwrap();
+    let result = execute_request(json!({"op":"open_presentation","id":"unprojected","base64":STANDARD.encode(&bytes)})).unwrap();
+    assert!(result["document"]["deck"]["slides"][0]["elements"].as_array().unwrap().is_empty());
+    let preview = execute_request(json!({"op":"preview_presentation","document":result["document"],"options":{"page_indices":[0]}})).unwrap();
+    assert!(preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "NATIVE_OBJECT_NOT_PREVIEWED" && warning["element_id"] == "shape"));
+    let checked = execute_request(json!({"op":"preflight_presentation","document":result["document"],"options":{"page_indices":[0]}})).unwrap();
+    assert!(checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED" && finding["severity"] == "warning"));
+    assert_eq!(saved(&result["document"]), bytes);
+}
+
+#[test]
+fn unpreviewed_master_objects_do_not_borrow_same_named_slide_evidence() {
+    let mut scene = execute_request(json!({"op":"create_presentation","id":"scope-source","title":"Synthetic scopes"})).unwrap()["deck"].clone();
+    scene["design"]["masters"][0]["elements"] = json!([shape()]);
+    scene["slides"][0]["elements"] = json!([{"type":"rect","id":"shape","x":20,"y":30,"width":100,"height":60,"fill":"FFFFFF"}]);
+    let mut package = Package::open(export(scene)).unwrap();
+    let path = "ppt/slideMasters/slideMaster1.xml";
+    let xml = package.text(path).unwrap().replace("prst=\"roundRect\"", "prst=\"unsupportedPreset\"");
+    package.replace_part(path, xml.into_bytes()).unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"scope-warning","base64":STANDARD.encode(package.save().unwrap())})).unwrap();
+    let checked = execute_request(json!({"op":"preflight_presentation","document":opened["document"],"options":{"page_indices":[0]}})).unwrap();
+    let warning = checked["findings"].as_array().unwrap().iter().find(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED").unwrap();
+    assert_eq!(warning["element_ids"], json!(["shape"]));
+    assert!(warning["message"].as_str().unwrap().contains(path));
+    assert!(warning["scopes"].as_array().unwrap().is_empty(), "{warning}");
+    assert_eq!(warning["bounds"]["width"], 0.0);
+    assert_eq!(warning["bounds"]["height"], 0.0);
+}
+
+#[test]
+fn native_connector_errors_describe_coordinates_and_both_recovery_paths() {
+    for points in [json!([[0,0.5],[1,0.5]]), json!([[1,0.5],[0,0.5]])] {
+        let element = json!({"type":"connector","id":"route","x":10,"y":10,"width":300,"height":40,"color":"000000","stroke_width":2,"arrow":true,"routing":{"points":points}});
+        let error = execute_request(json!({"op":"export","deck":deck(element.clone())})).unwrap_err().to_string();
+        for hint in ["0.5", "start must be [0,0]", "bounding box", "[[0,0],[1,0]]", "custom:true", "freeform"] {
+            assert!(error.contains(hint), "{hint}: {error}");
+        }
+        let mut custom = element;
+        custom["routing"]["custom"] = json!(true);
+        assert!(execute_request(json!({"op":"export","deck":deck(custom)})).is_ok());
+    }
+    for points in [
+        json!([[0,0],[1,0]]), json!([[1,0],[0,0]]), json!([[0,0],[1,0],[1,1]]),
+        json!([[0,0],[0,1],[1,1]]), json!([[0,0],[0.4,0],[0.4,1],[1,1]]),
+        json!([[0,0],[0,0.4],[1,0.4],[1,1]])
+    ] {
+        assert!(execute_request(json!({"op":"export","deck":deck(json!({"type":"connector","id":"route","x":10,"y":10,"width":300,"height":40,"color":"000000","stroke_width":2,"arrow":true,"routing":{"points":points}}))})).is_ok());
+    }
+}
+
+#[test]
 fn svg_asset_retains_vector_and_native_relationship() {
     let source = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" fill="#ff0000"/></svg>"##;
     let asset = execute_request(json!({"op":"create_asset","id":"svg","base64":STANDARD.encode(source),"mime_type":"image/svg+xml","alt":"Vector","size":96})).unwrap();
