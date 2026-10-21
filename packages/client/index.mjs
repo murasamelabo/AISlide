@@ -50,6 +50,9 @@ export class AislideClient {
     return result;
   }
   authoringCapabilities(options) { return this.request({ op: 'authoring_capabilities' }, options); }
+  previewInteractive(input, options) { return this.request({ ...input, op: 'preview_interactive' }, options); }
+  compileInteractive(input, options) { return this.request({ ...input, op: 'compile_interactive' }, options); }
+  powerpointAddinManifest(runtimeUrl, options) { return this.request({ op: 'powerpoint_addin_manifest', runtime_url: runtimeUrl }, options); }
   computeChartPresentation(input, options) { return this.request({ ...input, op: 'compute_chart_presentation' }, options); }
   renderElementPreview(element, theme, options) { return this.request({ op: 'render_element_preview', element, theme }, options); }
   textAssist(input, options) { return this.request({ op: 'text_assist', input }, options); }
@@ -484,6 +487,8 @@ export class DocumentSession {
   redo(options) { return this.#restore(this.#future, this.#past, options); }
   exportProject(options = {}) { return this.#run(() => this.#request({ op: 'export_project', document: this.#document }, options), options); }
   exportPresentation(options = {}) { return this.#run(() => this.#request({ op: 'export_presentation', document: this.#document }, options), options); }
+  exportPowerpointInteractive(input, options = {}) { return this.#run(() => this.#request({ op: 'export_powerpoint_interactive', document: this.#document, options: input }, options), options); }
+  exportCopilotInteractive(input, options = {}) { return this.#run(() => this.#request({ op: 'export_copilot_interactive', document: this.#document, ...input }, options), options); }
 }
 
 export const FONT_LIMITS = Object.freeze({ face_bytes: 12 * 1048576, total_bytes: 24 * 1048576, faces: 8 });

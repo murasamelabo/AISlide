@@ -268,7 +268,7 @@ pub(crate) fn read_rich_paragraphs_with_limit(body: Node<'_, '_>, inherited_styl
 
 fn names(tree: Node<'_, '_>, aliases: Option<&crate::provenance::Identity>) -> Result<BTreeMap<String, String>> {
     let mut result = BTreeMap::new(); let mut used = BTreeSet::new();
-    for node in tree.descendants().filter(|node| is_shape(*node)) {
+    for node in tree.descendants().filter(|node| is_shape(*node) && !crate::interactive::office::in_playback_choice(*node)) {
         let props = properties(node).ok_or_else(|| Error::Unsupported("native shape has no identity".into()))?;
         let numeric = props.attribute("id").ok_or_else(|| Error::Invalid("native shape ID missing".into()))?;
         let name = aliases.and_then(|entry| entry.objects.get(numeric)).map(String::as_str).or_else(|| props.attribute("name")).filter(|name| !name.is_empty() && name.chars().count() <= 80).unwrap_or("");
@@ -530,6 +530,10 @@ pub(crate) fn read_part(package: &Package, path: &str, id: String, scale: (f64, 
     let mut elements = Vec::new();
     let scope = match document.root_element().tag_name().name() { "sld" => "slide", "sldMaster" => "master", "sldLayout" => "layout", _ => "part" };
     for node in tree.children().filter(|node| node.is_element() && !["nvGrpSpPr", "grpSpPr", "extLst"].contains(&node.tag_name().name())) {
+        let node=if let Some(fallback)=crate::interactive::office::static_fallback(node) {
+            warnings.push(format!("{path}: AISlide content add-in shown using its inert native fallback; HTML was not executed. Playback exports are read-only in AISlide; edit the static source and export again."));
+            fallback
+        } else { node };
         let element_id = properties(node).and_then(|node| node.attribute("id")).and_then(|numeric| ids.get(numeric)).map(String::as_str).unwrap_or("unknown");
         let context = format!("{scope} {id}, {path}, element {element_id}");
         let result = if is_shape(node) { read_element(package, path, node, scale, &ids, templates, 0) } else { Err(Error::Unsupported(node.tag_name().name().into())) };
@@ -720,6 +724,12 @@ pub(crate) fn save(bytes: Vec<u8>, deck: &Deck) -> Result<Vec<u8>> {
         }
     }
     if crate::canonical::bytes(&original.deck)? == crate::canonical::bytes(&compatible)? { return Ok(bytes); }
+    for name in package.part_names().iter().filter(|name|name.starts_with("ppt/slides/") && name.ends_with(".xml")) {
+        let xml=parse(package.text(name)?)?;
+        if xml.descendants().any(|node|crate::interactive::office::static_fallback(node).is_some()) {
+            return Err(Error::Unsupported("PowerPoint playback exports are read-only in AISlide; edit the static source PPTX and explicitly export its content add-ins again".into()));
+        }
+    }
     crate::review::ensure_native_write(&package, "native editing")?;
     let main = relationship_targets(&package, "", "officeDocument")?.into_values().next().ok_or_else(|| Error::Invalid("presentation missing".into()))?;
     let presentation = parse(package.text(&main)?)?;

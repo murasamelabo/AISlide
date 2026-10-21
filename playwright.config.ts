@@ -6,7 +6,7 @@ const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: './tests/e2e',
-  testIgnore: '**/generation.spec.ts',
+  testIgnore: ['**/generation.spec.ts', '**/office-runtime.spec.ts'],
   timeout: 30_000,
   workers: 1,
   use: {

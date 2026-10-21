@@ -106,6 +106,8 @@ function useWorkspacePanels(workbench: RefObject<HTMLDivElement | null>, workspa
 }
 const AssetPanel = lazy(() => import('./AssetPanel').then((module) => ({ default: module.AssetPanel })))
 const GraphEditor = lazy(() => import('./GraphEditor').then((module) => ({ default: module.GraphEditor })))
+const InteractivePanel = lazy(() => import('./InteractivePanel').then((module) => ({ default: module.InteractivePanel })))
+const OfficeExportPanel = lazy(() => import('./OfficeExportPanel').then((module) => ({ default: module.OfficeExportPanel })))
 let initial: Promise<AislideDocument> | undefined
 function loadInitial() {
   initial ??= client.createPresentation(crypto.randomUUID()).then((opened) => opened.document)
@@ -203,7 +205,7 @@ export default function Studio() {
   const busy = documentBusy || inlineWorking || propertiesWorking
   const [error, setError] = useState('')
   const [status, setStatus] = useState('Loading local core')
-  const [modal, setModalState] = useState<'report' | 'inspect' | 'generate' | 'sources' | 'layout' | 'import' | 'insert' | 'parts' | 'graph' | 'theme' | 'design' | 'master-import' | 'assets' | 'text-tools' | 'object-tools' | 'review' | 'setup' | 'export' | 'recovery' | 'fonts' | null>(null)
+  const [modal, setModalState] = useState<'report' | 'inspect' | 'generate' | 'sources' | 'layout' | 'import' | 'insert' | 'parts' | 'graph' | 'interactive' | 'office-export' | 'theme' | 'design' | 'master-import' | 'assets' | 'text-tools' | 'object-tools' | 'review' | 'setup' | 'export' | 'recovery' | 'fonts' | null>(null)
   const [templateDecision, setTemplateDecision] = useState<((approved: boolean) => void) | null>(null)
   const [graphCatalog, setGraphCatalog] = useState<GraphCatalog | null>(null)
   const [partCatalog, setPartCatalog] = useState<PartCatalog | null>(null)
@@ -598,7 +600,7 @@ export default function Studio() {
     } else { event.preventDefault(); event.stopPropagation(); openContext(kind, { x: event.clientX, y: event.clientY, anchor: event.currentTarget }, slideId, id) }
   }
   function editMetadata(part: PartInstance) {
-    void run(async () => { setPartEditing(part); if (part.spec.data.kind === 'diagram') { setGraphCatalog(await client.graphCatalog()); setModal('graph') } else { setPartCatalog(await client.partCatalog()); setModal('parts') } })
+    void run(async () => { setPartEditing(part); if (part.spec.data.kind === 'diagram') { setGraphCatalog(await client.graphCatalog()); setModal('graph') } else { setPartCatalog(await client.partCatalog()); setModal(part.spec.data.kind === 'interactive' ? 'interactive' : 'parts') } })
   }
   async function insertAssets(assets: AssetInput[], location?: { x: number; y: number }) {
     if (!session.current || !slide) throw new Error('No slide is open')
@@ -786,6 +788,8 @@ export default function Studio() {
       <div className="ribbon-group"><Tool label="Add text" disabled={disable} onClick={() => addElement('text')}><Type size={19} /></Tool><Tool label="Add rectangle" disabled={disable} onClick={() => addElement('rect')}><Square size={18} /></Tool><Tool label="Add chart" disabled={disable} onClick={() => addElement('chart')}><ChartNoAxesCombined size={18} /></Tool>
         <Tool label="Insert objects" disabled={disable || importedMode} onClick={() => void run(async () => { setCatalog(await core<ObjectCatalog>({ op: 'object_catalog' })); setModal('insert') })}><Shapes size={18} /></Tool>
         <Tool label="Parts library" disabled={disable || importedMode} onClick={() => void run(async () => { setPartCatalog(await client.partCatalog()); setPartEditing(null); setModal('parts') })}><Blocks size={18} /></Tool>
+        <Tool label="Interactive part" disabled={disable || importedMode} onClick={() => void run(async () => { setPartCatalog(await client.partCatalog()); setPartEditing(null); setModal('interactive') })}><Presentation size={18} /></Tool>
+        <Tool label="PowerPoint interactive export" disabled={disable || !documentState?.parts?.some(part => part.spec.data.kind === 'interactive')} onClick={() => setModal('office-export')}><FileOutput size={18} /></Tool>
         <Tool label="Add picture" disabled={disable} onClick={() => { pictureTarget.current = null; pictureInput.current?.click() }}><ImagePlus size={18} /></Tool>
         <Tool label="Insert icons" disabled={disable || importedMode} onClick={() => setModal('assets')}><Sticker size={18} /></Tool>
         <Tool label="Architecture diagram" disabled={disable || importedMode} onClick={() => void run(async () => { setGraphCatalog(await client.graphCatalog()); setPartEditing(null); setModal('graph') })}><Network size={18} /></Tool>
@@ -871,7 +875,7 @@ export default function Studio() {
         <div className="panel-tabs" role="tablist" aria-label="Inspector views"><button role="tab" disabled={busy || hasDrafts} aria-selected={panel === 'elements'} onClick={() => setPanel('elements')}><Layers size={16} />Elements</button><button role="tab" disabled={busy || hasDrafts} aria-selected={panel === 'notes'} onClick={() => setPanel('notes')}><FileText size={16} />Notes</button></div>
         {panel === 'elements' ? <>
           <div className="layer-list">{slide?.elements.map((item) => <div className="selection-layer" key={item.id}><button disabled={busy} className={selectedIds.includes(item.id) ? 'active' : ''} aria-label={`Select ${item.id}`} aria-pressed={selectedIds.includes(item.id)} onClick={(event) => selectElement(item.id, event.shiftKey || event.ctrlKey || event.metaKey)} onContextMenu={(event) => handleContext(event, 'element', slide.id, item.id)} onKeyDown={(event) => handleContext(event, 'element', slide.id, item.id)}>{item.type === 'text' ? <Type size={15} /> : item.type === 'table' ? <Table2 size={15} /> : <Square size={15} />}<span>{item.id}</span></button><Tool label={`${visualOf(item)?.hidden ? 'Show' : 'Hide'} ${item.id}`} disabled={busy || hasDrafts || item.type === 'table' || item.type === 'chart'} onClick={() => toggleLayer(item, 'hidden')}>{visualOf(item)?.hidden ? <EyeOff /> : <Eye />}</Tool><Tool label={`${visualOf(item)?.locked ? 'Unlock' : 'Lock'} ${item.id}`} disabled={busy || hasDrafts || item.type === 'table' || item.type === 'chart'} onClick={() => toggleLayer(item, 'locked')}>{visualOf(item)?.locked ? <Lock /> : <Unlock />}</Tool></div>)}</div>
-          {selectedPart && <div className="part-data-action"><button className="secondary" aria-label={selectedPart.spec.data.kind === 'diagram' ? 'Edit graph' : 'Edit part data'} disabled={busy || selectedPart.stale} onClick={() => void run(async () => { setPartEditing(selectedPart); if (selectedPart.spec.data.kind === 'diagram') { setGraphCatalog(await client.graphCatalog()); setModal('graph') } else { setPartCatalog(await client.partCatalog()); setModal('parts') } })}><Blocks size={16} />{selectedPart.spec.data.kind === 'diagram' ? 'Edit graph' : 'Edit part data'}</button>{selectedPart.stale && <p>Part data is out of sync with native edits.</p>}</div>}
+          {selectedPart && <div className="part-data-action"><button className="secondary" aria-label={selectedPart.spec.data.kind === 'diagram' ? 'Edit graph' : 'Edit part data'} disabled={busy || selectedPart.stale} onClick={() => editMetadata(selectedPart)}><Blocks size={16} />{selectedPart.spec.data.kind === 'diagram' ? 'Edit graph' : 'Edit part data'}</button>{selectedPart.stale && <p>Part data is out of sync with native edits.</p>}</div>}
           {element && selectedIds.length === 1 ? <><div className="selection-heading"><strong>{element.id}</strong><span>{element.type}</span></div><Properties key={JSON.stringify(element)} element={element} theme={deck?.design?.theme} width={deck?.width ?? 1280} height={deck?.height ?? 720} busy={busy || selectionLocked || Boolean(visualOf(element)?.hidden)} onTextBusy={setPropertiesWorking} onDraftChange={setPropertiesDraft} onApply={async (value) => editOnSlide(value.type === 'text' && value.format?.inherit_layout ? { ...value, format: { ...value.format, inherit_layout: false } } : value)} onReplaceImage={() => { pictureTarget.current = element.id; pictureInput.current?.click() }} /></> : <div className="empty-properties"><Layers size={24} /><p>{selectedIds.length ? `${selectedIds.length} elements selected` : 'No element selected'}</p></div>}
           {slide && deck && <div className="slide-design-properties"><ColorField label="Slide background" value={slide.background} theme={deck.design?.theme} onChange={(background) => void run(() => apply({ ...deck, slides: deck.slides.map((entry) => entry.id === slide.id ? { ...entry, background, inherit_background: false } : entry) }))} />{deck.design && <><label className="checkbox"><input type="checkbox" disabled={busy} checked={Boolean(slide.inherit_background)} onChange={(event) => { const inherit_background = event.target.checked; void run(() => apply({ ...deck, slides: deck.slides.map((entry) => entry.id === slide.id ? { ...entry, inherit_background } : entry) })) }} />Use layout background</label><label className="checkbox"><input type="checkbox" disabled={busy} checked={!slide.hide_master_graphics} onChange={(event) => { const hide_master_graphics = !event.target.checked; void run(() => apply({ ...deck, slides: deck.slides.map((entry) => entry.id === slide.id ? { ...entry, hide_master_graphics } : entry) })) }} />Show master graphics</label></>}</div>}
           <div className="slide-order"><span>Slide order</span><Tool label="Move slide up" disabled={disable || importedMode || slideIndex === 0} onClick={() => { if (slide) slidesCommand([{ op: 'move', slide_id: slide.id, index: slideIndex - 1 }]) }}><ArrowUp size={16} /></Tool><Tool label="Move slide down" disabled={disable || importedMode || !deck || slideIndex >= deck.slides.length - 1} onClick={() => { if (slide) slidesCommand([{ op: 'move', slide_id: slide.id, index: slideIndex + 1 }]) }}><ArrowDown size={16} /></Tool></div>
@@ -887,6 +891,7 @@ export default function Studio() {
 
     {context && <ContextMenu position={context.position} label={`${context.kind} actions`} commands={context.commands} onClose={closeContext} />}
     {modal === 'export' && panelSession && <Modal title="Export PDF and images" onClose={closeModal}><ExportPanel session={panelSession} pageIndex={slideIndex} onBusy={setOutputBusy} /></Modal>}
+    {modal === 'office-export' && panelSession && <Modal title="PowerPoint interactive export" onClose={closeModal} busy={busy}><Suspense fallback={<p role="status">Loading Office export</p>}><OfficeExportPanel session={panelSession} onBusy={setBusy} /></Suspense></Modal>}
     <DocumentFonts key={documentState?.id} fonts={deck?.embedded_fonts} />
     {modal === 'fonts' && panelSession && <Modal title="Fonts" onClose={closeModal}><FontPanel session={panelSession} element={element ?? undefined} slideId={slide?.id} onDocument={setDocumentState} onBusy={setBusy} /></Modal>}
     {modal === 'master-import' && panelSession && <Modal title="Master import" busy={busy} onClose={closeModal}><MasterImportPanel key={documentState?.id} session={panelSession} onBusy={setBusy} onCancel={closeModal} onDocument={document => { setDocumentState(document); setStatus('Masters added / Existing slides unchanged'); setModal(null) }} /></Modal>}
@@ -935,6 +940,12 @@ export default function Studio() {
       const document = partEditing ? await session.current.updatePart(slide.id, { id, spec }) : await session.current.addPart(slide.id, { id, spec })
       setDocumentState(document); setSelected(id); setStatus('Unsaved part changes'); setModal(null)
     }} /></Modal>}
+    {modal === 'interactive' && partCatalog && deck && slide && <Modal title="Interactive part" onClose={closeModal} busy={busy}><Suspense fallback={<p role="status">Loading interactive editor</p>}><InteractivePanel presets={partCatalog.presets.filter(preset => preset.category === 'interactive')} instance={partEditing} theme={deck.design?.theme} onBusy={setBusy} onApply={async (spec) => {
+      if (!session.current) throw new Error('No document is open')
+      const id = partEditing?.element_id ?? `interactive-${crypto.randomUUID().slice(0, 8)}`
+      const document = partEditing ? await session.current.updatePart(slide.id, { id, spec }) : await session.current.addPart(slide.id, { id, spec })
+      setDocumentState(document); setSelected(id); setStatus('Unsaved interactive default changes'); setModal(null)
+    }} /></Suspense></Modal>}
     {modal === 'graph' && graphCatalog && deck && slide && <Modal title="Architecture diagram" onClose={closeModal}><Suspense fallback={<p role="status">Loading diagram editor</p>}><GraphEditor catalog={graphCatalog} initial={partEditing?.spec.data.kind === 'diagram' ? partEditing.spec.data.graph : undefined} editing={Boolean(partEditing)} theme={deck.design?.theme} onBusy={setBusy} onApply={async (spec) => {
       if (!session.current) throw new Error('No document is open')
       const id = partEditing?.element_id ?? `graph-${crypto.randomUUID().slice(0, 8)}`

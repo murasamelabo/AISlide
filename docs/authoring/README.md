@@ -6,6 +6,44 @@ For local spelling, proofing-language assignment, synonyms, bilingual terms, and
 
 AISlide exposes English, purpose-specific best practices and a deterministic compiler for evidence-linked outlines. The calling assistant plans the claims and supplies content; these tools do not contact a model, fetch source URLs, execute source text, or invent missing values.
 
+## Interactive component prototype
+
+This development-only prototype does not update an installed desktop app.
+After building this branch's CLI, set `AISLIDE_CORE_BINARY` to its absolute
+executable path and run `node tools/interactive-studio.mjs` from the repository.
+Open `http://127.0.0.1:4197` and choose **Interactive part** on the editing ribbon.
+The launcher also supports linked development dependencies without changing
+the desktop CSP; it rejects a core without the interactive catalog entries.
+
+Studio's **Interactive part** opens five typed examples: summary, dashboard,
+ordered timeline, qualitative comparison and grouped priority map. Explore
+selections with the buttons and group/dimension/scale controls. These clicks
+are transient. **Save default and insert/update part** is the explicit document
+change and can be undone once; closing the dialog discards exploration.
+
+For AI/MCP authoring, discover `part_catalog` with `query:"interactive"` and
+request an example by `preset_id`. Edit its typed `data.spec`, then call
+`preview_interactive` before `add_part` / `update_part`. Supply real sources and
+metric denominators; the catalog contains synthetic demonstration data only.
+Use the default 1152×512 frame or a sufficiently large native layout. Long
+labels or insufficient space are rejected, not silently reduced.
+
+For opt-in **PowerPoint-hosted HTML playback**, follow the
+[mandatory creation and delivery checklist](powerpoint-interactive.md#mandatory-creation-and-delivery-checklist)
+before delivery. The [PowerPoint content add-in guide](powerpoint-interactive.md)
+distinguishes the AISlide-owned HTTPS add-in from the separate experimental
+Copilot catalog target. Neither a static screenshot nor a successful PPTX open
+verifies interactive playback. The ordinary export behavior below is unchanged.
+
+The saved PPTX remains editable native shapes/text and stores only the chosen
+default view plus typed metadata. AISlide can reopen and explore it again.
+Ordinary PowerPoint/PDF/PNG exports are static; only the explicit content-add-in
+export activates the separate Office runtime after installation. No arbitrary
+HTML execution is provided. Ordinary exports do not reference the internal
+Copilot catalog; that requires the explicit experimental target. Neither path
+relaxes Studio's CSP or executes embedded content from imported decks.
+See the [API contract](../api.md#interactive-parts-prototype).
+
 ## Profiles
 
 | ID | Intended outcome | Guide |

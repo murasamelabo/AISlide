@@ -375,7 +375,25 @@ const businessData = [
 	z.object({ kind: z.literal('journey'), stages: z.array(briefingLine(20, 'Journey stage', true)).min(2).max(6), rows: z.array(z.object({ label: briefingLine(16, 'Journey row', true), cells: z.array(briefingText(60, 'Journey cell')).min(2).max(6), boxed: z.boolean().optional() }).strict()).min(1).max(4), emotions: z.array(z.number().int().min(-2).max(2)).max(6).optional(), emotion_label: briefingLine(16, 'emotion_label').optional(), emotion_notes: z.array(briefingText(32, 'Journey emotion note')).max(6).optional(), highlight: optional(z.number().int().min(0).max(5)), message: briefingMessage }).strict(),
 	z.object({ kind: z.literal('architecture'), system: briefingLine(40, 'Architecture system', true), elements: z.array(architectureElement).min(2).max(12), relations: z.array(z.object({ from: partId, to: partId, label: briefingLine(24, 'Architecture relation label').optional() }).strict()).min(1).max(16) }).strict(),
 ];
+const interactiveId = z.string().min(1).max(32).regex(/^[A-Za-z0-9_-]+$/);
+const interactiveState = z.object({
+	selected_id: interactiveId, group_id: optional(interactiveId), dimension: z.number().int().min(0).max(3).optional(),
+	scale: z.enum(['linear', 'logarithmic']).optional(),
+}).strict();
+const interactiveSpec = z.object({
+	version: z.literal(1), template: z.enum(['summary', 'dashboard', 'timeline', 'comparison', 'map']),
+	appearance: z.enum(['plain', 'showcase']).optional(),
+	source: z.string().min(1).max(240), groups: z.array(z.object({ id: interactiveId, label: z.string().min(1).max(32) }).strict()).max(4).optional(),
+	dimensions: z.array(z.string().min(1).max(32)).max(4).optional(),
+	items: z.array(z.object({
+		id: interactiveId, label: z.string().min(1).max(48), detail: z.string().min(1).max(300), action: z.string().max(160).optional(),
+		group_id: optional(interactiveId), value: optional(z.number().finite().min(0).max(1e15)), unit: z.string().max(16).optional(),
+		values: z.array(z.string().min(1).max(96)).max(4).optional(),
+		metrics: z.array(z.object({ label: z.string().min(1).max(32), value: z.string().min(1).max(24), qualifier: z.string().min(1).max(80) }).strict()).max(3).optional(),
+	}).strict()).min(2).max(8), initial_state: interactiveState,
+}).strict();
 const partData = z.discriminatedUnion('kind', [
+	z.object({ kind: z.literal('interactive'), spec: interactiveSpec }).strict(),
 	z.object({ kind: z.literal('comparison_panels'), panels: z.array(comparisonPanel).length(2), transition: z.boolean().optional() }).strict().refine(value => value.panels.length === 2 && value.panels[0].items.length === value.panels[1].items.length, { message: 'Comparison panels require paired row counts', path: ['panels', 1, 'items'] }),
 	z.object({ kind: z.literal('icon_cards'), cards: z.array(iconCard).min(2).max(6), columns: optional(z.number().int().min(2).max(4)), numbered: z.boolean().optional(), body_size: briefingBody, message: briefingMessage }).strict()
 		.refine(value => { const columns = value.columns ?? (value.cards.length <= 4 ? value.cards.length : 3); return columns <= value.cards.length && Math.ceil(value.cards.length / columns) <= 2; }, { message: 'Icon cards require at most the card count in columns and at most two rows', path: ['columns'] }),
@@ -1058,7 +1076,7 @@ register('apply_recipe', 'Apply the exact previewed recipe to the same new empty
 	await state.applyRecipe(slide_id, { id, input, variant }, { expectedRevision: expected_revision, expectedHash: expected_hash, candidateHash: candidate_hash, signal });
 	return { deck_id, slide_id, variant, revision: state.revision, hash: state.document.hash, can_undo: state.canUndo, ...renderWarningMetadata(state) };
 });
-register('part_catalog', 'Search 138 original presets across 36 categories. Compact default returns 12 concise entries, next_offset, recommended/use_when/avoid_when; preset_id returns one synthetic example. detail=full without filters returns all examples and the core schema. Prefer flow/open-steps or vertical-flow/rail for ordered explanations, flow/roadmap for categorical phases, list-horizontal/icon-columns for icon-led peers, fact-columns for supplied headline facts with qualifiers, and image-columns for fully contained evidence pictures. Use cards only when enclosing items serves the content. Existing technical briefing and 14 specialized business-analysis presets remain available. Legacy rendering is retained. No model calls, downloads or mutation.', { ...catalogPage, preset_id: z.string().min(1).max(100).optional() }, true, async ({ query, preset_id, offset, limit, detail }, signal) => {
+register('part_catalog', 'Search 143 original presets including five typed interactive prototypes. Compact default returns 12 concise entries, next_offset, recommended/use_when/avoid_when; preset_id returns one synthetic example. detail=full without filters returns all examples and the core schema. Prefer flow/open-steps or vertical-flow/rail for ordered explanations, flow/roadmap for categorical phases, list-horizontal/icon-columns for icon-led peers, fact-columns for supplied headline facts with qualifiers, and image-columns for fully contained evidence pictures. Use cards only when enclosing items serves the content. Existing technical briefing and 14 specialized business-analysis presets remain available. Legacy rendering is retained. No model calls, downloads or mutation.', { ...catalogPage, preset_id: z.string().min(1).max(100).optional() }, true, async ({ query, preset_id, offset, limit, detail }, signal) => {
 	const catalog = await client.partCatalog({ signal });
 	if (!compactResponse(detail) && query === undefined && preset_id === undefined && offset === undefined && limit === undefined) return catalog;
 	const term = (query ?? '').toLowerCase();
@@ -1119,6 +1137,9 @@ register('create_guided_presentation', 'Create a NEW evidence-led presentation a
 	return { deck_id: id, revision: result.session.revision, slides: result.session.document.deck.slides.length, profile_id: result.profile_id, validation: result.validation, model_inference: false };
 });
 register('create_part', 'Preview a part without inserting it. Choose a preset from part_catalog by information relationship and use_when/avoid_when, not item count alone. Prefer apply_operations with add_part and PartSpec.layout for regenerable metadata. create_part plus add_elements is an explicit unmanaged choice, never a timeout fallback. Core validates bounds, numeric meaning and references. Deterministic design, not AI generation.', { id: z.string().min(1).max(40), spec: partSpec, theme: themeSchema.optional() }, true, async (input, signal) => client.createPart(input, { signal }));
+register('preview_interactive', 'Project a typed interactive part at a transient selection/filter/dimension/scale without changing any document or Undo history. Choose interactive/* presets from part_catalog. PPTX/PDF stores only the native editable initial_state view, not interactive HTML. No imported HTML, JavaScript, external URL, network or Office catalogue is executed.', { id: z.string().min(1).max(40), spec: partSpec, state: interactiveState.optional(), theme: themeSchema.optional() }, true, async (input, signal) => client.previewInteractive(input, { signal }));
+register('compile_interactive', 'Compile every permitted interaction state with the shared core for the AISlide HTML content-add-in runtime. Returns bounded typed views, not arbitrary JavaScript or imported HTML. Does not fetch a URL or change a document.', { id: z.string().min(1).max(40), spec: partSpec, theme: themeSchema.optional() }, true, async (input, signal) => client.compileInteractive(input, { signal }));
+register('powerpoint_addin_manifest', 'Create the AISlide-owned content add-in manifest for an explicitly supplied HTTPS runtime URL ending in /office.html. No installation, trust changes or network access. Not the Microsoft Copilot add-in.', { runtime_url: z.string().min(1).max(2048) }, true, async ({ runtime_url }, signal) => client.powerpointAddinManifest(runtime_url, { signal }));
 for (const name of ['add_part', 'update_part']) {
 	register(name, (name === 'add_part' ? 'Insert a native metadata-driven part in one undoable revision. Presets and metadata schema come from part_catalog. Placement does not rearrange existing content.' : 'Update a part from metadata while retaining its placement, in one undoable revision. Rejects stale metadata after native edits; never restores a cached scene over external changes.') + graphDiagnosticDescription, { deck_id: handle, expected_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), slide_id: z.string().min(1).max(80), id: z.string().min(1).max(40), spec: partSpec }, false, async ({ deck_id, expected_revision, slide_id, ...input }, signal) => {
 		const state = getDeck(deck_id);
@@ -1269,12 +1290,51 @@ register('export_pptx', 'Save one native PPTX including optional sources/binding
 	await publishNewFile(temporary, destination, bytes, signal);
 	return { path: destination, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
 });
+register('export_powerpoint_interactive', 'Export a NEW PPTX with AISlide-owned content add-ins and native static fallback plus its manifest. Requires approved output directory, installation of this own add-in and reachable trusted HTTPS runtime on each recipient machine. Not Copilot add-in impersonation, not standalone embedded HTML. Does not install, trust certificates, fetch URLs or mutate the source document. Office playback needs separate verification.', {
+    deck_id: handle, filename: filenameSchema,
+    options: z.object({ runtime_url: z.string().min(1).max(2048), catalog: z.discriminatedUnion('kind', [
+        z.object({ kind: z.literal('file_system'), location: z.string().min(1).max(2048) }).strict(),
+    ]) }).strict(),
+}, false, async ({ deck_id, filename, options }, signal) => {
+    if (!outputDirectory) throw new Error('Saving requires --output-dir at server startup');
+    const result = await getDeck(deck_id).exportPowerpointInteractive(options, { signal });
+    const manifestName = `${filename.slice(0, -5)}.addin.xml`;
+    const bytes = Buffer.from(result.base64, 'base64');
+    const items = [
+        { filename, bytes }, { filename: manifestName, bytes: Buffer.from(result.manifest, 'utf8') },
+    ];
+    const receipt = { format: 'aislide.office-content', version: 1, addin_id: result.addin_id,
+        powerpoint_playback_verified: false, requires_addin_installation: true, runtime_url: options.runtime_url,
+        files: items.map(item => ({ filename: item.filename, bytes: item.bytes.length, sha256: createHash('sha256').update(item.bytes).digest('hex') })) };
+    items.push({ filename: `${filename.slice(0, -5)}.manifest.json`, bytes: Buffer.from(JSON.stringify(receipt, null, 2)) });
+    const publication = await publishNewBundle(outputDirectory, items, signal);
+    const { base64: _base64, manifest: _manifest, ...metadata } = result;
+    return { ...metadata, ...publication, sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length };
+});
 register('close_deck', 'Release the in-memory deck and its undo history. Saved files remain unchanged.', { deck_id: handle }, false, async ({ deck_id }) => {
 	getDeck(deck_id);
 	decks.delete(deck_id);
 	deckActivity.delete(deck_id);
 	expireCandidates();
 	return { closed: deck_id };
+});
+register('export_copilot_interactive', 'EXPERIMENTAL: export generated AISlide HTML as a JSON-string contentBlockHtml using the observed Microsoft fa000000210 / sdxcatalog / en-US reference. This unpublished authoring contract may be rejected or change; no verified Copilot playback, Microsoft approval, license bypass or imported HTML execution. Requires explicit acknowledged_experimental=true, a new filename and approved output directory. Does not install an add-in or change trust. Keeps the editable source unchanged and includes native/PNG static fallbacks.', {
+    deck_id: handle, filename: filenameSchema, acknowledged_experimental: z.literal(true),
+    javascript_labs: z.array(z.object({ slide_id: z.string().min(1).max(80), element_id: z.string().min(1).max(40),
+        kind: z.enum(['simulator','network','priority','playback','comparison','quiz','explorer','canvas']) }).strict()).max(8).optional()
+        .describe('Explicit trusted built-in JavaScript experiments only; runtime calculations/drag/animation. Their static fallback is explanatory, not an identical live UI. No arbitrary scripts or URLs.'),
+}, false, async ({ deck_id, filename, acknowledged_experimental, javascript_labs }, signal) => {
+    if (!outputDirectory) throw new Error('Saving requires --output-dir at server startup');
+    const result = await getDeck(deck_id).exportCopilotInteractive({ acknowledged_experimental, ...(javascript_labs ? { javascript_labs } : {}) }, { signal });
+    const bytes = Buffer.from(result.base64, 'base64');
+    const { base64: _base64, ...metadata } = result;
+    const receipt = { format: 'aislide.experimental-copilot-content', version: 1, ...metadata,
+        files: [{ filename, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }] };
+    const publication = await publishNewBundle(outputDirectory, [
+        { filename, bytes },
+        { filename: `${filename.slice(0, -5)}.manifest.json`, bytes: Buffer.from(JSON.stringify(receipt, null, 2)) },
+    ], signal);
+    return { ...metadata, ...publication, bytes: bytes.length, sha256: receipt.files[0].sha256 };
 });
 
 register('ingest_source', 'Read a caller-provided CSV, JSON, XLSX, UTF-8 text/Markdown, PDF or PNG/JPEG evidence file. Keeps hashes and cell/page locators. Optional image OCR uses installed Windows languages locally; results require review. Never fetches URLs, evaluates formulas or executes content.', {

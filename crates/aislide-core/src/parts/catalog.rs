@@ -76,6 +76,7 @@ pub fn catalog() -> Value {
         if preset.specialized { entry["specialized"] = json!(true); }
         entry
     }));
+    presets.extend(crate::interactive::presets());
     json!({"version":1,"presets":presets,"schema":schemars::schema_for!(PartSpec),"style":"Theme-linked minimal modern","default_bounds":{"x":64,"y":144,"width":1152,"height":512}})
 }
 
