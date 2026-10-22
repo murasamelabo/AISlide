@@ -96,6 +96,13 @@ pub(crate) fn paragraph_metrics(styles: &[RunStyle], fallback: f64, spacing: Opt
     (maximum, height.max(maximum))
 }
 
+pub(crate) fn paragraph_indents(paragraph: &RichParagraph, format: &TextFormat, size: f64) -> (i32, i32) {
+    let bullet = paragraph.bullet.unwrap_or(format.bullet) != Bullet::None;
+    let margin = paragraph.margin_left.unwrap_or_else(|| if bullet { (size * 9525.0).round() as i32 } else { 0 });
+    let indent = paragraph.indent.unwrap_or_else(|| if bullet { (-size * 0.7 * 9525.0).round() as i32 } else { 0 });
+    (margin, indent)
+}
+
 pub(crate) fn paragraph_runs(paragraph: &RichParagraph, format: &TextFormat, index: usize) -> Vec<RichRun> {
     let mut runs = paragraph.runs.clone();
     let bullet = paragraph.bullet.unwrap_or(format.bullet);
@@ -173,7 +180,7 @@ fn editable(element: &mut Element) -> Result<(&mut String, &mut TextFormat)> {
     }
 }
 
-fn paragraphs(text: &str, format: &TextFormat) -> Vec<RichParagraph> {
+pub(crate) fn paragraphs(text: &str, format: &TextFormat) -> Vec<RichParagraph> {
     if !format.paragraphs.is_empty() { return format.paragraphs.clone(); }
     text.split('\n').map(|line| RichParagraph { runs: vec![RichRun { text: line.into(), style: RunStyle::default(), field: None }], ..Default::default() }).collect()
 }

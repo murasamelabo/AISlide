@@ -85,7 +85,7 @@ fn shape_fill(node: Node<'_, '_>) -> String {
     if child(node, A, "noFill").is_some() { "none".into() } else { color(node, "@lt1") }
 }
 
-fn placeholder(node: Node<'_, '_>) -> Option<Placeholder> {
+pub(crate) fn placeholder(node: Node<'_, '_>) -> Option<Placeholder> {
     let value = node.children().find(|node| node.tag_name().namespace() == Some(P) && node.tag_name().name().starts_with("nv"))
         .and_then(|node| child(node, P, "nvPr")).and_then(|node| child(node, P, "ph"))?;
     let kind = match value.attribute("type").unwrap_or("body") { "title" | "ctrTitle" => PlaceholderKind::Title, "body" | "obj" => PlaceholderKind::Body, "subTitle" => PlaceholderKind::Subtitle, "ftr" => PlaceholderKind::Footer, "dt" => PlaceholderKind::Date, "sldNum" => PlaceholderKind::SlideNumber, _ => return None };
@@ -715,6 +715,7 @@ pub(crate) fn save(bytes: Vec<u8>, deck: &Deck) -> Result<Vec<u8>> {
     validate_deck(deck)?;
     let mut package = Package::open(bytes.clone())?;
     let mut original = read(&package)?;
+    crate::native_projection::remember(&bytes, &package, &original)?;
     let mut compatible = deck.clone();
     if compatible.auxiliary_design.is_none() { compatible.auxiliary_design = original.deck.auxiliary_design.clone(); }
     for slide in &mut compatible.slides {

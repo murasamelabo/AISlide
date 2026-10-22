@@ -326,7 +326,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into(), "numbered_sequence_spacing".into(), "part_aspect".into()]);
 	report.limitations.push("Over-budget shadow, glow, soft-edge and reflection are omitted only from the diagnostic view at scale 1, with an EFFECT_APPROXIMATION finding; native content is unchanged and other renderer failures still reject.".into());
 	report.limitations.push("Reference URL detection uses normalized HTTP(S) tokens terminated by CJK prose; percent-encode CJK URL paths. Warnings do not echo private note URLs. Fixed-reference collisions require explicit repair, not automatic reflow.".into());
-	let projection_warnings = crate::document::projection_warnings(document, &selected)?;
+	let projection_warnings = crate::native_projection::warnings(document, &selected)?;
 	for page in selected {
 		let slide = &deck.slides[page];
 		let notes_only = crate::references::notes_only_count(document, page)?;
@@ -372,7 +372,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				_ => &["Inspect the preview and compare in Office when visual parity matters"],
 			};
 			push_finding(&mut report, page, &slide.id, &evidence, &warning.code, severity, "renderer", &warning.message, suggestions)?;
-			if object.is_none() {
+			if object.is_none() && !warning.element_id.is_empty() {
 				if let Some(finding) = report.findings.last_mut() { finding.element_ids.push(warning.element_id); }
 			}
 		}

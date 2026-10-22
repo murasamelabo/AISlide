@@ -16,7 +16,7 @@ pub struct Measurement {
 pub struct LayoutReport { pub engine: String, pub office_parity_verified: bool, pub measurements: Vec<Measurement>, pub fonts: Vec<String>, pub issues: Vec<Issue> }
 
 fn measure(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width: f64, height: f64, size: f64, bold: bool, format: &TextFormat, theme: &Theme) -> Measurement {
-    if !format.paragraphs.is_empty() { return measure_rich(fonts, slide, id, text, width, height, size, bold, format, theme); }
+    if !format.paragraphs.is_empty() || format.bullet != Bullet::None { return measure_rich(fonts, slide, id, text, width, height, size, bold, format, theme); }
     measure_plain(fonts, slide, id, text, width, height, size, bold, format, theme).0
 }
 
@@ -69,16 +69,16 @@ fn measure_rich(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width
     let mut measured_width = 0.0f32; let mut measured_height = 0.0f32; let mut lines = 0; let mut missing = 0;
     let mut used = BTreeSet::new(); let mut requested = String::new();
     let spacing_pixels = |spacing: Spacing, size: f64| match spacing { Spacing::Percent(value) => size * value as f64 / 100000.0, Spacing::Points(value) => value as f64 / 75.0 };
-    for (index, paragraph) in format.paragraphs.iter().enumerate() {
+    let paragraphs = crate::rich_text::paragraphs(text, format);
+    for (index, paragraph) in paragraphs.iter().enumerate() {
         let runs = crate::rich_text::paragraph_runs(paragraph, format, index);
         let styles: Vec<_> = runs.iter().map(|run| { let mut style = RunStyle::frame(size, "@dk1", bold, format); style.overlay(&run.style); style }).collect();
         let families: Vec<_> = runs.iter().zip(&styles).map(|(run, style)| crate::fonts::requested_family(&run.text, style.font_family.as_deref(), theme).to_owned()).collect();
         if requested.is_empty() { requested = families.first().cloned().unwrap_or_else(|| theme.fonts.minor.clone()); }
         let (maximum_size, line_height) = crate::rich_text::paragraph_metrics(&styles, size, paragraph.line_spacing);
-        let margin = paragraph.margin_left.map_or(0.0, |value| value as f64 / 9525.0);
-        let indent = paragraph.indent.unwrap_or(0) as f64 / 9525.0;
+        let (margin, indent) = crate::rich_text::paragraph_indents(paragraph, format, size);
         let tab_reserve = if runs.iter().any(|run| run.text.contains('\t')) { paragraph.tabs.last().map_or(maximum_size * 4.0, |tab| tab.position as f64 / 9525.0) } else { 0.0 };
-        let inset = (margin + indent).max(0.0) + tab_reserve;
+        let inset = ((f64::from(margin) + f64::from(indent)) / 9525.0).max(0.0) + tab_reserve;
         let default_attrs = Attrs::new().family(Family::Name(&requested));
         let mut buffer = Buffer::new(fonts, Metrics::new(maximum_size as f32, line_height as f32));
         buffer.set_size(Some((width - inset).max(1.0) as f32), None); buffer.set_wrap(Wrap::WordOrGlyph);

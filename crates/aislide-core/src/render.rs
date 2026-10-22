@@ -29,7 +29,7 @@ use crate::{
     design::Theme,
     export_static::{RenderWarning, MAX_SVG_BYTES},
     model::{validate_deck, Bullet, Deck, Element, TextAlign, TextFormat, VerticalAlign},
-    rich_text::{RichParagraph, RichRun, RunStyle, Spacing},
+    rich_text::{RunStyle, Spacing},
     visual::{Gradient, VisualStyle},
     Error, Result,
 };
@@ -992,19 +992,7 @@ impl Scene<'_> {
                 "installed fonts required for static text".into(),
             ));
         }
-        let paragraphs = if format.paragraphs.is_empty() {
-            text.split('\n')
-                .map(|line| RichParagraph {
-                    runs: vec![RichRun {
-                        text: line.into(),
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                })
-                .collect()
-        } else {
-            format.paragraphs.clone()
-        };
+        let paragraphs = crate::rich_text::paragraphs(text, format);
         let mut glyphs = Vec::new();
         let mut top = 0.0;
         let mut used = BTreeSet::new();
@@ -1057,24 +1045,18 @@ impl Scene<'_> {
                 .collect();
             requested.extend(families.iter().cloned());
             let (maximum, line_height) = crate::rich_text::paragraph_metrics(&styles, size, paragraph.line_spacing);
-            let margin = paragraph
-                .margin_left
-                .map_or(0.0, |value| value as f64 / 9525.0);
-            let indent = paragraph.indent.unwrap_or(0) as f64 / 9525.0;
-            if indent != 0.0 || paragraph.level.is_some() {
+            let (margin, indent) = crate::rich_text::paragraph_indents(paragraph, format, size);
+            if paragraph.indent.is_some_and(|value| value != 0) || paragraph.level.is_some() {
                 self.warning(
                     id,
                     "INDENT_APPROXIMATION",
                     "Paragraph indent applies to all wrapped lines; hierarchy is not auto-indented",
                 );
             }
-            let inset = (margin + indent).max(0.0);
+            let inset = ((f64::from(margin) + f64::from(indent)) / 9525.0).max(0.0);
             let available = bounds[2] - inset;
-            if available <= 0.0 {
-                return Err(Error::Invalid(format!(
-                    "static text {id} has no width after indentation"
-                )));
-            }
+            overflow |= available <= 0.0;
+            let available = available.max(1.0);
             top += paragraph
                 .space_before
                 .map_or(0.0, |value| spacing(value, maximum));

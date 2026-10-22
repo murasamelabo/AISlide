@@ -715,9 +715,27 @@ paragraph/run sizes, padding, alignment, vertical placement and group transforms
 A label at the top of a container no longer makes its entire frame collide with
 the contained text. Real label/body intersections still warn. This is not exact
 ink intersection; rotated bounds are conservative and warped text uses its
-content frame. Native objects retained without an editing projection return
+content frame. Text clipped outside its content frame is excluded from overlap
+checks; it still produces `TEXT_OVERFLOW`, even if the unclipped text would
+intersect another element. Native objects retained without an editing projection return
 `NATIVE_OBJECT_NOT_PREVIEWED` in preview warnings and preflight findings, rather
 than disappearing without a diagnostic. The original XML remains retained.
+
+Missing native objects are aggregated per source part, with the total count,
+up to four example IDs and an explicit remaining count. Shared layout/master
+parts are reported once per selected page batch, at their first affected page,
+so these warnings do not multiply by the number of selected slides or exhaust
+the 256-finding budget. Design date/footer/slide-number placeholders without
+visible slide instances, or disabled by effective layout/master `p:hf` flags,
+are excluded; active instances retain their warning. Hidden objects and masters
+suppressed by the layout's `showMasterSp` flag are also excluded. The static
+renderer remains an approximation, not Office parity.
+Native verification reuses a content-hash-keyed projection inventory for these
+diagnostics, avoiding a second full origin import per preview/preflight call.
+The thread-local inventory cache retains at most eight origins and 2 MiB of
+serialized metadata, never source bytes or rendered output; it is not saved in
+the document and does not bypass native-origin integrity or preservation checks.
+Inventories larger than that cache budget are recomputed rather than retained.
 
 Typed edits: `translate{ids,dx,dy}`, `align{ids,alignment,relative_to}`, `set_text_frame{id,x,y,width,height}`, `replace_text{id,text}`, `update_part{id,spec}`, and `update_graph{id,spec}`. One slide, 1-16 edits and up to 32 unique targets per selection; no arbitrary JSON Patch, file path, XML or source authority. Nested text coordinates remain parent-local. Locked/hidden targets and native loss reject. Generic child edits may make managed metadata stale; the preview reports this. Existing raw `transaction` remains a separate lower-level API.
 
@@ -1423,7 +1441,10 @@ and line-height calculations: explicit run sizes determine the paragraph size;
 frame defaults apply only to unspecified styles and empty paragraphs. AISlide
 measurement includes the same synthesized inline bullet/numbering runs as
 rendering, so their font size and width also contribute to wrapping and line
-height. Hanging indentation remains an approximation, not Office parity. AISlide
+height. Plain and rich bullets share the writer's default `marL=font_size` and
+`indent=-0.7*font_size` (rounded to EMUs), including after native reopening.
+Explicit paragraph values override those defaults. Hanging indentation remains
+an approximation, not Office parity. AISlide
 exports separate frame defaults when run styles override them, so reopening does
 not promote the first large/bold run into the defaults for the remaining
 paragraphs. Uniform multiline text retains its legacy plain-text editing path.

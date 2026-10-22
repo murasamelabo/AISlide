@@ -1,0 +1,294 @@
+﻿use crate::{
+    document::Document,
+    export_static::RenderWarning,
+    model::{element_list, Deck, Element, PlaceholderKind, Slide},
+    native::{self, NativeDeck, NativePart, P},
+    package::Package,
+    Error, Result,
+};
+use base64::{engine::general_purpose::STANDARD, Engine};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::{cell::RefCell, collections::{BTreeMap, BTreeSet, VecDeque}, sync::Arc};
+
+const MAX_ORIGINS: usize = 8;
+const MAX_METADATA_BYTES: usize = 2 * crate::limits::MIB;
+
+#[derive(Default, Serialize)]
+struct ProjectionIndex {
+    slides: BTreeMap<String, ProjectionPart>,
+    layouts: BTreeMap<String, ProjectionPart>,
+    masters: BTreeMap<String, ProjectionPart>,
+}
+
+#[derive(Default, Serialize)]
+struct ProjectionPart {
+    path: String,
+    missing: Vec<String>,
+    field_slots: BTreeMap<String, usize>,
+    field_visibility: [Option<bool>; 3],
+    hide_master_graphics: bool,
+}
+
+fn field_slot(kind: &PlaceholderKind) -> Option<usize> {
+    match kind {
+        PlaceholderKind::Date => Some(0), PlaceholderKind::Footer => Some(1),
+        PlaceholderKind::SlideNumber => Some(2), _ => None,
+    }
+}
+
+struct CacheEntry {
+    hash: String,
+    index: Arc<ProjectionIndex>,
+    metadata_bytes: usize,
+}
+
+thread_local! {
+    static CACHE: RefCell<VecDeque<CacheEntry>> = const { RefCell::new(VecDeque::new()) };
+}
+
+fn cached(hash: &str) -> Option<Arc<ProjectionIndex>> {
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let position = cache.iter().position(|entry| entry.hash == hash)?;
+        let entry = cache.remove(position)?;
+        let index = Arc::clone(&entry.index);
+        cache.push_back(entry);
+        Some(index)
+    })
+}
+
+fn store(hash: String, index: ProjectionIndex) -> Result<Arc<ProjectionIndex>> {
+    let metadata_bytes = serde_json::to_vec(&index)?.len();
+    let index = Arc::new(index);
+    if metadata_bytes <= MAX_METADATA_BYTES {
+        CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            while cache.len() >= MAX_ORIGINS
+                || cache.iter().map(|entry| entry.metadata_bytes).sum::<usize>() + metadata_bytes > MAX_METADATA_BYTES
+            {
+                cache.pop_front();
+            }
+            cache.push_back(CacheEntry { hash, index: Arc::clone(&index), metadata_bytes });
+        });
+    }
+    Ok(index)
+}
+
+fn part(package: &Package, binding: &NativePart, elements: &[Element], design: bool) -> Result<ProjectionPart> {
+    let parsed = crate::pptx::parse(package.text(&binding.path)?)?;
+    let root = parsed.root_element();
+    let tree = native::child(root, P, "cSld").and_then(|node| native::child(node, P, "spTree"))
+        .ok_or_else(|| Error::Invalid("native projection shape tree missing".into()))?;
+    let projected: BTreeSet<_> = element_list(elements).into_iter().map(|element| element.bounds().0).collect();
+    let identities: BTreeMap<_, _> = binding.nodes.iter().map(|(id, numeric)| (numeric.as_str(), id.as_str())).collect();
+    let mut missing = BTreeSet::new();
+    let mut field_slots = BTreeMap::new();
+    for container in tree.children().filter(|node| node.is_element()) {
+        let container = crate::interactive::office::static_fallback(container).unwrap_or(container);
+        for node in container.descendants().filter(|node| native::is_shape(*node)) {
+            let Some(id) = native::properties(node).and_then(|properties| properties.attribute("id"))
+                .and_then(|numeric| identities.get(numeric)).copied() else { continue; };
+            if projected.contains(id) { continue; }
+            if node.ancestors().filter(|ancestor| native::is_shape(*ancestor))
+                .any(|ancestor| native::properties(ancestor).is_some_and(|properties| matches!(properties.attribute("hidden"), Some("1" | "true"))))
+            { continue; }
+            if design {
+                if let Some(slot) = native::placeholder(node).and_then(|placeholder| field_slot(&placeholder.kind)) {
+                    field_slots.insert(id.to_owned(), slot);
+                }
+            }
+            missing.insert(id.to_owned());
+        }
+    }
+    Ok(ProjectionPart {
+        path: binding.path.clone(), missing: missing.into_iter().collect(), field_slots,
+        field_visibility: ["dt", "ftr", "sldNum"].map(|name| native::child(root, P, "hf")
+            .and_then(|node| node.attribute(name)).map(|value| !matches!(value, "0" | "false"))),
+        hide_master_graphics: matches!(root.attribute("showMasterSp"), Some("0" | "false")),
+    })
+}
+
+fn build(package: &Package, source: &NativeDeck) -> Result<ProjectionIndex> {
+    let mut index = ProjectionIndex::default();
+    for binding in &source.slides {
+        let slide = source.deck.slides.iter().find(|slide| slide.id == binding.id)
+            .ok_or_else(|| Error::Invalid("native projection slide missing".into()))?;
+        index.slides.insert(binding.id.clone(), part(package, binding, &slide.elements, false)?);
+    }
+    if let Some(design) = &source.deck.design {
+        for binding in &source.layouts {
+            let layout = design.layouts.iter().find(|layout| layout.id == binding.id)
+                .ok_or_else(|| Error::Invalid("native projection layout missing".into()))?;
+            index.layouts.insert(binding.id.clone(), part(package, binding, &layout.elements, true)?);
+        }
+        for binding in &source.masters {
+            let master = design.masters.iter().find(|master| master.id == binding.id)
+                .ok_or_else(|| Error::Invalid("native projection master missing".into()))?;
+            index.masters.insert(binding.id.clone(), part(package, binding, &master.elements, true)?);
+        }
+    }
+    Ok(index)
+}
+
+// Native verification already reads the origin, including in one-request CLI processes.
+pub(crate) fn remember(bytes: &[u8], package: &Package, source: &NativeDeck) -> Result<()> {
+    let hash = format!("{:x}", Sha256::digest(bytes));
+    if cached(&hash).is_none() { store(hash, build(package, source)?)?; }
+    Ok(())
+}
+
+fn is_active(part: &ProjectionPart, id: &str, fields: [bool; 3]) -> bool {
+    part.field_slots.get(id).is_none_or(|slot| fields[*slot])
+}
+
+fn append_warning(part: &ProjectionPart, page_index: usize, fields: [bool; 3], warnings: &mut Vec<RenderWarning>) {
+    let missing: Vec<_> = part.missing.iter().filter(|id| is_active(part, id, fields)).collect();
+    if missing.is_empty() { return; }
+    let message = if missing.len() == 1 {
+        format!("Native object {} in {} is retained in the PPTX but has no editing projection and is not drawn in this preview; inspect it in Office", missing[0], part.path)
+    } else {
+        let examples = missing.iter().take(4).map(|id| id.as_str()).collect::<Vec<_>>().join(", ");
+        let rest = missing.len().saturating_sub(4);
+        let more = if rest > 0 { format!("; {rest} more") } else { String::new() };
+        format!("{} native objects in {} are retained in the PPTX but have no editing projection and are not drawn in this preview. First IDs: {examples}{more}. Inspect the source part in Office; shared design parts are reported once per selected page batch.", missing.len(), part.path)
+    };
+    warnings.push(RenderWarning {
+        code: "NATIVE_OBJECT_NOT_PREVIEWED".into(), page_index,
+        element_id: if missing.len() == 1 { missing[0].to_string() } else { String::new() },
+        message,
+    });
+}
+
+pub(crate) fn warnings(document: &Document, pages: &[usize]) -> Result<Vec<RenderWarning>> {
+    let Some(origin) = document.origin.as_ref().filter(|origin| origin.native) else { return Ok(Vec::new()); };
+    let index = if let Some(index) = cached(&origin.sha256) { index } else {
+        let bytes = STANDARD.decode(&origin.base64).map_err(|_| Error::Invalid("native origin encoding".into()))?;
+        if format!("{:x}", Sha256::digest(&bytes)) != origin.sha256 { return Err(Error::Conflict("import origin hash mismatch".into())); }
+        let package = Package::open(bytes)?;
+        let source = native::read(&package)?;
+        store(origin.sha256.clone(), build(&package, &source)?)?
+    };
+    selected_warnings(&document.deck, pages, &index)
+}
+
+fn active_fields(slide: &Slide, layout: Option<&ProjectionPart>, master: Option<&ProjectionPart>) -> [bool; 3] {
+    fn visit(elements: &[Element], fields: &mut [bool; 3]) {
+        for element in elements {
+            if element.visual().is_some_and(|visual| visual.hidden) { continue; }
+            match element {
+                Element::Text { format, .. } | Element::Shape { format, .. } => {
+                    if let Some(slot) = format.placeholder.as_ref().and_then(|placeholder| field_slot(&placeholder.kind)) {
+                        fields[slot] = true;
+                    }
+                }
+                Element::Group { children, .. } => visit(children, fields),
+                _ => {}
+            }
+        }
+    }
+    let mut fields = [false; 3];
+    visit(&slide.elements, &mut fields);
+    for (slot, active) in fields.iter_mut().enumerate() {
+        *active &= layout.and_then(|part| part.field_visibility[slot])
+            .or_else(|| master.and_then(|part| part.field_visibility[slot])).unwrap_or(true);
+    }
+    fields
+}
+
+struct SharedWarning<'a> {
+    part: &'a ProjectionPart,
+    page_index: usize,
+    fields: [bool; 3],
+}
+
+fn add_shared<'a>(part: &'a ProjectionPart, page_index: usize, fields: [bool; 3], shared: &mut Vec<SharedWarning<'a>>) {
+    if !part.missing.iter().any(|id| is_active(part, id, fields)) { return; }
+    if let Some(previous) = shared.iter_mut().find(|previous| previous.part.path == part.path) {
+        for (slot, active) in fields.iter().enumerate() { previous.fields[slot] |= active; }
+    } else {
+        shared.push(SharedWarning { part, page_index, fields });
+    }
+}
+
+fn selected_warnings(deck: &Deck, pages: &[usize], index: &ProjectionIndex) -> Result<Vec<RenderWarning>> {
+    let mut warnings = Vec::new();
+    let mut shared = Vec::new();
+    for &page in pages {
+        let slide = deck.slides.get(page).ok_or_else(|| Error::Invalid("projection warning page index out of range".into()))?;
+        let source_id = slide.native_source_id.as_deref().unwrap_or(&slide.id);
+        if let Some(part) = index.slides.get(source_id) { append_warning(part, page, [true; 3], &mut warnings); }
+        let layout = deck.design.as_ref().and_then(|design| {
+            slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)).or_else(|| design.layouts.first())
+        });
+        if let Some(layout) = layout {
+            let source_layout = index.layouts.get(&layout.id);
+            let source_master = index.masters.get(&layout.master_id);
+            let fields = active_fields(slide, source_layout, source_master);
+            if let Some(part) = source_layout {
+                add_shared(part, page, fields, &mut shared);
+            }
+            if !slide.hide_master_graphics && source_layout.is_none_or(|part| !part.hide_master_graphics) {
+                if let Some(part) = source_master { add_shared(part, page, fields, &mut shared); }
+            }
+        }
+    }
+    for warning in shared { append_warning(warning.part, warning.page_index, warning.fields, &mut warnings); }
+    Ok(warnings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verified_origin_inventory_is_reused_without_entering_document_content() {
+        CACHE.with(|cache| cache.borrow_mut().clear());
+        let generated = crate::editing::create("projection-cache".into(), "Synthetic cache".into()).unwrap();
+        let bytes = crate::pptx::export_pptx(&generated.deck).unwrap();
+        let opened = crate::document::open_presentation("projection-cache".into(), bytes).unwrap();
+        let document: Document = serde_json::from_value(opened["document"].clone()).unwrap();
+        let hash = &document.origin.as_ref().unwrap().sha256;
+        let first = cached(hash).expect("native verification primes the inventory");
+        assert!(warnings(&document, &[0]).unwrap().is_empty());
+        crate::document::verify(&document).unwrap();
+        assert!(Arc::ptr_eq(&first, &cached(hash).unwrap()));
+        assert!(!serde_json::to_string(&document).unwrap().contains("projection_index"));
+        let mut forged = document;
+        forged.origin.as_mut().unwrap().base64 = STANDARD.encode(b"not the verified package");
+        assert!(crate::document::verify(&forged).is_err());
+    }
+
+    #[test]
+    fn inventory_cache_evicts_by_origin_count_and_metadata_bytes() {
+        CACHE.with(|cache| cache.borrow_mut().clear());
+        for index in 0..MAX_ORIGINS {
+            store(format!("origin-{index}"), ProjectionIndex::default()).unwrap();
+        }
+        assert!(cached("origin-0").is_some());
+        store("next-origin".into(), ProjectionIndex::default()).unwrap();
+        assert!(cached("origin-0").is_some());
+        assert!(cached("origin-1").is_none());
+        for index in 0..MAX_ORIGINS {
+            let mut inventory = ProjectionIndex::default();
+            inventory.masters.insert("master".into(), ProjectionPart {
+                path: "ppt/slideMasters/slideMaster1.xml".into(),
+                missing: vec!["x".repeat(MAX_METADATA_BYTES / 3)], ..Default::default()
+            });
+            store(format!("sized-{index}"), inventory).unwrap();
+        }
+        CACHE.with(|cache| {
+            let cache = cache.borrow();
+            assert!(cache.len() < MAX_ORIGINS);
+            assert!(cache.iter().map(|entry| entry.metadata_bytes).sum::<usize>() <= MAX_METADATA_BYTES);
+        });
+        let mut oversized = ProjectionIndex::default();
+        oversized.masters.insert("master".into(), ProjectionPart {
+            path: "ppt/slideMasters/slideMaster1.xml".into(),
+            missing: vec!["x".repeat(MAX_METADATA_BYTES)], ..Default::default()
+        });
+        let retained = store("oversized".into(), oversized).unwrap();
+        assert_eq!(retained.masters["master"].missing[0].len(), MAX_METADATA_BYTES);
+        assert!(cached("oversized").is_none());
+    }
+}

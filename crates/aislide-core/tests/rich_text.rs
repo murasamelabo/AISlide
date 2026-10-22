@@ -607,6 +607,56 @@ fn rich_bullet_markers_use_the_same_line_height_in_measurement_and_rendering() {
 }
 
 #[test]
+fn review31_default_bullets_keep_wrapping_and_fit_after_native_reopen() {
+    for bullet in ["bullet", "numbered"] {
+        for (width, height) in [(240,120),(360,120),(240,600),(360,600)] {
+            let text = std::iter::repeat_n("Synthetic word", if height == 120 { 24 } else { 8 }).collect::<Vec<_>>().join(" ");
+            for rich in [false, true] {
+                let mut input = text_element();
+                input["text"] = json!(text);
+                input["width"] = json!(width);
+                input["height"] = json!(height);
+                input["format"] = json!({"bullet":bullet,"padding":{"left":0,"right":0,"top":0,"bottom":0}});
+                if rich { input["format"]["paragraphs"] = json!([{"bullet":bullet,"runs":[{"text":text}]}]); }
+                let preview = execute_request(json!({"op":"render_element_preview","element":input.clone()})).unwrap();
+                assert!(!preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "INDENT_APPROXIMATION"));
+                let original = deck(input);
+                let reopened = open(&export_deck(original.clone()));
+                let before = execute_request(json!({"op":"measure_layout","deck":original})).unwrap();
+                let after = execute_request(json!({"op":"measure_layout","deck":reopened["deck"]})).unwrap();
+                let before = &before["measurements"][0];
+                let after = &after["measurements"][0];
+                assert_eq!(before["overflow"], height == 120, "{bullet}, width={width}, height={height}: {before}");
+                assert_eq!(before["overflow"], preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "TEXT_OVERFLOW"));
+                assert_eq!(before["lines"], after["lines"], "{bullet}, width={width}, rich={rich}: {before} -> {after}");
+                assert_eq!(before["overflow"], after["overflow"]);
+                assert!((before["measured_height"].as_f64().unwrap() - after["measured_height"].as_f64().unwrap()).abs() < 0.02);
+                assert!((before["measured_width"].as_f64().unwrap() - after["measured_width"].as_f64().unwrap()).abs() < 0.02);
+            }
+        }
+    }
+}
+
+#[test]
+fn review31_narrow_bullet_frames_report_overflow_without_aborting_preview() {
+    for bullet in ["bullet", "numbered"] {
+        for rich in [false, true] {
+            let mut input = text_element();
+            input["text"] = json!("Item");
+            input["width"] = json!(10);
+            input["height"] = json!(100);
+            input["font_size"] = json!(40);
+            input["format"] = json!({"bullet":bullet});
+            if rich { input["format"]["paragraphs"] = json!([{"runs":[{"text":"Item"}]}]); }
+            let measured = execute_request(json!({"op":"measure_layout","deck":deck(input.clone())})).unwrap();
+            let preview = execute_request(json!({"op":"render_element_preview","element":input})).unwrap();
+            assert_eq!(measured["measurements"][0]["overflow"], true);
+            assert!(preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "TEXT_OVERFLOW"));
+        }
+    }
+}
+
+#[test]
 fn rich_frame_defaults_and_text_fit_survive_native_roundtrip() {
     let mut input = text_element();
     input["text"] = json!("1  step\nHeading text\nBody text that wraps onto a second line here");

@@ -64,6 +64,7 @@ pub mod parts;
 pub mod interactive;
 pub mod guided;
 mod native;
+mod native_projection;
 mod native_save;
 mod native_slides;
 mod native_design;
