@@ -1,9 +1,9 @@
 ﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { cp, mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { unzipSync, strFromU8 } from 'fflate';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -486,6 +486,64 @@ test('Japanese editing skill is portable and separates meaning from presentation
   }
   const guide = await readFile(new URL('../.github/skills/README.md', import.meta.url), 'utf8');
   assert.match(guide, /japanese-editing\/SKILL\.md/);
+});
+
+test('visual defaults reach planning, all specialists and authoring with explicit user opt-out', async () => {
+  const guideUrl = new URL('../.github/skills/aislide-authoring/references/visual-selection.md', import.meta.url);
+  const entries = ['aislide-authoring', 'slide-planning', 'tech-deck-ja', ...Object.values(specialistFamilies).map(family => family.name)];
+  for (const name of entries) {
+    const entryUrl = new URL(`../.github/skills/${name}/SKILL.md`, import.meta.url);
+    const entry = await readFile(entryUrl, 'utf8');
+    const link = entry.match(/\[visual defaults\]\(([^)]+)\)/);
+    assert.ok(link, `${name} must load the visual policy even when invoked directly`);
+    assert.equal(new URL(link[1], entryUrl).href, guideUrl.href);
+    assert.ok(entry.includes('Explicit user exclusions override this default'), name);
+    if (name === 'aislide-authoring' || name === 'slide-planning') {
+      assert.ok(Buffer.byteLength(entry.replace(/\r?\n/g, '\r\n')) < 6000, `${name} Windows budget`);
+    }
+  }
+  const guide = await readFile(guideUrl, 'utf8');
+  for (const heading of ['Default And Overrides', 'Choose By Meaning', 'Discover And Draw', 'Review The Deck', 'Acceptance Cases']) {
+    assert.ok(guide.includes(`## ${heading}`), heading);
+  }
+  for (const phrase of ['No diagrams', 'No icons', 'text-only', 'no fixed quota', 'no suitable visual',
+    'architecture', 'concept', 'native charts', 'approved source', 'lucide_icons', 'lucide_icon_assets',
+    'part_catalog', 'recommend_recipes', 'reader question', 'same ledger', 'not new MCP parameters',
+    'Existing slides', 'Do not invent', 'not proof of model compliance']) {
+    assert.ok(guide.includes(phrase), phrase);
+  }
+  assert.match(guide, /"No diagrams" excludes diagrams, not an otherwise\s+permitted chart/);
+  for (const path of ['../.github/skills/README.md', '../docs/authoring/README.md']) {
+    const pageUrl = new URL(path, import.meta.url);
+    const page = await readFile(pageUrl, 'utf8');
+    assert.ok([...page.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)].some(match => new URL(match[1], pageUrl).href === guideUrl.href), path);
+  }
+});
+
+test('planning-only skill copies retain the shared visual reference without authorizing execution', async () => {
+  const setup = await readFile(new URL('../.github/skills/README.md', import.meta.url), 'utf8');
+  assert.match(setup, /構成だけの場合も.*`aislide-authoring\/`.*`references\/`/);
+  assert.ok(setup.includes('構成依頼では実行スキルを呼び出しません'));
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-visual-skills-'));
+  try {
+    for (const name of ['slide-planning', 'aislide-authoring']) {
+      await cp(new URL(`../.github/skills/${name}/`, import.meta.url), join(directory, name), { recursive: true });
+    }
+    const entryUrl = pathToFileURL(join(directory, 'slide-planning', 'SKILL.md'));
+    const entry = await readFile(entryUrl, 'utf8');
+    const link = entry.match(/\[visual defaults\]\(([^)]+)\)/);
+    assert.ok(link);
+    const guideUrl = new URL(link[1], entryUrl);
+    const guide = await readFile(guideUrl, 'utf8');
+    assert.ok(guide.includes('Explicit user exclusions override this default'));
+    for (const match of guide.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
+      const target = new URL(match[1], guideUrl);
+      target.hash = '';
+      assert.ok((await readFile(target, 'utf8')).length > 0, match[1]);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('interactive playback checklist is required by the authoring skill and Windows CI', async () => {

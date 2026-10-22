@@ -839,6 +839,7 @@ test('roundtrip feedback skill and initialization expose the short safe authorin
       const instructions = client.getInstructions();
       assert.ok(Buffer.byteLength(instructions) < 1024);
       for (const text of ['Serialize core-backed AISlide calls', 'apply_operations', 'asset_id', 'get_deck_summary', 'unmet requirements']) assert.ok(instructions.includes(text), text);
+      for (const text of ['Prefer explanatory visuals by default', 'Explicit user exclusions override this default', 'never force decoration']) assert.ok(instructions.includes(text), text);
     } finally { await client.close(); }
   }, []);
 });
@@ -1835,6 +1836,10 @@ function assertFeedbackWorkflow(prompt, resource) {
     /graphDiagnostics bound to the accepted revision\/hash without another core request/, /64 findings within 32 KiB/,
     /GRAPH_LABEL_BORDER_OVERLAP.*GRAPH_LABEL_OVERLAP.*GRAPH_NODE_LABEL_WRAPPED.*GRAPH_NODE_LABEL_SHRINK_LIMIT/,
     /unavailable does not mean no issues/, /on_overlap=error remains fatal/,
+    /Prefer explanatory visuals by default/, /Explicit user exclusions override this default/,
+    /architecture.*boundaries.*labeled edges/, /concept.*relations/, /native charts.*verified values/,
+    /No icons.*only icons/, /No diagrams excludes diagrams, not an otherwise permitted chart/,
+    /text-only or no visuals requests suppress/, /no fixed quota/, /no suitable visual/,
   ]) assert.match(text, pattern);
 }
 

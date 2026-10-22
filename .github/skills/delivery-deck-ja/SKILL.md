@@ -19,6 +19,9 @@ During authorized planning, locate `## <purpose-id>` and read through the next l
 
 ## Workflow
 
+Follow [visual defaults](../aislide-authoring/references/visual-selection.md).
+Explicit user exclusions override this default.
+
 1. 読者が合意すること、把握すること、変える行動を確認する。報告時点、対象期間、共有先、担当ページを既存台帳に記録する。状況共有を勝手に決裁依頼へ変えない。
 2. 基準計画、実績、差異、影響、対応、担当、期限、判断事項を根拠IDへ結び付ける。未合意の責任や日付は未決とし、「順調」「完了」の判定条件を示す。
 3. 作業件数の羅列ではなく、読者に関係する成果、変化、依存関係を優先する。時点と状態を揃え、予定・着手・完了・合意済みを混同しない。

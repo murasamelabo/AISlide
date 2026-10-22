@@ -19,6 +19,9 @@ During authorized planning, locate `## <purpose-id>` and read through the next l
 
 ## Workflow
 
+Follow [visual defaults](../aislide-authoring/references/visual-selection.md).
+Explicit user exclusions override this default.
+
 1. 読者が知りたいことを、取引の相談、応募との適合、判断基準の共有、初期業務、仕事の発注から絞る。既存台帳を使い、主用途と担当ページを確認する。業種や企業名から用途を決めない。
 2. 事業・組織・仕事・条件・実績を根拠IDへ結び付ける。社員の発言、掲載許諾、社内限定情報を区別する。欠けた待遇、人物像、成果を作らず、実態と目標を分ける。
 3. 選択された用途の判断に沿ってページの順序を決める。各ページに一つの問いと、それを判断できる本文・図表を置く。職務条件や重要な制約はノートだけに隠さない。

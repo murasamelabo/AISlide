@@ -82,7 +82,8 @@ Skills do not connect MCP. Label synthetic data.
 
 ## Select And Review The Expression
 
-Use the [selection discriminators](references/technical-panels.md#selection-discriminators).
+Follow [visual defaults](references/visual-selection.md).
+Explicit user exclusions override this default.
 Record question, relation, primary visual, selected/rejected reasons, emphasis and
 style roles. `recommend_recipes` accepts goal/dimensions/position need; inspect
 rejected/no-fit, then preview. Check relations, source readability, anchors and
