@@ -72,7 +72,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/verify-javascript-lab.mjs --directory .artifacts\javascript-expression-lab
       - name: Test editor in Edge
+        id: editor_e2e
         run: npm run test:e2e
+      - name: Upload Edge failure diagnostics
+        if: ${{ failure() && steps.editor_e2e.outcome == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: edge-e2e-failure-${{ github.run_attempt }}
+          path: .artifacts\playwright
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
       - name: Test generation in Edge with a local fixture
         run: npm run test:generation:e2e
       - name: Test native request management
