@@ -143,32 +143,55 @@ fn review31_inactive_design_fields_do_not_create_missing_object_warnings() {
 }
 
 #[test]
-fn review31_enabled_design_fields_with_slide_instances_remain_reported() {
-    let (_, bytes) = native_projection_fixture(2, &unsupported_shape(900, "active-master-footer", Some("ftr")), "", false);
-    let mut package = Package::open(bytes).unwrap();
-    let footer = unsupported_shape(990, "slide-footer", Some("ftr"))
-        .replace("unsupportedPreset", "rect")
-        .replace("cx=\"95250\" cy=\"95250\"", "cx=\"2857500\" cy=\"571500\"")
-        .replace("</p:sp>", "<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Visible footer</a:t></a:r></a:p></p:txBody></p:sp>");
-    let slide = package.text("ppt/slides/slide2.xml").unwrap().replace("</p:spTree>", &format!("{footer}</p:spTree>"));
-    package.replace_part("ppt/slides/slide2.xml", slide.into_bytes()).unwrap();
-    let path = "ppt/slideMasters/slideMaster1.xml";
-    let master = package.text(path).unwrap().replace("<p:txStyles>", "<p:hf ftr=\"1\"/><p:txStyles>");
-    assert!(master.contains("<p:hf ftr=\"1\"/>"));
-    let layout_path = "ppt/slideLayouts/slideLayout1.xml";
-    let layout = package.text(layout_path).unwrap().to_owned();
-    for (master_enabled, layout_override) in [(true,None),(false,None),(true,Some(false)),(false,Some(true))] {
-        let xml = if master_enabled { master.clone() } else { master.replace("ftr=\"1\"", "ftr=\"0\"") };
+fn review31_projected_slide_fields_do_not_warn_about_design_templates() {
+    for (kind, model_kind) in [("dt","date"),("ftr","footer"),("sldNum","slide_number")] {
+        let master_field = unsupported_shape(900, "master-field-template", Some(kind));
+        let layout_field = unsupported_shape(901, "layout-field-template", Some(kind));
+        let (_, bytes) = native_projection_fixture(2, &master_field, &layout_field, false);
+        let mut package = Package::open(bytes).unwrap();
+        let field = unsupported_shape(990, "slide-field-instance", Some(kind))
+            .replace("unsupportedPreset", "rect")
+            .replace("cx=\"95250\" cy=\"95250\"", "cx=\"2857500\" cy=\"571500\"")
+            .replace("</p:sp>", "<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Visible field</a:t></a:r></a:p></p:txBody></p:sp>");
+        let slide = package.text("ppt/slides/slide2.xml").unwrap().replace("</p:spTree>", &format!("{field}</p:spTree>"));
+        package.replace_part("ppt/slides/slide2.xml", slide.into_bytes()).unwrap();
+        let master_path = "ppt/slideMasters/slideMaster1.xml";
+        let master = package.text(master_path).unwrap().to_owned();
+        let layout_path = "ppt/slideLayouts/slideLayout1.xml";
+        let layout = package.text(layout_path).unwrap().to_owned();
+        for (master_enabled, layout_override) in [(None,None),(Some(true),None),(Some(false),None),(Some(true),Some(false)),(Some(false),Some(true))] {
+            let xml = master_enabled.map(|enabled| master.replace("<p:txStyles>", &format!("<p:hf {kind}=\"{}\"/><p:txStyles>", u8::from(enabled)))).unwrap_or_else(|| master.clone());
+            package.replace_part(master_path, xml.into_bytes()).unwrap();
+            let xml = layout_override.map(|enabled| layout.replace("</p:sldLayout>", &format!("<p:hf {kind}=\"{}\"/></p:sldLayout>", u8::from(enabled)))).unwrap_or_else(|| layout.clone());
+            package.replace_part(layout_path, xml.into_bytes()).unwrap();
+            let bytes = package.save().unwrap();
+            let document = execute_request(json!({"op":"open_presentation","id":"projected-field","base64":STANDARD.encode(&bytes)})).unwrap()["document"].clone();
+            assert_eq!(document["deck"]["slides"][1]["elements"][0]["format"]["placeholder"]["kind"], model_kind);
+            let checked = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+            assert!(!checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "TEXT_OVERFLOW"));
+            assert!(!checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED"), "{kind}: {checked}");
+            assert_eq!(saved(&document), bytes);
+        }
+    }
+}
+
+#[test]
+fn review31_unprojected_slide_fields_warn_only_for_their_slide_part() {
+    for kind in ["dt","ftr","sldNum"] {
+        let (_, bytes) = native_projection_fixture(2,
+            &unsupported_shape(900, "master-field-template", Some(kind)),
+            &unsupported_shape(901, "layout-field-template", Some(kind)), false);
+        let mut package = Package::open(bytes).unwrap();
+        let path = "ppt/slides/slide2.xml";
+        let xml = package.text(path).unwrap().replace("</p:spTree>", &format!("{}</p:spTree>", unsupported_shape(990, "missing-slide-field", Some(kind))));
         package.replace_part(path, xml.into_bytes()).unwrap();
-        let xml = layout_override.map(|enabled| layout.replace("</p:sldLayout>", &format!("<p:hf ftr=\"{}\"/></p:sldLayout>", u8::from(enabled)))).unwrap_or_else(|| layout.clone());
-        package.replace_part(layout_path, xml.into_bytes()).unwrap();
-        let document = execute_request(json!({"op":"open_presentation","id":"active-field","base64":STANDARD.encode(package.save().unwrap())})).unwrap()["document"].clone();
-        assert_eq!(document["deck"]["slides"][1]["elements"][0]["format"]["placeholder"]["kind"], "footer");
+        let document = execute_request(json!({"op":"open_presentation","id":"unprojected-field","base64":STANDARD.encode(package.save().unwrap())})).unwrap()["document"].clone();
         let checked = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
-        assert!(!checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "TEXT_OVERFLOW"));
-        let reported = checked["findings"].as_array().unwrap().iter().find(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED");
-        assert_eq!(reported.is_some(), layout_override.unwrap_or(master_enabled), "{checked}");
-        if let Some(warning) = reported { assert_eq!(warning["page_index"], 1); }
+        let missing: Vec<_> = checked["findings"].as_array().unwrap().iter().filter(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED").collect();
+        assert_eq!(missing.len(), 1, "{kind}: {checked}");
+        assert_eq!(missing[0]["page_index"], 1);
+        assert_eq!(missing[0]["element_ids"], json!(["missing-slide-field"]));
+        assert!(missing[0]["message"].as_str().unwrap().contains(path));
     }
 }
 
@@ -204,7 +227,9 @@ fn review31_many_unprojected_master_objects_do_not_exhaust_preflight_or_delivery
     let checked = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":selected}})).unwrap();
     let warnings: Vec<_> = checked["findings"].as_array().unwrap().iter().filter(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED").collect();
     assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0]["element_ids"], json!([]));
     assert!(warnings[0]["message"].as_str().unwrap().contains("300 native objects"));
+    assert!(warnings[0]["message"].as_str().unwrap().contains("Example IDs (lexicographic): opaque-0, opaque-1, opaque-10, opaque-100"));
     assert!(warnings[0]["message"].as_str().unwrap().contains("296 more"));
     assert!(warnings[0]["message"].as_str().unwrap().len() < 2048);
     let delivery = execute_request(json!({"op":"prepare_delivery","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],

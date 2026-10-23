@@ -103,6 +103,14 @@ pub(crate) fn paragraph_indents(paragraph: &RichParagraph, format: &TextFormat, 
     (margin, indent)
 }
 
+pub(crate) fn paragraph_insets(paragraph: &RichParagraph, format: &TextFormat, size: f64) -> (f64, f64) {
+    let (margin, indent) = paragraph_indents(paragraph, format, size);
+    let margin = f64::from(margin) / 9525.0;
+    let indent = f64::from(indent) / 9525.0;
+    // A hanging first-line indent must not widen the continuation-line wrap area.
+    (margin + indent.max(0.0), (margin + indent).max(0.0))
+}
+
 pub(crate) fn paragraph_runs(paragraph: &RichParagraph, format: &TextFormat, index: usize) -> Vec<RichRun> {
     let mut runs = paragraph.runs.clone();
     let bullet = paragraph.bullet.unwrap_or(format.bullet);

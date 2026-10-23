@@ -1,7 +1,7 @@
 ﻿use crate::{
     document::Document,
     export_static::RenderWarning,
-    model::{element_list, Deck, Element, PlaceholderKind, Slide},
+    model::{element_list, Deck, Element, PlaceholderKind},
     native::{self, NativeDeck, NativePart, P},
     package::Package,
     Error, Result,
@@ -25,16 +25,7 @@ struct ProjectionIndex {
 struct ProjectionPart {
     path: String,
     missing: Vec<String>,
-    field_slots: BTreeMap<String, usize>,
-    field_visibility: [Option<bool>; 3],
     hide_master_graphics: bool,
-}
-
-fn field_slot(kind: &PlaceholderKind) -> Option<usize> {
-    match kind {
-        PlaceholderKind::Date => Some(0), PlaceholderKind::Footer => Some(1),
-        PlaceholderKind::SlideNumber => Some(2), _ => None,
-    }
 }
 
 struct CacheEntry {
@@ -83,7 +74,6 @@ fn part(package: &Package, binding: &NativePart, elements: &[Element], design: b
     let projected: BTreeSet<_> = element_list(elements).into_iter().map(|element| element.bounds().0).collect();
     let identities: BTreeMap<_, _> = binding.nodes.iter().map(|(id, numeric)| (numeric.as_str(), id.as_str())).collect();
     let mut missing = BTreeSet::new();
-    let mut field_slots = BTreeMap::new();
     for container in tree.children().filter(|node| node.is_element()) {
         let container = crate::interactive::office::static_fallback(container).unwrap_or(container);
         for node in container.descendants().filter(|node| native::is_shape(*node)) {
@@ -93,18 +83,14 @@ fn part(package: &Package, binding: &NativePart, elements: &[Element], design: b
             if node.ancestors().filter(|ancestor| native::is_shape(*ancestor))
                 .any(|ancestor| native::properties(ancestor).is_some_and(|properties| matches!(properties.attribute("hidden"), Some("1" | "true"))))
             { continue; }
-            if design {
-                if let Some(slot) = native::placeholder(node).and_then(|placeholder| field_slot(&placeholder.kind)) {
-                    field_slots.insert(id.to_owned(), slot);
-                }
-            }
+            if design && native::placeholder(node).is_some_and(|placeholder| matches!(
+                placeholder.kind, PlaceholderKind::Date | PlaceholderKind::Footer | PlaceholderKind::SlideNumber
+            )) { continue; }
             missing.insert(id.to_owned());
         }
     }
     Ok(ProjectionPart {
-        path: binding.path.clone(), missing: missing.into_iter().collect(), field_slots,
-        field_visibility: ["dt", "ftr", "sldNum"].map(|name| native::child(root, P, "hf")
-            .and_then(|node| node.attribute(name)).map(|value| !matches!(value, "0" | "false"))),
+        path: binding.path.clone(), missing: missing.into_iter().collect(),
         hide_master_graphics: matches!(root.attribute("showMasterSp"), Some("0" | "false")),
     })
 }
@@ -138,12 +124,8 @@ pub(crate) fn remember(bytes: &[u8], package: &Package, source: &NativeDeck) -> 
     Ok(())
 }
 
-fn is_active(part: &ProjectionPart, id: &str, fields: [bool; 3]) -> bool {
-    part.field_slots.get(id).is_none_or(|slot| fields[*slot])
-}
-
-fn append_warning(part: &ProjectionPart, page_index: usize, fields: [bool; 3], warnings: &mut Vec<RenderWarning>) {
-    let missing: Vec<_> = part.missing.iter().filter(|id| is_active(part, id, fields)).collect();
+fn append_warning(part: &ProjectionPart, page_index: usize, warnings: &mut Vec<RenderWarning>) {
+    let missing = &part.missing;
     if missing.is_empty() { return; }
     let message = if missing.len() == 1 {
         format!("Native object {} in {} is retained in the PPTX but has no editing projection and is not drawn in this preview; inspect it in Office", missing[0], part.path)
@@ -151,7 +133,7 @@ fn append_warning(part: &ProjectionPart, page_index: usize, fields: [bool; 3], w
         let examples = missing.iter().take(4).map(|id| id.as_str()).collect::<Vec<_>>().join(", ");
         let rest = missing.len().saturating_sub(4);
         let more = if rest > 0 { format!("; {rest} more") } else { String::new() };
-        format!("{} native objects in {} are retained in the PPTX but have no editing projection and are not drawn in this preview. First IDs: {examples}{more}. Inspect the source part in Office; shared design parts are reported once per selected page batch.", missing.len(), part.path)
+        format!("{} native objects in {} are retained in the PPTX but have no editing projection and are not drawn in this preview. Example IDs (lexicographic): {examples}{more}. Inspect the source part in Office; shared design parts are reported once per selected page batch.", missing.len(), part.path)
     };
     warnings.push(RenderWarning {
         code: "NATIVE_OBJECT_NOT_PREVIEWED".into(), page_index,
@@ -172,68 +154,29 @@ pub(crate) fn warnings(document: &Document, pages: &[usize]) -> Result<Vec<Rende
     selected_warnings(&document.deck, pages, &index)
 }
 
-fn active_fields(slide: &Slide, layout: Option<&ProjectionPart>, master: Option<&ProjectionPart>) -> [bool; 3] {
-    fn visit(elements: &[Element], fields: &mut [bool; 3]) {
-        for element in elements {
-            if element.visual().is_some_and(|visual| visual.hidden) { continue; }
-            match element {
-                Element::Text { format, .. } | Element::Shape { format, .. } => {
-                    if let Some(slot) = format.placeholder.as_ref().and_then(|placeholder| field_slot(&placeholder.kind)) {
-                        fields[slot] = true;
-                    }
-                }
-                Element::Group { children, .. } => visit(children, fields),
-                _ => {}
-            }
-        }
-    }
-    let mut fields = [false; 3];
-    visit(&slide.elements, &mut fields);
-    for (slot, active) in fields.iter_mut().enumerate() {
-        *active &= layout.and_then(|part| part.field_visibility[slot])
-            .or_else(|| master.and_then(|part| part.field_visibility[slot])).unwrap_or(true);
-    }
-    fields
-}
-
-struct SharedWarning<'a> {
-    part: &'a ProjectionPart,
-    page_index: usize,
-    fields: [bool; 3],
-}
-
-fn add_shared<'a>(part: &'a ProjectionPart, page_index: usize, fields: [bool; 3], shared: &mut Vec<SharedWarning<'a>>) {
-    if !part.missing.iter().any(|id| is_active(part, id, fields)) { return; }
-    if let Some(previous) = shared.iter_mut().find(|previous| previous.part.path == part.path) {
-        for (slot, active) in fields.iter().enumerate() { previous.fields[slot] |= active; }
-    } else {
-        shared.push(SharedWarning { part, page_index, fields });
-    }
-}
-
 fn selected_warnings(deck: &Deck, pages: &[usize], index: &ProjectionIndex) -> Result<Vec<RenderWarning>> {
     let mut warnings = Vec::new();
-    let mut shared = Vec::new();
+    let mut seen = BTreeSet::new();
     for &page in pages {
         let slide = deck.slides.get(page).ok_or_else(|| Error::Invalid("projection warning page index out of range".into()))?;
         let source_id = slide.native_source_id.as_deref().unwrap_or(&slide.id);
-        if let Some(part) = index.slides.get(source_id) { append_warning(part, page, [true; 3], &mut warnings); }
+        if let Some(part) = index.slides.get(source_id) { append_warning(part, page, &mut warnings); }
         let layout = deck.design.as_ref().and_then(|design| {
             slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)).or_else(|| design.layouts.first())
         });
         if let Some(layout) = layout {
             let source_layout = index.layouts.get(&layout.id);
             let source_master = index.masters.get(&layout.master_id);
-            let fields = active_fields(slide, source_layout, source_master);
             if let Some(part) = source_layout {
-                add_shared(part, page, fields, &mut shared);
+                if seen.insert(part.path.as_str()) { append_warning(part, page, &mut warnings); }
             }
             if !slide.hide_master_graphics && source_layout.is_none_or(|part| !part.hide_master_graphics) {
-                if let Some(part) = source_master { add_shared(part, page, fields, &mut shared); }
+                if let Some(part) = source_master {
+                    if seen.insert(part.path.as_str()) { append_warning(part, page, &mut warnings); }
+                }
             }
         }
     }
-    for warning in shared { append_warning(warning.part, warning.page_index, warning.fields, &mut warnings); }
     Ok(warnings)
 }
 

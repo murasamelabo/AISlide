@@ -67,6 +67,7 @@ pub(crate) fn graph_rich_metrics(text: &str, width: f64, height: f64, size: f64,
 fn measure_rich(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width: f64, height: f64, size: f64, bold: bool, format: &TextFormat, theme: &Theme) -> Measurement {
     use crate::rich_text::{RunStyle, Spacing};
     let mut measured_width = 0.0f32; let mut measured_height = 0.0f32; let mut lines = 0; let mut missing = 0;
+    let mut exhausted_width = false;
     let mut used = BTreeSet::new(); let mut requested = String::new();
     let spacing_pixels = |spacing: Spacing, size: f64| match spacing { Spacing::Percent(value) => size * value as f64 / 100000.0, Spacing::Points(value) => value as f64 / 75.0 };
     let paragraphs = crate::rich_text::paragraphs(text, format);
@@ -76,12 +77,14 @@ fn measure_rich(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width
         let families: Vec<_> = runs.iter().zip(&styles).map(|(run, style)| crate::fonts::requested_family(&run.text, style.font_family.as_deref(), theme).to_owned()).collect();
         if requested.is_empty() { requested = families.first().cloned().unwrap_or_else(|| theme.fonts.minor.clone()); }
         let (maximum_size, line_height) = crate::rich_text::paragraph_metrics(&styles, size, paragraph.line_spacing);
-        let (margin, indent) = crate::rich_text::paragraph_indents(paragraph, format, size);
+        let (wrap_inset, _) = crate::rich_text::paragraph_insets(paragraph, format, size);
         let tab_reserve = if runs.iter().any(|run| run.text.contains('\t')) { paragraph.tabs.last().map_or(maximum_size * 4.0, |tab| tab.position as f64 / 9525.0) } else { 0.0 };
-        let inset = ((f64::from(margin) + f64::from(indent)) / 9525.0).max(0.0) + tab_reserve;
+        let inset = wrap_inset + tab_reserve;
+        let available = width - inset;
+        exhausted_width |= available <= 0.0;
         let default_attrs = Attrs::new().family(Family::Name(&requested));
         let mut buffer = Buffer::new(fonts, Metrics::new(maximum_size as f32, line_height as f32));
-        buffer.set_size(Some((width - inset).max(1.0) as f32), None); buffer.set_wrap(Wrap::WordOrGlyph);
+        buffer.set_size(Some(available.max(1.0) as f32), None); buffer.set_wrap(Wrap::WordOrGlyph);
         buffer.set_rich_text(runs.iter().zip(&styles).zip(&families).map(|((run, style), family)| {
             let attrs = Attrs::new().family(Family::Name(family)).weight(crate::fonts::weight(fonts, family, style.bold.unwrap_or(bold), style.italic.unwrap_or(false))).style(if style.italic.unwrap_or(false) { Style::Italic } else { Style::Normal }).metrics(Metrics::new(style.font_size.unwrap_or(size) as f32, line_height as f32));
             (run.text.as_str(), attrs)
@@ -102,7 +105,7 @@ fn measure_rich(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width
         measured_height += paragraph_height + (raise + lower + before + after) as f32;
     }
     Measurement { slide_id: slide.into(), element_id: id.into(), width, height, measured_width, measured_height, lines,
-        overflow: !text.is_empty() && (measured_width as f64 > width + 1.0 || measured_height as f64 > height + 1.0), missing_glyphs: missing, requested_family: requested, fonts: used.into_iter().collect() }
+        overflow: !text.is_empty() && (exhausted_width || measured_width as f64 > width + 1.0 || measured_height as f64 > height + 1.0), missing_glyphs: missing, requested_family: requested, fonts: used.into_iter().collect() }
 }
 
 fn visit(fonts: &mut FontSystem, slide: &str, elements: &[Element], measurements: &mut Vec<Measurement>, characters: &mut usize, theme: &Theme, visible_only: bool) -> Result<()> {

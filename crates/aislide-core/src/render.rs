@@ -1045,7 +1045,7 @@ impl Scene<'_> {
                 .collect();
             requested.extend(families.iter().cloned());
             let (maximum, line_height) = crate::rich_text::paragraph_metrics(&styles, size, paragraph.line_spacing);
-            let (margin, indent) = crate::rich_text::paragraph_indents(paragraph, format, size);
+            let (wrap_inset, inset) = crate::rich_text::paragraph_insets(paragraph, format, size);
             if paragraph.indent.is_some_and(|value| value != 0) || paragraph.level.is_some() {
                 self.warning(
                     id,
@@ -1053,8 +1053,7 @@ impl Scene<'_> {
                     "Paragraph indent applies to all wrapped lines; hierarchy is not auto-indented",
                 );
             }
-            let inset = ((f64::from(margin) + f64::from(indent)) / 9525.0).max(0.0);
-            let available = bounds[2] - inset;
+            let available = bounds[2] - wrap_inset;
             overflow |= available <= 0.0;
             let available = available.max(1.0);
             top += paragraph

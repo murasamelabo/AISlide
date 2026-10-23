@@ -722,12 +722,15 @@ intersect another element. Native objects retained without an editing projection
 than disappearing without a diagnostic. The original XML remains retained.
 
 Missing native objects are aggregated per source part, with the total count,
-up to four example IDs and an explicit remaining count. Shared layout/master
+up to four lexicographically sorted example IDs and an explicit remaining count.
+Aggregate findings have no single target (`element_ids` is empty); their source
+part and example IDs are reported in the message. Shared layout/master
 parts are reported once per selected page batch, at their first affected page,
 so these warnings do not multiply by the number of selected slides or exhaust
-the 256-finding budget. Design date/footer/slide-number placeholders without
-visible slide instances, or disabled by effective layout/master `p:hf` flags,
-are excluded; active instances retain their warning. Hidden objects and masters
+the 256-finding budget. Design date/footer/slide-number placeholders are
+templates, not separately rendered objects, so they are excluded regardless
+of slide instances or `p:hf` settings. An unprojected field instance on the slide
+itself still produces a warning for that slide part. Hidden objects and masters
 suppressed by the layout's `showMasterSp` flag are also excluded. The static
 renderer remains an approximation, not Office parity.
 Native verification reuses a content-hash-keyed projection inventory for these
@@ -1444,7 +1447,13 @@ rendering, so their font size and width also contribute to wrapping and line
 height. Plain and rich bullets share the writer's default `marL=font_size` and
 `indent=-0.7*font_size` (rounded to EMUs), including after native reopening.
 Explicit paragraph values override those defaults. Hanging indentation remains
-an approximation, not Office parity. AISlide
+an approximation, not Office parity. Both measurement and rendering reserve
+the full `marL` for continuation-line wrapping; a negative first-line `indent`
+does not widen that area. Positive indentation is conservatively reserved on
+all lines. The marker remains an inline run within that width, so it can add
+an extra line rather than understate overflow. Glyph placement uses a separate
+approximate origin of `max(0, marL + indent)` for all lines, not exact Office
+first-line/hanging placement. AISlide
 exports separate frame defaults when run styles override them, so reopening does
 not promote the first large/bold run into the defaults for the remaining
 paragraphs. Uniform multiline text retains its legacy plain-text editing path.
