@@ -64,6 +64,7 @@ pub mod parts;
 pub mod interactive;
 pub mod guided;
 mod native;
+mod native_projection;
 mod native_save;
 mod native_slides;
 mod native_design;
@@ -95,3 +96,8 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub(crate) fn deserialize_present<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where D: serde::Deserializer<'de>, T: serde::Deserialize<'de> {
+    T::deserialize(deserializer).map(Some)
+}

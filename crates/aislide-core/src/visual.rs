@@ -261,7 +261,7 @@ fn is_true(node: Node<'_, '_>, name: &str) -> bool { matches!(node.attribute(nam
 pub(crate) fn read_color(node: Node<'_, '_>) -> Result<(String, f64)> {
     let shade = node.children().find(|node| node.has_tag_name((A, "srgbClr")) || node.has_tag_name((A, "schemeClr"))).ok_or_else(|| Error::Unsupported("visual color type".into()))?;
     let value = shade.attribute("val").ok_or_else(|| Error::Invalid("visual color missing".into()))?;
-    let color = if shade.has_tag_name((A, "schemeClr")) { format!("@{value}") } else { value.into() };
+    let color = if shade.has_tag_name((A, "schemeClr")) { format!("@{}", crate::design::color_slot(value)) } else { value.into() };
     let opacity = child(shade, A, "alpha").map(|node| numeric(node, "val", 100000.0)).transpose()?.unwrap_or(100000.0) / 100000.0;
     Ok((color, opacity))
 }

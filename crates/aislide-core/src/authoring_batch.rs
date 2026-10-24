@@ -43,6 +43,8 @@ pub enum Operation {
     UpdateGraph { slide_id: String, id: String, spec: crate::graphs::GraphSpec },
     SetFrame { slide_id: String, id: String, frame: Frame },
     SetTextStyle { slide_id: String, ids: Vec<String>, style: RunStyle },
+    SetSurface { slide_id: String, ids: Vec<String>, surface: crate::proofing::SurfacePatch },
+    SetEffects { slide_id: String, ids: Vec<String>, effects: crate::proofing::EffectsPatch },
     SetRichText { slide_id: String, id: String, paragraphs: Vec<RichParagraph> },
     SetTextPadding { slide_id: String, ids: Vec<String>, #[serde(deserialize_with = "Option::deserialize")] padding: Option<crate::model::TextPadding> },
     SetSlideBackground { slide_id: String, color: String },
@@ -163,6 +165,7 @@ fn text_style(element: &mut Element, style: &RunStyle) -> Result<()> {
 fn apply(deck: &mut Deck, parts: &mut Vec<crate::parts::state::PartInstance>, operation: &Operation, native_guard: &mut crate::parts::state::NativeRegenerationGuard<'_>) -> Result<usize> {
     let slide_id = match operation {
         Operation::ComposeSlide { slide_id, .. } | Operation::AddElements { slide_id, .. } | Operation::SetFrame { slide_id, .. } | Operation::SetTextStyle { slide_id, .. } | Operation::SetRichText { slide_id, .. } | Operation::SetTextPadding { slide_id, .. }
+        | Operation::SetSurface { slide_id, .. } | Operation::SetEffects { slide_id, .. }
         | Operation::AddPart { slide_id, .. } | Operation::UpdatePart { slide_id, .. } | Operation::AddGraph { slide_id, .. } | Operation::UpdateGraph { slide_id, .. }
         | Operation::UpdateNotes { slide_id, .. } | Operation::SetTableHeaders { slide_id, .. } | Operation::SetAccessibility { slide_id, .. }
         | Operation::SetSlideBackground { slide_id, .. } | Operation::SetConnector { slide_id, .. } | Operation::SetPictureCrop { slide_id, .. }
@@ -194,6 +197,14 @@ fn apply(deck: &mut Deck, parts: &mut Vec<crate::parts::state::PartInstance>, op
             if ids.is_empty() || ids.len() > 128 || ids.iter().collect::<BTreeSet<_>>().len() != ids.len() { return Err(Error::Limit("set_text_style requires 1-128 distinct IDs".into())); }
             if *style == RunStyle::default() { return Err(Error::Invalid("set_text_style requires at least one supplied property".into())); }
             for id in ids { text_style(target(&mut slide.elements, id)?, style)?; }
+        }
+        Operation::SetSurface { ids, surface, .. } => {
+            if ids.is_empty() || ids.len() > 128 || ids.iter().collect::<BTreeSet<_>>().len() != ids.len() { return Err(Error::Limit("set_surface requires 1-128 distinct IDs".into())); }
+            for id in ids { surface.apply(target(&mut slide.elements, id)?)?; }
+        }
+        Operation::SetEffects { ids, effects, .. } => {
+            if ids.is_empty() || ids.len() > 128 || ids.iter().collect::<BTreeSet<_>>().len() != ids.len() { return Err(Error::Limit("set_effects requires 1-128 distinct IDs".into())); }
+            for id in ids { effects.apply(target(&mut slide.elements, id)?)?; }
         }
         Operation::SetRichText { id, paragraphs, .. } => {
             let element = target(&mut slide.elements, id)?;

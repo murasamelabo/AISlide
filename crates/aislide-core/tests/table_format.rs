@@ -1,6 +1,6 @@
 ﻿use aislide_core::model::Element;
 use serde_json::{json, Value};
-use aislide_core::table_format::{self, Dimensions, DimensionUnit, MergeRegion, TableFormat};
+use aislide_core::table_format::{self, Dimensions, DimensionUnit, MergeRegion, TableFormatPatch};
 use aislide_core::{execute_request, package::Package};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
@@ -74,11 +74,47 @@ fn functional_merge_split_and_axis_edits_preserve_anchors() {
     assert_eq!(serde_json::to_value(restored).unwrap(),serde_json::to_value(&merged).unwrap());
     let split = table_format::split_cell(merged,1,1).unwrap();
     assert_eq!(serde_json::to_value(split).unwrap(),serde_json::to_value(&original).unwrap());
-    let mut format = TableFormat::default(); format.column_widths = Some(Dimensions {unit:DimensionUnit::Relative,values:vec![1.0,2.0,3.0]});
+    let mut format = TableFormatPatch::default(); format.column_widths = Some(Some(Dimensions {unit:DimensionUnit::Relative,values:vec![1.0,2.0,3.0]}));
     let formatted = table_format::update_format(original,format).unwrap();
     let inserted = table_format::insert_column(formatted,1,vec![String::new();3]).unwrap();
     assert!(table_format::validate_element(&inserted).is_ok());
     assert!(table_format::validate_element(&table_format::remove_column(inserted,1).unwrap()).is_ok());
+}
+
+#[test]
+fn partial_format_edits_preserve_omitted_cells_merges_and_tracks() {
+    let original = open(&export_table(formatted()));
+    let before = current(&original)["format"].clone();
+    let edited = execute_request(json!({"op":"edit_table","document":original,"expected_revision":0,
+        "slide_id":original["deck"]["slides"][0]["id"],"id":"table-1",
+        "operations":[{"op":"update_format","format":{"column_widths":{"unit":"relative","values":[2,1,1]}}}]})).unwrap();
+    let after = current(&edited["document"])["format"].clone();
+    assert_eq!(after["column_widths"]["values"], json!([2.0,1.0,1.0]));
+    for field in ["row_heights", "cells", "merges"] { assert_eq!(after[field], before[field], "{field}"); }
+    let reopened = open(&export_document(&edited["document"]));
+    assert_eq!(current(&reopened)["format"]["merges"], before["merges"]);
+    assert_eq!(current(&reopened)["format"]["cells"], before["cells"]);
+    let undone = execute_request(json!({"op":"undo_transaction","document":edited["document"],
+        "expected_revision":1,"receipt":edited["receipt"]})).unwrap();
+    assert_eq!(undone["document"]["hash"], original["hash"]);
+}
+
+#[test]
+fn partial_formats_distinguish_omission_null_empty_arrays_and_replacement() {
+    let original: Element = serde_json::from_value(formatted()).unwrap();
+    let patch = |value| serde_json::from_value::<TableFormatPatch>(value).unwrap();
+    let unchanged = table_format::update_format(original.clone(), patch(json!({}))).unwrap();
+    assert_eq!(serde_json::to_value(&unchanged).unwrap(), serde_json::to_value(&original).unwrap());
+    let cleared = table_format::update_format(original.clone(), patch(json!({"column_widths":null,"cells":[]}))).unwrap();
+    let cleared = serde_json::to_value(cleared).unwrap();
+    assert!(cleared["format"].get("column_widths").is_none());
+    assert!(cleared["format"].get("cells").is_none());
+    assert_eq!(cleared["format"]["merges"], formatted()["format"]["merges"]);
+    let replaced = table_format::replace_format(original, Default::default()).unwrap();
+    assert!(serde_json::to_value(replaced).unwrap().get("format").is_none());
+    for invalid in [json!({"cells":null}), json!({"merges":null}), json!({"unknown":true})] {
+        assert!(serde_json::from_value::<TableFormatPatch>(invalid).is_err());
+    }
 }
 
 fn export_table(element: Value) -> Vec<u8> {

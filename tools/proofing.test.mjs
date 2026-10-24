@@ -50,7 +50,9 @@ test('format SDK native rich text and language persist and Undo restores exact p
   assert.equal(changed.format.hyperlink, 'https://example.invalid/target');
   await assert.rejects(session.applyFormat('slide-1', { ids: ['target'], style }, { expectedRevision: 0 }), /revision/i);
   const reopened = (await client.openPresentation('format-reopened', (await session.exportPresentation()).base64)).session;
-  assert.equal(reopened.document.deck.slides[0].elements[1].font_size, 32);
+  const reopenedTarget = reopened.document.deck.slides[0].elements[1];
+  assert.equal(reopenedTarget.font_size, before.deck.slides[0].elements[1].font_size);
+  assert.equal(reopenedTarget.format.paragraphs[0].runs[0].style.font_size, 32);
   await session.undo(); assert.equal((await session.exportPresentation()).base64, bytes);
   await session.setProofingLanguage('slide-1', { id: 'target', language: 'en-US' });
   const language = (await client.openPresentation('language-reopened', (await session.exportPresentation()).base64)).session.document.deck.slides[0].elements[1];

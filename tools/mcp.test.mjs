@@ -341,6 +341,92 @@ test('issue18 MCP exposes bounded template inspection and selection', async () =
   });
 });
 
+test('issue27 MCP returns template layout mappings without full-document payloads', async () => {
+  await feedbackMcpFixture(async ({ call, calls, fixture }) => {
+    fixture.onRequest = async request => {
+      assert.equal(request.op, 'import_template');
+      return { version: 1, id: request.id, revision: 0, hash: 'a'.repeat(64), sources: [], bindings: [], parts: [],
+        deck: { version: 1, title: 'Synthetic template', width: 1280, height: 720,
+          design: { masters: [{ id: 'master', name: 'Brand', elements: [{ base64: 'PRIVATE_MASTER_BYTES' }] }],
+            layouts: [{ source_id: 'ppt/slideLayouts/slideLayout2.xml', id: 'title-content', name: 'Title and content', master_id: 'master', elements: [{ base64: 'PRIVATE_LAYOUT_BYTES' }] }] },
+          slides: [{ id: 'slide-1', title: '', background: 'FFFFFF', elements: [], notes: 'PRIVATE_NOTES' }] } };
+    };
+    const imported = await call('import_template', { kind: 'potx', base64: 'UEs=' });
+    assert.deepEqual(imported.masters, [{ id: 'master', name: 'Brand' }]);
+    assert.deepEqual(imported.layouts, [{ source_id: 'ppt/slideLayouts/slideLayout2.xml', id: 'title-content', name: 'Title and content', master_id: 'master' }]);
+    const count = calls.length;
+    const summary = await call('get_deck_summary', { deck_id: imported.deck_id });
+    assert.deepEqual(summary.layouts, imported.layouts);
+    assert.deepEqual(summary.masters, imported.masters);
+    assert.equal(calls.length, count);
+    assert.doesNotMatch(JSON.stringify({ imported, summary }), /PRIVATE_|base64/);
+  });
+});
+
+test('issue28 MCP rejects misplaced page indices with actionable nesting guidance', async () => {
+  await feedbackMcpFixture(async ({ registrations, fixture, calls }) => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'page-indices-guidance', version: '1.0.0' });
+    try {
+      await McpServer.prototype.connect.call(fixture.instance, serverTransport);
+      await client.connect(clientTransport);
+      for (const name of ['preview_presentation', 'preflight_presentation', 'finalize_presentation']) {
+        const tool = registrations.get(name);
+        const input = { deck_id: '11111111-1111-4111-8111-111111111111', ...(name === 'finalize_presentation' ? { expected_revision: 0, expected_hash: 'a'.repeat(64), name: 'synthetic' } : {}) };
+        const invalid = tool.config.inputSchema.safeParse({ ...input, page_indices: [0] });
+        assert.equal(invalid.success, false);
+        assert.match(invalid.error.message, /options\.page_indices/);
+        assert.match(tool.config.description, /options\.page_indices/);
+        assert.equal(tool.config.inputSchema.safeParse({ ...input, options: { page_indices: [0] } }).success, true);
+        assert.equal(tool.config.inputSchema.safeParse({ ...input, unknown: true }).success, false);
+        const response = await client.callTool({ name, arguments: { ...input, page_indices: [0] } });
+        assert.equal(response.isError, true);
+        assert.match(response.content[0].text, /options\.page_indices/);
+      }
+      assert.equal(calls.length, 0);
+    } finally { await client.close(); }
+  });
+});
+
+test('issue29 MCP exposes non-destructive partial surface and effects operations', async () => {
+  await feedbackMcpFixture(async ({ registrations, calls, call }) => {
+    const created = await call('create_presentation', { title: 'Synthetic appearance' });
+    const input = { deck_id: created.deck_id, expected_revision: 0, slide_id: 'slide-1', ids: ['rich'] };
+    const surface = { fill: '225566', opacity: null, gradient: null };
+    await call('set_surface', { ...input, surface });
+    assert.deepEqual(calls.at(-1).request.operations, [{ op: 'set_surface', slide_id: 'slide-1', ids: ['rich'], surface }]);
+    await call('set_effects', { ...input, expected_revision: 1, effects: { glow: null } });
+    assert.deepEqual(calls.at(-1).request.operations, [{ op: 'set_effects', slide_id: 'slide-1', ids: ['rich'], effects: { glow: null } }]);
+    for (const surface of [{}, { fill: null }, { stroke: null }, { opacity: -1 }, { unknown: true }]) {
+      assert.equal(registrations.get('set_surface').config.inputSchema.safeParse({ ...input, surface }).success, false);
+    }
+    for (const effects of [{}, { soft_edge: 101 }, { unknown: true }]) {
+      assert.equal(registrations.get('set_effects').config.inputSchema.safeParse({ ...input, effects }).success, false);
+    }
+    assert.match(registrations.get('apply_format').config.description, /kind:"filled"/);
+    const table = registrations.get('edit_table').config.inputSchema;
+    for (const op of ['update_format', 'replace_format']) {
+      assert.equal(table.safeParse({ deck_id: created.deck_id, expected_revision: 2, slide_id: 'slide-1', id: 'table', operations: [{ op, format: {} }] }).success, true);
+    }
+  });
+});
+
+test('issue29 MCP surfaces accepted mixed-run format painter warnings', async () => {
+  await feedbackMcpFixture(async ({ call, fixture }) => {
+    const created = await call('create_presentation', { title: 'Synthetic mixed text' });
+    fixture.onRequest = async request => {
+      assert.equal(request.op, 'apply_format');
+      return { document: { ...request.document, revision: 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] },
+        render_warnings: [{ code: 'FORMAT_PAINTER_RUNS_UNIFIED', page_index: 0, element_id: 'rich', message: 'Use kind:"filled" for appearance-only edits.' }] };
+    };
+    const result = await call('apply_format', { deck_id: created.deck_id, expected_revision: 0, slide_id: 'slide-1', ids: ['rich'],
+      style: { run: { bold: true }, paragraph: { runs: [] }, vertical: 'top' } });
+    assert.equal(result.renderWarnings.status, 'complete');
+    assert.equal(result.renderWarnings.revision, 1);
+    assert.equal(result.renderWarnings.warnings[0].code, 'FORMAT_PAINTER_RUNS_UNIFIED');
+  });
+});
+
 test('reference MCP registers guarded publication with default-deny entries', async () => {
   await feedbackMcpFixture(async ({ registrations, call, calls, fixture }) => {
     const tool = registrations.get('set_references');
@@ -1810,7 +1896,9 @@ function assertFeedbackWorkflow(prompt, resource) {
     /Pass asset_id instead of base64/, /page_scope reports unselected pages/,
     /typed_authoring/, /freeform.*high-volume/, /apply_operations.*complete add_elements/,
     /1\.\.128.*one Undo/, /expected_revision and expected_hash/, /set_frame\/set_frames change geometry only/,
-    /set_text_style is a partial style update.*apply_format copies/, /Do not force a preview_slide_revision candidate for every frame/,
+    /set_text_style, set_surface and set_effects are partial updates.*apply_format copies/,
+    /kind:"filled".*preserves rich text/, /options\.page_indices.*options:\{page_indices:\[0\]\}/,
+    /Do not force a preview_slide_revision candidate for every frame/,
     /Finish with preview_presentation and preflight_presentation/, /sentence headlines and a 32-slide limit/,
     /headline_style="keyword"/, /slide_limit=39.*32\.\.128/, /Evidence support and numeric declarations still apply/,
     /Consulting issues are required only for the consulting-decision profile/, /PartSpec\.layout.*show_title=false.*body box/,
@@ -2119,7 +2207,7 @@ test('managed batch MCP stub accepts strict parts and graphs with one guarded re
     const schema = registrations.get('apply_operations').config.inputSchema;
     assert.deepEqual(schema.parse(guarded), guarded);
     const published = z.toJSONSchema(schema, { io: 'input' });
-    assert.equal(published.properties.operations.items.oneOf.length, 19);
+    assert.equal(published.properties.operations.items.oneOf.length, 21);
     for (const operation of operations) {
       assert.equal(schema.safeParse({ ...guarded, operations: [operation] }).success, true);
       assert.equal(schema.safeParse({ ...guarded, operations: [{ ...operation, unknown: true }] }).success, false);
@@ -2379,7 +2467,8 @@ test('managed batch MCP live 39 slides and 21 managed roots retain metadata thro
     const items = resolveSchemaRef(batchSchema, resolveSchemaRef(batchSchema, batchSchema.properties.operations).items);
     const variants = items.oneOf ?? items.anyOf;
     const operations = variants.map(variant => resolveSchemaRef(batchSchema, resolveSchemaRef(batchSchema, variant).properties.op).const).sort();
-    assert.equal(operations.length, 19);
+    assert.equal(operations.length, 21);
+    for (const name of ['set_surface', 'set_effects']) assert.ok(operations.includes(name));
     const capabilities = await call('authoring_capabilities');
     assert.deepEqual([...capabilities.typed_authoring.operations].sort(), operations);
     assert.equal(capabilities.typed_authoring.batch_limit, 128);

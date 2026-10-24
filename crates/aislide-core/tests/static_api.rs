@@ -499,6 +499,26 @@ fn authoring_preflight_uses_group_transforms_and_rejects_unbounded_requests() {
 }
 
 #[test]
+fn authoring_preflight_uses_positioned_text_in_labelled_containers() {
+    for (vertical, body_y, label_y) in [("top", 120, 48), ("middle", 80, 160), ("bottom", 80, 274)] {
+        let mut scene = document()["deck"].clone();
+        scene["slides"][0]["elements"] = json!([
+            {"type":"shape","id":"container","preset":"roundRect","x":40,"y":40,"width":400,"height":260,
+                "fill":"EEF1FB","stroke":"087F73","stroke_width":1,"text":"Container label","font_size":18,"color":"000000","bold":false,
+                "format":{"vertical":vertical,"padding":{"top":8,"bottom":8,"left":12,"right":12}}},
+            {"type":"text","id":"body","x":60,"y":body_y,"width":300,"height":30,"text":"Contained text","font_size":18,"color":"000000","bold":false}
+        ]);
+        let state = execute_request(json!({"op":"new_document","id":"labelled-container","deck":scene})).unwrap();
+        let checked = execute_request(json!({"op":"preflight_presentation","document":state})).unwrap();
+        assert!(!checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "TEXT_OVERLAP"), "{vertical}: {checked}");
+        scene["slides"][0]["elements"][1]["y"] = json!(label_y);
+        let state = execute_request(json!({"op":"new_document","id":"label-collision","deck":scene})).unwrap();
+        let checked = execute_request(json!({"op":"preflight_presentation","document":state})).unwrap();
+        assert!(checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "TEXT_OVERLAP"), "{vertical}: {checked}");
+    }
+}
+
+#[test]
 fn static_api_exports_files_and_metadata_without_mutation() {
     let mut document = document();
     let first = document["deck"]["slides"][0].clone();

@@ -383,7 +383,10 @@ fn body_xml(body: &[RichParagraph]) -> Result<String> {
     let xml = crate::pptx::element_xml(&element, 2, &BTreeMap::new(), &Default::default());
     let parsed = crate::pptx::parse(&xml)?;
     let node = parsed.descendants().find(|node| node.has_tag_name((crate::native::P, "txBody"))).ok_or_else(invalid)?;
-    let children: String = node.children().filter(|node| node.is_element()).map(|node| crate::native_save::fragment(&xml, node)).collect();
+    // Comments keep explicit run styles, not the temporary text box's frame defaults.
+    let children: String = node.children().filter(|node| node.is_element()).map(|node| {
+        if node.has_tag_name((crate::native::A, "lstStyle")) { "<a:lstStyle/>".into() } else { crate::native_save::fragment(&xml, node) }
+    }).collect();
     Ok(format!("<m:txBody xmlns:m=\"{NS}\" xmlns:a=\"{}\">{children}</m:txBody>", crate::native::A))
 }
 

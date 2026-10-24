@@ -211,6 +211,8 @@ Browser E2E uses installed Microsoft Edge through Playwright. Generation tests u
 ./tools/verify-demo.ps1
 ```
 
+Failed Edge editor tests upload available screenshots, error contexts and Playwright traces as an `edge-e2e-failure-<run_attempt>` artifact on the failed Verify run, retained for seven days. Artifact collection does not retry or suppress the failing editor gate.
+
 After `npm run tauri:build`, `npm run test:native:e2e` runs direct editing, IME, object insertion, master/theme/layout editing, Undo and the generation workflow in a separately owned Windows desktop WebView using a disposable profile and loopback fixture. It closes the test application and removes its debugging profile afterward. This interactive desktop check is separate from hosted CI.
 
 Optional network/desktop qualifications are deliberately separate: `npm run test:corpus` downloads the pinned public fixture set, `npm run demo:benchmark` fetches attributed World Bank data, `npm run model:qualify` uses the prepared local model, and `tools/verify-powerpoint.ps1` checks Office on disposable copies. None is presented as a credential-free hosted CI result.

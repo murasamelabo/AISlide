@@ -469,13 +469,18 @@ test('lightweight SDK summary is paginated, detached and excludes source and ima
       { type: 'picture', id: `image-${index}`, x: 100, y: 0, width: 100, height: 100, base64: 'PRIVATE_IMAGE_BYTES', mime_type: 'image/png', alt: 'Image' },
     ] },
   ] }));
-  const document = { id: 'summary', revision: 3, hash: 'a'.repeat(64), origin: { base64: 'PRIVATE_ORIGIN_BYTES' }, sources: [{ text: 'PRIVATE_SOURCE_TEXT' }], guided_record: { input: { evidence: 'PRIVATE_GUIDED_EVIDENCE' } }, deck: { title: 'Synthetic summary', width: 1280, height: 720, slides } };
+  const document = { id: 'summary', revision: 3, hash: 'a'.repeat(64), origin: { base64: 'PRIVATE_ORIGIN_BYTES' }, sources: [{ text: 'PRIVATE_SOURCE_TEXT' }], guided_record: { input: { evidence: 'PRIVATE_GUIDED_EVIDENCE' } }, deck: { title: 'Synthetic summary', width: 1280, height: 720, slides,
+    design: { masters: [{ id: 'master', name: 'Synthetic master', elements: [{ base64: 'PRIVATE_MASTER_IMAGE_BYTES' }] }], layouts: [{ id: 'document-layout', name: 'Synthetic layout', master_id: 'master', source_id: 'ppt/slideLayouts/slideLayout2.xml', elements: [{ base64: 'PRIVATE_LAYOUT_IMAGE_BYTES' }] }] } } };
   const session = new DocumentSession(() => { throw new Error('Summary must not call core'); }, document);
   Object.defineProperty(session, 'document', { get() { throw new Error('Summary must not clone the full document'); } });
   const summary = session.getSummary();
   assert.equal(summary.slide_count, 40);
   assert.equal(summary.revision, 3);
   assert.equal(summary.hash, document.hash);
+  assert.deepEqual(summary.masters, [{ id: 'master', name: 'Synthetic master' }]);
+  assert.deepEqual(summary.layouts, [{ id: 'document-layout', name: 'Synthetic layout', master_id: 'master', source_id: 'ppt/slideLayouts/slideLayout2.xml' }]);
+  summary.layouts[0].name = 'Changed outside session';
+  assert.equal(session.getSummary().layouts[0].name, 'Synthetic layout');
   assert.equal(summary.slides.length, 16);
   assert.equal(summary.next_offset, 16);
   assert.equal(summary.slides[0].has_notes, true);
@@ -853,6 +858,8 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
     ];
     for (const spec of briefing) results.push(session.addPart('slide-1', { id: spec.preset, spec }));
     const managed: AuthoringOperation[] = [
+      { op: 'set_surface', slide_id: 'slide-1', ids: ['shape'], surface: { fill: '225566', opacity: null, gradient: null } },
+      { op: 'set_effects', slide_id: 'slide-1', ids: ['shape'], effects: { glow: null, soft_edge: 2 } },
       { op: 'set_text_padding', slide_id: 'slide-1', ids: ['text'], padding: null },
       { op: 'update_notes', slide_id: 'slide-1', notes: 'Synthetic notes' },
       { op: 'set_table_headers', slide_id: 'slide-1', element_id: 'table', policy: 'first_row' },
@@ -867,7 +874,8 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
     ];
     results.push(session.applyOperations(managed, options), session.addPart('slide-1', { id: 'part', spec: part }),
       session.updatePart('slide-1', { id: 'part', spec: part }), session.addGraph('slide-1', { id: 'graph', spec: graph }),
-      session.updateGraph('slide-1', { id: 'graph', spec: graph }));
+      session.updateGraph('slide-1', { id: 'graph', spec: graph }),
+      session.editTable('slide-1', { id: 'table', operations: [{ op: 'replace_format', format: {} }, { op: 'update_format', format: { column_widths: null, cells: [] } }] }));
     const authoring: GuidedAuthoring = { headline_style: 'keyword', slide_limit: 128, ledger_notes: 'summary' };
     const noteModes: GuidedAuthoring['ledger_notes'][] = ['full', 'summary', 'none', null, undefined];
     const record: GuidedRecord | null | undefined = source.guided_record;
@@ -884,6 +892,8 @@ test('feedback SDK types accept the new contracts and reject raw or mistyped ope
   `);
   assert.deepEqual(diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')), []);
   for (const invalid of [
+    "session.applyOperations([{ op: 'set_surface', slide_id: 'slide-1', ids: ['shape'], surface: { fill: null } }]);",
+    "session.applyOperations([{ op: 'set_effects', slide_id: 'slide-1', ids: ['shape'], effects: { glow: 'none' } }]);",
     "const invalid: DeliveryChecks['layout_scope'] = 'all_layouts';",
     "session.applyOperations([{ op: 'update_notes', slide_id: 'slide-1', notes: null }]);",
     "session.applyOperations([{ op: 'set_table_headers', slide_id: 'slide-1', element_id: 'table', policy: 'all' }]);",

@@ -321,11 +321,12 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 	}
 	let mut report = PreflightReport { revision: document.revision, hash: document.hash.clone(), page_indices: selected.clone(), findings: Vec::new(),
 		checks: ["renderer_warnings", "off_slide", "text_overlap", "connector_label_interference", "connector_badge_overlap", "container_clearance", "small_text", "density"].map(String::from).to_vec(),
-		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed frame bounds, not glyph intersection; intentional overlapping text needs human review", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices are summarized per page as info; specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
+		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed shaped-glyph metric bounds with alignment, padding and clipping, not exact ink intersection; warped text conservatively uses its content frame", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices are summarized per page as info; specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
 		office_visual_parity: false, semantic_truth_verified: false };
 	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into(), "numbered_sequence_spacing".into(), "part_aspect".into()]);
 	report.limitations.push("Over-budget shadow, glow, soft-edge and reflection are omitted only from the diagnostic view at scale 1, with an EFFECT_APPROXIMATION finding; native content is unchanged and other renderer failures still reject.".into());
 	report.limitations.push("Reference URL detection uses normalized HTTP(S) tokens terminated by CJK prose; percent-encode CJK URL paths. Warnings do not echo private note URLs. Fixed-reference collisions require explicit repair, not automatic reflow.".into());
+	let projection_warnings = crate::native_projection::warnings(document, &selected)?;
 	for page in selected {
 		let slide = &deck.slides[page];
 		let notes_only = crate::references::notes_only_count(document, page)?;
@@ -335,14 +336,23 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				&["Approve distribution-safe URLs before adding visible citations or a linked reference appendix", "Keep a readable URL as well as a hyperlink; never automatically publish private notes or file paths"])?;
 		}
 		let known_badges = crate::graphs::managed_badge_pairs(document, &slide.id);
-		let objects = page_objects(deck, page)?;
+		let mut objects = page_objects(deck, page)?;
 		// Text a managed part draws at sizes its preset fixes (tags, captions, badges) cannot be raised from the spec, so it is information;
 		// a body_size the author lowered below the floor stays a warning (see parts::fixed_typography).
 		let fixed_part = |object: &Object<'_>| object.owner.and_then(|owner| document.parts.iter().find(|part| part.slide_id == slide.id && part.element_id == owner)).filter(|part| !part.stale && crate::parts::fixed_typography(&part.spec, options.min_font_size));
 		let rendered = crate::render::render_with_effect_policy(deck, page, false, 1.0, crate::render::EffectPolicy::Preflight)?;
+		let text_bounds: std::collections::BTreeMap<_, _> = rendered.text.iter()
+			.map(|span| ((span.scope.as_str(), span.element_id.as_str()), span.occupied_bounds())).collect();
+		for object in &mut objects {
+			if let Some(bounds) = text_bounds.get(&(object.scope.as_str(), object.id)) {
+				object.text_bounds = bounds.map_or(Rect::ZERO, |bounds| object.transform.transform_rect_bbox(bounds));
+			}
+		}
 		let mut chart_notices: Vec<&Object<'_>> = Vec::new();
-		for warning in rendered.warnings {
-			let object = objects.iter().rev().find(|object| warning.element_id == object.id || warning.element_id.starts_with(&format!("{}[", object.id)));
+		for warning in rendered.warnings.into_iter().chain(projection_warnings.iter().filter(|warning| warning.page_index == page).cloned()) {
+			let object = if warning.code == "NATIVE_OBJECT_NOT_PREVIEWED" { None } else {
+				objects.iter().rev().find(|object| warning.element_id == object.id || warning.element_id.starts_with(&format!("{}[", object.id)))
+			};
 			let generic_chart_notice = matches!((warning.code.as_str(), warning.message.as_str()),
 				("CHART_PREVIEW", "Plotters chart layout; axis/legend placement is not Office parity")
 				| ("CHART_PRESENTATION", "AISlide bounded chart projection; not Office visual parity"));
@@ -362,7 +372,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				_ => &["Inspect the preview and compare in Office when visual parity matters"],
 			};
 			push_finding(&mut report, page, &slide.id, &evidence, &warning.code, severity, "renderer", &warning.message, suggestions)?;
-			if object.is_none() {
+			if object.is_none() && !warning.element_id.is_empty() {
 				if let Some(finding) = report.findings.last_mut() { finding.element_ids.push(warning.element_id); }
 			}
 		}
@@ -404,7 +414,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			for other in &objects[index + 1..] {
 				let overlap = object.text_bounds.intersect(other.text_bounds);
 				if other.text && overlap.width() > 2.0 && overlap.height() > 2.0 {
-					push_finding(&mut report, page, &slide.id, &[object, other], "TEXT_OVERLAP", "warning", "geometry", "Visible text frames overlap; confirm whether intentional", &["Move, align or reflow the text frames", "Inspect rotated text before applying a repair"])?;
+					push_finding(&mut report, page, &slide.id, &[object, other], "TEXT_OVERLAP", "warning", "renderer", "Positioned text bounds overlap; confirm whether intentional", &["Move, align or reflow the text frames", "Inspect rotated text before applying a repair"])?;
 				}
 			}
 			for (connector_index, connector) in objects.iter().enumerate().filter(|(_, candidate)| !candidate.route.is_empty()) {

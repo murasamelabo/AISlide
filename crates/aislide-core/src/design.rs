@@ -4,6 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const COLOR_KEYS: [&str; 12] = ["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
 
+pub(crate) fn color_slot(value: &str) -> &str {
+    match value { "tx1" => "dk1", "bg1" => "lt1", "tx2" => "dk2", "bg2" => "lt2", other => other }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ThemeFonts { pub major: String, pub minor: String, pub east_asian: String, pub complex_script: String }
@@ -15,7 +19,7 @@ pub struct Theme { pub name: String, pub colors: BTreeMap<String, String>, pub f
 pub struct Master { pub id: String, pub name: String, pub background: String, pub elements: Vec<Element>, #[serde(default, skip_serializing_if = "Option::is_none")] pub theme: Option<Theme> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SlideLayout { pub id: String, pub name: String, pub master_id: String, #[serde(default)] pub background: Option<String>, pub elements: Vec<Element> }
+pub struct SlideLayout { pub id: String, pub name: String, pub master_id: String, #[serde(default, skip_serializing_if = "Option::is_none")] pub source_id: Option<String>, #[serde(default)] pub background: Option<String>, pub elements: Vec<Element> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Design { pub theme: Theme, pub masters: Vec<Master>, pub layouts: Vec<SlideLayout> }
@@ -36,10 +40,10 @@ impl Default for Design {
     fn default() -> Self {
         let title = || placeholder("title", PlaceholderKind::Title, 0, [64.0, 80.0, 1152.0, 120.0], 42.0, "Title");
         Self { theme: Theme::default(), masters: vec![Master { id: "master-1".into(), name: "Main master".into(), background: "@lt1".into(), elements: Vec::new(), theme: None }], layouts: vec![
-            SlideLayout { id: "blank".into(), name: "Blank".into(), master_id: "master-1".into(), background: None, elements: Vec::new() },
-            SlideLayout { id: "title-content".into(), name: "Title and content".into(), master_id: "master-1".into(), background: None, elements: vec![title(), placeholder("body", PlaceholderKind::Body, 1, [64.0, 230.0, 1152.0, 370.0], 28.0, "Content")] },
-            SlideLayout { id: "two-columns".into(), name: "Two columns".into(), master_id: "master-1".into(), background: None, elements: vec![title(), placeholder("body-left", PlaceholderKind::Body, 1, [64.0, 230.0, 548.0, 370.0], 26.0, "Left content"), placeholder("body-right", PlaceholderKind::Body, 2, [668.0, 230.0, 548.0, 370.0], 26.0, "Right content")] },
-            SlideLayout { id: "section".into(), name: "Section header".into(), master_id: "master-1".into(), background: Some("@lt2".into()), elements: vec![placeholder("title", PlaceholderKind::Title, 0, [100.0, 250.0, 1080.0, 200.0], 56.0, "Section")] },
+            SlideLayout { id: "blank".into(), name: "Blank".into(), master_id: "master-1".into(), source_id: None, background: None, elements: Vec::new() },
+            SlideLayout { id: "title-content".into(), name: "Title and content".into(), master_id: "master-1".into(), source_id: None, background: None, elements: vec![title(), placeholder("body", PlaceholderKind::Body, 1, [64.0, 230.0, 1152.0, 370.0], 28.0, "Content")] },
+            SlideLayout { id: "two-columns".into(), name: "Two columns".into(), master_id: "master-1".into(), source_id: None, background: None, elements: vec![title(), placeholder("body-left", PlaceholderKind::Body, 1, [64.0, 230.0, 548.0, 370.0], 26.0, "Left content"), placeholder("body-right", PlaceholderKind::Body, 2, [668.0, 230.0, 548.0, 370.0], 26.0, "Right content")] },
+            SlideLayout { id: "section".into(), name: "Section header".into(), master_id: "master-1".into(), source_id: None, background: Some("@lt2".into()), elements: vec![placeholder("title", PlaceholderKind::Title, 0, [100.0, 250.0, 1080.0, 200.0], 56.0, "Section")] },
         ] }
     }
 }
@@ -75,6 +79,10 @@ pub fn validate_design_on_canvas(design: &Design, width: u32, height: u32) -> Re
     let mut layouts = BTreeSet::new();
     for layout in &design.layouts {
         valid_text(&layout.id, 80)?; valid_text(&layout.name, 100)?;
+        if let Some(source) = &layout.source_id {
+            valid_text(source, 512)?;
+            if source.is_empty() { return Err(Error::Invalid("layout source_id must be nonempty when present".into())); }
+        }
         if layout.id.is_empty() || !layouts.insert(&layout.id) || !ids.contains(&layout.master_id) { return Err(Error::Invalid("layout ID or master reference is invalid".into())); }
         if let Some(background) = &layout.background { crate::model::valid_color(background)?; }
         crate::model::validate_elements(&layout.elements, (f64::from(width), f64::from(height)), 0, &mut BTreeSet::new(), &mut total, &mut images)?;
@@ -138,9 +146,24 @@ pub fn assign_layout(deck: Deck, slide_id: &str, layout_id: &str) -> Result<Deck
     assign_layout_with_options(deck, slide_id, layout_id, false)
 }
 
+fn resolve_layout<'a>(design: &'a Design, requested: &str) -> Result<&'a SlideLayout> {
+    if let Some(layout) = design.layouts.iter().find(|layout| layout.id == requested) { return Ok(layout); }
+    let mut named = design.layouts.iter().filter(|layout| layout.name == requested);
+    if let Some(layout) = named.next() {
+        if named.next().is_none() { return Ok(layout); }
+    }
+    let choices = design.layouts.iter().map(|layout| format!("{} ({:?})", layout.id, layout.name)).collect::<Vec<_>>().join(", ");
+    let reason = if requested.starts_with("ppt/slideLayouts/") {
+        "This is a package-part source_id, not a document layout ID; use the mapped id from import_template or get_deck_summary"
+    } else if design.layouts.iter().filter(|layout| layout.name == requested).count() > 1 {
+        "Layout name is ambiguous; use a unique document layout ID"
+    } else { "Use a document layout ID or an unambiguous layout name from get_deck_summary" };
+    Err(Error::Invalid(format!("layout not found: {requested:?}. {reason}. Available document layouts: {choices}")))
+}
+
 pub fn assign_layout_with_options(mut deck: Deck, slide_id: &str, layout_id: &str, preserve_freeform: bool) -> Result<Deck> {
     let design = deck.design.get_or_insert_with(Design::default);
-    let layout = design.layouts.iter().find(|layout| layout.id == layout_id).ok_or_else(|| Error::Invalid("layout not found".into()))?.clone();
+    let layout = resolve_layout(design, layout_id)?.clone();
     let slide = deck.slides.iter_mut().find(|slide| slide.id == slide_id).ok_or_else(|| Error::Invalid("slide not found".into()))?;
     slide.layout_id = Some(layout.id); slide.inherit_background = true;
     for template in &layout.elements {

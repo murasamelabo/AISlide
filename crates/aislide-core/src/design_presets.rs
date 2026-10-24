@@ -33,7 +33,7 @@ fn text(id: &str, bounds: [f64; 4], size: f64, value: &str, kind: PlaceholderKin
 }
 
 fn layout(id: &str, name: &str, background: Option<&str>, elements: Vec<Element>) -> SlideLayout {
-    SlideLayout { id: format!("preset-{id}"), name: name.into(), master_id: "preset-master".into(), background: background.map(str::to_owned), elements }
+    SlideLayout { id: format!("preset-{id}"), name: name.into(), master_id: "preset-master".into(), source_id: None, background: background.map(str::to_owned), elements }
 }
 
 /// Geometry a preset shares between its layouts and design tokens.

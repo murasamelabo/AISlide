@@ -509,7 +509,7 @@ fn assert_managed_part_master_theme(batch: bool, update: bool) {
     master_theme.fonts.major = "Courier New".into();
     master_theme.fonts.minor = "Courier New".into();
     design.masters.push(Master { id: "second".into(), name: "Second".into(), background: "@lt1".into(), elements: vec![], theme: Some(master_theme.clone()) });
-    design.layouts.push(SlideLayout { id: "second-layout".into(), name: "Second".into(), master_id: "second".into(), background: None, elements: vec![] });
+    design.layouts.push(SlideLayout { id: "second-layout".into(), name: "Second".into(), master_id: "second".into(), source_id: None, background: None, elements: vec![] });
     for bounded in [false, true] {
         let mut spec = column_spec();
         spec["title"] = json!("i".repeat(if bounded { 40 } else { 80 }));

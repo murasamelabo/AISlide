@@ -202,7 +202,9 @@ export class DocumentSession {
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 0 || limit > 32) throw new Error('Summary requires a nonnegative offset and limit 0..32');
     const { id, revision, hash, deck } = this.#document;
     const summary = { document_id: id, revision, hash, title: deck.title, width: deck.width, height: deck.height, slide_count: deck.slides.length,
-      capacity_profile: this.#profile, can_undo: this.canUndo, can_redo: this.canRedo, busy: this.#busy };
+      capacity_profile: this.#profile, can_undo: this.canUndo, can_redo: this.canRedo, busy: this.#busy,
+      masters: (deck.design?.masters ?? []).map(({ id, name }) => ({ id, name })),
+      layouts: (deck.design?.layouts ?? []).map(({ id, name, master_id, source_id }) => ({ id, name, master_id, ...(source_id === undefined ? {} : { source_id }) })) };
     if (slideId === undefined) return { ...summary, slides: deck.slides.slice(offset, offset + limit).map(slide => ({ id: slide.id, title: slide.title, element_count: slide.elements.length, has_notes: Boolean(slide.notes) })),
       next_offset: limit > 0 && offset + limit < deck.slides.length ? offset + limit : null };
     const slide = deck.slides.find(value => value.id === slideId);

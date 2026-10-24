@@ -10,6 +10,36 @@ fn shape() -> Value {
     json!({"type":"shape","id":"shape","x":100,"y":100,"width":300,"height":180,"preset":"roundRect","fill":"123456","stroke":"000000","stroke_width":2,"rotation":0,"text":"","font_size":24,"color":"000000","bold":false})
 }
 
+fn unsupported_shape(id: usize, name: &str, placeholder: Option<&str>) -> String {
+    let placeholder = placeholder.map(|kind| {
+        let index = match kind { "dt" => 0, "ftr" => 1, "sldNum" => 2, _ => 3 };
+        format!("<p:ph type=\"{kind}\" idx=\"{index}\"/>")
+    }).unwrap_or_default();
+    format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"{name}\"/><p:cNvSpPr/><p:nvPr>{placeholder}</p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"9525\" y=\"9525\"/><a:ext cx=\"95250\" cy=\"95250\"/></a:xfrm><a:prstGeom prst=\"unsupportedPreset\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr></p:sp>")
+}
+
+fn native_projection_fixture(pages: usize, master_art: &str, layout_art: &str, hide_master: bool) -> (Value, Vec<u8>) {
+    let mut scene = execute_request(json!({"op":"create_presentation","id":"projection-source","title":"Synthetic projection"})).unwrap()["deck"].clone();
+    let slide = scene["slides"][0].clone();
+    scene["slides"] = json!((0..pages).map(|index| {
+        let mut slide = slide.clone();
+        slide["id"] = json!(format!("projection-page-{index}"));
+        slide
+    }).collect::<Vec<_>>());
+    let mut package = Package::open(export(scene)).unwrap();
+    for (path, art) in [("ppt/slideMasters/slideMaster1.xml", master_art), ("ppt/slideLayouts/slideLayout1.xml", layout_art)] {
+        let mut xml = package.text(path).unwrap().replace("</p:spTree>", &format!("{art}</p:spTree>"));
+        if hide_master && path.contains("slideLayouts") {
+            assert!(!xml.contains("showMasterSp="));
+            xml = xml.replace("<p:sldLayout ", "<p:sldLayout showMasterSp=\"0\" ");
+        }
+        package.replace_part(path, xml.into_bytes()).unwrap();
+    }
+    let bytes = package.save().unwrap();
+    let document = execute_request(json!({"op":"open_presentation","id":"projection-native","base64":STANDARD.encode(&bytes)})).unwrap()["document"].clone();
+    (document, bytes)
+}
+
 fn export(deck: Value) -> Vec<u8> {
     let output = execute_request(json!({"op":"export","deck":deck})).unwrap();
     STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()
@@ -38,6 +68,195 @@ fn visual_transform_fill_effects_are_native_and_reopen() {
     assert_eq!(visual["flip_h"], true);
     assert_eq!(visual["opacity"], 0.5);
     assert_eq!(visual["shadow"]["blur"], 6.0);
+}
+
+#[test]
+fn theme_aliases_are_shared_by_native_gradient_fill_and_effect_colors() {
+    for (alias, slot) in [("bg1","lt1"),("tx1","dk1"),("bg2","lt2"),("tx2","dk2")] {
+        let shade = format!("@{slot}");
+        let mut element = shape();
+        element["fill"] = json!(shade);
+        element["visual"] = json!({
+            "gradient":{"kind":"linear","angle":0,"stops":[{"offset":0,"color":shade,"opacity":0.5},{"offset":1,"color":shade,"opacity":0}]},
+            "glow":{"color":shade,"opacity":0.5,"radius":2},
+            "shadow":{"color":shade,"opacity":0.5,"blur":1,"distance":2,"angle":45}
+        });
+        let mut package = Package::open(export(deck(element))).unwrap();
+        let xml = package.text("ppt/slides/slide1.xml").unwrap().replace(&format!("val=\"{slot}\""), &format!("val=\"{alias}\""));
+        package.replace_part("ppt/slides/slide1.xml", xml.into_bytes()).unwrap();
+        let bytes = package.save().unwrap();
+        let result = execute_request(json!({"op":"open_presentation","id":"theme-alias","base64":STANDARD.encode(&bytes)})).unwrap();
+        assert!(!result["warnings"].as_array().unwrap().iter().any(|warning| warning.as_str().unwrap().contains("retained unsupported")), "{alias}: {}", result["warnings"]);
+        let actual = &result["document"]["deck"]["slides"][0]["elements"][0];
+        assert_eq!(actual["fill"], shade);
+        for color in [&actual["visual"]["gradient"]["stops"][0]["color"], &actual["visual"]["gradient"]["stops"][1]["color"], &actual["visual"]["glow"]["color"], &actual["visual"]["shadow"]["color"]] {
+            assert_eq!(color, &json!(shade));
+        }
+        let preview = execute_request(json!({"op":"render_element_preview","element":actual})).unwrap();
+        assert!(!preview["svg"].as_str().unwrap().is_empty());
+        assert_eq!(saved(&result["document"]), bytes);
+    }
+}
+
+#[test]
+fn retained_native_objects_remain_visible_as_preview_and_preflight_warnings() {
+    let mut package = Package::open(export(deck(shape()))).unwrap();
+    let xml = package.text("ppt/slides/slide1.xml").unwrap().replace("prst=\"roundRect\"", "prst=\"unsupportedPreset\"");
+    package.replace_part("ppt/slides/slide1.xml", xml.into_bytes()).unwrap();
+    let bytes = package.save().unwrap();
+    let result = execute_request(json!({"op":"open_presentation","id":"unprojected","base64":STANDARD.encode(&bytes)})).unwrap();
+    assert!(result["document"]["deck"]["slides"][0]["elements"].as_array().unwrap().is_empty());
+    let preview = execute_request(json!({"op":"preview_presentation","document":result["document"],"options":{"page_indices":[0]}})).unwrap();
+    assert!(preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "NATIVE_OBJECT_NOT_PREVIEWED" && warning["element_id"] == "shape"));
+    let checked = execute_request(json!({"op":"preflight_presentation","document":result["document"],"options":{"page_indices":[0]}})).unwrap();
+    assert!(checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED" && finding["severity"] == "warning"));
+    assert_eq!(saved(&result["document"]), bytes);
+}
+
+#[test]
+fn unpreviewed_master_objects_do_not_borrow_same_named_slide_evidence() {
+    let mut scene = execute_request(json!({"op":"create_presentation","id":"scope-source","title":"Synthetic scopes"})).unwrap()["deck"].clone();
+    scene["design"]["masters"][0]["elements"] = json!([shape()]);
+    scene["slides"][0]["elements"] = json!([{"type":"rect","id":"shape","x":20,"y":30,"width":100,"height":60,"fill":"FFFFFF"}]);
+    let mut package = Package::open(export(scene)).unwrap();
+    let path = "ppt/slideMasters/slideMaster1.xml";
+    let xml = package.text(path).unwrap().replace("prst=\"roundRect\"", "prst=\"unsupportedPreset\"");
+    package.replace_part(path, xml.into_bytes()).unwrap();
+    let opened = execute_request(json!({"op":"open_presentation","id":"scope-warning","base64":STANDARD.encode(package.save().unwrap())})).unwrap();
+    let checked = execute_request(json!({"op":"preflight_presentation","document":opened["document"],"options":{"page_indices":[0]}})).unwrap();
+    let warning = checked["findings"].as_array().unwrap().iter().find(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED").unwrap();
+    assert_eq!(warning["element_ids"], json!(["shape"]));
+    assert!(warning["message"].as_str().unwrap().contains(path));
+    assert!(warning["scopes"].as_array().unwrap().is_empty(), "{warning}");
+    assert_eq!(warning["bounds"]["width"], 0.0);
+    assert_eq!(warning["bounds"]["height"], 0.0);
+}
+
+#[test]
+fn review31_inactive_design_fields_do_not_create_missing_object_warnings() {
+    let fields = ["dt", "ftr", "sldNum"].iter().enumerate().map(|(index, kind)| unsupported_shape(900 + index, &format!("inactive-{kind}"), Some(kind))).collect::<String>();
+    let (document, _) = native_projection_fixture(2, &fields, &fields, false);
+    let preview = execute_request(json!({"op":"preview_presentation","document":document,"options":{"page_indices":[0,1],"max_dimension":320}})).unwrap();
+    assert!(!preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "NATIVE_OBJECT_NOT_PREVIEWED"), "{}", preview["warnings"]);
+    let checked = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0,1]}})).unwrap();
+    assert!(!checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED"), "{checked}");
+}
+
+#[test]
+fn review31_projected_slide_fields_do_not_warn_about_design_templates() {
+    for (kind, model_kind) in [("dt","date"),("ftr","footer"),("sldNum","slide_number")] {
+        let master_field = unsupported_shape(900, "master-field-template", Some(kind));
+        let layout_field = unsupported_shape(901, "layout-field-template", Some(kind));
+        let (_, bytes) = native_projection_fixture(2, &master_field, &layout_field, false);
+        let mut package = Package::open(bytes).unwrap();
+        let field = unsupported_shape(990, "slide-field-instance", Some(kind))
+            .replace("unsupportedPreset", "rect")
+            .replace("cx=\"95250\" cy=\"95250\"", "cx=\"2857500\" cy=\"571500\"")
+            .replace("</p:sp>", "<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Visible field</a:t></a:r></a:p></p:txBody></p:sp>");
+        let slide = package.text("ppt/slides/slide2.xml").unwrap().replace("</p:spTree>", &format!("{field}</p:spTree>"));
+        package.replace_part("ppt/slides/slide2.xml", slide.into_bytes()).unwrap();
+        let master_path = "ppt/slideMasters/slideMaster1.xml";
+        let master = package.text(master_path).unwrap().to_owned();
+        let layout_path = "ppt/slideLayouts/slideLayout1.xml";
+        let layout = package.text(layout_path).unwrap().to_owned();
+        for (master_enabled, layout_override) in [(None,None),(Some(true),None),(Some(false),None),(Some(true),Some(false)),(Some(false),Some(true))] {
+            let xml = master_enabled.map(|enabled| master.replace("<p:txStyles>", &format!("<p:hf {kind}=\"{}\"/><p:txStyles>", u8::from(enabled)))).unwrap_or_else(|| master.clone());
+            package.replace_part(master_path, xml.into_bytes()).unwrap();
+            let xml = layout_override.map(|enabled| layout.replace("</p:sldLayout>", &format!("<p:hf {kind}=\"{}\"/></p:sldLayout>", u8::from(enabled)))).unwrap_or_else(|| layout.clone());
+            package.replace_part(layout_path, xml.into_bytes()).unwrap();
+            let bytes = package.save().unwrap();
+            let document = execute_request(json!({"op":"open_presentation","id":"projected-field","base64":STANDARD.encode(&bytes)})).unwrap()["document"].clone();
+            assert_eq!(document["deck"]["slides"][1]["elements"][0]["format"]["placeholder"]["kind"], model_kind);
+            let checked = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+            assert!(!checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "TEXT_OVERFLOW"));
+            assert!(!checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED"), "{kind}: {checked}");
+            assert_eq!(saved(&document), bytes);
+        }
+    }
+}
+
+#[test]
+fn review31_unprojected_slide_fields_warn_only_for_their_slide_part() {
+    for kind in ["dt","ftr","sldNum"] {
+        let (_, bytes) = native_projection_fixture(2,
+            &unsupported_shape(900, "master-field-template", Some(kind)),
+            &unsupported_shape(901, "layout-field-template", Some(kind)), false);
+        let mut package = Package::open(bytes).unwrap();
+        let path = "ppt/slides/slide2.xml";
+        let xml = package.text(path).unwrap().replace("</p:spTree>", &format!("{}</p:spTree>", unsupported_shape(990, "missing-slide-field", Some(kind))));
+        package.replace_part(path, xml.into_bytes()).unwrap();
+        let document = execute_request(json!({"op":"open_presentation","id":"unprojected-field","base64":STANDARD.encode(package.save().unwrap())})).unwrap()["document"].clone();
+        let checked = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+        let missing: Vec<_> = checked["findings"].as_array().unwrap().iter().filter(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED").collect();
+        assert_eq!(missing.len(), 1, "{kind}: {checked}");
+        assert_eq!(missing[0]["page_index"], 1);
+        assert_eq!(missing[0]["element_ids"], json!(["missing-slide-field"]));
+        assert!(missing[0]["message"].as_str().unwrap().contains(path));
+    }
+}
+
+#[test]
+fn review31_hidden_master_graphics_do_not_create_missing_object_warnings() {
+    let (document, _) = native_projection_fixture(1, &unsupported_shape(900, "hidden-master", None), "", true);
+    let checked = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+    assert!(!checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED"), "{checked}");
+}
+
+#[test]
+fn review31_shared_projection_warnings_are_aggregated_once_per_source_part() {
+    let master = (0..5).map(|index| unsupported_shape(900 + index, &format!("master-{index}"), None)).collect::<String>();
+    let layout = unsupported_shape(950, "layout-opaque", None);
+    let (document, bytes) = native_projection_fixture(8, &master, &layout, false);
+    let selected = json!([7,3,0,2,1,4,5,6]);
+    let preview = execute_request(json!({"op":"preview_presentation","document":document,"options":{"page_indices":selected,"max_dimension":320}})).unwrap();
+    let warnings: Vec<_> = preview["warnings"].as_array().unwrap().iter().filter(|warning| warning["code"] == "NATIVE_OBJECT_NOT_PREVIEWED").collect();
+    assert_eq!(warnings.len(), 2);
+    assert!(warnings.iter().all(|warning| warning["page_index"] == 7));
+    assert!(warnings.iter().any(|warning| warning["message"].as_str().unwrap().contains("5 native objects")));
+    let checked = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":selected}})).unwrap();
+    assert_eq!(checked["page_indices"], selected);
+    assert_eq!(checked["findings"].as_array().unwrap().iter().filter(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED").count(), 2);
+    assert_eq!(saved(&document), bytes);
+}
+
+#[test]
+fn review31_many_unprojected_master_objects_do_not_exhaust_preflight_or_delivery() {
+    let master = (0..300).map(|index| unsupported_shape(900 + index, &format!("opaque-{index}"), None)).collect::<String>();
+    let (document, bytes) = native_projection_fixture(8, &master, "", false);
+    let selected = json!([0,1,2,3,4,5,6,7]);
+    let checked = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":selected}})).unwrap();
+    let warnings: Vec<_> = checked["findings"].as_array().unwrap().iter().filter(|finding| finding["code"] == "NATIVE_OBJECT_NOT_PREVIEWED").collect();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0]["element_ids"], json!([]));
+    assert!(warnings[0]["message"].as_str().unwrap().contains("300 native objects"));
+    assert!(warnings[0]["message"].as_str().unwrap().contains("Example IDs (lexicographic): opaque-0, opaque-1, opaque-10, opaque-100"));
+    assert!(warnings[0]["message"].as_str().unwrap().contains("296 more"));
+    assert!(warnings[0]["message"].as_str().unwrap().len() < 2048);
+    let delivery = execute_request(json!({"op":"prepare_delivery","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],
+        "options":{"page_indices":selected,"preview":"none","preflight":true}})).unwrap();
+    assert!(delivery["files"].as_array().unwrap().iter().any(|file| file["mime_type"] == "application/vnd.openxmlformats-officedocument.presentationml.presentation"));
+    assert_eq!(saved(&document), bytes);
+}
+
+#[test]
+fn native_connector_errors_describe_coordinates_and_both_recovery_paths() {
+    for points in [json!([[0,0.5],[1,0.5]]), json!([[1,0.5],[0,0.5]])] {
+        let element = json!({"type":"connector","id":"route","x":10,"y":10,"width":300,"height":40,"color":"000000","stroke_width":2,"arrow":true,"routing":{"points":points}});
+        let error = execute_request(json!({"op":"export","deck":deck(element.clone())})).unwrap_err().to_string();
+        for hint in ["0.5", "start must be [0,0]", "bounding box", "[[0,0],[1,0]]", "custom:true", "freeform"] {
+            assert!(error.contains(hint), "{hint}: {error}");
+        }
+        let mut custom = element;
+        custom["routing"]["custom"] = json!(true);
+        assert!(execute_request(json!({"op":"export","deck":deck(custom)})).is_ok());
+    }
+    for points in [
+        json!([[0,0],[1,0]]), json!([[1,0],[0,0]]), json!([[0,0],[1,0],[1,1]]),
+        json!([[0,0],[0,1],[1,1]]), json!([[0,0],[0.4,0],[0.4,1],[1,1]]),
+        json!([[0,0],[0,0.4],[1,0.4],[1,1]])
+    ] {
+        assert!(execute_request(json!({"op":"export","deck":deck(json!({"type":"connector","id":"route","x":10,"y":10,"width":300,"height":40,"color":"000000","stroke_width":2,"arrow":true,"routing":{"points":points}}))})).is_ok());
+    }
 }
 
 #[test]

@@ -45,6 +45,19 @@ pub struct TableFormat {
     #[serde(skip_serializing_if = "Vec::is_empty")] pub cells: Vec<CellFormat>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TableFormatPatch {
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")]
+    pub column_widths: Option<Option<Dimensions>>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")]
+    pub row_heights: Option<Option<Dimensions>>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")]
+    pub merges: Option<Vec<MergeRegion>>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")]
+    pub cells: Option<Vec<CellFormat>>,
+}
+
 impl TableFormat { pub fn is_default(&self) -> bool { self == &Self::default() } }
 
 impl Dimensions {
@@ -130,7 +143,18 @@ pub fn validate_element(element: &Element) -> Result<()> {
     format.validate(rows,*width,*height)
 }
 
-pub fn update_format(mut element: Element, replacement: TableFormat) -> Result<Element> {
+pub fn update_format(mut element: Element, update: TableFormatPatch) -> Result<Element> {
+    validate_element(&element)?;
+    if let Element::Table { format, .. } = &mut element {
+        if let Some(value) = update.column_widths { format.column_widths = value; }
+        if let Some(value) = update.row_heights { format.row_heights = value; }
+        if let Some(value) = update.merges { format.merges = value; }
+        if let Some(value) = update.cells { format.cells = value; }
+    }
+    validate_element(&element)?; Ok(element)
+}
+
+pub fn replace_format(mut element: Element, replacement: TableFormat) -> Result<Element> {
     validate_element(&element)?;
     if let Element::Table { format, .. } = &mut element { *format = replacement; }
     validate_element(&element)?; Ok(element)
@@ -259,7 +283,7 @@ fn native_fill(node: roxmltree::Node<'_, '_>) -> Option<String> {
     if child(node,A,"noFill").is_some() { return Some("none".into()); }
     let fill = child(node,A,"solidFill")?;
     if let Some(color) = child(fill,A,"srgbClr").and_then(|node| node.attribute("val")) { return Some(color.into()); }
-    child(fill,A,"schemeClr").and_then(|node| node.attribute("val")).map(|value| format!("@{}",match value {"bg1"=>"lt1","bg2"=>"lt2","tx1"=>"dk1","tx2"=>"dk2",value=>value}))
+    child(fill,A,"schemeClr").and_then(|node| node.attribute("val")).map(|value| format!("@{}", crate::design::color_slot(value)))
 }
 
 fn style_difference(mut style: RunStyle, base: &RunStyle) -> RunStyle {

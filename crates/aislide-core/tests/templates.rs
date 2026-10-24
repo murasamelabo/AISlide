@@ -9,6 +9,32 @@ const CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 const PROVENANCE: &str = "urn:aislide:provenance:1";
 
 #[test]
+fn selected_template_layouts_expose_source_ids_and_accept_document_names() {
+    let source = editing::create("layout-source".into(), "Synthetic layouts".into()).unwrap();
+    let bytes = templates::export_potx(&source).unwrap();
+    let source_ids = vec!["ppt/slideLayouts/slideLayout2.xml".to_owned(), "ppt/slideLayouts/slideLayout4.xml".to_owned()];
+    let imported = templates::load_potx_with_options("selected-layouts".into(), bytes, &templates::TemplateImportOptions {
+        include_sample_slides: false, layout_ids: source_ids.clone(), ..Default::default()
+    }).unwrap();
+    let layouts = &imported.deck.design.as_ref().unwrap().layouts;
+    assert_eq!(layouts.len(), 2);
+    assert_eq!(layouts.iter().map(|layout| layout.source_id.as_ref().unwrap().clone()).collect::<Vec<_>>(), source_ids);
+    assert_eq!(layouts.iter().map(|layout| layout.id.as_str()).collect::<Vec<_>>(), ["title-content","section"]);
+    let error = aislide_core::design::assign_layout(imported.deck.clone(), &imported.deck.slides[0].id, &source_ids[0]).unwrap_err().to_string();
+    for hint in ["package-part", "document layout ID", "get_deck_summary", "title-content", "Section header"] { assert!(error.contains(hint), "{error}"); }
+    let assigned = aislide_core::design::assign_layout(imported.deck.clone(), &imported.deck.slides[0].id, "Section header").unwrap();
+    assert_eq!(assigned.slides[0].layout_id.as_deref(), Some("section"));
+    let inserted = aislide_core::execute_request(serde_json::json!({"op":"edit_slides","document":imported,"expected_revision":0,
+        "operations":[{"op":"insert","id":"named-layout","title":"Synthetic inserted slide","layout_id":"Title and content"}]})).unwrap();
+    assert_eq!(inserted["document"]["deck"]["slides"][1]["layout_id"], "title-content");
+    let mut ambiguous = assigned;
+    for layout in &mut ambiguous.design.as_mut().unwrap().layouts { layout.name = "Duplicate".into(); }
+    let error = aislide_core::design::assign_layout(ambiguous.clone(), &ambiguous.slides[0].id, "Duplicate").unwrap_err().to_string();
+    assert!(error.contains("ambiguous") && error.contains("title-content") && error.contains("section"), "{error}");
+    assert!(aislide_core::design::assign_layout(ambiguous.clone(), &ambiguous.slides[0].id, "section").is_ok());
+}
+
+#[test]
 fn review19_inert_external_hyperlinks_allow_inspection_and_selected_import() {
     let url = "https://www.example.com/contact";
     let mut deck = editing::create("links".into(), "Synthetic links".into()).unwrap().deck;

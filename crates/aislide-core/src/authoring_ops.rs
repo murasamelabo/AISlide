@@ -1,7 +1,7 @@
 ﻿use crate::{document::{self, Document, Transaction, TransactionResult}, model::Deck, text_ops, Error, Result};
 use serde_json::json;
 use serde::{Deserialize, Serialize};
-use crate::{model::{Element, element_list}, rich_text::{RichParagraph, RunStyle}, selection::{ElementBundle, SelectionOperation, SelectionEffects}, table_format::{self, TableFormat, CellStyle, MergeRegion}};
+use crate::{model::{Element, element_list}, rich_text::{RichParagraph, RunStyle}, selection::{ElementBundle, SelectionOperation, SelectionEffects}, table_format::{self, TableFormat, TableFormatPatch, CellStyle, MergeRegion}};
 
 fn check(document: &Document, expected_revision: u64) -> Result<()> {
     document::verify(document)?;
@@ -138,7 +138,16 @@ pub fn copy_format(document: &Document, slide_id: &str, id: &str, paragraph_inde
 
 pub fn apply_format(document: &Document, expected_revision: u64, slide_id: &str, ids: &[String], style: &FormatSnapshot) -> Result<TransactionResult> {
     check(document, expected_revision)?;
-    replace_deck(document, expected_revision, crate::proofing::apply_format(document.deck.clone(), slide_id, ids, style)?)
+    let deck = crate::proofing::apply_format(document.deck.clone(), slide_id, ids, style)?;
+    let mixed = crate::proofing::mixed_text_targets(&document.deck, slide_id, ids, style);
+    let mut result = replace_deck(document, expected_revision, deck)?;
+    if let Some(page_index) = document.deck.slides.iter().position(|slide| slide.id == slide_id) {
+        result.render_warnings.extend(mixed.into_iter().map(|element_id| crate::export_static::RenderWarning {
+            code: "FORMAT_PAINTER_RUNS_UNIFIED".into(), page_index, element_id,
+            message: "Text format painting unifies supplied style properties across mixed runs. For appearance-only edits, use kind:\"filled\" or apply_operations set_surface/set_effects to retain rich text formatting.".into(),
+        }));
+    }
+    Ok(result)
 }
 
 pub fn set_proofing_language(document: &Document, expected_revision: u64, slide_id: &str, id: &str, language: &str) -> Result<TransactionResult> {
@@ -183,7 +192,8 @@ pub fn update_paragraphs(document: &Document, expected_revision: u64, slide_id: 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TableOperation {
-    UpdateFormat { format: TableFormat },
+    UpdateFormat { format: TableFormatPatch },
+    ReplaceFormat { format: TableFormat },
     SetCellStyle { row: usize, column: usize, style: CellStyle },
     SetCellText { row: usize, column: usize, text: String },
     Merge { region: MergeRegion },
@@ -200,6 +210,7 @@ pub fn edit_table(document: &Document, expected_revision: u64, slide_id: &str, i
         for operation in operations {
             element = match operation {
                 TableOperation::UpdateFormat { format } => table_format::update_format(element, format)?,
+                TableOperation::ReplaceFormat { format } => table_format::replace_format(element, format)?,
                 TableOperation::SetCellStyle { row, column, style } => table_format::set_cell_style(element, row, column, style)?,
                 TableOperation::SetCellText { row, column, text } => table_format::replace_cell_text(element, row, column, text)?,
                 TableOperation::Merge { region } => table_format::merge_cells(element, region)?,
@@ -362,7 +373,7 @@ fn commit_selection(document: &Document, expected_revision: u64, slide_id: &str,
 
 pub fn capabilities() -> serde_json::Value {
     json!({"version":1,"operations":["search_text","replace_text","replace_font","format_text","replace_text_content","update_paragraphs","edit_selection","combine_shapes","resize_canvas","detach_part","import_template","export_template","inspect_master_source","preview_master_import","import_masters","edit_image","apply_image_edit","edit_table","format_text_element","replace_element_text","refresh_fields","add_comment","reply_comment","resolve_comment","remove_comment","modern_comment","set_table_headers","set_accessibility","set_reading_order","check_accessibility","inspect_document","export_clean_copy","preview_presentation","preflight_presentation","set_references","preview_slide_revision","apply_slide_revision","prepare_delivery","apply_operations","import_slides"],
-        "typed_authoring":{"batch_limit":128,"element_roots_per_add":128,"operations":["add_elements","set_frame","set_text_style","set_text_padding","set_rich_text","compose_slide","set_slide_background","set_connector","set_picture_crop","set_hyperlink","set_shape_adjustment","add_picture","add_part","update_part","add_graph","update_graph","update_notes","set_table_headers","set_accessibility"],"managed_parts_limit":128,"managed_metadata_persisted":true,"scale_fonts":false,"scale_strokes":false,"one_undo":true},
+        "typed_authoring":{"batch_limit":128,"element_roots_per_add":128,"operations":["add_elements","set_frame","set_text_style","set_surface","set_effects","set_text_padding","set_rich_text","compose_slide","set_slide_background","set_connector","set_picture_crop","set_hyperlink","set_shape_adjustment","add_picture","add_part","update_part","add_graph","update_graph","update_notes","set_table_headers","set_accessibility"],"managed_parts_limit":128,"managed_metadata_persisted":true,"scale_fonts":false,"scale_strokes":false,"one_undo":true},
         "slide_import":{"source":"authored_document_only","selected_slides":128,"same_canvas":true,"design_deduplication":true,"office_visual_parity":false},
         "master_import":{"formats":["pptx","potx"],"modes":["masters","slides"],"selection_limit":8,"masters_limit":8,"layouts_limit":32,"same_canvas_required":true,"append_only":true,"automatic_assignment":false,"source_fonts_imported":false,"unsupported_content":"rejected before apply","office_visual_parity":false},
         "delivery":{"visual_pages":8,"output_bytes":crate::delivery::MAX_DELIVERY_BYTES,"mcp_response_bytes":4194304,"mcp_max_files_including_manifest":13,"options_schema":schemars::schema_for!(crate::delivery::DeliveryOptions),"notes_opt_in":true,"source_report_opt_in":true,"multi_file_atomic":false},

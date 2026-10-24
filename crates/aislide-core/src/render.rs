@@ -29,7 +29,7 @@ use crate::{
     design::Theme,
     export_static::{RenderWarning, MAX_SVG_BYTES},
     model::{validate_deck, Bullet, Deck, Element, TextAlign, TextFormat, VerticalAlign},
-    rich_text::{RichParagraph, RichRun, RunStyle, Spacing},
+    rich_text::{RunStyle, Spacing},
     visual::{Gradient, VisualStyle},
     Error, Result,
 };
@@ -54,8 +54,23 @@ pub struct RenderedSlide {
 
 pub(crate) struct RenderedText {
     pub element_id: String,
+    pub scope: String,
     pub svg_id: String,
     pub glyphs: Vec<RenderedGlyph>,
+    frame: [f64; 4],
+    warped: bool,
+}
+
+impl RenderedText {
+    pub(crate) fn occupied_bounds(&self) -> Option<kurbo::Rect> {
+        let [x, y, width, height] = self.frame;
+        if self.warped { return Some(kurbo::Rect::new(x, y, x + width, y + height)); }
+        self.glyphs.iter().filter(|glyph| !glyph.text.chars().all(char::is_whitespace))
+            .map(|glyph| kurbo::Rect::new(glyph.origin[0], glyph.origin[1] - glyph.size, glyph.origin[0] + glyph.width, glyph.origin[1] + glyph.size * 0.15))
+            .reduce(|bounds, next| bounds.union(next))
+            .map(|bounds| bounds.intersect(kurbo::Rect::new(0.0, 0.0, width, height)) + kurbo::Vec2::new(x, y))
+            .filter(|bounds| bounds.width() > 0.0 && bounds.height() > 0.0)
+    }
 }
 
 pub(crate) struct RenderedGlyph {
@@ -91,7 +106,7 @@ pub fn render_element_preview(element: &Element, theme: Option<&Theme>) -> Resul
     filter_budget(&deck.slides[0].elements[0], 1.0, 1.0, 1, &mut budget)?;
     budget.check("preview", 1.0)?;
     let mut fonts = FONTS.get_or_init(|| Mutex::new(crate::fonts::system())).lock().map_err(|_| Error::Invalid("render font state unavailable".into()))?;
-    let mut scene = Scene { writer: XmlWriter::new(Options { indent: xmlwriter::Indent::None, ..Default::default() }), theme, fonts: &mut fonts, page_index: 0, warnings: vec![], omit_effects: false, sequence: 0, path_bytes: 0, text: vec![], objects: vec![] };
+    let mut scene = Scene { writer: XmlWriter::new(Options { indent: xmlwriter::Indent::None, ..Default::default() }), theme, fonts: &mut fonts, page_index: 0, warnings: vec![], omit_effects: false, sequence: 0, path_bytes: 0, scope: "slide".into(), text: vec![], objects: vec![] };
     scene.writer.start_element("svg"); scene.writer.write_attribute("xmlns", "http://www.w3.org/2000/svg"); scene.writer.write_attribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
     scene.writer.write_attribute("width", &width); scene.writer.write_attribute("height", &height); scene.writer.write_attribute("viewBox", &format!("0 0 {width} {height}"));
     scene.element(&deck.slides[0].elements[0])?;
@@ -129,7 +144,7 @@ pub(crate) fn render_preview_at_scale(
 
 pub(crate) enum EffectPolicy { Strict, Preview, Preflight, DeliveryPdf }
 
-fn render_layers(deck: &Deck, page_index: usize) -> Result<Vec<&[Element]>> {
+fn render_layers(deck: &Deck, page_index: usize) -> Result<Vec<(String, &[Element])>> {
     let slide = deck.slides.get(page_index)
         .ok_or_else(|| Error::Invalid("render page index out of range".into()))?;
     let layout = deck.design.as_ref().and_then(|design| {
@@ -137,9 +152,9 @@ fn render_layers(deck: &Deck, page_index: usize) -> Result<Vec<&[Element]>> {
             .or_else(|| design.layouts.first())
     });
     let master = layout.and_then(|layout| deck.design.as_ref()?.masters.iter().find(|master| master.id == layout.master_id));
-    Ok(master.filter(|_| !slide.hide_master_graphics).map(|master| master.elements.as_slice()).into_iter()
-        .chain(layout.map(|layout| layout.elements.as_slice()))
-        .chain(std::iter::once(slide.elements.as_slice())).collect())
+    Ok(master.filter(|_| !slide.hide_master_graphics).map(|master| (format!("master:{}", master.id), master.elements.as_slice())).into_iter()
+        .chain(layout.map(|layout| (format!("layout:{}", layout.id), layout.elements.as_slice())))
+        .chain(std::iter::once(("slide".into(), slide.elements.as_slice()))).collect())
 }
 
 fn page_effect_budget(deck: &Deck, page_index: usize, scale: f64) -> Result<EffectBudget> {
@@ -148,7 +163,7 @@ fn page_effect_budget(deck: &Deck, page_index: usize, scale: f64) -> Result<Effe
     }
     let layers = render_layers(deck, page_index)?;
     let mut budget = EffectBudget::default();
-    for (index, layer) in layers.iter().enumerate() {
+    for (index, (_, layer)) in layers.iter().enumerate() {
         for element in *layer {
             if index + 1 < layers.len() && matches!(element, Element::Text { format, .. } if format.placeholder.is_some()) { continue; }
             filter_budget(element, scale, scale, 1, &mut budget)
@@ -221,7 +236,7 @@ pub(crate) fn render_with_effect_policy(
     let mut characters = 0usize;
     let mut points = 0usize;
     let mut pixels = 0usize;
-    for layer in &layers {
+    for (_, layer) in &layers {
         for element in crate::model::element_list(layer) {
             match element {
                 Element::Text { text, .. } | Element::Shape { text, .. } => {
@@ -276,6 +291,7 @@ pub(crate) fn render_with_effect_policy(
         omit_effects,
         sequence: 0,
         path_bytes: 0,
+        scope: String::new(),
         text: Vec::new(),
         objects: Vec::new(),
     };
@@ -306,7 +322,8 @@ pub(crate) fn render_with_effect_policy(
             None,
         );
     }
-    for (index, layer) in layers.iter().enumerate() {
+    for (index, (scope, layer)) in layers.iter().enumerate() {
+        scene.scope.clone_from(scope);
         for element in *layer {
             if index + 1 < layers.len()
                 && matches!(element,Element::Text {format,..} if format.placeholder.is_some())
@@ -339,6 +356,7 @@ struct Scene<'a> {
     omit_effects: bool,
     sequence: usize,
     path_bytes: usize,
+    scope: String,
     text: Vec<RenderedText>,
     objects: Vec<(String, String)>,
 }
@@ -974,19 +992,7 @@ impl Scene<'_> {
                 "installed fonts required for static text".into(),
             ));
         }
-        let paragraphs = if format.paragraphs.is_empty() {
-            text.split('\n')
-                .map(|line| RichParagraph {
-                    runs: vec![RichRun {
-                        text: line.into(),
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                })
-                .collect()
-        } else {
-            format.paragraphs.clone()
-        };
+        let paragraphs = crate::rich_text::paragraphs(text, format);
         let mut glyphs = Vec::new();
         let mut top = 0.0;
         let mut used = BTreeSet::new();
@@ -1014,30 +1020,9 @@ impl Scene<'_> {
             if paragraph.runs.iter().any(|run| run.field.is_some()) {
                 self.warning(id,"FIELD_CACHED_TEXT","Dynamic fields render their stored display text; export does not evaluate date/time fields");
             }
-            let mut runs = paragraph.runs.clone();
+            let runs = crate::rich_text::paragraph_runs(paragraph, format, paragraph_index);
             let bullet = paragraph.bullet.unwrap_or(format.bullet);
             if bullet != Bullet::None {
-                let marker = if bullet == Bullet::Bullet {
-                    paragraph
-                        .bullet_character
-                        .clone()
-                        .unwrap_or_else(|| "\u{2022}".into())
-                } else {
-                    let number = paragraph.number_start.unwrap_or(1) + paragraph_index as u32;
-                    match paragraph.numbering.as_deref() {
-                        Some("arabicParenR") => format!("{number})"),
-                        Some("arabicParenBoth") => format!("({number})"),
-                        Some("arabicPlain") => number.to_string(),
-                        _ => format!("{number}."),
-                    }
-                };
-                runs.insert(
-                    0,
-                    RichRun {
-                        text: format!("{marker} "),
-                        ..Default::default()
-                    },
-                );
                 self.warning(
                     id,
                     "BULLET_LAYOUT_APPROXIMATION",
@@ -1059,33 +1044,18 @@ impl Scene<'_> {
                 .map(|(run, style)| self.family(&run.text, style.font_family.as_deref()))
                 .collect();
             requested.extend(families.iter().cloned());
-            let maximum = styles
-                .iter()
-                .filter_map(|style| style.font_size)
-                .fold(size, f64::max);
-            let line_height = spacing(
-                paragraph.line_spacing.unwrap_or(Spacing::Percent(115000)),
-                maximum,
-            )
-            .max(maximum);
-            let margin = paragraph
-                .margin_left
-                .map_or(0.0, |value| value as f64 / 9525.0);
-            let indent = paragraph.indent.unwrap_or(0) as f64 / 9525.0;
-            if indent != 0.0 || paragraph.level.is_some() {
+            let (maximum, line_height) = crate::rich_text::paragraph_metrics(&styles, size, paragraph.line_spacing);
+            let (wrap_inset, inset) = crate::rich_text::paragraph_insets(paragraph, format, size);
+            if paragraph.indent.is_some_and(|value| value != 0) || paragraph.level.is_some() {
                 self.warning(
                     id,
                     "INDENT_APPROXIMATION",
                     "Paragraph indent applies to all wrapped lines; hierarchy is not auto-indented",
                 );
             }
-            let inset = (margin + indent).max(0.0);
-            let available = bounds[2] - inset;
-            if available <= 0.0 {
-                return Err(Error::Invalid(format!(
-                    "static text {id} has no width after indentation"
-                )));
-            }
+            let available = bounds[2] - wrap_inset;
+            overflow |= available <= 0.0;
+            let available = available.max(1.0);
             top += paragraph
                 .space_before
                 .map_or(0.0, |value| spacing(value, maximum));
@@ -1125,6 +1095,7 @@ impl Scene<'_> {
                 TextAlign::Right => Align::Right,
                 TextAlign::Justify => Align::Justified,
             };
+            let inset = if matches!(align, Align::Right | Align::Center) { wrap_inset } else { inset };
             for line in &mut buffer.lines {
                 line.set_align(Some(align));
             }
@@ -1322,8 +1293,11 @@ impl Scene<'_> {
         semantic.dedup_by_key(|(logical, _)| *logical);
         self.text.push(RenderedText {
             element_id: id.into(),
+            scope: self.scope.clone(),
             svg_id: text_id,
             glyphs: semantic.into_iter().map(|(_, glyph)| glyph).collect(),
+            frame: bounds,
+            warped: warp.is_some(),
         });
         Ok(())
     }

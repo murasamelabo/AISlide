@@ -63,6 +63,70 @@ fn request(document: &Value, operations: Value) -> Value {
 }
 
 #[test]
+fn partial_surface_and_effect_updates_preserve_rich_text_order_and_native_roundtrip() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let mut rich = all_elements()[2].clone();
+    rich["id"] = json!("rich");
+    rich["text"] = json!("Key point and normal text");
+    rich["bold"] = json!(false);
+    rich["format"]["paragraphs"] = json!([{"runs":[
+        {"text":"Key point","style":{"bold":true,"color":"F6E162"}},
+        {"text":" and normal text"}
+    ]}]);
+    rich["visual"]["glow"] = json!({"color":"F6E162","opacity":0.5,"radius":4});
+    let generated = execute_request(request(&original(), json!([{"op":"add_elements","slide_id":"slide-1","elements":[rich,text()]}]))).unwrap()["document"].clone();
+    let bytes = execute_request(json!({"op":"export_presentation","document":generated})).unwrap()["base64"].clone();
+    let native = execute_request(json!({"op":"open_presentation","id":"appearance-native","base64":bytes})).unwrap()["document"].clone();
+    for before in [&generated, &native] {
+        let changed = execute_request(request(before, json!([
+            {"op":"set_surface","slide_id":"slide-1","ids":["rich"],"surface":{"fill":"225566"}},
+            {"op":"set_effects","slide_id":"slide-1","ids":["rich"],"effects":{"glow":null}}
+        ]))).unwrap();
+        let actual = element(&changed["document"], "rich");
+        for field in ["text","font_size","bold","color","format","x","y","width","height","rotation","stroke","stroke_width"] {
+            assert_eq!(actual[field], element(before,"rich")[field], "{field}");
+        }
+        assert_eq!(actual["fill"], "225566");
+        assert!(actual["visual"].get("glow").is_none());
+        for field in ["shadow","opacity","flip_h","adjustments"] { assert_eq!(actual["visual"][field], element(before,"rich")["visual"][field], "{field}"); }
+        assert_eq!(changed["document"]["deck"]["slides"][0]["elements"][1]["id"], "text");
+        assert_eq!(changed["document"]["deck"]["slides"][0]["review"], before["deck"]["slides"][0]["review"]);
+        assert_eq!(changed["document"]["revision"].as_u64(), Some(before["revision"].as_u64().unwrap() + 1));
+        let saved = execute_request(json!({"op":"export_presentation","document":changed["document"]})).unwrap();
+        let reopened = execute_request(json!({"op":"open_presentation","id":"appearance-reopened","base64":saved["base64"]})).unwrap()["document"].clone();
+        assert_eq!(element(&reopened,"rich")["fill"], "225566");
+        assert_eq!(element(&reopened,"rich")["format"]["paragraphs"][0]["runs"][0]["style"]["bold"], true);
+        assert_eq!(element(&reopened,"rich")["format"]["paragraphs"][0]["runs"][1]["style"]["bold"], false);
+        let noop = execute_request(request(&changed["document"], json!([{"op":"set_effects","slide_id":"slide-1","ids":["rich"],"effects":{"glow":null}}]))).unwrap();
+        assert_eq!(noop["document"]["hash"], changed["document"]["hash"]);
+        assert!(noop["receipt"].is_null());
+        let undone = execute_request(json!({"op":"undo_transaction","document":changed["document"],"expected_revision":changed["document"]["revision"],"receipt":changed["receipt"]})).unwrap();
+        assert_eq!(undone["document"]["hash"], before["hash"]);
+        if before["origin"].is_object() {
+            assert_eq!(STANDARD.decode(execute_request(json!({"op":"export_presentation","document":undone["document"]})).unwrap()["base64"].as_str().unwrap()).unwrap(), STANDARD.decode(bytes.as_str().unwrap()).unwrap());
+        }
+    }
+}
+
+#[test]
+fn partial_appearance_updates_reject_empty_incompatible_and_invalid_batches() {
+    let before = populated();
+    for (operation, message) in [
+        (json!({"op":"set_surface","slide_id":"slide-1","ids":["shape"],"surface":{}}), "at least one"),
+        (json!({"op":"set_effects","slide_id":"slide-1","ids":["shape"],"effects":{}}), "at least one"),
+        (json!({"op":"set_surface","slide_id":"slide-1","ids":["text"],"surface":{"fill":"112233"}}), "requires a filled"),
+        (json!({"op":"set_surface","slide_id":"slide-1","ids":["rect"],"surface":{"stroke":"112233"}}), "outlines require"),
+        (json!({"op":"set_surface","slide_id":"slide-1","ids":["shape","shape"],"surface":{"fill":"112233"}}), "distinct"),
+        (json!({"op":"set_effects","slide_id":"slide-1","ids":["shape","missing"],"effects":{"glow":null}}), "not found"),
+        (json!({"op":"set_surface","slide_id":"slide-1","ids":["shape"],"surface":{"opacity":-1}}), "0..=1"),
+        (json!({"op":"set_effects","slide_id":"slide-1","ids":["shape"],"effects":{"soft_edge":101}}), "0..=100")
+    ] { reject_atomic(&before, operation, message); }
+    let cleared = execute_request(request(&before, json!([{"op":"set_surface","slide_id":"slide-1","ids":["shape"],"surface":{"opacity":null,"gradient":null}}]))).unwrap();
+    assert!(element(&cleared["document"],"shape")["visual"].get("opacity").is_none());
+    assert_eq!(element(&cleared["document"],"shape")["visual"]["shadow"], element(&before,"shape")["visual"]["shadow"]);
+}
+
+#[test]
 fn rich_text_batch_projects_single_source_and_preserves_canonical_validation() {
     let before = populated();
     let paragraphs = json!([{"runs":[{"text":"Synthetic ","style":{"bold":true}},{"text":"\u{65e5}\u{672c}\u{8a9e}","style":{"color":"@accent1"}}]}, {"runs":[{"text":"Second paragraph"}]}]);
@@ -619,8 +683,8 @@ fn typed_authoring_and_slide_import_are_discoverable_without_claiming_office_par
     assert_eq!(capabilities["typed_authoring"]["scale_fonts"], false);
     assert_eq!(capabilities["typed_authoring"]["one_undo"], true);
     let operations = capabilities["typed_authoring"]["operations"].as_array().unwrap();
-    assert_eq!(operations.len(), 19);
-    for operation in ["add_elements", "set_frame", "set_text_style", "set_slide_background", "set_connector", "set_picture_crop", "set_hyperlink", "set_shape_adjustment", "add_picture", "add_part", "update_part", "add_graph", "update_graph", "update_notes", "set_table_headers", "set_accessibility"] {
+    assert_eq!(operations.len(), 21);
+    for operation in ["add_elements", "set_frame", "set_text_style", "set_surface", "set_effects", "set_slide_background", "set_connector", "set_picture_crop", "set_hyperlink", "set_shape_adjustment", "add_picture", "add_part", "update_part", "add_graph", "update_graph", "update_notes", "set_table_headers", "set_accessibility"] {
         assert!(operations.contains(&json!(operation)), "missing {operation}");
     }
     assert_eq!(capabilities["typed_authoring"]["managed_parts_limit"], 128);

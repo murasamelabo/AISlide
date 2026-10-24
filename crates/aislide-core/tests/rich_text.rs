@@ -571,6 +571,279 @@ fn rich_measurement_uses_run_sizes_and_reports_missing_glyphs() {
 }
 
 #[test]
+fn rich_rendering_uses_actual_run_sizes_not_larger_frame_defaults() {
+    let mut input = text_element();
+    input["text"] = json!("First line\nSecond line");
+    input["width"] = json!(260);
+    input["height"] = json!(40);
+    input["format"] = json!({"paragraphs":[
+        {"runs":[{"text":"First line","style":{"font_size":12}}]},
+        {"runs":[{"text":"Second line","style":{"font_size":12}}]}
+    ]});
+    let source = deck(input.clone());
+    let measured = execute_request(json!({"op":"measure_layout","deck":source})).unwrap();
+    assert_eq!(measured["measurements"][0]["overflow"], false);
+    assert!((measured["measurements"][0]["measured_height"].as_f64().unwrap() - 27.6).abs() < 0.01);
+    let preview = execute_request(json!({"op":"render_element_preview","element":input})).unwrap();
+    assert!(!preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "TEXT_OVERFLOW"), "{preview}");
+}
+
+#[test]
+fn rich_bullet_markers_use_the_same_line_height_in_measurement_and_rendering() {
+    for bullet in ["bullet", "numbered"] {
+        let mut input = text_element();
+        input["text"] = json!("Item");
+        input["width"] = json!(260);
+        input["height"] = json!(20);
+        input["font_size"] = json!(40);
+        input["format"] = json!({"paragraphs":[{"bullet":bullet,"runs":[{"text":"Item","style":{"font_size":12}}]}]});
+        let measured = execute_request(json!({"op":"measure_layout","deck":deck(input.clone())})).unwrap();
+        let preview = execute_request(json!({"op":"render_element_preview","element":input})).unwrap();
+        let rendered_overflow = preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "TEXT_OVERFLOW");
+        assert!(rendered_overflow);
+        assert_eq!(measured["measurements"][0]["overflow"], rendered_overflow, "{bullet}: {measured}");
+        assert!((measured["measurements"][0]["measured_height"].as_f64().unwrap() - 46.0).abs() < 0.01);
+    }
+}
+
+#[test]
+fn review31_default_bullets_keep_wrapping_and_fit_after_native_reopen() {
+    for bullet in ["bullet", "numbered"] {
+        for (width, height) in [(240,120),(360,120),(240,600),(360,600)] {
+            let text = std::iter::repeat_n("Synthetic word", if height == 120 { 24 } else { 8 }).collect::<Vec<_>>().join(" ");
+            for rich in [false, true] {
+                let mut input = text_element();
+                input["text"] = json!(text);
+                input["width"] = json!(width);
+                input["height"] = json!(height);
+                input["format"] = json!({"bullet":bullet,"padding":{"left":0,"right":0,"top":0,"bottom":0}});
+                if rich { input["format"]["paragraphs"] = json!([{"bullet":bullet,"runs":[{"text":text}]}]); }
+                let preview = execute_request(json!({"op":"render_element_preview","element":input.clone()})).unwrap();
+                assert!(!preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "INDENT_APPROXIMATION"));
+                let original = deck(input);
+                let reopened = open(&export_deck(original.clone()));
+                let before = execute_request(json!({"op":"measure_layout","deck":original})).unwrap();
+                let after = execute_request(json!({"op":"measure_layout","deck":reopened["deck"]})).unwrap();
+                let before = &before["measurements"][0];
+                let after = &after["measurements"][0];
+                assert_eq!(before["overflow"], height == 120, "{bullet}, width={width}, height={height}: {before}");
+                assert_eq!(before["overflow"], preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "TEXT_OVERFLOW"));
+                assert_eq!(before["lines"], after["lines"], "{bullet}, width={width}, rich={rich}: {before} -> {after}");
+                assert_eq!(before["overflow"], after["overflow"]);
+                assert!((before["measured_height"].as_f64().unwrap() - after["measured_height"].as_f64().unwrap()).abs() < 0.02);
+                assert!((before["measured_width"].as_f64().unwrap() - after["measured_width"].as_f64().unwrap()).abs() < 0.02);
+            }
+        }
+    }
+}
+
+#[test]
+fn review31_narrow_bullet_frames_report_overflow_without_aborting_preview() {
+    for bullet in ["bullet", "numbered"] {
+        for rich in [false, true] {
+            let mut input = text_element();
+            input["text"] = json!("Item");
+            input["width"] = json!(10);
+            input["height"] = json!(100);
+            input["font_size"] = json!(40);
+            input["format"] = json!({"bullet":bullet});
+            if rich { input["format"]["paragraphs"] = json!([{"runs":[{"text":"Item"}]}]); }
+            let measured = execute_request(json!({"op":"measure_layout","deck":deck(input.clone())})).unwrap();
+            let preview = execute_request(json!({"op":"render_element_preview","element":input})).unwrap();
+            assert_eq!(measured["measurements"][0]["overflow"], true);
+            assert!(preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "TEXT_OVERFLOW"));
+        }
+    }
+}
+
+#[test]
+fn review31_hanging_bullets_reserve_continuation_margin_before_export() {
+    let text = "Quarterly performance review for the regional team with a long title that wraps onto several lines";
+    let mut reference = text_element();
+    reference["text"] = json!(text);
+    reference["width"] = json!(236);
+    reference["height"] = json!(150);
+    reference["format"] = json!({"padding":{"left":0,"right":0,"top":0,"bottom":0}});
+    let reference = execute_request(json!({"op":"measure_layout","deck":deck(reference)})).unwrap();
+    let reference = &reference["measurements"][0];
+    assert_eq!(reference["overflow"], true, "{reference}");
+    for bullet in ["bullet", "numbered"] {
+        for rich in [false, true] {
+            let mut input = text_element();
+            input["text"] = json!(text);
+            input["width"] = json!(260);
+            input["height"] = json!(150);
+            input["format"] = json!({"bullet":bullet,"padding":{"left":0,"right":0,"top":0,"bottom":0}});
+            if rich { input["format"]["paragraphs"] = json!([{"bullet":bullet,"runs":[{"text":text}]}]); }
+            let original = deck(input.clone());
+            let measured = execute_request(json!({"op":"measure_layout","deck":original})).unwrap();
+            assert_eq!(measured["measurements"][0]["overflow"], true, "{bullet}, rich={rich}: {measured}");
+            assert!(measured["measurements"][0]["lines"].as_u64().unwrap() >= reference["lines"].as_u64().unwrap());
+            let preview = execute_request(json!({"op":"render_element_preview","element":input})).unwrap();
+            assert!(preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "TEXT_OVERFLOW"));
+            let document = execute_request(json!({"op":"new_document","id":"conservative-bullet-export","deck":original})).unwrap();
+            let checked = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+            assert!(checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "TEXT_OVERFLOW"));
+            let error = execute_request(json!({"op":"export_presentation","document":document})).unwrap_err().to_string();
+            assert!(error.contains("project export blocked by TEXT_OVERFLOW"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn review31_bullet_wrap_is_not_wider_than_the_continuation_margin_reference() {
+    for size in [16,24,40] {
+        for width in [200,260,360,640] {
+            for words in [3,12,24,30] {
+                for count in [1,3] {
+                    let line = std::iter::repeat_n("Regional", words).collect::<Vec<_>>().join(" ");
+                    let text = std::iter::repeat_n(line.clone(), count).collect::<Vec<_>>().join("\n");
+                    let mut reference = text_element();
+                    reference["text"] = json!(text);
+                    reference["font_size"] = json!(size);
+                    reference["width"] = json!(width-size);
+                    reference["height"] = json!(600);
+                    let measured = execute_request(json!({"op":"measure_layout","deck":deck(reference)})).unwrap();
+                    let minimum_lines = measured["measurements"][0]["lines"].as_u64().unwrap();
+                    for bullet in ["bullet", "numbered"] {
+                        for rich in [false,true] {
+                            let mut input = text_element();
+                            input["text"] = json!(text);
+                            input["font_size"] = json!(size);
+                            input["width"] = json!(width);
+                            input["height"] = json!(600);
+                            input["format"] = json!({"bullet":bullet});
+                            if rich { input["format"]["paragraphs"] = json!(std::iter::repeat_n(json!({"runs":[{"text":line}]}), count).collect::<Vec<_>>()); }
+                            let actual = execute_request(json!({"op":"measure_layout","deck":deck(input)})).unwrap();
+                            assert!(actual["measurements"][0]["lines"].as_u64().unwrap() >= minimum_lines,
+                                "size={size}, width={width}, words={words}, paragraphs={count}, {bullet}, rich={rich}: {actual}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn review31_exhausted_continuation_width_is_overflow_even_for_small_runs() {
+    for margin in [50.0_f64, 50.5] {
+        let mut input = text_element();
+        input["text"] = json!("i");
+        input["font_size"] = json!(8);
+        input["width"] = json!(50);
+        input["height"] = json!(100);
+        input["format"] = json!({"paragraphs":[{
+            "margin_left":(margin*9525.0).round() as i32,"indent":-190500,
+            "runs":[{"text":"i","style":{"font_size":1}}]
+        }]});
+        let measured = execute_request(json!({"op":"measure_layout","deck":deck(input.clone())})).unwrap();
+        let preview = execute_request(json!({"op":"render_element_preview","element":input.clone()})).unwrap();
+        assert!(preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "TEXT_OVERFLOW"));
+        assert_eq!(measured["measurements"][0]["overflow"], true, "{measured}");
+        let document = execute_request(json!({"op":"new_document","id":"exhausted-continuation","deck":deck(input)})).unwrap();
+        let error = execute_request(json!({"op":"export_presentation","document":document})).unwrap_err().to_string();
+        assert!(error.contains("project export blocked by TEXT_OVERFLOW"), "{error}");
+    }
+}
+
+#[test]
+fn rich_frame_defaults_and_text_fit_survive_native_roundtrip() {
+    let mut input = text_element();
+    input["text"] = json!("1  step\nHeading text\nBody text that wraps onto a second line here");
+    input["width"] = json!(260);
+    input["height"] = json!(130);
+    input["font_size"] = json!(16);
+    input["color"] = json!("112233");
+    input["format"] = json!({"padding":{"left":0,"right":0,"top":0,"bottom":0},"paragraphs":[
+        {"space_after":{"kind":"points","value":300},"runs":[
+            {"text":"1","style":{"font_size":40,"bold":true,"color":"F6E162"}},
+            {"text":"  step","style":{"font_size":15}}
+        ]},
+        {"space_after":{"kind":"points","value":300},"runs":[{"text":"Heading text","style":{"font_size":19,"bold":true}}]},
+        {"runs":[{"text":"Body text that wraps onto a second line here"}]}
+    ]});
+    let source = deck(input);
+    let bytes = export_deck(source.clone());
+    let reopened = open(&bytes);
+    let actual = &reopened["deck"]["slides"][0]["elements"][0];
+    assert_eq!(actual["font_size"].as_f64(), Some(16.0));
+    assert_eq!(actual["bold"], false);
+    assert_eq!(actual["color"], "112233");
+    let original = execute_request(json!({"op":"new_document","id":"rich-fit","deck":source})).unwrap();
+    let mut heights = Vec::new();
+    for document in [&original, &reopened] {
+        let measured = execute_request(json!({"op":"measure_layout","deck":document["deck"]})).unwrap();
+        assert_eq!(measured["measurements"][0]["overflow"], false, "{measured}");
+        heights.push(measured["measurements"][0]["measured_height"].as_f64().unwrap());
+        let preview = execute_request(json!({"op":"preview_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
+        assert!(!preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "TEXT_OVERFLOW"), "{preview}");
+        let checked = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
+        assert!(!checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "TEXT_OVERFLOW"), "{checked}");
+    }
+    assert!((heights[0] - heights[1]).abs() < 0.05, "{heights:?}");
+    assert_eq!(export_document(&reopened), bytes);
+}
+
+#[test]
+fn rich_native_base_size_uses_paragraph_defaults_not_first_run() {
+    let bytes = body_fixture("<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz='3000' b='1'/><a:t>1</a:t></a:r><a:r><a:rPr sz='1200'/><a:t> body</a:t></a:r><a:endParaRPr sz='1200'/></a:p></p:txBody>");
+    let document = open(&bytes);
+    let actual = &document["deck"]["slides"][0]["elements"][0];
+    assert_eq!(actual["font_size"].as_f64(), Some(16.0));
+    assert_eq!(actual["bold"], false);
+    assert_eq!(actual["format"]["paragraphs"][0]["runs"][0]["style"]["font_size"].as_f64(), Some(40.0));
+    assert_eq!(actual["format"]["paragraphs"][0]["runs"][1]["style"]["font_size"].as_f64(), Some(16.0));
+}
+
+#[test]
+fn uniform_rich_frames_remain_legacy_and_copyable_after_native_reopen() {
+    let mut input = text_element();
+    input["format"] = json!({"paragraphs":[{"runs":[{"text":"日本😀 English"}]}]});
+    let bytes = export_deck(deck(input));
+    let document = open(&bytes);
+    assert!(document["deck"]["slides"][0]["elements"][0]["format"].get("paragraphs").is_none());
+    let style = execute_request(json!({"op":"copy_format","document":document,"slide_id":"slide-1","id":"text-1"})).unwrap();
+    assert_eq!(style["run"]["font_size"].as_f64(), Some(24.0));
+    assert_eq!(export_document(&document), bytes);
+}
+
+#[test]
+fn uniform_multiline_native_text_preserves_plain_frame_editing() {
+    let mut input = text_element();
+    input["text"] = json!("Quarterly performance\nMultiline heading");
+    input["font_size"] = json!(42);
+    input["bold"] = json!(true);
+    input["color"] = json!("123456");
+    let document = open(&export_deck(deck(input)));
+    let current = &document["deck"]["slides"][0]["elements"][0];
+    assert_eq!(current["bold"], true);
+    assert_eq!(current["color"], "123456");
+    assert!(current["format"].get("paragraphs").is_none());
+    let mut next = current.clone();
+    next["text"] = json!("Updated heading\nStill plain text");
+    let edited = transact(&document, next).unwrap();
+    assert_eq!(open(&export_document(&edited["document"]))["deck"]["slides"][0]["elements"][0]["text"], "Updated heading\nStill plain text");
+}
+
+#[test]
+fn rich_text_mismatch_errors_show_newline_joining_and_bounded_expected_text() {
+    let mut input = text_element();
+    input["text"] = json!("First Second");
+    input["format"] = json!({"paragraphs":[{"runs":[{"text":"First"}]},{"runs":[{"text":"Second"}]}]});
+    let error = execute_request(json!({"op":"export","deck":deck(input.clone())})).unwrap_err().to_string();
+    for hint in ["newline (\\n)", "\"First\\nSecond\"", "set_rich_text"] { assert!(error.contains(hint), "{error}"); }
+    input["text"] = json!("First\nSecond");
+    assert!(execute_request(json!({"op":"export","deck":deck(input.clone())})).is_ok());
+    input["text"] = json!("wrong");
+    input["format"]["paragraphs"] = json!([{"runs":[{"text":"😀".repeat(400)}]}]);
+    let error = execute_request(json!({"op":"export","deck":deck(input)})).unwrap_err().to_string();
+    assert!(error.contains("(truncated)"));
+    assert_eq!(error.matches('😀').count(), 160);
+    assert!(error.chars().count() < 500);
+}
+
+#[test]
 fn native_empty_paragraphs_accept_rich_insertions() {
     for paragraph in ["<a:p/>", "<a:p><a:pPr/><a:endParaRPr lang='en-US' sz='1800'/></a:p>"] {
         let bytes = body_fixture(&format!("<p:txBody><a:bodyPr/><a:lstStyle/>{paragraph}</p:txBody>"));

@@ -78,7 +78,14 @@ fn formatted_text_body(writer: &mut XmlWriter, name: &str, text: &str, size: f64
     empty(writer, "a:noAutofit", &[]);
     writer.end_element();
     writer.start_element("a:lstStyle");
-    if format.placeholder.is_some() {
+    let preserve_frame = name == "p:txBody" && !format.paragraphs.is_empty() && {
+        let frame = crate::rich_text::RunStyle::frame(size, shade, bold, format);
+        format.paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()) || format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| {
+            let mut resolved = frame.clone(); resolved.overlay(&run.style);
+            !resolved.same_frame_style(&frame)
+        })
+    };
+    if format.placeholder.is_some() || preserve_frame {
         writer.start_element("a:lvl1pPr"); paragraph_properties(writer, size, format);
         run_properties(writer, "a:defRPr", size, shade, bold, format, None, theme);
         writer.end_element();
@@ -119,7 +126,10 @@ fn formatted_text_body(writer: &mut XmlWriter, name: &str, text: &str, size: f64
 
 fn paragraph_properties(writer: &mut XmlWriter, size: f64, format: &TextFormat) {
     writer.write_attribute("algn", match format.alignment { TextAlign::Center => "ctr", TextAlign::Right => "r", TextAlign::Justify => "just", TextAlign::Left => "l" });
-    if format.bullet != Bullet::None { writer.write_attribute("marL", &emu(size)); writer.write_attribute("indent", &emu(-size * 0.7)); }
+    if format.bullet != Bullet::None {
+        let (margin, indent) = crate::rich_text::paragraph_indents(&Default::default(), format, size);
+        writer.write_attribute("marL", &margin.to_string()); writer.write_attribute("indent", &indent.to_string());
+    }
     writer.start_element("a:lnSpc"); empty(writer, "a:spcPct", &[("val", "115000")]); writer.end_element();
     match format.bullet {
         Bullet::Bullet => empty(writer, "a:buChar", &[("char", "\u{2022}")]),
@@ -138,10 +148,9 @@ fn rich_paragraph_properties(writer: &mut XmlWriter, size: f64, format: &TextFor
     let bullet = paragraph.bullet.unwrap_or(format.bullet);
     writer.write_attribute("algn", match alignment { TextAlign::Center => "ctr", TextAlign::Right => "r", TextAlign::Justify => "just", TextAlign::Left => "l" });
     if let Some(level) = paragraph.level { writer.write_attribute("lvl", &level.to_string()); }
-    if let Some(margin) = paragraph.margin_left { writer.write_attribute("marL", &margin.to_string()); }
-    else if bullet != Bullet::None { writer.write_attribute("marL", &emu(size)); }
-    if let Some(indent) = paragraph.indent { writer.write_attribute("indent", &indent.to_string()); }
-    else if bullet != Bullet::None { writer.write_attribute("indent", &emu(-size * 0.7)); }
+    let (margin, indent) = crate::rich_text::paragraph_indents(paragraph, format, size);
+    if paragraph.margin_left.is_some() || bullet != Bullet::None { writer.write_attribute("marL", &margin.to_string()); }
+    if paragraph.indent.is_some() || bullet != Bullet::None { writer.write_attribute("indent", &indent.to_string()); }
     write_spacing(writer, "a:lnSpc", paragraph.line_spacing.unwrap_or(crate::rich_text::Spacing::Percent(115000)));
     if let Some(spacing) = paragraph.space_before { write_spacing(writer, "a:spcBef", spacing); }
     if let Some(spacing) = paragraph.space_after { write_spacing(writer, "a:spcAft", spacing); }

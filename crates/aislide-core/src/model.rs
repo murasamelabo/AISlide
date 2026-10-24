@@ -393,7 +393,12 @@ fn validate_element_tree(elements: &[Element], canvas: (f64, f64), depth: usize,
                         if route.custom {
                             let extent = [(width * 9525.0).round(), (height * 9525.0).round()];
                             if route.points.windows(2).any(|points| (0..2).all(|axis| extent[axis] == 0.0 || (points[0][axis] * 1e6).round() == (points[1][axis] * 1e6).round())) { return Err(Error::Invalid("custom connector segments must remain nonzero at native coordinate precision".into())); }
-                        } else if route.native_preset().is_none() { return Err(Error::Unsupported("connector route must fit a standard straight or one/two-bend DrawingML preset".into())); }
+                        } else if route.native_preset().is_none() {
+                            return Err(Error::Unsupported(format!(
+                                "connector route {:?} must fit a standard straight or one/two-bend DrawingML preset: after horizontal/vertical flips, start must be [0,0], end must be a different frame corner with coordinates 0 or 1, and bends must match bentConnector2/3/4. Make the frame the route's bounding box, e.g. [[0,0],[1,0]] for a horizontal line, or use routing.custom:true (exported as a freeform line)",
+                                route.points
+                            )));
+                        }
                     }
                     for connection in [start, end].into_iter().flatten() {
                         let target = elements.iter().find(|candidate| candidate.bounds().0 == connection.element_id);

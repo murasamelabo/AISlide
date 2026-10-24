@@ -9,13 +9,15 @@ export async function waitForCoreOperation(page: Page, operation: string) {
 }
 
 export async function openSample(page: Page) {
-  await page.goto('/')
-  const created = waitForCoreOperation(page, 'new_document')
-  await page.getByRole('button', { name: 'New report', exact: true }).click()
-  await created
+  await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await Promise.all([
+    waitForCoreOperation(page, 'new_document'),
+    page.getByRole('button', { name: 'New report', exact: true }).click(),
+  ])
   await expect(page.locator('.thumbnail')).toHaveCount(12)
-  const pending = page.waitForEvent('download')
-  await page.getByRole('button', { name: 'Save PPTX', exact: true }).click()
-  await pending
+  await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: 'Save PPTX', exact: true }).click(),
+  ])
   await expect(page.locator('.dirty-indicator')).toHaveCount(0)
 }
