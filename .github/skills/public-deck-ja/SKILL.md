@@ -19,6 +19,9 @@ During authorized planning, locate `## <purpose-id>` and read through the next l
 
 ## Workflow
 
+Follow [visual defaults](../aislide-authoring/references/visual-selection.md).
+Explicit user exclusions override this default.
+
 1. 聴衆の理解、視点の変化、必要な行動、採否や表現案の判断を確認する。共有範囲、発表時点、提供状態、担当ページを既存台帳へ記録する。「広報」を公開の許可と扱わない。
 2. 伝える主張を根拠IDへ結び付け、確認済み事実、提案、予測、未確認を分ける。本人の体験・感情、参加者の賛同、復旧見込みを創作しない。
 3. 用途に合う順序と語り口を選ぶ。講演を一律の技術報告調にせず、障害説明を物語で引き延ばさない。立場の違う読者への負担と重要な留保を残す。

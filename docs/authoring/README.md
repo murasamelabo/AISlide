@@ -6,6 +6,39 @@ For local spelling, proofing-language assignment, synonyms, bilingual terms, and
 
 AISlide exposes English, purpose-specific best practices and a deterministic compiler for evidence-linked outlines. The calling assistant plans the claims and supplies content; these tools do not contact a model, fetch source URLs, execute source text, or invent missing values.
 
+## Explanatory visuals by default
+
+For authorized new slide content, the planning and authoring skills and the MCP
+initialization/prompt/workflow resource now prefer useful explanatory visuals
+before settling on bullet-only layouts. Follow the shared
+[visual defaults](../../.github/skills/aislide-authoring/references/visual-selection.md)
+for relationship-based choices, discovery, deck-wide review and evaluation cases.
+Use architecture/concept diagrams for supported relations, flows for handoffs,
+native charts for verified values, comparisons/tables for shared criteria, and
+approved source figures or meaningful icons when they help the explanation.
+Vary expression when meaning changes, not decoration or theme roles.
+
+Explicit user exclusions override this default: "text-only", "no diagrams",
+"no icons", "no charts" and page-specific restrictions need no setting toggle.
+A ban on icons does not ban other appropriate visuals. There is no minimum
+visual ratio or diversity quota, and text-led pages remain valid. Do not invent
+numbers, relationships or images, force a preset, redraw required source
+evidence, or redesign an approved deck without permission.
+
+The MCP initialization itself preserves the scope of existing slides and
+approved ledgers, even when the workflow resource has not been read. It also
+names layers, evidence readings and activity-to-outcome mappings as recipe
+discovery examples: recipes choose their own layout rather than requiring
+manual pattern-slot selection first. Revision/hash guards and bounded
+cross-slide accessibility edits still apply.
+
+This is guidance for the calling assistant, not a new core layout optimizer,
+automatic icon insertion, MCP parameter or guarantee of model behavior. Ordinary
+PPTX rendering/export is unchanged. Restart an already connected MCP server to
+receive updated initialization instructions; copied skills need their matching
+reference files updated and the host reloaded as described in
+[skill setup](../../.github/skills/README.md).
+
 ## Interactive component prototype
 
 This development-only prototype does not update an installed desktop app.

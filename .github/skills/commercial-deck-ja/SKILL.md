@@ -19,6 +19,9 @@ During authorized planning, locate `## <purpose-id>` and read through the next l
 
 ## Workflow
 
+Follow [visual defaults](../aislide-authoring/references/visual-selection.md).
+Explicit user exclusions override this default.
+
 1. 読者が利用範囲を知りたいのか、導入を判断するのか、作業を見たいのか、事例の適用性を確かめるのか、協議へ進むのかを確認する。主用途と担当ページを既存台帳へ記録する。
 2. 顧客の確認済み要件と仮説を分け、機能の提供状態、費用、制約、実績、競合比較を根拠IDへ結び付ける。未確認の効果・価格・顧客発言を作らない。
 3. 相手の判断に必要な材料を先に置く。数値の期間・母数・比較条件を揃え、導入しない案も必要なら比較する。技術構成を説明するページだけで提案全体を置き換えない。

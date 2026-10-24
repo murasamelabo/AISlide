@@ -19,6 +19,9 @@ During authorized planning, locate `## <purpose-id>` and read through the next l
 
 ## Workflow
 
+Follow [visual defaults](../aislide-authoring/references/visual-selection.md).
+Explicit user exclusions override this default.
+
 1. 読者の検討事項を、投資の追加検討、計画の成立性、配分の理解、業績の把握、承認、説明責任から確認する。主用途と担当ページを既存台帳へ記録する。
 2. 数値ごとに期間、単位、算定範囲、実績・予測・目標・仮定、根拠IDを対応付ける。資料間の不一致は解消前に断定せず、欠損値をゼロや都合のよい成長率で補わない。
 3. 結論、判断軸、代替案、費用、リスク、条件変化をつなぐ。確定情報と条件付きの見通しを視覚的にも区別する。反対材料や未達を付録だけへ追いやらない。
