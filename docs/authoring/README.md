@@ -25,6 +25,13 @@ visual ratio or diversity quota, and text-led pages remain valid. Do not invent
 numbers, relationships or images, force a preset, redraw required source
 evidence, or redesign an approved deck without permission.
 
+The MCP initialization itself preserves the scope of existing slides and
+approved ledgers, even when the workflow resource has not been read. It also
+names layers, evidence readings and activity-to-outcome mappings as recipe
+discovery examples: recipes choose their own layout rather than requiring
+manual pattern-slot selection first. Revision/hash guards and bounded
+cross-slide accessibility edits still apply.
+
 This is guidance for the calling assistant, not a new core layout optimizer,
 automatic icon insertion, MCP parameter or guarantee of model behavior. Ordinary
 PPTX rendering/export is unchanged. Restart an already connected MCP server to
