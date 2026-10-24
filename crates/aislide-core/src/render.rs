@@ -189,7 +189,7 @@ pub(crate) fn validated_authoring_effect_warnings(deck: &Deck, page_indices: &[u
     for &page_index in page_indices {
         match page_effect_budget(deck, page_index, scale) {
             Ok(budget) => warnings.extend(budget.warning(&deck.slides[page_index].id, page_index, scale, None)),
-            Err(Error::Limit(message)) => warnings.push(RenderWarning { code: "EFFECT_ANALYSIS_UNAVAILABLE".into(), page_index, element_id: String::new(), message: format!("Effect budget prediction unavailable at scale={scale}: {message}. The edit is accepted; actual rendering limits remain enforced.") }),
+            Err(Error::Limit(message)) => warnings.push(RenderWarning { code: "EFFECT_ANALYSIS_UNAVAILABLE".into(), page_index, element_id: String::new(), scope: None, message: format!("Effect budget prediction unavailable at scale={scale}: {message}. The edit is accepted; actual rendering limits remain enforced.") }),
             Err(error) => return Err(error),
         }
     }
@@ -376,12 +376,13 @@ impl Scene<'_> {
     fn warning(&mut self, id: &str, code: &str, message: impl Into<String>) {
         let message = message.into();
         if !self.warnings.iter().any(|warning| {
-            warning.element_id == id && warning.code == code && warning.message == message
+            warning.element_id == id && warning.scope.as_deref() == Some(self.scope.as_str()) && warning.code == code && warning.message == message
         }) {
             self.warnings.push(RenderWarning {
                 code: code.into(),
                 page_index: self.page_index,
                 element_id: id.into(),
+                scope: Some(self.scope.clone()),
                 message,
             });
         }
@@ -885,8 +886,11 @@ impl Scene<'_> {
                 ..
             } => {
                 let svg = chart_svg(
-                    *kind, categories, series, options, width, height, self.theme,
-                )?;
+                    *kind, categories, series, options, width, height, self.theme, self.fonts,
+                ).map_err(|error| match error {
+                    Error::Unsupported(message) => Error::Unsupported(format!("page_index {}, scope {}, chart {id}: {message}",self.page_index,self.scope)),
+                    error => error,
+                })?;
                 if chart_projection::required(series, options) && !kind.is_polar() && !kind.is_extended() && !matches!(kind, crate::model::ChartKind::Radar | crate::model::ChartKind::RadarFilled) {
                     for warning in crate::model::chart_format::compute_chart_presentation(*kind, categories, series, options)?.warnings { self.warning(id, "CHART_PRESENTATION", warning); }
                     if options.legend.is_some_and(|legend| !matches!(legend, crate::model::chart_format::LegendPosition::Bottom | crate::model::chart_format::LegendPosition::Hidden)) { self.warning(id, "CHART_LEGEND_LAYOUT", "Statistical chart preview uses a bottom legend; native legend placement is retained"); }
@@ -1017,8 +1021,8 @@ impl Scene<'_> {
                     "static text {id}: non-Arabic numbering"
                 )));
             }
-            if paragraph.runs.iter().any(|run| run.field.is_some()) {
-                self.warning(id,"FIELD_CACHED_TEXT","Dynamic fields render their stored display text; export does not evaluate date/time fields");
+            if paragraph.runs.iter().any(|run| run.field.as_ref().is_some_and(|field| field.kind != "slidenum" && field.kind != crate::fields::SLIDE_TOTAL)) {
+                self.warning(id,"FIELD_CACHED_TEXT","Date/time or unsupported fields render their stored display text; explicitly refresh supported fields before export");
             }
             let runs = crate::rich_text::paragraph_runs(paragraph, format, paragraph_index);
             let bullet = paragraph.bullet.unwrap_or(format.bullet);
@@ -1324,20 +1328,7 @@ impl Scene<'_> {
             let horizontal = number("x", 0.0);
             let vertical = number("y", 0.0);
             let family = self.family(text, None);
-            let mut buffer = Buffer::new(self.fonts, Metrics::new(size as f32, size as f32 * 1.15));
-            buffer.set_size(None, None);
-            buffer.set_text(
-                text,
-                &Attrs::new().family(Family::Name(&family)),
-                Shaping::Advanced,
-                None,
-            );
-            buffer.shape_until_scroll(self.fonts, false);
-            let extent = buffer
-                .layout_runs()
-                .map(|run| run.line_w as f64)
-                .fold(1.0, f64::max)
-                + 1.0;
+            let extent = chart_text_extent(self.fonts, text, size, &family);
             let left = horizontal
                 - match node.attribute("text-anchor") {
                     Some("end") => extent,
@@ -1449,7 +1440,7 @@ impl EffectBudget {
     }
 
     fn warning(&self, slide_id: &str, page_index: usize, scale: f64, mode: Option<&str>) -> Option<RenderWarning> {
-        self.exceeded().then(|| RenderWarning { code: "EFFECT_APPROXIMATION".into(), page_index, element_id: self.highest_id.clone(),
+        self.exceeded().then(|| RenderWarning { code: "EFFECT_APPROXIMATION".into(), page_index, element_id: self.highest_id.clone(), scope: None,
             message: format!("{}; {}: shadow, glow, soft-edge and reflection {} omitted from the disposable rendered view on this page; fills, text, opacity and native PPTX are unchanged. This budget check does not validate other renderer resources.",
                 self.description(slide_id, scale), mode.unwrap_or("budget analysis for preview/preflight/delivery"), if mode.is_some() { "are" } else { "would be" }) })
     }
@@ -1779,6 +1770,14 @@ fn warp_outline(source: &str, width: f64, height: f64, warp: crate::visual::Text
 #[path = "render_chart.rs"]
 mod chart_projection;
 
+fn chart_text_extent(fonts: &mut FontSystem, text: &str, size: f64, family: &str) -> f64 {
+    let mut buffer = Buffer::new(fonts, Metrics::new(size as f32, size as f32 * 1.15));
+    buffer.set_size(None, None);
+    buffer.set_text(text, &Attrs::new().family(Family::Name(family)), Shaping::Advanced, None);
+    buffer.shape_until_scroll(fonts, false);
+    buffer.layout_runs().map(|run| run.line_w as f64).fold(1.0, f64::max) + 1.0
+}
+
 fn chart_svg(
     kind: crate::model::ChartKind,
     categories: &[String],
@@ -1787,14 +1786,16 @@ fn chart_svg(
     width: f64,
     height: f64,
     theme: &Theme,
+    fonts: &mut FontSystem,
 ) -> Result<String> {
     use crate::model::{
         chart_format::{ChartAxis, LabelPosition, LegendPosition},
         ChartKind,
     };
     use plotters::prelude::*;
+    use plotters::coord::{ranged1d::Ranged, types::RangedCoordf64};
     if chart_projection::required(series, options) && !kind.is_polar() && !kind.is_extended() && !matches!(kind, ChartKind::Radar | ChartKind::RadarFilled) {
-        return chart_projection::svg(kind, categories, series, options, width, height, theme);
+        return chart_projection::svg(kind, categories, series, options, width, height, theme, fonts);
     }
     if kind.is_extended() || matches!(kind, ChartKind::Radar | ChartKind::RadarFilled) {
         return projected_chart_svg(kind, categories, series, options, width, height, theme);
@@ -2022,15 +2023,28 @@ fn chart_svg(
             } else {
                 (0.0..category_end, lower..upper)
             };
+            let format_tick = |value: &f64| crate::model::chart_format::format_chart_number(*value, None).0;
+            let y_labels = if horizontal && !kind.is_xy() { categories.to_vec() }
+                else { RangedCoordf64::from(y_range.clone()).key_points(11usize).iter().map(&format_tick).collect() };
+            let label_width = |fonts: &mut FontSystem, labels: &[String], size: f64| labels.iter()
+                .map(|text| chart_text_extent(fonts, text, size, crate::fonts::requested_family(text, None, theme))).fold(0.0, f64::max);
+            let left_area = (label_width(fonts, &y_labels, 13.0) + 12.0).ceil().max(if horizontal { 70.0 } else { 42.0 }) as u32;
+            let right_area = if secondary {
+                let labels = (0..=4).map(|step| format_tick(&(secondary_lower + (secondary_upper - secondary_lower) * step as f64 / 4.0))).collect::<Vec<_>>();
+                (label_width(fonts, &labels, 12.0) + 12.0).ceil().max(64.0) as u32
+            } else { 0 };
+            if f64::from(left_area + right_area) + 56.0 > width {
+                return Err(Error::Unsupported("chart axis labels do not fit the requested font and width; enlarge the chart or use an explicit compact number format".into()));
+            }
             let mut chart = ChartBuilder::on(&root)
                 .margin(12)
                 .x_label_area_size(32)
-                .y_label_area_size(if horizontal { 70 } else { 42 })
-                .right_y_label_area_size(if secondary { 64 } else { 0 })
+                .y_label_area_size(left_area)
+                .right_y_label_area_size(right_area)
                 .build_cartesian_2d(x_range, y_range)
                 .map_err(error)?;
             let mut mesh = chart.configure_mesh();
-            mesh.label_style(("sans-serif", 13)).disable_mesh();
+            mesh.label_style(("sans-serif", 13)).x_label_formatter(&format_tick).y_label_formatter(&format_tick).disable_mesh();
             if !kind.is_xy() {
                 if horizontal {
                     mesh.y_labels(0);
@@ -2043,7 +2057,7 @@ fn chart_svg(
                 for step in 0..=4 {
                     let value = secondary_lower + (secondary_upper - secondary_lower) * step as f64 / 4.0;
                     let (left, top) = chart.backend_coord(&(category_end, project_secondary(value)));
-                    root.draw(&Text::new(value.to_string(), (left + 5, top), ("sans-serif", 12).into_font())).map_err(error)?;
+                    root.draw(&Text::new(format_tick(&value), (left + 5, top), ("sans-serif", 12).into_font())).map_err(error)?;
                 }
             }
             if !kind.is_xy() {

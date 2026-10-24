@@ -155,7 +155,7 @@ pub(crate) fn prepare(package: &mut Package, original: &NativeDeck, deck: &Deck,
         || old.layouts.iter().map(|layout| (&layout.id, &layout.master_id)).ne(design.layouts.iter().map(|layout| (&layout.id, &layout.master_id)));
     if !changed { return Ok(Topology { masters: original.masters.iter().map(|part| binding(&original.masters, &part.id, String::new())).collect(), layouts: original.layouts.iter().map(|part| binding(&original.layouts, &part.id, String::new())).collect() }); }
     let mut empty = deck.clone();
-    empty.slides.truncate(1); empty.slides[0].elements.clear(); empty.slides[0].layout_id = None;
+    empty.slides.truncate(1); empty.slides[0].elements.clear(); empty.slides[0].layout_id = None; empty.slides[0].review = None;
     let empty_design = empty.design.as_mut().ok_or_else(|| Error::Invalid("native design missing".into()))?;
     for master in &mut empty_design.masters { master.elements.clear(); }
     for layout in &mut empty_design.layouts { layout.elements.clear(); }

@@ -42,7 +42,7 @@ pub(super) fn render(drawing: &mut Drawing, category: &str, variant: usize, data
             let top=104.0+index as f64*row_height;
             drawing.rect([816.0,top,304.0,1.0],"@lt2");
             drawing.text(category,[824.0,top+5.0,132.0,row_height-7.0],16.0,"@dk1",true,TextAlign::Left);
-            let values=series.iter().map(|series| display(series.values[index])).collect::<Vec<_>>().join(" / ");
+            let values=series.iter().map(|series| crate::model::chart_format::exact_chart_number(series.values[index])).collect::<Vec<_>>().join(" / ");
             drawing.text(&values,[966.0,top+5.0,154.0,row_height-7.0],14.0,"@dk2",false,TextAlign::Right);
         }
     }

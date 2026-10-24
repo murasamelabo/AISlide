@@ -246,6 +246,9 @@ pub fn transact(document: &Document, transaction: Transaction) -> Result<Transac
         let contains = |deck: &Deck| deck.slides.iter().any(|slide| slide.id == part.slide_id && slide.elements.iter().any(|element| element.bounds().0 == part.element_id));
         contains(&updated.deck) || !contains(&document.deck)
     });
+    if document.deck.slides.iter().map(|slide| &slide.id).ne(updated.deck.slides.iter().map(|slide| &slide.id)) {
+        crate::fields::refresh_pagination(&mut updated.deck, Some(&document.deck));
+    }
     crate::references::refresh(&mut updated)?;
     seal(&mut updated)?;
     if updated.hash == document.hash { return Ok(TransactionResult { document: document.clone(), receipt: None, changes: Vec::new(), diagnostics: None, render_warnings: Vec::new() }); }

@@ -4,12 +4,12 @@ export type StaticExportOptions = { format?: StaticExportFormat; page_indices?: 
 export type PreviewOptions = { page_indices?: number[] | null; max_dimension?: number; layout?: 'pages' | 'contact_sheet'; max_output_bytes?: number; format?: 'png' | 'jpeg'; overflow?: 'shrink' | 'error' }
 export type PreviewImage = { base64: string; mime_type: 'image/png' | 'image/jpeg'; width: number; height: number; byte_length: number; sha256: string }
 export type PresentationPreview = { revision: number; hash: string; requested_max_dimension: number; actual_max_dimension: number; quality_reduced: boolean; pages: { page_index: number; slide_id: string; image_index: number; x: number; y: number; width: number; height: number }[]; images: PreviewImage[]; warnings: StaticExport['warnings']; office_visual_parity: false }
-export type PreflightOptions = { page_indices?: number[] | null; min_font_size?: number }
+export type PreflightOptions = { page_indices?: number[] | null; min_font_size?: number; include_inherited?: boolean }
 export type ReferenceEntry = { id: string; name: string; url: string; slide_ids: string[]; publish?: boolean }
 export type ReferencePublication = { supplied: number; published: number; excluded: number }
 export type ReferenceOptions = { entries: ReferenceEntry[]; placement?: 'auto' | 'footnotes' | 'appendix' | 'appendix_only'; title?: string; font_size?: number }
 export type ReferenceState = { options: Required<ReferenceOptions>; elements: { slide_id: string; id: string; sha256: string }[]; slides: string[]; page_sha256: Record<string, string> }
-export type PreflightFinding = { code: string; severity: 'info' | 'warning' | 'error'; evidence: 'renderer' | 'geometry' | 'heuristic' | 'document'; page_index: number; slide_id: string; element_ids: string[]; scopes: string[]; bounds: { x: number; y: number; width: number; height: number }; message: string; suggestions: string[] }
+export type PreflightFinding = { code: string; severity: 'info' | 'warning' | 'error'; evidence: 'renderer' | 'geometry' | 'heuristic' | 'document'; page_index: number; slide_id: string; affected_page_indices: number[]; affected_slide_ids: string[]; element_ids: string[]; scopes: string[]; bounds: { x: number; y: number; width: number; height: number }; message: string; suggestions: string[] }
 export type PreflightReport = { revision: number; hash: string; page_indices: number[]; findings: PreflightFinding[]; checks: string[]; limitations: string[]; office_visual_parity: false; semantic_truth_verified: false }
 export type RevisionEdit = { op: 'translate'; ids: string[]; dx: number; dy: number } | { op: 'align'; ids: string[]; alignment: 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom'; relative_to: 'selection' | 'page' } | { op: 'set_text_frame'; id: string; x: number; y: number; width: number; height: number } | { op: 'replace_text'; id: string; text: string } | { op: 'update_part'; id: string; spec: PartSpec } | { op: 'update_graph'; id: string; spec: GraphSpec }
 export type RevisionPreview = { slide_id: string; base_revision: number; base_hash: string; candidate_hash: string; affected_ids: string[]; stale_part_ids: string[]; source_bindings_stale: boolean; native_preservation_checked: boolean; office_visual_parity: false; before: PresentationPreview; after: PresentationPreview }
@@ -43,7 +43,7 @@ export type DeliveryChecks = { document_verified: true; pptx_exported: true; nat
 export type DeliveryManifest = { format: 'aislide.delivery'; version: 1; producer: { name: string; version: string; engine: 'aislide-core'; contract_version: 1 }; document: { id: string; revision: number; hash: string; title: string; slide_count: number }; options: Required<DeliveryOptions>; files: (Omit<DeliveryFile, 'base64' | 'width' | 'height'> & { width: number | null; height: number | null })[]; preview_pages: PresentationPreview['pages']; multi_file_atomic: false; checks: DeliveryChecks; preflight: PreflightReport | null; render_warnings: StaticExport['warnings']; privacy: { pptx_includes_notes: true; pptx_may_include_sources_and_bindings: true; pptx_includes_guided_record?: true; separate_notes_requested: boolean; separate_source_report_requested: boolean }; limitations: string[] }
 export type PreparedDelivery = { revision: number; hash: string; files: DeliveryFile[]; manifest: DeliveryManifest }
 export type StaticExportFile = { filename: string; base64: string; byte_length: number; mime_type: 'image/png' | 'image/jpeg' | 'application/pdf'; page_indices: number[]; width: number; height: number }
-export type StaticExport = { files: StaticExportFile[]; warnings: { code: string; page_index: number; element_id: string; message: string }[]; office_parity_verified: false; pdf_rasterized: false; pdf_text_outlined: boolean; pdf_editable_text: false; pdf_tagged: boolean; pdf_searchable_text: boolean; pdf_selectable_text: boolean; pdf_semantic_overlay: boolean; pdf_ua_certified: false }
+export type StaticExport = { files: StaticExportFile[]; warnings: { code: string; page_index: number; element_id: string; scope?: string; message: string }[]; office_parity_verified: false; pdf_rasterized: false; pdf_text_outlined: boolean; pdf_editable_text: false; pdf_tagged: boolean; pdf_searchable_text: boolean; pdf_selectable_text: boolean; pdf_semantic_overlay: boolean; pdf_ua_certified: false }
 export type ImmutableValue<Value> = Value extends object ? { readonly [Key in keyof Value]: ImmutableValue<Value[Key]> } : Value
 export type VerifiedRecoveryDocument = ImmutableValue<AislideDocument>
 export type ChartKind = 'column' | 'bar' | 'line' | 'pie' | 'doughnut' | 'area' | 'scatter' | 'stacked_column' | 'stacked_bar' | 'percent_stacked_column' | 'percent_stacked_bar' | 'combo' | 'bubble' | 'radar' | 'radar_filled' | 'column3d' | 'bar3d' | 'pie3d' | 'funnel' | 'waterfall' | 'histogram' | 'box_whisker' | 'treemap' | 'sunburst'
@@ -60,17 +60,29 @@ export type ChartSeries = { name: string; values: number[]; color: string; kind?
 export type ChartData = { kind: ChartKind; categories: string[]; series: ChartSeries[]; options?: ChartOptions }
 export type PresentationAxis = { domain: [number, number]; log_base: number | null; reverse: boolean; ticks: { value: number; position: number; label: string }[]; minor_ticks: { value: number; position: number; label: string }[] }
 export type ChartPresentation = { category_axis: PresentationAxis; primary_axis: PresentationAxis; secondary_axis: PresentationAxis | null; series: { axis: ChartAxis; points: { x: number; y: number }[]; labels: string[]; errors: { index: number; direction: 'x' | 'y'; lower: { x: number; y: number }; upper: { x: number; y: number } }[]; trend: { points: { x: number; y: number }[]; coefficients: number[]; center: number; scale: number; equation: string | null; r_squared: number | null } | null }[]; warnings: string[]; office_parity_verified: false }
-export type ElementPreview = { svg: string; warnings: { code: string; message: string; element_id: string; page_index: number }[]; office_parity_verified: false }
+export type ElementPreview = { svg: string; warnings: { code: string; message: string; element_id: string; page_index: number; scope?: string }[]; office_parity_verified: false }
 export type HistogramData = { kind: 'column'; sample_count: number; bins: { lower: number; upper: number; upper_inclusive: boolean; count: number }[]; categories: string[]; series: ChartSeries[] }
 export type ChartCapability = { id: ChartKind | 'histogram' | 'box_whisker' | 'treemap' | 'sunburst' | 'waterfall' | 'funnel' | 'line3d' | 'area3d' | 'surface3d'; native: boolean; create: boolean; read: boolean; edit: boolean; axis_options: boolean; secondary_axis: boolean; data_labels: boolean; trendlines: boolean; error_bars: boolean; bubble_sizes: boolean; derived: boolean; office_validated: boolean; limits?: { categories: number; series: number }; limitations: string[] }
 export type Placeholder = { kind: 'title' | 'body' | 'subtitle' | 'footer' | 'date' | 'slide_number'; index: number }
 export type RunStyle = { bold?: boolean | null; italic?: boolean | null; underline?: boolean | null; font_size?: number | null; color?: string | null; font_family?: string | null; baseline?: number | null; highlight?: string | null; language?: string | null; alternative_language?: string | null }
-export type KnownFieldKind = 'slidenum' | `datetime${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13}`
+export type KnownFieldKind = 'slidenum' | 'aislide_slidetotal' | `datetime${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13}`
 export type RichField = { id: string; kind: string }
 export type RichRun = { text: string; style?: RunStyle; field?: RichField | null }
+/** OOXML spacing: points use 1/100 pt (1200 = 12 pt); percent uses 1/1000 % (100000 = 100%). */
 export type RichSpacing = { kind: 'percent' | 'points'; value: number }
-export type RichTab = { position: number; alignment?: 'left' | 'center' | 'right' | 'decimal' }
-export type RichParagraph = { runs: RichRun[]; alignment?: 'left' | 'center' | 'right' | 'justify' | null; bullet?: 'none' | 'bullet' | 'numbered' | null; bullet_character?: string | null; numbering?: 'arabicPeriod' | 'arabicParenR' | 'arabicParenBoth' | 'arabicPlain' | 'alphaLcPeriod' | 'alphaUcPeriod' | 'alphaLcParenR' | 'alphaUcParenR' | 'romanLcPeriod' | 'romanUcPeriod' | null; number_start?: number | null; level?: number | null; margin_left?: number | null; indent?: number | null; line_spacing?: RichSpacing | null; space_before?: RichSpacing | null; space_after?: RichSpacing | null; tabs?: RichTab[] }
+export type RichTab = {
+  /** OOXML EMU: 9525 = 1 px, 12700 = 1 pt, 228600 = 0.25 inch. */
+  position: number
+  alignment?: 'left' | 'center' | 'right' | 'decimal'
+}
+export type RichParagraph = {
+  runs: RichRun[]; alignment?: 'left' | 'center' | 'right' | 'justify' | null; bullet?: 'none' | 'bullet' | 'numbered' | null; bullet_character?: string | null; numbering?: 'arabicPeriod' | 'arabicParenR' | 'arabicParenBoth' | 'arabicPlain' | 'alphaLcPeriod' | 'alphaUcPeriod' | 'alphaLcParenR' | 'alphaUcParenR' | 'romanLcPeriod' | 'romanUcPeriod' | null; number_start?: number | null; level?: number | null
+  /** Left margin in OOXML EMU: 9525 = 1 px, 12700 = 1 pt. */
+  margin_left?: number | null
+  /** First-line offset in OOXML EMU; negative values create hanging indentation. */
+  indent?: number | null
+  line_spacing?: RichSpacing | null; space_before?: RichSpacing | null; space_after?: RichSpacing | null; tabs?: RichTab[]
+}
 export type TextPadding = { left?: number; right?: number; top?: number; bottom?: number }
 export type TextFormat = { italic?: boolean; underline?: boolean; alignment?: 'left' | 'center' | 'right' | 'justify'; vertical?: 'top' | 'middle' | 'bottom'; bullet?: 'none' | 'bullet' | 'numbered'; font_family?: string | null; hyperlink?: string | null; placeholder?: Placeholder | null; inherit_layout?: boolean; paragraphs?: RichParagraph[]; padding?: TextPadding | null }
 export type Theme = { name: string; colors: Record<string, string>; fonts: { major: string; minor: string; east_asian: string; complex_script: string } }

@@ -428,6 +428,23 @@ test('issue16 SDK binds effect warnings to accepted revisions without persisting
   assert.equal(session.renderWarnings, null);
 });
 
+test('issue36 SDK warning snapshots retain validated owner scopes', async () => {
+  const original = { id: 'warning-scopes', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
+  const warnings = ['layout:shared', 'slide'].map(scope => ({ code: 'FONT_FALLBACK', page_index: 0, element_id: 'same-id', scope, message: 'Synthetic fallback' }));
+  let result = { document: { ...original, revision: 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] }, render_warnings: warnings };
+  const session = new DocumentSession(async () => result, original);
+  const operations = [{ op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' }];
+  await session.applyOperations(operations);
+  assert.deepEqual(session.renderWarnings.warnings, warnings);
+  session.renderWarnings.warnings[0].scope = 'Must not leak';
+  assert.deepEqual(session.renderWarnings.warnings, warnings);
+  for (const scope of [7, 'x'.repeat(193)]) {
+    result = { ...result, document: { ...result.document, revision: result.document.revision + 1 }, render_warnings: [{ ...warnings[0], scope }] };
+    await session.applyOperations(operations);
+    assert.equal(session.renderWarnings.status, 'unavailable');
+  }
+});
+
 test('reference SDK forwards guarded core mutation and records undo', async () => {
   const original = { id: 'references-sdk', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
   const calls = [];

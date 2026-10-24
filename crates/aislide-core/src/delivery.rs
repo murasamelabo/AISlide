@@ -84,7 +84,7 @@ pub fn prepare_delivery(document: &Document, expected_revision: u64, expected_ha
     bundle.add("pptx", ".pptx".into(), "application/vnd.openxmlformats-officedocument.presentationml.presentation", all_pages.clone(), STANDARD.decode(base64).map_err(|_| Error::Invalid("PPTX export encoding".into()))?, None)?;
 
     let preflight = if options.preflight {
-        Some(crate::authoring_preflight::preflight_presentation(document, &crate::authoring_preflight::PreflightOptions { page_indices: Some(selected.clone()), min_font_size: options.min_font_size })?)
+        Some(crate::authoring_preflight::preflight_presentation(document, &crate::authoring_preflight::PreflightOptions { page_indices: Some(selected.clone()), min_font_size: options.min_font_size, ..Default::default() })?)
     } else { None };
     let mut render_warnings = Vec::new();
     let mut preview_pages = Vec::new();

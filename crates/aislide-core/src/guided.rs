@@ -162,11 +162,20 @@ fn required(value:&str, maximum:usize, field:&str, issues:&mut Vec<String>) {
     if value.trim().is_empty() || valid_text(value,maximum).is_err() {issues.push(format!("{field}: nonempty text within {maximum} characters is required"));}
 }
 
-fn numeric_paths(value:&Value, path:&str, output:&mut Vec<(String,Value)>) {
+fn numeric_paths(value:&Value, path:&str, kind:&str, output:&mut Vec<(String,Value)>) {
     match value {
         Value::Number(_) => output.push((path.into(),value.clone())),
-        Value::Array(values) => for (index,item) in values.iter().enumerate() {numeric_paths(item,&format!("{path}/{index}"),output);},
-        Value::Object(values) => for (key,item) in values {if !["x","y","width","height","font_size","detail_font_size","stroke_width","version","from","to","start","end","longitude","latitude"].contains(&key.as_str()) {numeric_paths(item,&format!("{path}/{}",key.replace('~',"~0").replace('/',"~1")),output);}},
+        Value::Array(values) => for (index,item) in values.iter().enumerate() {numeric_paths(item,&format!("{path}/{index}"),kind,output);},
+        Value::Object(values) => for (key,item) in values {
+            let root_style=path=="/data" && (key=="columns" && ["icon_cards","fact_columns","kpi_cards"].contains(&kind)
+                || key=="body_size" && ["icon_cards","icon_rows","shift_rows","step_cards","screenshot_callouts"].contains(&kind));
+            let panel_style=kind=="comparison_panels" && key=="body_size" && path.starts_with("/data/panels/");
+            let graph_style=kind=="diagram" && ((path.starts_with("/data/graph/groups/") && ["padding","header_height","header_font_size"].contains(&key.as_str()))
+                || (path.starts_with("/data/graph/edges/") && ["label_font_size","waypoints"].contains(&key.as_str())));
+            if !root_style && !panel_style && !graph_style && !["x","y","width","height","font_size","detail_font_size","stroke_width","version","from","to","start","end","longitude","latitude"].contains(&key.as_str()) {
+                numeric_paths(item,&format!("{path}/{}",key.replace('~',"~0").replace('/',"~1")),kind,output);
+            }
+        },
         _ => (),
     }
 }
@@ -240,7 +249,7 @@ fn checks(input:&GuidedInput)->Vec<String> {
             if support.clause.is_empty() || support.body_paths.is_empty() || support.body_paths.len()>16 || support.body_paths.iter().any(|path|path.len()>512 || (path!=root && !path.starts_with(&format!("{root}/"))) || body.pointer(path).is_none_or(|value|value.is_null() || value.as_str().is_some_and(|text|text.trim().is_empty()) || value.as_array().is_some_and(Vec::is_empty) || value.as_object().is_some_and(serde_json::Map::is_empty))) {issues.push(format!("{}: clause refers to missing body evidence; use populated data, not titles",slide.id));}
             if support.evidence_ids.is_empty() || support.evidence_ids.len()>16 || support.evidence_ids.iter().any(|id|!evidence.contains_key(id.as_str())) {issues.push(format!("{}: clause refers to missing evidence id",slide.id));}
         }
-        let mut numbers=Vec::new();if let Some(data)=body.get("data") {numeric_paths(data,"/data",&mut numbers);}
+        let mut numbers=Vec::new();if let Some(data)=body.get("data") {numeric_paths(data,"/data",data["kind"].as_str().unwrap_or(""),&mut numbers);}
         if slide.numbers.len()>256 {issues.push(format!("{}: too many number declarations",slide.id));}
         let mut declared=BTreeSet::new();
         for number in &slide.numbers {
@@ -293,10 +302,11 @@ fn author_text(text: &str, format: &mut TextFormat, settings: &ResolvedAuthoring
     }
 }
 
-fn author_body(element: &mut Element, settings: &ResolvedAuthoring<'_>, scale: f64, available_height: f64) {
+fn author_body(element: &mut Element, settings: &ResolvedAuthoring<'_>, scale: f64, available_height: f64, fixed: &BTreeSet<String>) {
     let floor=settings.body_floor/scale;
     match element {
-        Element::Text {text,font_size,format,..}|Element::Shape {text,font_size,format,..} => {
+        Element::Text {id,text,font_size,format,..}|Element::Shape {id,text,font_size,format,..} => {
+            let floor=if fixed.contains(id) {0.0} else {floor};
             *font_size=font_size.max(floor);
             author_text(text,format,settings,floor);
         }
@@ -320,7 +330,7 @@ fn author_body(element: &mut Element, settings: &ResolvedAuthoring<'_>, scale: f
                     .map(Element::bounds).filter(|(_,peer_left,peer_top,peer_width,_)|*peer_top>=top+height && *peer_left<left+width && peer_left+peer_width>left)
                     .map(|(_,_,peer_top,_,_)|peer_top-top).fold(*view_height-top,f64::min)
             }).collect();
-            for (child,limit) in children.iter_mut().zip(limits) {author_body(child,settings,child_scale,limit);}
+            for (child,limit) in children.iter_mut().zip(limits) {author_body(child,settings,child_scale,limit,fixed);}
         }
         _ => (),
     }
@@ -389,6 +399,59 @@ fn slide_notes(input:&GuidedInput,slide:&GuidedSlide,citations:&[&Evidence])->Re
     Ok(notes)
 }
 
+fn bounded_description(value: &str, limit: usize) -> String {
+    let value=value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if value.chars().count()<=limit {value} else {
+        let suffix="... [description truncated; inspect the supplied data]";
+        format!("{}{}",value.chars().take(limit-suffix.len()).collect::<String>(),suffix)
+    }
+}
+
+fn describe_visuals(slide: &mut crate::model::Slide, spec: Option<&PartSpec>) -> Result<()> {
+    let title=spec.map_or(slide.title.as_str(),|spec|spec.title.as_str());
+    let context=spec.filter(|spec|!spec.subtitle.trim().is_empty()).map_or_else(||title.to_owned(),|spec|format!("{}; {}",spec.title,spec.subtitle));
+    let matrix=spec.and_then(|spec| match &spec.data {
+        crate::parts::PartData::Raci {roles,tasks,..} => Some(tasks.iter().map(|task|format!("{}: {}",task.label,roles.iter().zip(&task.assignments).map(|(role,value)|format!("{role} = {value}")).collect::<Vec<_>>().join("; "))).collect::<Vec<_>>().join(". ")),
+        crate::parts::PartData::Matrix {rows,columns,cells,..} => Some(rows.iter().zip(cells).map(|(row,cells)|format!("{row}: {}",columns.iter().zip(cells).map(|(column,value)|format!("{column} = {value}")).collect::<Vec<_>>().join("; "))).collect::<Vec<_>>().join(". ")),
+        crate::parts::PartData::Heatmap {columns,rows,unit,..} => Some(rows.iter().map(|row|format!("{}: {}",row.label,columns.iter().zip(&row.values).map(|(column,value)|format!("{column} = {value}{unit}")).collect::<Vec<_>>().join("; "))).collect::<Vec<_>>().join(". ")),
+        crate::parts::PartData::HarveyMatrix {columns,rows,..} => Some(rows.iter().map(|row|format!("{}: {}",row.label,columns.iter().zip(&row.levels).map(|(column,value)|format!("{column} = {value}/4")).collect::<Vec<_>>().join("; "))).collect::<Vec<_>>().join(". ")),
+        _=>None,
+    });
+    let connections=if let Some(PartSpec {data:crate::parts::PartData::Diagram {graph},..})=spec {
+        graph.edges.iter().map(|edge| {
+            let label=|id:&str| graph.nodes.iter().find(|node|node.id==id).map_or(id.to_owned(),|node|node.label.clone());
+            format!("{} -> {} ({})",label(&edge.source),label(&edge.target),edge.label)
+        }).collect::<Vec<_>>().join("; ")
+    } else {String::new()};
+    let mut descriptions=Vec::new();
+    for element in crate::model::element_list(&slide.elements) {
+        let description=match element {
+            Element::Group {children,..} => {
+                let labels=crate::model::element_list(children).into_iter().filter_map(|element|match element {
+                    Element::Text {text,..}|Element::Shape {text,..} if !text.is_empty() && text!=title && spec.is_none_or(|spec|text!=&spec.subtitle)=>Some(text.as_str()),
+                    Element::Picture {alt,..} if !alt.is_empty()=>Some(alt.as_str()),
+                    _=>None,
+                }).collect::<Vec<_>>().join("; ");
+                let mut description=if let Some(matrix)=&matrix {format!("{context}. Rows and columns: {matrix}")} else {format!("{context}. Labels: {labels}")};
+                if !connections.is_empty() {description.push_str(&format!(". Connections: {connections}"));}
+                description
+            }
+            Element::Chart {categories,series,..} => {
+                let axes=if let Some(PartSpec {data:crate::parts::PartData::Chart {x_axis,y_axis,..},..})=spec {format!("Axes: {x_axis}; {y_axis}. ")} else {String::new()};
+                let values=series.iter().map(|series|format!("{}: {}",series.name,categories.iter().zip(&series.values)
+                    .map(|(category,value)|format!("{category} = {value}")).collect::<Vec<_>>().join("; "))).collect::<Vec<_>>().join(". ");
+                format!("{context}. {axes}{values}")
+            }
+            _=>continue,
+        };
+        descriptions.push((element.bounds().0.to_owned(),crate::review::ElementAccessibility {
+            title:Some(bounded_description(title,500)),description:Some(bounded_description(&description,4000)),decorative:None,
+        }));
+    }
+    for (id,metadata) in descriptions {crate::review::set_accessibility_on_slide(slide,&id,Some(metadata))?;}
+    Ok(())
+}
+
 fn build(input:&GuidedInput,id:&str)->Result<Document> {
     let authoring=input.authoring.as_ref().filter(|settings|settings.has_typography()).map(|settings|settings.resolve(&input.profile_id));
     let primary=input.brand_color.as_deref().unwrap_or("1976D2");
@@ -409,6 +472,7 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
         let citations:Vec<_>=input.evidence.iter().filter(|entry|slide.support.iter().any(|support|support.evidence_ids.contains(&entry.id))).collect();
         let citation=citations.iter().map(|entry|format!("[{}] {}",entry.id,entry.reference)).collect::<Vec<_>>().join("; ");
         let mut elements=vec![text("section",&slide.section,[64.0,24.0,1152.0,28.0],18.0,"@accent1",true),text("headline",&slide.headline,[64.0,64.0,1152.0,if double {86.0} else {52.0}],if double {29.0} else {32.0},"@dk1",true),text("source",&citation,[64.0,658.0,1052.0,48.0],12.0,"@dk2",false),text("page",&format!("{} / {}",index+1,input.slides.len()),[1132.0,676.0,84.0,26.0],12.0,"@dk2",false)];
+        crate::fields::pagination(&mut elements[3],&slide.id,index+1,input.slides.len());
         if let Some(settings)=&authoring {
             if let Element::Text {x,width,height,font_size,format,..}=&mut elements[1] {
                 *x=settings.margin;*width=1280.0-2.0*settings.margin;*font_size=settings.headline_size;
@@ -421,18 +485,19 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
         if let Some(spec)=&slide.part {
             let element_id=format!("guided-part-{}",index+1);
             let mut element=crate::parts::create_with_theme(&element_id,spec,&design.theme)?;
+            let fixed=crate::parts::fixed_annotation_ids(&element_id,spec,&element)?;
             let margin=authoring.as_ref().map_or(64.0,|settings|settings.margin);
             let body_width=1280.0-2.0*margin;
             if let Element::Group{x,y,width,height,..}=&mut element {*x=margin;*y=body_top;*width=body_width;*height=body_height;}
             crate::parts::state::resize_canvas(&mut element,body_width,body_height)?;
-            fn minimum_text(element:&mut Element) {match element {Element::Text{font_size,..}|Element::Shape{font_size,..}|Element::Table{font_size,..}=>*font_size=font_size.max(12.0),Element::Group{children,..}=>children.iter_mut().for_each(minimum_text),_=>()}}
-            minimum_text(&mut element);
+            fn minimum_text(element:&mut Element,fixed:&BTreeSet<String>,small_diagram_annotations:bool) {match element {Element::Text{id,font_size,..}|Element::Shape{id,font_size,..}|Element::Table{id,font_size,..}=>if !small_diagram_annotations || !fixed.contains(id) {*font_size=font_size.max(12.0);},Element::Group{children,..}=>for child in children {minimum_text(child,fixed,small_diagram_annotations);},_=>()}}
+            minimum_text(&mut element,&fixed,matches!(spec.data,crate::parts::PartData::Diagram{..}));
             if authoring.is_none() && input.profile_id=="event-talk" {
                 let mut encoded=serde_json::to_value(&element)?;
                 if let Some(children)=encoded["children"].as_array_mut() {for child in children {if child["type"]=="text" && child["y"].as_f64().is_some_and(|value|value>70.0) && child["height"].as_f64().is_some_and(|value|value>=40.0) {child["font_size"]=json!(child["font_size"].as_f64().unwrap_or(22.0).max(22.0));}}}
                 element=serde_json::from_value(encoded)?;
             }
-            if let Some(settings)=&authoring {author_body(&mut element,settings,1.0,body_height);}
+            if let Some(settings)=&authoring {author_body(&mut element,settings,1.0,body_height,&fixed);}
             parts.push(PartInstance{slide_id:slide.id.clone(),element_id,spec:spec.clone(),render_sha256:crate::parts::state::render_hash(&element)?,native_sha256:None,stale:false});
             elements.push(element);
         } else {
@@ -463,10 +528,12 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
             }
         }
         if slide.part.is_none() {if let Some(settings)=&authoring {
-            for element in &mut elements[4..] {let bounds=element.bounds();author_body(element,settings,1.0,bounds.4);}
+            for element in &mut elements[4..] {let bounds=element.bounds();author_body(element,settings,1.0,bounds.4,&BTreeSet::new());}
         }}
         let notes=slide_notes(input,slide,&citations)?;
-        slides.push(json!({"id":slide.id,"title":slide.headline,"background":"@lt1","layout_id":"guided-content","inherit_background":true,"elements":elements,"notes":notes}));
+        let mut page=serde_json::from_value(json!({"id":slide.id,"title":slide.headline,"background":"@lt1","layout_id":"guided-content","inherit_background":true,"elements":elements,"notes":notes}))?;
+        describe_visuals(&mut page,slide.part.as_ref())?;
+        slides.push(page);
     }
     let deck:Deck=serde_json::from_value(json!({"version":1,"title":input.title,"width":1280,"height":720,"design":design_value,"slides":slides}))?;
     let measured=if authoring.is_some() {
@@ -526,7 +593,7 @@ mod tests {
         let inner=json!({"type":"group","id":"inner","x":0,"y":0,"width":800,"height":400,"view_width":1600,"view_height":800,"children":[rich,table]});
         let mut element:Element=serde_json::from_value(json!({"type":"group","id":"outer","x":0,"y":0,"width":800,"height":400,"view_width":1600,"view_height":800,"children":[inner]})).unwrap();
         let settings:Authoring=serde_json::from_value(json!({"body_font_min":24,"font_family":"Arial","spacing":"relaxed"})).unwrap();
-        author_body(&mut element,&settings.resolve("status-report"),1.0,400.0);
+        author_body(&mut element,&settings.resolve("status-report"),1.0,400.0,&BTreeSet::new());
         let encoded=serde_json::to_value(&element).unwrap();
         let rich=&encoded["children"][0]["children"][0];
         assert_eq!(rich["font_size"],96.0);
