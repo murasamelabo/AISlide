@@ -153,17 +153,41 @@ pub(crate) fn resize_canvas(element: &mut Element, target_width: f64, target_hei
     let Element::Group { view_width, view_height, .. } = element else { return Ok(()); };
     let horizontal = target_width / *view_width;
     let vertical = target_height / *view_height;
-    fn scale(value: &mut serde_json::Value, horizontal: f64, vertical: f64) {
+    fn markers(element: &Element, area: f64, output: &mut BTreeSet<String>) {
+        if super::aspect::is_marker(element, area) { output.insert(element.bounds().0.into()); }
+        if let Element::Group { children, view_width, view_height, .. } = element {
+            for child in children { markers(child, view_width * view_height, output); }
+        }
+    }
+    let mut marker_ids = BTreeSet::new();
+    markers(element, 0.0, &mut marker_ids);
+    fn scale(value: &mut serde_json::Value, horizontal: f64, vertical: f64, markers: &BTreeSet<String>) -> Result<()> {
+        let uniform = if value["type"] == "picture" || value["id"].as_str().is_some_and(|id| markers.contains(id)) {
+            let coordinate = |name: &str| value.get(name).and_then(serde_json::Value::as_f64).ok_or_else(|| Error::Invalid(format!("part marker {name} is missing or invalid")));
+            Some((coordinate("x")?, coordinate("y")?, coordinate("width")?, coordinate("height")?))
+        } else { None };
         for (field, factor) in [("x", horizontal), ("y", vertical), ("width", horizontal), ("height", vertical), ("view_width", horizontal), ("view_height", vertical)] {
             if let Some(number) = value.get(field).and_then(serde_json::Value::as_f64) { value[field] = json!(number * factor); }
         }
         let factor = horizontal.min(vertical);
+        if let Some((x, y, width, height)) = uniform {
+            value["x"] = json!(x * horizontal + width * (horizontal - factor) / 2.0);
+            value["y"] = json!(y * vertical + height * (vertical - factor) / 2.0);
+            value["width"] = json!(width * factor); value["height"] = json!(height * factor);
+        }
+        if let Some(padding) = value.get_mut("format").and_then(|format| format.get_mut("padding")) {
+            let (horizontal, vertical) = if uniform.is_some() { (factor, factor) } else { (horizontal, vertical) };
+            for (field, factor) in [("left", horizontal), ("right", horizontal), ("top", vertical), ("bottom", vertical)] {
+                if let Some(number) = padding.get(field).and_then(serde_json::Value::as_f64) { padding[field] = json!(number * factor); }
+            }
+        }
         if let Some(number) = value.get("font_size").and_then(serde_json::Value::as_f64) { value["font_size"] = json!((number * factor).clamp(8.0, 120.0)); }
         if let Some(number) = value.get("stroke_width").and_then(serde_json::Value::as_f64).filter(|number| *number > 0.0) { value["stroke_width"] = json!((number * factor).max(0.5)); }
-        if let Some(children) = value.get_mut("children").and_then(serde_json::Value::as_array_mut) { for child in children { scale(child, horizontal, vertical); } }
+        if let Some(children) = value.get_mut("children").and_then(serde_json::Value::as_array_mut) { for child in children { scale(child, horizontal, vertical, markers)?; } }
+        Ok(())
     }
     let mut value = serde_json::to_value(&*element)?;
-    if let Some(children) = value.get_mut("children").and_then(serde_json::Value::as_array_mut) { for child in children { scale(child, horizontal, vertical); } }
+    if let Some(children) = value.get_mut("children").and_then(serde_json::Value::as_array_mut) { for child in children { scale(child, horizontal, vertical, &marker_ids)?; } }
     value["view_width"] = json!(target_width); value["view_height"] = json!(target_height);
     *element = serde_json::from_value(value)?;
     Ok(())

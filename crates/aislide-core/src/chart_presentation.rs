@@ -65,6 +65,22 @@ pub struct ChartPresentation {
     pub office_parity_verified: bool,
 }
 
+fn grouped_decimal(text: &str) -> String {
+    let (whole, decimal) = text.split_once('.').unwrap_or((text, ""));
+    let negative = whole.starts_with('-');
+    let digits = whole.trim_start_matches('-');
+    let mut grouped = String::new();
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) { grouped.push(','); }
+        grouped.push(character);
+    }
+    format!("{}{}{}{}", if negative { "-" } else { "" }, grouped, if decimal.is_empty() { "" } else { "." }, decimal)
+}
+
+pub(crate) fn exact_chart_number(value: f64) -> String {
+    grouped_decimal(&if value == 0.0 { "0".into() } else { value.to_string() })
+}
+
 pub fn format_chart_number(value: f64, format: Option<&str>) -> (String, bool) {
     let general = || {
         if value == 0.0 { return "0".into(); }
@@ -91,15 +107,7 @@ pub fn format_chart_number(value: f64, format: Option<&str>) -> (String, bool) {
         format!("{mantissa}E{:+03}", exponent.parse::<i32>().unwrap_or(0))
     } else { format!("{:.*}", fraction.len(), magnitude) };
     if integer == "#,##0" && !scientific {
-        let (whole, decimal) = text.split_once('.').unwrap_or((&text, ""));
-        let negative = whole.starts_with('-');
-        let digits = whole.trim_start_matches('-');
-        let mut grouped = String::new();
-        for (index, character) in digits.chars().enumerate() {
-            if index > 0 && (digits.len() - index).is_multiple_of(3) { grouped.push(','); }
-            grouped.push(character);
-        }
-        text = format!("{}{}{}{}", if negative { "-" } else { "" }, grouped, if decimal.is_empty() { "" } else { "." }, decimal);
+        text = grouped_decimal(&text);
     }
     if percent { text.push('%'); }
     (text, true)

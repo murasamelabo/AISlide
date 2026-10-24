@@ -4,6 +4,11 @@ use std::{collections::{BTreeMap, BTreeSet}, ops::Range};
 
 type Edits = Vec<(Range<usize>, String)>;
 
+struct PartResources {
+    mapping: BTreeMap<String, String>,
+    hyperlinks: BTreeMap<String, String>,
+}
+
 fn equal(left: &impl serde::Serialize, right: &impl serde::Serialize) -> Result<bool> { Ok(crate::canonical::bytes(left)? == crate::canonical::bytes(right)?) }
 
 pub(crate) fn check_duplicate(document: &crate::document::Document, slide_id: &str, element: &Element) -> Result<()> {
@@ -55,9 +60,16 @@ pub(crate) fn check_copy_element(package: &Package, binding: &NativePart, elemen
 }
 
 fn xml_value(node: Node<'_, '_>) -> serde_json::Value {
-    let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), attribute.value())).collect();
+    xml_value_with_hyperlinks(node, false)
+}
+
+fn xml_value_with_hyperlinks(node: Node<'_, '_>, normalize_links: bool) -> serde_json::Value {
+    let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| {
+        let value = if normalize_links && node.has_tag_name((A, "hlinkClick")) && attribute.namespace() == Some(crate::native::R) && attribute.name() == "id" { "hyperlink" } else { attribute.value() };
+        (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), value)
+    }).collect();
     let children: Vec<_> = node.children().filter_map(|node| {
-        if node.is_element() { Some(xml_value(node)) }
+        if node.is_element() { Some(xml_value_with_hyperlinks(node, normalize_links)) }
         else if node.is_text() && !node.text().unwrap_or("").trim().is_empty() { Some(serde_json::json!(node.text())) }
         else { None }
     }).collect();
@@ -171,16 +183,25 @@ pub(crate) fn resource_changes(package: &mut Package, binding: &NativePart, befo
     let xml = if package.part_names().contains(relation_path.as_str()) { package.text(&relation_path)?.to_owned() } else { format!("<Relationships xmlns=\"{}\"/>", crate::native::REL) };
     let parsed = parse(&xml)?;
     let mut taken: BTreeSet<String> = parsed.root_element().children().filter_map(|node| node.attribute("Id").map(str::to_owned)).collect();
+    let mut links: BTreeMap<String, String> = parsed.root_element().children()
+        .filter(|node| node.has_tag_name((crate::native::REL, "Relationship")) && node.attribute("Type") == Some(crate::pptx::relationship_type("hyperlink").as_str()) && node.attribute("TargetMode") == Some("External"))
+        .filter_map(|node| Some((node.attribute("Target")?.to_owned(), node.attribute("Id")?.to_owned()))).collect();
     let mut counter = 1; let mut mapping = BTreeMap::new(); let mut extra = String::new();
     for (old_id, kind, target) in relationships {
+        if kind == "hyperlink" {
+            if let Some(id) = links.get(&target) { mapping.insert(old_id, id.clone()); continue; }
+        }
         let id = loop { let candidate = format!("rIdAislideResource{counter}"); counter += 1; if taken.insert(candidate.clone()) { break candidate; } };
         let target = if kind == "hyperlink" { target } else { format!("/ppt/{}", target.strip_prefix("../").ok_or_else(|| Error::Invalid("generated resource target".into()))?) };
         extra.push_str(&format!("<Relationship xmlns=\"{}\" Id=\"{id}\" Type=\"{}\" Target=\"{}\"{}/>", crate::native::REL, crate::pptx::relationship_type(kind), quick_xml::escape::escape(&target), if kind == "hyperlink" { " TargetMode=\"External\"" } else { "" }));
+        if kind == "hyperlink" { links.insert(target, id.clone()); }
         mapping.insert(old_id, id);
     }
-    let mut edits = Vec::new(); insert_child(&xml, parsed.root_element(), &extra, None, &mut edits)?;
-    let data = apply(xml, edits)?;
-    if package.part_names().contains(relation_path.as_str()) { package.replace_part(&relation_path, data)?; } else { package.add_part(relation_path, data)?; }
+    if !extra.is_empty() {
+        let mut edits = Vec::new(); insert_child(&xml, parsed.root_element(), &extra, None, &mut edits)?;
+        let data = apply(xml, edits)?;
+        if package.part_names().contains(relation_path.as_str()) { package.replace_part(&relation_path, data)?; } else { package.add_part(relation_path, data)?; }
+    }
     if !types.is_empty() {
         let xml = package.text("[Content_Types].xml")?.to_owned(); let parsed = parse(&xml)?;
         let entries = types.into_iter().map(|(path, kind)| format!("<Override xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" PartName=\"/{path}\" ContentType=\"{}\"/>", quick_xml::escape::escape(&kind))).collect::<String>();
@@ -305,8 +326,24 @@ fn replace_text(xml: &str, body: Node<'_, '_>, text: &str, edits: &mut Edits) ->
     Ok(())
 }
 
-fn supports_style(body: Node<'_, '_>) -> bool {
-    if !plain_paragraphs(body) { return false; }
+fn uniform_hyperlinks(body: Node<'_, '_>, targets: &BTreeMap<String, String>) -> bool {
+    let mut destination: Option<Option<&str>> = None;
+    for run in body.descendants().filter(|node| node.has_tag_name((A, "r"))) {
+        let link = child(run, A, "rPr").and_then(|node| child(node, A, "hlinkClick"));
+        let target = if let Some(link) = link {
+            let Some(id) = link.attribute((crate::native::R, "id")) else { return false; };
+            let Some(target) = targets.get(id) else { return false; };
+            if crate::model::validate_hyperlink(target).is_err() { return false; }
+            Some(target.as_str())
+        } else { None };
+        if destination.is_some_and(|previous| previous != target) { return false; }
+        destination = Some(target);
+    }
+    true
+}
+
+fn supports_style(body: Node<'_, '_>, hyperlinks: &BTreeMap<String, String>) -> bool {
+    if !plain_paragraphs(body) || !uniform_hyperlinks(body, hyperlinks) { return false; }
     let allowed = ["txBody", "bodyPr", "noAutofit", "lstStyle", "lvl1pPr", "p", "pPr", "lnSpc", "spcPct", "buNone", "buChar", "buAutoNum", "r", "rPr", "defRPr", "endParaRPr", "t", "solidFill", "srgbClr", "schemeClr", "latin", "ea", "cs", "hlinkClick"];
     if body.descendants().filter(|node| node.is_element()).any(|node| !allowed.contains(&node.tag_name().name())) { return false; }
     for node in body.descendants().filter(|node| node.is_element()) {
@@ -326,7 +363,7 @@ fn supports_style(body: Node<'_, '_>) -> bool {
     runs.windows(2).all(|pair| {
         let left: BTreeMap<_, _> = pair[0].attributes().filter(|attr| attr.name() != "lang").map(|attr| ((attr.namespace(), attr.name()), attr.value())).collect();
         let right: BTreeMap<_, _> = pair[1].attributes().filter(|attr| attr.name() != "lang").map(|attr| ((attr.namespace(), attr.name()), attr.value())).collect();
-        left == right && pair[0].children().filter(|node| node.is_element()).map(xml_value).eq(pair[1].children().filter(|node| node.is_element()).map(xml_value))
+        left == right && pair[0].children().filter(|node| node.is_element()).map(|node| xml_value_with_hyperlinks(node, true)).eq(pair[1].children().filter(|node| node.is_element()).map(|node| xml_value_with_hyperlinks(node, true)))
     })
 }
 
@@ -336,7 +373,7 @@ fn rich_style_error(node: Node<'_, '_>, attribute: Option<&str>) -> Error {
     Error::Unsupported(format!("unrepresentable native text styles or fields are preserved; rich text edit rejected at {location}"))
 }
 
-fn validate_rich_style(body: Node<'_, '_>) -> Result<()> {
+fn validate_rich_style(body: Node<'_, '_>, hyperlinks: &BTreeMap<String, String>) -> Result<()> {
     use crate::native::R;
     for node in body.descendants().filter(|node| node.is_element()) {
         if node != body && node.tag_name().namespace() != Some(A) { return Err(rich_style_error(node, None)); }
@@ -379,8 +416,7 @@ fn validate_rich_style(body: Node<'_, '_>) -> Result<()> {
             }
         }
     }
-    let links: Vec<_> = body.descendants().filter(|node| node.has_tag_name((A, "r"))).map(|node| child(node, A, "rPr").and_then(|node| child(node, A, "hlinkClick")).and_then(|node| node.attribute((R, "id")))).collect();
-    if !links.windows(2).all(|pair| pair[0] == pair[1]) { return Err(rich_style_error(body, None)); }
+    if !uniform_hyperlinks(body, hyperlinks) { return Err(rich_style_error(body, None)); }
     Ok(())
 }
 
@@ -388,12 +424,12 @@ pub(crate) fn check_rich_text(package: &Package, binding: &NativePart, id: &str)
     let Some(numeric) = binding.nodes.get(id) else { return Ok(()); };
     let xml = parse(package.text(&binding.path)?)?;
     let node = xml.descendants().find(|node| is_shape(*node) && properties(*node).and_then(|node| node.attribute("id")) == Some(numeric)).ok_or_else(|| Error::Invalid("native text identity missing".into()))?;
-    if let Some(body) = child(node, P, "txBody") { validate_rich_style(body)?; }
+    if let Some(body) = child(node, P, "txBody") { validate_rich_style(body, &crate::native::hyperlink_targets(package, &binding.path)?)?; }
     Ok(())
 }
 
-fn replace_rich_paragraphs(xml: &str, body: Node<'_, '_>, generated: &str, next_body: Node<'_, '_>, unchanged: &[bool], edits: &mut Edits) -> Result<()> {
-    validate_rich_style(body)?;
+fn replace_rich_paragraphs(xml: &str, body: Node<'_, '_>, generated: &str, next_body: Node<'_, '_>, unchanged: &[bool], hyperlinks: &BTreeMap<String, String>, edits: &mut Edits) -> Result<()> {
+    validate_rich_style(body, hyperlinks)?;
     crate::native::read_rich_paragraphs(body, &crate::rich_text::RunStyle::default(), &crate::model::TextFormat::default())?;
     let original: Vec<_> = body.children().filter(|node| node.has_tag_name((A, "p"))).collect();
     let next: Vec<_> = next_body.children().filter(|node| node.has_tag_name((A, "p"))).collect();
@@ -461,7 +497,7 @@ fn text_padding_changes(xml: &str, body: Node<'_, '_>, element: &Element, edits:
     Ok(())
 }
 
-fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '_>, previous: Node<'_, '_>, old: &Element, new: &Element, edits: &mut Edits) -> Result<()> {
+fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '_>, previous: Node<'_, '_>, old: &Element, new: &Element, hyperlinks: &BTreeMap<String, String>, edits: &mut Edits) -> Result<()> {
     crate::rich_text::validate_element(new)?;
     let (old_text, old_size, old_color, old_bold, old_format) = match old { Element::Text { text, font_size, color, bold, format, .. } | Element::Shape { text, font_size, color, bold, format, .. } => (text, font_size, color, bold, format), _ => return Ok(()) };
     let (text, size, color, bold, format) = match new { Element::Text { text, font_size, color, bold, format, .. } | Element::Shape { text, font_size, color, bold, format, .. } => (text, font_size, color, bold, format), _ => return Err(Error::Unsupported("native object type change".into())) };
@@ -473,14 +509,18 @@ fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '
     if old_text == text && !padding_changed && (!style_changed || (!rich && old_format.inherit_layout && format.inherit_layout)) { return Ok(()); }
     let body = child(node, P, "txBody").ok_or_else(|| Error::Unsupported("text body missing".into()))?;
     if padding_changed && old_text == text && !style_changed { return text_padding_changes(xml, body, new, edits); }
+    if crate::fields::patch_text_cache(xml, node, old, new, edits)? {
+        if padding_changed { text_padding_changes(xml, body, new, edits)?; }
+        return Ok(());
+    }
     if rich {
         if format.paragraphs.is_empty() { return Err(Error::Unsupported("rich native text must be edited through the rich text API".into())); }
         if !equal(&(old_size, old_color, old_bold, old_format.italic, old_format.underline, &old_format.font_family, old_format.alignment, old_format.bullet), &(size, color, bold, format.italic, format.underline, &format.font_family, format.alignment, format.bullet))? {
             return Err(Error::Unsupported("rich text has explicit run and paragraph styles; use the rich range or paragraph API instead of frame-style replacement".into()));
         }
         let next_body = child(next, P, "txBody").ok_or_else(|| Error::Invalid("generated text body missing".into()))?;
-        let unchanged: Vec<_> = old_format.paragraphs.iter().enumerate().map(|(index, paragraph)| format.paragraphs.get(index) == Some(paragraph)).collect();
-        replace_rich_paragraphs(xml, body, generated, next_body, &unchanged, edits)?;
+        let unchanged: Vec<_> = old_format.paragraphs.iter().enumerate().map(|(index, paragraph)| old_format.hyperlink == format.hyperlink && format.paragraphs.get(index) == Some(paragraph)).collect();
+        replace_rich_paragraphs(xml, body, generated, next_body, &unchanged, hyperlinks, edits)?;
         if padding_changed { text_padding_changes(xml, body, new, edits)?; }
         if old_format.vertical != format.vertical {
             let properties = child(body, A, "bodyPr").ok_or_else(|| Error::Unsupported("native body properties missing".into()))?;
@@ -490,7 +530,7 @@ fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '
     }
     if style_changed && !(old_format.inherit_layout && format.inherit_layout) {
         let expected = child(previous, P, "txBody").ok_or_else(|| Error::Invalid("previous text body missing".into()))?;
-        if !supports_style(body) || xml_value(body) != xml_value(expected) { return Err(Error::Unsupported("complex native text formatting is preserved; only its supported text/geometry fields are writable".into())); }
+        if !supports_style(body, hyperlinks) || xml_value_with_hyperlinks(body, true) != xml_value_with_hyperlinks(expected, true) { return Err(Error::Unsupported("complex native text formatting is preserved; only its supported text/geometry fields are writable".into())); }
         let next_body = child(next, P, "txBody").ok_or_else(|| Error::Invalid("generated text body".into()))?;
         edits.push((body.range(), fragment(generated, next_body)));
     } else {
@@ -500,11 +540,10 @@ fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '
     Ok(())
 }
 
-fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, ids: &BTreeMap<&str, usize>, theme: &crate::design::Theme, binding: &NativePart, resources: &BTreeMap<String, String>, scale: (f64, f64), edits: &mut Edits) -> Result<()> {
+fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, ids: &BTreeMap<&str, usize>, theme: &crate::design::Theme, binding: &NativePart, resources: &PartResources, scale: (f64, f64), edits: &mut Edits) -> Result<()> {
     if equal(old, new)? { return Ok(()); }
     if std::mem::discriminant(old) != std::mem::discriminant(new) { return Err(Error::Unsupported("native shape type replacement".into())); }
-    if crate::fields::patch_cache_only(xml, node, old, new, edits)? { return Ok(()); }
-    let generated = remap_resources(scaled_element(new, ids, theme, scale)?, resources)?;
+    let generated = remap_resources(scaled_element(new, ids, theme, scale)?, &resources.mapping)?;
     // Earlier exports kept custom routes in p:cxnSp, which PowerPoint cannot open; an edited route is rewritten as the marked freeform.
     if matches!(new, Element::Connector { routing: Some(route), .. } if route.custom) && node.has_tag_name((P, "cxnSp")) {
         edits.push((node.range(), generated));
@@ -523,7 +562,7 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
     let old_bounds = old.bounds(); let new_bounds = new.bounds();
     if old_bounds != new_bounds || matches!((old, new), (Element::Text { format: old, .. }, Element::Text { format: new, .. }) if old.inherit_layout != new.inherit_layout)
         || matches!((old, new), (Element::Shape { rotation: old, .. }, Element::Shape { rotation: new, .. }) if old != new) { geometry(xml, node, &generated, next, old, new, scale, edits)?; }
-    text_changes(xml, node, &generated, next, previous, old, new, edits).map_err(|error| match error {
+    text_changes(xml, node, &generated, next, previous, old, new, &resources.hyperlinks, edits).map_err(|error| match error {
         Error::Unsupported(message) => Error::Unsupported(format!("slide_id {}, element {}: {message}", binding.id, new.bounds().0)),
         error => error,
     })?;
@@ -552,7 +591,7 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
                     let rich = [&old_style.text_format,&style.text_format].iter().any(|format| format.as_ref().is_some_and(|format| !format.paragraphs.is_empty()));
                     let style_changed = old_style.text_style != style.text_style || old_style.text_format != style.text_format || font_size != next_size;
                     if style_changed || (before != after && rich) {
-                        validate_rich_style(body).map_err(|error| Error::Unsupported(format!("slide_id {}, element {}, cell ({row}, {column}): {error}", binding.id, new.bounds().0)))?;
+                        validate_rich_style(body, &resources.hyperlinks).map_err(|error| Error::Unsupported(format!("slide_id {}, element {}, cell ({row}, {column}): {error}", binding.id, new.bounds().0)))?;
                         if body.descendants().any(|node| node.has_tag_name((A,"hlinkClick")) || node.has_tag_name((A,"hlinkMouseOver"))) { return Err(Error::Unsupported("native cell hyperlinks are preserved; text style replacement is unsupported".into())); }
                         let next_body = child(next_cell,A,"txBody").ok_or_else(|| Error::Invalid("generated table text missing".into()))?;
                         crate::table_format::patch_paragraphs(xml,body,&generated,next_body,edits)?;
@@ -561,7 +600,7 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
                         let before_flags = crate::table_format::merge_flags(format,row,column);
                         let after_flags = crate::table_format::merge_flags(next_format,row,column);
                         if before_flags != after_flags {
-                            validate_rich_style(body).map_err(|error| Error::Unsupported(format!("slide_id {}, element {}, cell ({row}, {column}): {error}", binding.id, new.bounds().0)))?;
+                            validate_rich_style(body, &resources.hyperlinks).map_err(|error| Error::Unsupported(format!("slide_id {}, element {}, cell ({row}, {column}): {error}", binding.id, new.bounds().0)))?;
                             for name in ["gridSpan","rowSpan","hMerge","vMerge"] {
                                 match (cell.attribute(name),next_cell.attribute(name)) {
                                     (Some(old),Some(new)) if old != new => set_attribute(xml,cell,name,new,edits)?,
@@ -611,7 +650,7 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
                 let namespace = if kind.is_extended() { crate::chart_extended::NS } else { crate::native::C };
                 let chart = node.descendants().find(|node| node.has_tag_name((namespace, "chart"))).ok_or_else(|| Error::Invalid("chart reference missing".into()))?;
                 let attribute = chart.attributes().find(|attribute| attribute.namespace() == Some(crate::native::R) && attribute.name() == "id").ok_or_else(|| Error::Invalid("chart relationship missing".into()))?;
-                let relation = resources.get(&format!("rIdShape{}", ids[new.bounds().0])).ok_or_else(|| Error::Invalid("new chart resource missing".into()))?;
+                let relation = resources.mapping.get(&format!("rIdShape{}", ids[new.bounds().0])).ok_or_else(|| Error::Invalid("new chart resource missing".into()))?;
                 edits.push((attribute.range_value(), relation.clone()));
             }
         }
@@ -764,7 +803,7 @@ struct NativeSelection<'context, 'node, 'input> {
     ids: &'context BTreeMap<&'context str, usize>,
     theme: &'context crate::design::Theme,
     binding: &'context NativePart,
-    resources: &'context BTreeMap<String, String>,
+    resources: &'context PartResources,
 }
 
 impl NativeSelection<'_, '_, '_> {
@@ -778,7 +817,7 @@ impl NativeSelection<'_, '_, '_> {
                 insert_child(&shell, parsed.root_element(), &content, None, &mut edits)?;
                 return String::from_utf8(apply(shell, edits)?).map_err(|_| Error::Invalid("native group encoding".into()));
             }
-            return remap_resources(scaled_element(element, self.ids, self.theme, scale)?, self.resources);
+            return remap_resources(scaled_element(element, self.ids, self.theme, scale)?, &self.resources.mapping);
         };
         let mut edits = Vec::new();
         if let (Element::Group { children: before, view_width, view_height, .. }, Element::Group { children: after, view_width: next_width, view_height: next_height, .. }) = (old, element) {
@@ -814,7 +853,7 @@ impl NativeSelection<'_, '_, '_> {
     }
 }
 
-fn patch_selection_topology(xml: &str, tree: Node<'_, '_>, before: &[Element], after: &[Element], ids: &BTreeMap<&str, usize>, theme: &crate::design::Theme, binding: &NativePart, resources: &BTreeMap<String, String>, scale: (f64, f64), edits: &mut Edits) -> Result<()> {
+fn patch_selection_topology(xml: &str, tree: Node<'_, '_>, before: &[Element], after: &[Element], ids: &BTreeMap<&str, usize>, theme: &crate::design::Theme, binding: &NativePart, resources: &PartResources, scale: (f64, f64), edits: &mut Edits) -> Result<()> {
     let mut nodes = BTreeMap::new();
     let mut raw_ids = BTreeSet::new();
     for node in tree.descendants().filter(|node| node.has_tag_name((P, "cNvPr"))) {
@@ -889,7 +928,7 @@ fn patch_selection_topology(xml: &str, tree: Node<'_, '_>, before: &[Element], a
     Ok(())
 }
 
-fn patch_elements(xml: &str, tree: Node<'_, '_>, before: &[Element], after: &[Element], ids: &BTreeMap<&str, usize>, theme: &crate::design::Theme, binding: &NativePart, resources: &BTreeMap<String, String>, scale: (f64, f64), edits: &mut Edits) -> Result<()> {
+fn patch_elements(xml: &str, tree: Node<'_, '_>, before: &[Element], after: &[Element], ids: &BTreeMap<&str, usize>, theme: &crate::design::Theme, binding: &NativePart, resources: &PartResources, scale: (f64, f64), edits: &mut Edits) -> Result<()> {
     if tree.has_tag_name((P, "spTree")) {
         let mut reserved = BTreeSet::new();
         for node in tree.descendants().filter(|node| node.has_tag_name((P, "cNvPr"))) {
@@ -939,7 +978,7 @@ fn patch_elements(xml: &str, tree: Node<'_, '_>, before: &[Element], after: &[El
                 patch_element(xml, node, old, next, ids, theme, binding, resources, scale, &mut local)?;
                 fragments.push(edited_fragment(xml, node, local)?);
             } else {
-                fragments.push(remap_resources(scaled_element(next, ids, theme, scale)?, resources)?);
+                fragments.push(remap_resources(scaled_element(next, ids, theme, scale)?, &resources.mapping)?);
             }
         }
         let mut fragments = fragments.into_iter();
@@ -960,7 +999,7 @@ fn patch_elements(xml: &str, tree: Node<'_, '_>, before: &[Element], after: &[El
     }
     let mut inserted = String::new();
     for element in after.iter().filter(|element| !before.iter().any(|old| old.bounds().0 == element.bounds().0)) {
-        inserted.push_str(&remap_resources(scaled_element(element, ids, theme, scale)?, resources)?);
+        inserted.push_str(&remap_resources(scaled_element(element, ids, theme, scale)?, &resources.mapping)?);
     }
     if !inserted.is_empty() { insert_child(xml, tree, &inserted, child(tree, P, "extLst"), edits)?; }
     Ok(())
@@ -973,7 +1012,7 @@ pub(crate) fn patch_part(package: &mut Package, binding: &NativePart, before: &[
     let mut maximum = binding.nodes.values().filter_map(|value| value.parse::<usize>().ok()).max().unwrap_or(1);
     let mut ids: BTreeMap<&str, usize> = binding.nodes.iter().map(|(id, value)| value.parse().map(|number| (id.as_str(), number)).map_err(|_| Error::Invalid("shape ID is not numeric".into()))).collect::<Result<_>>()?;
     for element in crate::model::element_list(after) { if !ids.contains_key(element.bounds().0) { maximum = maximum.checked_add(1).filter(|value| *value <= u32::MAX as usize).ok_or_else(|| Error::Limit("native shape IDs exhausted".into()))?; ids.insert(element.bounds().0, maximum); } }
-    let resources = resource_changes(package, binding, before, after, &ids)?;
+    let resources = PartResources { mapping: resource_changes(package, binding, before, after, &ids)?, hyperlinks: crate::native::hyperlink_targets(package, &binding.path)? };
     let mut edits = Vec::new();
     if let Some(name) = name { set_attribute(&xml, common, "name", name, &mut edits)?; }
     if let Some(background) = background {
@@ -1187,7 +1226,7 @@ fn patch_notes(package: &mut Package, main: &str, slide_path: &str, slide: &crat
                 if let (Some(previous), Some(next)) = (previous.get(index), slide.notes_paragraphs.get(index)) {
                     if crate::fields::patch_paragraph_cache(&xml, *paragraph, previous, next, &mut edits)? { continue; }
                 }
-                if validate_rich_style(*paragraph).is_err() || paragraph.descendants().any(|node| node.has_tag_name((A, "hlinkClick"))) { return Err(Error::Unsupported("notes paragraph fields, links or unmodeled styles are preserved".into())); }
+                if validate_rich_style(*paragraph, &BTreeMap::new()).is_err() || paragraph.descendants().any(|node| node.has_tag_name((A, "hlinkClick"))) { return Err(Error::Unsupported("notes paragraph fields, links or unmodeled styles are preserved".into())); }
                 let replacement = if let Some(next) = next.get(index) {
                     let mut replacement = fragment(template, *next);
                     if let Some(end) = child(*paragraph, A, "endParaRPr") {
@@ -1272,5 +1311,6 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
     crate::native_design::remove_deleted(package, original, &topology)?;
     crate::review::save_end(package, original, deck, &bindings)?;
     crate::fonts::write_native(package, main, &original.deck.embedded_fonts, deck)?;
+    crate::review::remove_unused_hyperlinks(package)?;
     package.save()
 }

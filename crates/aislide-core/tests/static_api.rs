@@ -6,6 +6,63 @@ fn document() -> Value {
     execute_request(json!({"op":"create_presentation","id":"static-test","title":"Output test"})).unwrap()
 }
 
+#[test]
+fn issue36_inherited_font_findings_aggregate_before_the_report_budget() {
+    let mut deck = document()["deck"].clone();
+    let layout_id = deck["design"]["layouts"][0]["id"].clone();
+    deck["design"]["layouts"][0]["elements"] = json!((0..32).map(|index| json!({
+        "type":"text","id":format!("template-note-{index}"),"x":24+index%6*200,"y":40+index/6*72,
+        "width":176,"height":32,"text":"Template annotation","font_size":10,"color":"000000","bold":false,
+        "format":{"font_family":"AISlide Deliberately Missing Annotation Font"}
+    })).collect::<Vec<_>>());
+    let mut slide = deck["slides"][0].clone();
+    slide["layout_id"] = layout_id;
+    slide["elements"] = json!([{"type":"text","id":"template-note-0","x":24,"y":650,"width":300,"height":32,
+        "text":"Editable slide annotation","font_size":10,"color":"000000","bold":false,
+        "format":{"font_family":"AISlide Deliberately Missing Annotation Font"}}]);
+    deck["slides"] = json!((0..8).map(|index| {let mut slide=slide.clone();slide["id"]=json!(format!("page-{index}"));slide}).collect::<Vec<_>>());
+    let document = execute_request(json!({"op":"new_document","id":"inherited-findings","deck":deck})).unwrap();
+    for include_inherited in [true, false] {
+        let options = if include_inherited {json!({"page_indices":[0,1,2,3,4,5,6,7]})}
+            else {json!({"page_indices":[0,1,2,3,4,5,6,7],"include_inherited":false})};
+        let report = execute_request(json!({"op":"preflight_presentation","document":document,"options":options})).unwrap();
+        for code in ["SMALL_TEXT","FONT_FALLBACK"] {
+            let findings: Vec<_> = report["findings"].as_array().unwrap().iter().filter(|finding| finding["code"] == code).collect();
+            let inherited: Vec<_> = findings.iter().filter(|finding| finding["scopes"][0].as_str().is_some_and(|scope| scope.starts_with("layout:"))).collect();
+            assert_eq!(inherited.len(), if include_inherited {32} else {0}, "{code}");
+            for finding in inherited {
+                assert_eq!(finding["severity"], "info");
+                assert_eq!(finding["affected_page_indices"], json!([0,1,2,3,4,5,6,7]));
+                assert_eq!(finding["affected_slide_ids"].as_array().unwrap().len(), 8);
+            }
+            let local: Vec<_> = findings.iter().filter(|finding| finding["scopes"] == json!(["slide"])).collect();
+            assert_eq!(local.len(), 8, "{code}: slide-owned findings must remain individual");
+            assert!(local.iter().all(|finding| finding["severity"] == "warning"));
+        }
+    }
+}
+
+#[test]
+fn review_inherited_only_density_is_filtered_but_mixed_density_stays_actionable() {
+    let mut deck = document()["deck"].clone();
+    let layout_id = deck["design"]["layouts"][0]["id"].clone();
+    deck["slides"][0]["layout_id"] = layout_id;
+    deck["slides"][0]["elements"] = json!([]);
+    deck["design"]["layouts"][0]["elements"] = json!((0..81).map(|index| json!({
+        "type":"text","id":format!("template-{index}"),"x":24+index%9*80,"y":24+index/9*64,
+        "width":48,"height":32,"text":"A","font_size":20,"color":"000000","bold":false,"format":{"font_family":"Arial"}
+    })).collect::<Vec<_>>());
+    for local in [false, true] {
+        if local {
+            deck["slides"][0]["elements"] = json!([{"type":"text","id":"local","x":900,"y":650,"width":240,"height":32,
+                "text":"Editable content","font_size":20,"color":"000000","bold":false,"format":{"font_family":"Arial"}}]);
+        }
+        let document = execute_request(json!({"op":"new_document","id":"density-owners","deck":deck})).unwrap();
+        let checked = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"include_inherited":false}})).unwrap();
+        assert_eq!(checked["findings"].as_array().unwrap().iter().any(|finding| finding["code"]=="DENSE_SLIDE"), local, "{checked}");
+    }
+}
+
 fn issue16_document() -> Value {
     let mut deck = document()["deck"].clone();
     deck["slides"][0]["elements"] = json!([(640, 390), (520, 300), (380, 280)].into_iter().enumerate().map(|(index, (width, height))| {

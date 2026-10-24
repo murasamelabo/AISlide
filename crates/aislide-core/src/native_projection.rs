@@ -26,6 +26,7 @@ struct ProjectionPart {
     path: String,
     missing: Vec<String>,
     hide_master_graphics: bool,
+    unsupported_color_mapping: bool,
 }
 
 struct CacheEntry {
@@ -92,6 +93,7 @@ fn part(package: &Package, binding: &NativePart, elements: &[Element], design: b
     Ok(ProjectionPart {
         path: binding.path.clone(), missing: missing.into_iter().collect(),
         hide_master_graphics: matches!(root.attribute("showMasterSp"), Some("0" | "false")),
+        unsupported_color_mapping: native::unsupported_color_mapping(root),
     })
 }
 
@@ -138,8 +140,15 @@ fn append_warning(part: &ProjectionPart, page_index: usize, warnings: &mut Vec<R
     warnings.push(RenderWarning {
         code: "NATIVE_OBJECT_NOT_PREVIEWED".into(), page_index,
         element_id: if missing.len() == 1 { missing[0].to_string() } else { String::new() },
+        scope: None,
         message,
     });
+}
+
+fn append_color_warning(part: &ProjectionPart, page_index: usize, seen: &mut BTreeSet<String>, warnings: &mut Vec<RenderWarning>) {
+    if part.unsupported_color_mapping && seen.insert(part.path.clone()) {
+        warnings.push(RenderWarning { code: "NATIVE_COLOR_MAPPING_UNSUPPORTED".into(), page_index, element_id: String::new(), scope: None, message: native::color_mapping_warning(&part.path) });
+    }
 }
 
 pub(crate) fn warnings(document: &Document, pages: &[usize]) -> Result<Vec<RenderWarning>> {
@@ -157,10 +166,11 @@ pub(crate) fn warnings(document: &Document, pages: &[usize]) -> Result<Vec<Rende
 fn selected_warnings(deck: &Deck, pages: &[usize], index: &ProjectionIndex) -> Result<Vec<RenderWarning>> {
     let mut warnings = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut seen_colors = BTreeSet::new();
     for &page in pages {
         let slide = deck.slides.get(page).ok_or_else(|| Error::Invalid("projection warning page index out of range".into()))?;
         let source_id = slide.native_source_id.as_deref().unwrap_or(&slide.id);
-        if let Some(part) = index.slides.get(source_id) { append_warning(part, page, &mut warnings); }
+        if let Some(part) = index.slides.get(source_id) { append_warning(part, page, &mut warnings); append_color_warning(part, page, &mut seen_colors, &mut warnings); }
         let layout = deck.design.as_ref().and_then(|design| {
             slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)).or_else(|| design.layouts.first())
         });
@@ -168,8 +178,10 @@ fn selected_warnings(deck: &Deck, pages: &[usize], index: &ProjectionIndex) -> R
             let source_layout = index.layouts.get(&layout.id);
             let source_master = index.masters.get(&layout.master_id);
             if let Some(part) = source_layout {
+                append_color_warning(part, page, &mut seen_colors, &mut warnings);
                 if seen.insert(part.path.as_str()) { append_warning(part, page, &mut warnings); }
             }
+            if let Some(part) = source_master { append_color_warning(part, page, &mut seen_colors, &mut warnings); }
             if !slide.hide_master_graphics && source_layout.is_none_or(|part| !part.hide_master_graphics) {
                 if let Some(part) = source_master {
                     if seen.insert(part.path.as_str()) { append_warning(part, page, &mut warnings); }

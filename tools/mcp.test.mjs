@@ -88,6 +88,26 @@ async function feedbackMcpFixture(run, args = ['--tool-profile', 'full']) {
   } finally { hooks.deregister(); delete globalThis[key]; }
 }
 
+test('issue35 paragraph schemas expose OOXML spacing and coordinate units', async () => {
+  await feedbackMcpFixture(async ({ registrations }) => {
+    const schema = z.toJSONSchema(registrations.get('set_rich_text').config.inputSchema, { io: 'input' });
+    const serialized = JSON.stringify(schema);
+    for (const unit of ['1/100 pt', '1200 = 12 pt', '1/1000 percent', '100000 = 100%', 'EMU', '1 px = 9525', '1 pt = 12700']) {
+      assert.ok(serialized.includes(unit), `Missing rich paragraph unit: ${unit}`);
+    }
+  });
+});
+
+test('issue36 preflight schema exposes the inherited-only finding switch', async () => {
+  await feedbackMcpFixture(async ({ registrations }) => {
+    const schema = registrations.get('preflight_presentation').config.inputSchema;
+    const input = { deck_id: '00000000-0000-4000-8000-000000000036', options: { page_indices: [0, 1], include_inherited: false } };
+    assert.deepEqual(schema.parse(input), input);
+    const jsonSchema = z.toJSONSchema(schema, { io: 'input' });
+    assert.match(jsonSchema.properties.options.properties.include_inherited.description, /Default true/);
+  });
+});
+
 test('recipe MCP discovers semantic candidates and uses strict bounded input schemas', async () => {
   await feedbackMcpFixture(async ({ registrations, call, fixture }) => {
     for (const name of ['recipe_catalog', 'recommend_recipes', 'preview_recipe', 'apply_recipe']) assert.ok(registrations.has(name), `Missing ${name}`);
@@ -316,6 +336,16 @@ test('issue16 MCP returns creation effect warnings outside graph diagnostics', a
     assert.equal(changed.renderWarnings.revision, 2);
     const resized = await call('set_frames', { deck_id: created.deck_id, expected_revision: 2, slide_id: 'slide-1', frames: [{ id: 'soft-0', frame: { x: 20, y: 20, width: 640, height: 390 } }] });
     assert.equal(resized.renderWarnings.revision, 3);
+  });
+});
+
+test('issue36 MCP mutation warnings distinguish matching IDs in different owners', async () => {
+  await feedbackMcpFixture(async ({ call, fixture }) => {
+    const created = await call('create_presentation', { title: 'Synthetic scoped warnings' });
+    const warnings = ['layout:shared', 'slide'].map(scope => ({ code: 'FONT_FALLBACK', page_index: 0, element_id: 'same-id', scope, message: 'Synthetic fallback' }));
+    fixture.onRequest = async request => ({ document: { ...request.document, revision: request.document.revision + 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] }, render_warnings: warnings });
+    const changed = await call('apply_operations', { deck_id: created.deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), operations: [{ op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' }] });
+    assert.deepEqual(changed.renderWarnings.warnings, warnings);
   });
 });
 

@@ -996,6 +996,12 @@ pub(crate) fn small_annotation_ids(id: &str, spec: &GraphSpec) -> Result<BTreeSe
     Ok(ids)
 }
 
+pub(crate) fn fixed_annotation_ids(id: &str, spec: &GraphSpec) -> Result<BTreeSet<String>> {
+    let prefix = render_prefix(id, spec)?;
+    Ok(spec.groups.iter().map(|group| format!("{prefix}-g-{}", group.id))
+        .chain(spec.edges.iter().flat_map(|edge| [format!("{prefix}-et-{}", edge.id), format!("{prefix}-eb-{}", edge.id)])).collect())
+}
+
 pub(crate) fn cap_detail_fonts(id: &str, spec: &GraphSpec, children: &mut [Element]) -> Result<()> {
     let prefix = render_prefix(id, spec)?;
     for node in spec.nodes.iter().filter(|node| node.detail.is_some()) {

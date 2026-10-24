@@ -311,6 +311,25 @@ pub(crate) fn fixed_typography(spec: &PartSpec, floor: f64) -> bool {
     body.is_none_or(|size| size + 0.01 >= floor)
 }
 
+pub(crate) fn fixed_annotation_ids(id: &str, spec: &PartSpec, element: &Element) -> Result<BTreeSet<String>> {
+    if let PartData::Diagram { graph } = &spec.data {
+        let (graph_id, graph, _) = graph_context(id, spec, graph)?;
+        return crate::graphs::fixed_annotation_ids(&graph_id, &graph);
+    }
+    let mut ids = BTreeSet::new();
+    if briefing::kind(&spec.data).is_some() {
+        for element in crate::model::element_list(std::slice::from_ref(element)) {
+            if let Element::Text { id, text, width, height, font_size, format, .. } | Element::Shape { id, text, width, height, font_size, format, .. } = element {
+                let shape = matches!(element, Element::Shape { .. });
+                if !text.is_empty() && *font_size < briefing::BODY && format.content_frame(*width, *height, shape)[3] <= 32.0
+                    && format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).all(|run| run.style.font_size.unwrap_or(*font_size) < briefing::BODY)
+                { ids.insert(id.clone()); }
+            }
+        }
+    }
+    Ok(ids)
+}
+
 pub fn create(id: &str, spec: &PartSpec) -> Result<Element> { create_with_theme(id, spec, &crate::design::Theme::default()) }
 
 pub(crate) fn graph_render_context(id: &str, spec: &PartSpec) -> Result<(String, crate::graphs::GraphSpec, f64)> {

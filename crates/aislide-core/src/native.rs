@@ -78,6 +78,15 @@ fn color(node: Node<'_, '_>, default: &str) -> String {
 
 fn background(node: Node<'_, '_>) -> Option<String> { child(node, P, "cSld").and_then(|node| child(node, P, "bg")).and_then(|node| child(node, P, "bgPr")).map(|node| color(node, "@lt1")) }
 
+pub(crate) fn unsupported_color_mapping(root: Node<'_, '_>) -> bool {
+    child(root, P, "clrMapOvr").and_then(|node| child(node, A, "overrideClrMapping")).is_some()
+        || child(root, P, "clrMap").is_some_and(|node| node.attributes().any(|attribute| attribute.value() != crate::design::color_slot(attribute.name())))
+}
+
+pub(crate) fn color_mapping_warning(path: &str) -> String {
+    format!("Custom native color mapping in {path} is preserved in the PPTX but not resolved in AISlide's projection. Preview colors and color-based diagnostics may differ from PowerPoint; inspect the unchanged source in Office before changing backgrounds, text or contrast.")
+}
+
 fn shape_fill(node: Node<'_, '_>) -> String {
     if let Some(stop) = child(node, A, "gradFill").and_then(|node| child(node, A, "gsLst")).and_then(|node| child(node, A, "gs")) {
         if let Ok((color, _)) = crate::visual::read_color(stop) { return color; }
@@ -111,6 +120,19 @@ fn hyperlink(package: &Package, part: &str, id: &str) -> Result<Option<String>> 
         .and_then(|node| node.attribute("Target"));
     if let Some(value) = target { crate::model::validate_hyperlink(value)?; }
     Ok(target.map(str::to_owned))
+}
+
+pub(crate) fn hyperlink_targets(package: &Package, part: &str) -> Result<BTreeMap<String, String>> {
+    let path = relations_path(part);
+    if !package.part_names().contains(path.as_str()) { return Ok(BTreeMap::new()); }
+    let parsed = parse(package.text(&path)?)?;
+    let mut targets = BTreeMap::new();
+    for node in parsed.root_element().children().filter(|node| node.has_tag_name((REL, "Relationship")) && node.attribute("Type") == Some(format!("{R}/hyperlink").as_str()) && node.attribute("TargetMode") == Some("External")) {
+        let id = node.attribute("Id").ok_or_else(|| Error::Invalid("native hyperlink relationship ID missing".into()))?;
+        let target = node.attribute("Target").ok_or_else(|| Error::Invalid("native hyperlink relationship target missing".into()))?;
+        if targets.insert(id.into(), target.into()).is_some() { return Err(Error::Invalid("duplicate native hyperlink relationship ID".into())); }
+    }
+    Ok(targets)
 }
 
 fn text_format(package: &Package, part: &str, body: Node<'_, '_>, template: Option<&Element>) -> Result<(f64, String, bool, TextFormat)> {
@@ -524,6 +546,7 @@ fn normalize_native_frame(element: &mut Element, node: Node<'_, '_>, canvas: (u3
 
 pub(crate) fn read_part(package: &Package, path: &str, id: String, scale: (f64, f64), templates: &[Element], warnings: &mut Vec<String>, metadata: Option<&crate::provenance::Metadata>, canvas: (u32, u32)) -> Result<(String, Option<String>, Vec<Element>, NativePart)> {
     let document = parse(package.text(path)?)?;
+    if unsupported_color_mapping(document.root_element()) { warnings.push(color_mapping_warning(path)); }
     let common = child(document.root_element(), P, "cSld").ok_or_else(|| Error::Invalid("native common slide data missing".into()))?;
     let tree = child(common, P, "spTree").ok_or_else(|| Error::Invalid("native shape tree missing".into()))?;
     let ids = names(tree, metadata.and_then(|metadata| metadata.identities.iter().find(|identity| identity.part == path)))?;

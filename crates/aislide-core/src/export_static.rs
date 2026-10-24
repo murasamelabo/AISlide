@@ -299,12 +299,12 @@ fn preview_attempt(
     let mut warnings = output.warnings;
     warnings.extend(crate::native_projection::warnings(document, selected)?);
     if document.bindings.iter().any(|binding| binding.stale) {
-        warnings.push(RenderWarning { code: "SOURCE_BINDINGS_STALE".into(), page_index: pages[0].page_index, element_id: String::new(), message: "Preview includes stale source bindings; undo or rebind before export".into() });
+        warnings.push(RenderWarning { code: "SOURCE_BINDINGS_STALE".into(), page_index: pages[0].page_index, element_id: String::new(), scope: None, message: "Preview includes stale source bindings; undo or rebind before export".into() });
     }
     let downscaled = max_dimension < options.max_dimension;
     let quality_reduced = downscaled || output.effects_omitted;
     if downscaled {
-        warnings.push(RenderWarning { code: "PREVIEW_DOWNSCALED".into(), page_index: pages[0].page_index, element_id: String::new(),
+        warnings.push(RenderWarning { code: "PREVIEW_DOWNSCALED".into(), page_index: pages[0].page_index, element_id: String::new(), scope: None,
             message: format!("Preview max_dimension reduced from requested {} to actual {max_dimension} pixels to fit the encoded image budget; all {} selected pages are preserved in their requested order", options.max_dimension, pages.len()) });
     }
     let result = PresentationPreview { revision: document.revision, hash: document.hash.clone(),
@@ -379,6 +379,8 @@ pub struct RenderWarning {
     pub code: String,
     pub page_index: usize,
     pub element_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     pub message: String,
 }
 
@@ -657,7 +659,7 @@ fn export_pdf(
         warnings.extend(scene.warnings);
         let (svg, effect_count) = pdf_effects(&scene.svg)?;
         if effect_count > 0 {
-            warnings.push(RenderWarning { code: "PDF_EFFECT_RASTERIZED".into(), page_index: *page_index, element_id: String::new(), message: format!("{effect_count} top-level effect objects rendered by resvg at 2x; other page objects remain vector") });
+            warnings.push(RenderWarning { code: "PDF_EFFECT_RASTERIZED".into(), page_index: *page_index, element_id: String::new(), scope: None, message: format!("{effect_count} top-level effect objects rendered by resvg at 2x; other page objects remain vector") });
         }
         let tree = svg2pdf::usvg::Tree::from_str(&svg, &svg2pdf::usvg::Options::default())
             .map_err(|error| Error::Invalid(format!("internal PDF SVG: {error}")))?;
