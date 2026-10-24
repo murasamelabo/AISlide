@@ -522,6 +522,7 @@ pub(crate) fn remove_unused_hyperlinks(package: &mut crate::package::Package) ->
         }
     }
     for ((source, path), mut ids) in candidates {
+        if !package.part_names().contains(source.as_str()) { continue; }
         let owner = crate::pptx::parse(package.text(&source)?)?;
         for attribute in owner.descendants().flat_map(|node| node.attributes()).filter(|attribute| matches!(attribute.namespace(), Some(namespace) if namespace == crate::native::R || namespace == "http://purl.oclc.org/ooxml/officeDocument/relationships")) { ids.remove(attribute.value()); }
         if ids.is_empty() { continue; }

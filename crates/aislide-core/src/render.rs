@@ -887,7 +887,10 @@ impl Scene<'_> {
             } => {
                 let svg = chart_svg(
                     *kind, categories, series, options, width, height, self.theme, self.fonts,
-                )?;
+                ).map_err(|error| match error {
+                    Error::Unsupported(message) => Error::Unsupported(format!("page_index {}, scope {}, chart {id}: {message}",self.page_index,self.scope)),
+                    error => error,
+                })?;
                 if chart_projection::required(series, options) && !kind.is_polar() && !kind.is_extended() && !matches!(kind, crate::model::ChartKind::Radar | crate::model::ChartKind::RadarFilled) {
                     for warning in crate::model::chart_format::compute_chart_presentation(*kind, categories, series, options)?.warnings { self.warning(id, "CHART_PRESENTATION", warning); }
                     if options.legend.is_some_and(|legend| !matches!(legend, crate::model::chart_format::LegendPosition::Bottom | crate::model::chart_format::LegendPosition::Hidden)) { self.warning(id, "CHART_LEGEND_LAYOUT", "Statistical chart preview uses a bottom legend; native legend placement is retained"); }
@@ -1018,8 +1021,8 @@ impl Scene<'_> {
                     "static text {id}: non-Arabic numbering"
                 )));
             }
-            if paragraph.runs.iter().any(|run| run.field.is_some()) {
-                self.warning(id,"FIELD_CACHED_TEXT","Dynamic fields render their stored display text; export does not evaluate date/time fields");
+            if paragraph.runs.iter().any(|run| run.field.as_ref().is_some_and(|field| field.kind != "slidenum" && field.kind != crate::fields::SLIDE_TOTAL)) {
+                self.warning(id,"FIELD_CACHED_TEXT","Date/time or unsupported fields render their stored display text; explicitly refresh supported fields before export");
             }
             let runs = crate::rich_text::paragraph_runs(paragraph, format, paragraph_index);
             let bullet = paragraph.bullet.unwrap_or(format.bullet);

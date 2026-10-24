@@ -61,6 +61,25 @@ fn issue32_custom_color_maps_warn_in_native_and_template_diagnostics_without_rew
     }
 }
 
+#[test]
+fn review46_default_override_color_mapping_does_not_warn() {
+    let mut package = Package::open(save(&source())).unwrap();
+    let path = "ppt/slideLayouts/slideLayout1.xml";
+    let mut xml = package.text(path).unwrap().to_owned();
+    let parsed = roxmltree::Document::parse(&xml).unwrap();
+    let end = parsed.descendants().find(|node| node.tag_name().name() == "cSld").unwrap().range().end;
+    let range = parsed.descendants().find(|node| node.tag_name().name() == "clrMapOvr").map(|node|node.range()).unwrap_or(end..end);
+    xml.replace_range(range,"<p:clrMapOvr><a:overrideClrMapping bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr>");
+    package.replace_part(path,xml.into_bytes()).unwrap();
+    let bytes = package.save().unwrap();
+    let opened = document::open_presentation("default-color-map".into(),bytes.clone()).unwrap();
+    assert!(!opened["warnings"].as_array().unwrap().iter().any(|warning| warning.as_str().is_some_and(|message|message.contains("Custom native color mapping"))));
+    let document: Document = serde_json::from_value(opened["document"].clone()).unwrap();
+    assert_eq!(save(&document),bytes);
+    let preview = aislide_core::execute_request(json!({"op":"preview_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
+    assert!(!preview["warnings"].as_array().unwrap().iter().any(|warning|warning["code"]=="NATIVE_COLOR_MAPPING_UNSUPPORTED"));
+}
+
 fn issue23_package(elements: Vec<aislide_core::model::Element>, canvas: (u32, u32)) -> Package {
     let mut deck = source().deck;
     deck.width = canvas.0; deck.height = canvas.1; deck.design = None;

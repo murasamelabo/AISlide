@@ -725,7 +725,8 @@ Default integral chart ticks omit a redundant `.0`. Both the Plotters and
 explicit-format Cartesian adapters reserve axis space from the actual shaped
 tick labels in the selected document font. Explicit number formats remain
 explicit; when labels leave insufficient plot space, preview returns an
-actionable error instead of silently clipping digits. These are AISlide
+actionable error identifying `page_index`, scope and chart ID instead of
+silently clipping digits. These are AISlide
 rendering guarantees, not Office chart-layout parity.
 
 `TEXT_OVERLAP` uses positioned, clipped shaped-glyph metric bounds, including
@@ -996,9 +997,13 @@ Profiles are `consulting-decision`, `technical-explainer`, `event-talk`, and `st
 
 Optional `input.authoring` controls reading/projection context, comfortable/compact density, standard/relaxed spacing, body font floor (12-40 scene pixels), headline size (28-64) and font family. Omission preserves legacy typography; `{}` opts into profile defaults. Supplying only `headline_style`, `slide_limit` and/or a `ledger_notes` mode does not activate typography overrides. Existing `brand_color` remains the palette override. These are creation settings, not a retained styling policy for later part regeneration.
 
-The body floor applies to content, not preset-fixed compact annotations.
-Diagram group headers, edge labels/badges and compact briefing badges/captions
-retain their intended sizes while still using the requested font family.
+The body floor applies to content, including matrix cells, chart data labels,
+Sankey labels, journey stages and agenda metadata. Only diagram group headers,
+edge labels/badges and `flow/cards` step-number pills retain their fixed sizes
+while still using the requested font family. This is a semantic exception, not
+a general exemption for short or low-height text. Without typography overrides,
+briefing text retains the legacy 12px floor, including step pills; explicitly
+small diagram annotations can remain below 12px.
 Frame padding scales with resized content; pictures and small square/circular
 markers are contained and centered in their scaled slots without changing
 their aspect, and picture crops remain unchanged. Text that still
@@ -1011,6 +1016,21 @@ refreshes them. Field identity survives native export/reopen and Undo restores
 the previous caches. Ordinary page-like user text is not rewritten. The total
 is maintained by AISlide, not an Office-calculated total-pages field; changes
 made solely in other applications may need an AISlide field refresh.
+New generated field IDs use DrawingML `ST_Guid` lexical form (`{UPPERCASE-UUID}`);
+native field IDs already in a source are retained. Managed `slidenum` and
+`aislide_slidetotal` do not produce `FIELD_CACHED_TEXT`; date/time and unknown
+fields still report that they use stored display text.
+
+Page footers are now dynamic-field text, not freely replaceable labels.
+`replace_text_content` cannot modify or remove the field runs. Use
+`refresh_fields` for their caches, or `set_text_style` on the authored source
+for font/bold styling before export; it retains the field IDs and kinds.
+`set_rich_text` rejects replacement of field-bearing paragraphs even when the
+caller retains those IDs. After native
+reopening, changing the field-bearing text's run/frame typography remains
+protected rather than flattening or replacing native fields; `set_rich_text`
+is not a bypass for that native guard. Frame geometry and supported cache/padding
+edits remain available.
 
 Numeric evidence declarations cover factual data, not recognized layout/style
 positions: root column counts and body sizes for their supported preset kinds,
@@ -1024,7 +1044,10 @@ prose quantities still need human evidence review.
 
 Generated groups and charts receive deterministic accessibility descriptions
 from supplied titles, subtitles, labels, axes, categories, series/values and
-diagram connections. Picture/icon `alt` is retained. Titles are bounded to 500
+diagram connections. Descriptions omit repeated title/subtitle labels and empty
+connection sections. Matrix, RACI, heatmap and Harvey-matrix descriptions retain
+row/column associations rather than only listing flattened labels.
+Picture/icon `alt` is retained. Titles are bounded to 500
 Unicode scalars and descriptions to 4000; overlong descriptions carry an explicit
 truncation marker and do not alter source data. This metadata is a starting
 point for human accessibility review, not model inference or certification.
@@ -1145,7 +1168,9 @@ direct insertion or complete typed elements for exact slide coordinates.
 Pictures and icons preserve their aspect within those scaled guided slots.
 Labeled chart value lists use exact shortest decimal values with thousands
 grouping (for example `41,172 / 7,497` and `4.3 / 2.2`); native chart values
-are unchanged. Focus/KPI magnitude formatting remains separate.
+are unchanged. These exact lists can wrap long multi-series values within their
+row; they do not promise one line for arbitrary magnitudes or silently abbreviate
+the data to force one. Focus/KPI magnitude formatting remains separate.
 
 `Document.parts` is optional when empty. An instance contains `slide_id`, `element_id`, `spec`, `render_sha256`, optional `native_sha256`, and `stale`. Hashes cover rendered children and original native group/resources, including chart workbooks. Root-only movement/resizing in Studio is allowed; mismatched manual/native edits mark the part stale and block semantic update. Missing fingerprints on existing native roots also mark stale. There is no automatic regeneration, no cryptographic authentication, and benign external XML reserialization can conservatively mark stale. Ordinary native objects remain available even without metadata.
 
@@ -1486,6 +1511,11 @@ Review operations `modern_comment`, `set_table_headers`, `check_accessibility`, 
 
 `deck.design` is optional and contains `{theme, masters, layouts}`. Each master is `{id, name, background, elements, theme?}`; each layout is `{id, name, master_id, source_id?, background?, elements}`. `source_id` records an imported package-part identity, not an alias accepted by layout assignment. A master's optional theme overrides the default design theme for its layouts and slides; omitting it restores inheritance. Background colors and element colors accept six-digit RGB or `@dk1`, `@lt1`, `@dk2`, `@lt2`, `@accent1` through `@accent6`, `@hlink`, `@folHlink`. Theme slots themselves must be RGB, not references. Theme fonts are `{major, minor, east_asian, complex_script}`. Native solid/table fills, gradients and effects consistently normalize standard `bg1/tx1/bg2/tx2` aliases to `lt1/dk1/lt2/dk2`; this does not implement custom master color-map remapping. Custom master maps and explicit layout/slide `overrideClrMapping` produce `NATIVE_COLOR_MAPPING_UNSUPPORTED` warnings in native/POTX previews and preflight, identifying the source part. Original mappings remain unchanged; compare in Office before changing colors or accepting color-based contrast diagnostics. See [master fields and themes](authoring/master-fields-themes.md) for owner isolation and native preservation limits.
 
+An explicit color-map override whose attributes repeat the standard mapping
+does not warn merely because `overrideClrMapping` is present. Nondefault
+mapping warnings remain conservative; the effective inherited custom map is
+still not resolved.
+
 Slides optionally contain `layout_id`, `inherit_background`, `hide_master_graphics`. Text and shape elements accept `format: {italic?, underline?, alignment?, vertical?, bullet?, font_family?, hyperlink?, placeholder?, inherit_layout?, paragraphs?}`. Alignment is left/center/right/justify; vertical is top/middle/bottom; bullet is none/bullet/numbered. Fonts may be explicit names or `@major`/`@minor`. Hyperlinks are absolute HTTP(S)/mailto URLs without embedded credentials or control characters; the application never fetches or activates them.
 
 Supported native hyperlink edits remain editable after saving and reopening.
@@ -1499,6 +1529,9 @@ This cleanup is not a complete privacy scan or a license to flatten unsupported
 mixed-link text or native formatting.
 Distinct relationship IDs for the same external destination do not count as
 mixed links. Genuinely different per-run targets remain guarded.
+An orphan relationship part whose owning source part is missing is retained
+unchanged: cleanup does not treat an uninspectable owner as proof that its
+links are unused. Such a malformed package is not certified as valid OPC.
 
 `format.paragraphs` represents rich runs and paragraph formatting, not HTML. It supports run styles, numbering, indentation, spacing and tab stops within bounded typed inputs. When paragraphs are present, the element's `text` must equal their run texts joined with newline separators. Unknown or unrepresentable native rich content remains protected rather than flattened. Font measurement and rendering do not establish Office typography parity.
 

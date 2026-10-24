@@ -409,7 +409,14 @@ fn bounded_description(value: &str, limit: usize) -> String {
 
 fn describe_visuals(slide: &mut crate::model::Slide, spec: Option<&PartSpec>) -> Result<()> {
     let title=spec.map_or(slide.title.as_str(),|spec|spec.title.as_str());
-    let context=spec.map_or_else(||title.to_owned(),|spec|format!("{}; {}",spec.title,spec.subtitle));
+    let context=spec.filter(|spec|!spec.subtitle.trim().is_empty()).map_or_else(||title.to_owned(),|spec|format!("{}; {}",spec.title,spec.subtitle));
+    let matrix=spec.and_then(|spec| match &spec.data {
+        crate::parts::PartData::Raci {roles,tasks,..} => Some(tasks.iter().map(|task|format!("{}: {}",task.label,roles.iter().zip(&task.assignments).map(|(role,value)|format!("{role} = {value}")).collect::<Vec<_>>().join("; "))).collect::<Vec<_>>().join(". ")),
+        crate::parts::PartData::Matrix {rows,columns,cells,..} => Some(rows.iter().zip(cells).map(|(row,cells)|format!("{row}: {}",columns.iter().zip(cells).map(|(column,value)|format!("{column} = {value}")).collect::<Vec<_>>().join("; "))).collect::<Vec<_>>().join(". ")),
+        crate::parts::PartData::Heatmap {columns,rows,unit,..} => Some(rows.iter().map(|row|format!("{}: {}",row.label,columns.iter().zip(&row.values).map(|(column,value)|format!("{column} = {value}{unit}")).collect::<Vec<_>>().join("; "))).collect::<Vec<_>>().join(". ")),
+        crate::parts::PartData::HarveyMatrix {columns,rows,..} => Some(rows.iter().map(|row|format!("{}: {}",row.label,columns.iter().zip(&row.levels).map(|(column,value)|format!("{column} = {value}/4")).collect::<Vec<_>>().join("; "))).collect::<Vec<_>>().join(". ")),
+        _=>None,
+    });
     let connections=if let Some(PartSpec {data:crate::parts::PartData::Diagram {graph},..})=spec {
         graph.edges.iter().map(|edge| {
             let label=|id:&str| graph.nodes.iter().find(|node|node.id==id).map_or(id.to_owned(),|node|node.label.clone());
@@ -421,11 +428,13 @@ fn describe_visuals(slide: &mut crate::model::Slide, spec: Option<&PartSpec>) ->
         let description=match element {
             Element::Group {children,..} => {
                 let labels=crate::model::element_list(children).into_iter().filter_map(|element|match element {
-                    Element::Text {text,..}|Element::Shape {text,..} if !text.is_empty()=>Some(text.as_str()),
+                    Element::Text {text,..}|Element::Shape {text,..} if !text.is_empty() && text!=title && spec.is_none_or(|spec|text!=&spec.subtitle)=>Some(text.as_str()),
                     Element::Picture {alt,..} if !alt.is_empty()=>Some(alt.as_str()),
                     _=>None,
                 }).collect::<Vec<_>>().join("; ");
-                format!("{context}. Labels: {labels}. Connections: {connections}")
+                let mut description=if let Some(matrix)=&matrix {format!("{context}. Rows and columns: {matrix}")} else {format!("{context}. Labels: {labels}")};
+                if !connections.is_empty() {description.push_str(&format!(". Connections: {connections}"));}
+                description
             }
             Element::Chart {categories,series,..} => {
                 let axes=if let Some(PartSpec {data:crate::parts::PartData::Chart {x_axis,y_axis,..},..})=spec {format!("Axes: {x_axis}; {y_axis}. ")} else {String::new()};
@@ -481,8 +490,8 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
             let body_width=1280.0-2.0*margin;
             if let Element::Group{x,y,width,height,..}=&mut element {*x=margin;*y=body_top;*width=body_width;*height=body_height;}
             crate::parts::state::resize_canvas(&mut element,body_width,body_height)?;
-            fn minimum_text(element:&mut Element,fixed:&BTreeSet<String>) {match element {Element::Text{id,font_size,..}|Element::Shape{id,font_size,..}|Element::Table{id,font_size,..}=>if !fixed.contains(id) {*font_size=font_size.max(12.0);},Element::Group{children,..}=>for child in children {minimum_text(child,fixed);},_=>()}}
-            minimum_text(&mut element,&fixed);
+            fn minimum_text(element:&mut Element,fixed:&BTreeSet<String>,small_diagram_annotations:bool) {match element {Element::Text{id,font_size,..}|Element::Shape{id,font_size,..}|Element::Table{id,font_size,..}=>if !small_diagram_annotations || !fixed.contains(id) {*font_size=font_size.max(12.0);},Element::Group{children,..}=>for child in children {minimum_text(child,fixed,small_diagram_annotations);},_=>()}}
+            minimum_text(&mut element,&fixed,matches!(spec.data,crate::parts::PartData::Diagram{..}));
             if authoring.is_none() && input.profile_id=="event-talk" {
                 let mut encoded=serde_json::to_value(&element)?;
                 if let Some(children)=encoded["children"].as_array_mut() {for child in children {if child["type"]=="text" && child["y"].as_f64().is_some_and(|value|value>70.0) && child["height"].as_f64().is_some_and(|value|value>=40.0) {child["font_size"]=json!(child["font_size"].as_f64().unwrap_or(22.0).max(22.0));}}}

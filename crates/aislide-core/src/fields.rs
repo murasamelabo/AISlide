@@ -166,7 +166,7 @@ pub(crate) fn replace_body(mut element: crate::model::Element, replacement: Stri
         for run in &paragraph.runs {
             let chars: Vec<_> = run.text.chars().collect();
             let limit = offset + chars.len();
-            if run.field.is_some() && ((prefix < limit && end > offset) || (prefix == end && prefix > offset && prefix < limit) || (chars.is_empty() && prefix <= offset && end >= offset)) { return Err(Error::Unsupported("plain body edits cannot modify or remove dynamic fields".into())); }
+            if run.field.is_some() && ((prefix < limit && end > offset) || (prefix == end && prefix > offset && prefix < limit) || (chars.is_empty() && prefix <= offset && end >= offset)) { return Err(Error::Unsupported("plain body edits cannot modify or remove dynamic fields; use refresh_fields for display caches, or set_text_style on the authored source for formatting before native export".into())); }
             if !inserted && prefix <= limit {
                 let left = prefix.saturating_sub(offset).min(chars.len());
                 if left > 0 { let mut kept = run.clone(); kept.text = chars[..left].iter().collect(); runs.push(kept); }
@@ -385,7 +385,7 @@ fn instance_id(scope: &str, element: &str, ordinal: usize) -> String {
     use sha2::{Digest, Sha256};
     let bytes = Sha256::digest(format!("aislide-field\0{scope}\0{element}\0{ordinal}"));
     let hex = format!("{bytes:x}");
-    format!("{}-{}-4{}-8{}-{}", &hex[..8], &hex[8..12], &hex[13..16], &hex[17..20], &hex[20..32])
+    format!("{{{}-{}-4{}-8{}-{}}}", &hex[..8], &hex[8..12], &hex[13..16], &hex[17..20], &hex[20..32]).to_ascii_uppercase()
 }
 
 pub(crate) fn pagination(element: &mut crate::model::Element, scope: &str, number: usize, total: usize) {

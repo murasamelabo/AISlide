@@ -516,7 +516,7 @@ fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '
     if rich {
         if format.paragraphs.is_empty() { return Err(Error::Unsupported("rich native text must be edited through the rich text API".into())); }
         if !equal(&(old_size, old_color, old_bold, old_format.italic, old_format.underline, &old_format.font_family, old_format.alignment, old_format.bullet), &(size, color, bold, format.italic, format.underline, &format.font_family, format.alignment, format.bullet))? {
-            return Err(Error::Unsupported("rich text has explicit run and paragraph styles; use the rich range or paragraph API instead of frame-style replacement".into()));
+            return Err(Error::Unsupported("rich text has explicit run and paragraph styles; use the rich range or paragraph API instead of frame-style replacement. For native field-bearing text, field styling is protected: use set_text_style on the authored source before native export; refresh_fields updates display caches without changing field identity".into()));
         }
         let next_body = child(next, P, "txBody").ok_or_else(|| Error::Invalid("generated text body missing".into()))?;
         let unchanged: Vec<_> = old_format.paragraphs.iter().enumerate().map(|(index, paragraph)| old_format.hyperlink == format.hyperlink && format.paragraphs.get(index) == Some(paragraph)).collect();

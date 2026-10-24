@@ -139,6 +139,26 @@ fn clean_copy_removes_unused_external_hyperlink_relationships_only() {
 }
 
 #[test]
+fn review46_orphan_hyperlink_relationships_are_retained_without_blocking_an_edit() {
+    let package = Package::open(source()).unwrap();
+    let path = "ppt/slides/_rels/slide9.xml.rels";
+    let orphan = format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"orphan\" Type=\"{R}/hyperlink\" Target=\"https://example.invalid/orphan\" TargetMode=\"External\"/></Relationships>");
+    let mut parts = package.parts().clone();
+    parts.insert(path.into(),orphan.as_bytes().to_vec());
+    let original = Package::from_parts(parts).unwrap().save().unwrap();
+    let document = open(&original);
+    assert_eq!(save(&document),original);
+    let changed = execute_request(json!({"op":"transaction","document":document,"transaction":{
+        "expected_revision":document["revision"],"expected_hash":document["hash"],"operations":[
+            {"op":"replace","path":"/deck/slides/0/notes","value":"Unrelated supported edit"}
+        ]
+    }})).unwrap();
+    let output = Package::open(save(&changed["document"])).unwrap();
+    assert_eq!(output.part(path).unwrap(),orphan.as_bytes());
+    assert_eq!(links(&save(&changed["document"])).len(),3);
+}
+
+#[test]
 fn cleanup_keeps_hover_extension_and_non_hyperlink_relationships() {
     let mut package = Package::open(source()).unwrap();
     let path = "ppt/slides/_rels/slide1.xml.rels";

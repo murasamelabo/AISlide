@@ -18,6 +18,21 @@ fn deck() -> Deck {
 }
 
 #[test]
+fn review46_chart_fit_error_identifies_the_page_and_chart() {
+    let mut source: Deck = serde_json::from_value(json!({"version":1,"title":"Synthetic crowded chart","width":1280,"height":720,
+        "slides":[{"id":"page-a","title":"Provided values","background":"FFFFFF","notes":"","elements":[{
+            "type":"chart","id":"crowded-chart","x":20,"y":20,"width":160,"height":120,"kind":"column","categories":["Provided"],
+            "series":[{"name":"Synthetic fixture","values":[41172],"color":"1976D2"}],
+            "options":{"primary_axis":{"number_format":"0.000000000000"}}
+        }]}]})).unwrap();
+    source.design = Some(aislide_core::design::Design::default());
+    source.design.as_mut().unwrap().theme.fonts.minor = "BIZ UDPGothic".into();
+    let error = render_slide_svg(&source,0,false).err().expect("tick labels must not be silently clipped").to_string();
+    assert!(error.contains("chart axis labels do not fit"),"{error}");
+    assert!(error.contains("crowded-chart") && error.contains("page_index 0"),"{error}");
+}
+
+#[test]
 fn issue45_wide_font_axis_ticks_keep_the_leading_digit_inside_the_rendered_chart() {
     use kurbo::Shape;
     let mut source: Deck = serde_json::from_value(json!({"version":1,"title":"Synthetic wide-font chart","width":1280,"height":720,

@@ -316,18 +316,15 @@ pub(crate) fn fixed_annotation_ids(id: &str, spec: &PartSpec, element: &Element)
         let (graph_id, graph, _) = graph_context(id, spec, graph)?;
         return crate::graphs::fixed_annotation_ids(&graph_id, &graph);
     }
-    let mut ids = BTreeSet::new();
-    if briefing::kind(&spec.data).is_some() {
-        for element in crate::model::element_list(std::slice::from_ref(element)) {
-            if let Element::Text { id, text, width, height, font_size, format, .. } | Element::Shape { id, text, width, height, font_size, format, .. } = element {
-                let shape = matches!(element, Element::Shape { .. });
-                if !text.is_empty() && *font_size < briefing::BODY && format.content_frame(*width, *height, shape)[3] <= 32.0
-                    && format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).all(|run| run.style.font_size.unwrap_or(*font_size) < briefing::BODY)
-                { ids.insert(id.clone()); }
-            }
+    let PartData::StepCards { steps, step_label, .. } = &spec.data else { return Ok(BTreeSet::new()); };
+    let label = if step_label.is_empty() { "STEP" } else { step_label };
+    let badges: BTreeSet<_> = (1..=steps.len()).map(|index| format!("{label} {index}")).collect();
+    Ok(crate::model::element_list(std::slice::from_ref(element)).into_iter().filter_map(|element| {
+        if let Element::Shape { id, text, preset, .. } = element {
+            if preset == "roundRect" && badges.contains(text) { return Some(id.clone()); }
         }
-    }
-    Ok(ids)
+        None
+    }).collect())
 }
 
 pub fn create(id: &str, spec: &PartSpec) -> Result<Element> { create_with_theme(id, spec, &crate::design::Theme::default()) }

@@ -22,6 +22,139 @@ fn part_brief(spec: Value) -> Value {
     input
 }
 
+fn catalog_brief(preset: &str) -> Value {
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let spec = catalog["presets"].as_array().unwrap().iter().find(|entry| entry["id"] == preset).unwrap()["example"].clone();
+    let mut input = part_brief(spec.clone());
+    fn numbers(value: &Value, path: &str, output: &mut Vec<Value>) {
+        match value {
+            Value::Number(_) => output.push(json!({"path":path,"value":value,"evidence_id":"source-a"})),
+            Value::Array(values) => for (index, value) in values.iter().enumerate() { numbers(value,&format!("{path}/{index}"),output); },
+            Value::Object(values) => for (key, value) in values { numbers(value,&format!("{path}/{}",key.replace('~',"~0").replace('/',"~1")),output); },
+            _ => {}
+        }
+    }
+    let mut declarations = Vec::new();
+    numbers(&spec["data"],"/data",&mut declarations);
+    input["slides"][0]["numbers"] = json!(declarations);
+    input
+}
+
+#[test]
+fn review46_data_labels_keep_the_requested_body_floor() {
+    for preset in ["matrix/raci", "flow/sankey", "flow/journey", "horizontal-bar-graph/bullet", "list/agenda"] {
+        let mut input = catalog_brief(preset);
+        input["authoring"] = json!({"font_family":"BIZ UDPGothic","body_font_min":16});
+        let created = execute_request(json!({"op":"create_guided_presentation","id":"data-label-floor","input":input})).unwrap_or_else(|error| panic!("{preset}: {error}"));
+        assert_body_floor(&created["document"]["deck"]["slides"][0]["elements"][4],1.0,16.0);
+        fn font_families(value: &Value) {
+            match value {
+                Value::Object(fields) => for (key,value) in fields {
+                    if key=="font_family" && !value.is_null() {assert_eq!(value,"BIZ UDPGothic");}
+                    font_families(value);
+                },
+                Value::Array(values) => for value in values {font_families(value);},
+                _ => {}
+            }
+        }
+        font_families(&created["document"]["deck"]["slides"][0]["elements"][4]);
+        let report = execute_request(json!({"op":"preflight_presentation","document":created["document"],"options":{"min_font_size":16}})).unwrap();
+        assert!(!report["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "SMALL_TEXT" && finding["element_ids"].as_array().unwrap().iter().any(|id| id.as_str().is_some_and(|id| id.starts_with("guided-part-")))), "{preset}: {report}");
+    }
+}
+
+#[test]
+fn review46_legacy_briefing_text_keeps_the_twelve_pixel_floor() {
+    for preset in ["flow/cards", "horizontal-bar-graph/bullet", "matrix/risk", "flow/swimlane"] {
+        let created = execute_request(json!({"op":"create_guided_presentation","id":"legacy-label-floor","input":catalog_brief(preset)})).unwrap();
+        assert_body_floor(&created["document"]["deck"]["slides"][0]["elements"][4],1.0,12.0);
+    }
+}
+
+#[test]
+fn review46_generated_guided_fields_use_ooxml_guid_lexical_form() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"guid-lexical-form","input":authoring_brief("status-report")})).unwrap();
+    let exported = execute_request(json!({"op":"export_presentation","document":created["document"]})).unwrap();
+    let package = aislide_core::package::Package::open(STANDARD.decode(exported["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let xml = roxmltree::Document::parse(package.text("ppt/slides/slide1.xml").unwrap()).unwrap();
+    let fields = xml.descendants().filter(|node| node.tag_name().name() == "fld").collect::<Vec<_>>();
+    assert_eq!(fields.len(),2);
+    for field in fields {
+        let id = field.attribute("id").unwrap();
+        assert_eq!(id.len(),38,"DrawingML ST_Guid requires braces: {id}");
+        assert!(id.starts_with('{') && id.ends_with('}'),"{id}");
+        assert_eq!(id,id.to_ascii_uppercase(),"DrawingML ST_Guid requires uppercase: {id}");
+        aislide_core::fields::parse_id(id).unwrap();
+    }
+}
+
+#[test]
+fn review46_managed_page_fields_do_not_add_cached_text_warnings() {
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"page-warning-scope","input":authoring_brief("status-report")})).unwrap();
+    let exported = execute_request(json!({"op":"export_presentation","document":created["document"]})).unwrap();
+    let reopened = execute_request(json!({"op":"open_presentation","id":"page-warning-native","base64":exported["base64"]})).unwrap();
+    for document in [&created["document"],&reopened["document"]] {
+        let deck = serde_json::from_value(document["deck"].clone()).unwrap();
+        let rendered = aislide_core::render::render_slide_svg(&deck,0,false).unwrap();
+        assert!(!rendered.warnings.iter().any(|warning| warning.code == "FIELD_CACHED_TEXT"),"{:?}",rendered.warnings);
+        let report = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+        assert!(!report["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "FIELD_CACHED_TEXT"),"{report}");
+    }
+    for kind in ["datetime1","vendor_unknown"] {
+        let mut deck = created["document"]["deck"].clone();
+        deck["slides"][0]["elements"][3]["format"]["paragraphs"][0]["runs"][0]["field"]["kind"] = json!(kind);
+        let rendered = aislide_core::render::render_slide_svg(&serde_json::from_value(deck).unwrap(),0,false).unwrap();
+        assert!(rendered.warnings.iter().any(|warning| warning.code == "FIELD_CACHED_TEXT"),"cached {kind} must still warn");
+    }
+}
+
+#[test]
+fn review46_alt_descriptions_avoid_empty_sections_and_keep_matrix_relations() {
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"readable-chart-alt","input":brief("status-report")})).unwrap();
+    let root = &created["document"]["deck"]["slides"][0]["review"]["accessibility"]["guided-part-1"]["description"];
+    let description = root.as_str().unwrap();
+    assert_eq!(description.matches("Exposure by area").count(),1,"{description}");
+    assert!(!description.contains("Connections:"),"{description}");
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"readable-matrix-alt","input":catalog_brief("matrix/raci")})).unwrap();
+    let description = created["document"]["deck"]["slides"][0]["review"]["accessibility"]["guided-part-1"]["description"].as_str().unwrap();
+    assert!(description.contains("Define requirements: Product = A/R"),"{description}");
+    assert!(description.contains("Build and test: Product = C; Engineering = A/R"),"{description}");
+}
+
+#[test]
+fn review46_protected_page_edits_explain_the_supported_authored_style_path() {
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"page-edit-guidance","input":authoring_brief("status-report")})).unwrap();
+    let document = &created["document"];
+    let styled = execute_request(json!({"op":"apply_operations","document":document,
+        "expected_revision":document["revision"],"expected_hash":document["hash"],"operations":[
+            {"op":"set_text_style","slide_id":"evidence-slide","ids":["page"],"style":{"bold":true,"font_size":14}}
+        ]})).unwrap();
+    let page = &styled["document"]["deck"]["slides"][0]["elements"][3];
+    assert_eq!(page["font_size"].as_f64(),Some(14.0)); assert_eq!(page["bold"],true); assert_eq!(page["text"],"1 / 1");
+    for index in [0,2] {
+        assert_eq!(page["format"]["paragraphs"][0]["runs"][index]["field"],document["deck"]["slides"][0]["elements"][3]["format"]["paragraphs"][0]["runs"][index]["field"]);
+    }
+    let saved_style = execute_request(json!({"op":"export_presentation","document":styled["document"]})).unwrap();
+    let reopened_style = execute_request(json!({"op":"open_presentation","id":"page-styled-native","base64":saved_style["base64"]})).unwrap();
+    let page = &reopened_style["document"]["deck"]["slides"][0]["elements"][3];
+    assert_eq!(page["font_size"].as_f64(),Some(14.0)); assert_eq!(page["bold"],true); assert_eq!(page["text"],"1 / 1");
+    for index in [0,2] {
+        assert_eq!(page["format"]["paragraphs"][0]["runs"][index]["field"],document["deck"]["slides"][0]["elements"][3]["format"]["paragraphs"][0]["runs"][index]["field"]);
+    }
+    let error = execute_request(json!({"op":"replace_text_content","document":document,
+        "expected_revision":document["revision"],"slide_id":"evidence-slide","id":"page","text":"Manual footer"})).unwrap_err().to_string();
+    assert!(error.contains("set_text_style") && error.contains("authored source") && error.contains("refresh_fields"),"{error}");
+    let exported = execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+    let reopened = execute_request(json!({"op":"open_presentation","id":"page-edit-guidance-native","base64":exported["base64"]})).unwrap();
+    let document = &reopened["document"];
+    let error = execute_request(json!({"op":"apply_operations","document":document,
+        "expected_revision":document["revision"],"expected_hash":document["hash"],"operations":[
+            {"op":"set_text_style","slide_id":"evidence-slide","ids":["page"],"style":{"bold":true}}
+        ]})).unwrap_err().to_string();
+    assert!(error.contains("set_text_style") && error.contains("authored source") && error.contains("protected"),"{error}");
+}
+
 #[test]
 fn issue38_guided_page_fields_follow_import_reorder_remove_and_native_reopen() {
     use aislide_core::{document, slide_import};

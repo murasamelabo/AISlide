@@ -79,8 +79,8 @@ fn color(node: Node<'_, '_>, default: &str) -> String {
 fn background(node: Node<'_, '_>) -> Option<String> { child(node, P, "cSld").and_then(|node| child(node, P, "bg")).and_then(|node| child(node, P, "bgPr")).map(|node| color(node, "@lt1")) }
 
 pub(crate) fn unsupported_color_mapping(root: Node<'_, '_>) -> bool {
-    child(root, P, "clrMapOvr").and_then(|node| child(node, A, "overrideClrMapping")).is_some()
-        || child(root, P, "clrMap").is_some_and(|node| node.attributes().any(|attribute| attribute.value() != crate::design::color_slot(attribute.name())))
+    [child(root, P, "clrMap"),child(root, P, "clrMapOvr").and_then(|node| child(node, A, "overrideClrMapping"))]
+        .into_iter().flatten().any(|node| node.attributes().any(|attribute| attribute.value() != crate::design::color_slot(attribute.name())))
 }
 
 pub(crate) fn color_mapping_warning(path: &str) -> String {
