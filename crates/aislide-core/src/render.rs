@@ -1095,6 +1095,7 @@ impl Scene<'_> {
                 TextAlign::Right => Align::Right,
                 TextAlign::Justify => Align::Justified,
             };
+            let inset = if matches!(align, Align::Right | Align::Center) { wrap_inset } else { inset };
             for line in &mut buffer.lines {
                 line.set_align(Some(align));
             }

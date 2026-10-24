@@ -50,6 +50,88 @@ fn with_elements(elements: serde_json::Value) -> Deck {
     serde_json::from_value(value).unwrap()
 }
 
+fn text_ink_bounds(element: serde_json::Value) -> [f64; 4] {
+    let mut source = with_elements(json!([element]));
+    source.width = 512;
+    let output = export_static(&source, &ExportOptions { transparent: true, ..Default::default() }).unwrap();
+    assert!(!output.warnings.iter().any(|warning| warning.code == "TEXT_OVERFLOW"), "{:?}", output.warnings);
+    let pixels = image::load_from_memory(&output.artifacts[0].bytes).unwrap().into_rgba8();
+    pixels.enumerate_pixels().filter(|(_, _, pixel)| pixel[3] > 32)
+        .map(|(x, y, _)| [x, y, x + 1, y + 1])
+        .reduce(|first, next| [first[0].min(next[0]), first[1].min(next[1]), first[2].max(next[2]), first[3].max(next[3])])
+        .expect("text must paint visible ink").map(f64::from)
+}
+
+#[test]
+fn review31_aligned_bullets_and_hanging_paragraphs_use_the_correct_ink_origin() {
+    for alignment in ["left", "right", "center", "justify"] {
+        for mode in ["plain-bullet", "rich-bullet", "plain-numbered", "rich-numbered", "hanging-18", "hanging-36", "positive-indent", "unindented"] {
+            for padding in [0, 12] {
+                for wrapped in [false, true] {
+                    let text = if wrapped { "Quarterly performance review for the regional team with a long title that wraps onto several lines" } else { "Regional team review" };
+                    let (wrap_inset, left_origin) = match mode {
+                        "plain-bullet" | "rich-bullet" | "plain-numbered" | "rich-numbered" => (24.0, 7.2),
+                        "hanging-18" => (18.0, 0.0),
+                        "hanging-36" => (36.0, 0.0),
+                        "positive-indent" => (24.0, 24.0),
+                        _ => (0.0, 0.0),
+                    };
+                    let marker = if mode.ends_with("bullet") { "\u{2022} " } else if mode.ends_with("numbered") { "1. " } else { "" };
+                    let insets = json!({"left":padding,"right":padding,"top":8,"bottom":8});
+                    let mut element = json!({
+                        "type":"text","id":"aligned","x":80,"y":40,"width":400,"height":220,
+                        "text":text,"font_size":24,"color":"000000","bold":false,
+                        "format":{"alignment":alignment,"padding":insets}
+                    });
+                    if mode.starts_with("plain-") {
+                        element["format"]["bullet"] = json!(if mode.ends_with("bullet") { "bullet" } else { "numbered" });
+                    } else if mode != "unindented" {
+                        let mut paragraph = json!({"alignment":alignment,"runs":[{"text":text}]});
+                        if mode.starts_with("rich-") {
+                            paragraph["bullet"] = json!(if mode.ends_with("bullet") { "bullet" } else { "numbered" });
+                        } else {
+                            let margin = if mode == "hanging-36" { 342900 } else { 171450 };
+                            paragraph["margin_left"] = json!(margin);
+                            paragraph["indent"] = json!(if mode == "positive-indent" { 57150 } else { -margin });
+                        }
+                        element["format"]["alignment"] = json!("left");
+                        element["format"]["paragraphs"] = json!([paragraph]);
+                    }
+                    let origin = if matches!(alignment, "right" | "center") { wrap_inset } else { left_origin };
+                    let reference = json!({
+                        "type":"text","id":"reference","x":80.0+origin,"y":40,"width":400.0-wrap_inset,"height":220,
+                        "text":format!("{marker}{text}"),"font_size":24,"color":"000000","bold":false,
+                        "format":{"alignment":alignment,"padding":insets}
+                    });
+                    let actual = text_ink_bounds(element.clone());
+                    let expected = text_ink_bounds(reference);
+                    let context = format!("{alignment}, {mode}, padding={padding}, wrapped={wrapped}: {actual:?} vs {expected:?}");
+                    for edge in 0..4 { assert!((actual[edge] - expected[edge]).abs() <= 1.0, "{context}"); }
+                    let right_edge = 480.0 - f64::from(padding);
+                    if alignment == "right" { assert!((right_edge - actual[2]).abs() <= 3.0, "{context}"); }
+                    if alignment == "center" {
+                        let center = (80.0 + f64::from(padding) + wrap_inset + right_edge) / 2.0;
+                        assert!(((actual[0] + actual[2]) / 2.0 - center).abs() <= 2.0, "{context}");
+                    }
+                    if !wrapped && padding == 12 && mode == "hanging-36" && matches!(alignment, "right" | "center") {
+                        let mut source = with_elements(json!([element]));
+                        source.width = 512;
+                        let bytes = aislide_core::pptx::export_pptx(&source).unwrap();
+                        let opened = aislide_core::execute_request(json!({"op":"open_presentation","id":"aligned-native","base64":STANDARD.encode(bytes)})).unwrap();
+                        let element = &opened["document"]["deck"]["slides"][0]["elements"][0];
+                        let paragraph = &element["format"]["paragraphs"][0];
+                        assert_eq!(paragraph["margin_left"], 342900);
+                        assert_eq!(paragraph["indent"], -342900);
+                        assert_eq!(paragraph["alignment"], alignment);
+                        let reopened = text_ink_bounds(element.clone());
+                        for edge in 0..4 { assert!((reopened[edge] - expected[edge]).abs() <= 1.0, "{context}; reopened={reopened:?}"); }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn noisy_preview_document() -> aislide_core::document::Document {
     let mut state = 0x1234_5678u32;
     let pixels = image::RgbaImage::from_fn(256, 256, |_column, _row| {

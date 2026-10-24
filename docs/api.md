@@ -1451,8 +1451,12 @@ an approximation, not Office parity. Both measurement and rendering reserve
 the full `marL` for continuation-line wrapping; a negative first-line `indent`
 does not widen that area. Positive indentation is conservatively reserved on
 all lines. The marker remains an inline run within that width, so it can add
-an extra line rather than understate overflow. Glyph placement uses a separate
-approximate origin of `max(0, marL + indent)` for all lines, not exact Office
+an extra line rather than understate overflow. Left and justified paragraphs use
+a separate approximate glyph origin of `max(0, marL + indent)` on all lines.
+Right and centered paragraphs instead start at the reserved wrap inset, so their
+alignment box reaches the content-frame right edge after padding; centering is
+within that usable box. This preserves conservative wrapping without shifting
+right/center-aligned hanging or bulleted text inward. It is not exact Office
 first-line/hanging placement. AISlide
 exports separate frame defaults when run styles override them, so reopening does
 not promote the first large/bold run into the defaults for the remaining
