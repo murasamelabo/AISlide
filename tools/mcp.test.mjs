@@ -946,17 +946,33 @@ test('roundtrip feedback skill and initialization expose the short safe authorin
   assert.ok(Buffer.byteLength(skill) < 6000);
   for (const text of ['asset_id', 'apply_operations', 'set_table_headers', 'set_accessibility', 'update_notes', '80 Unicode', 'Serialize core-backed AISlide calls', 'aislide_timing', 'unmet requirements']) assert.ok(skill.includes(text), text);
   for (const path of ['../../../docs/api.md', '../../../docs/authoring/README.md']) assert.ok((await readFile(new URL(path, skillUrl), 'utf8')).length > 0);
-  await feedbackMcpFixture(async ({ fixture }) => {
+  for (const patterns of ['off', 'on']) await feedbackMcpFixture(async ({ fixture, prompts, resources }) => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'short-path-instructions', version: '1.0.0' });
     try {
       await McpServer.prototype.connect.call(fixture.instance, serverTransport);
       await client.connect(clientTransport);
       const instructions = client.getInstructions();
-      assert.ok(Buffer.byteLength(instructions) < 1024);
+      if (patterns === 'off') assert.ok(Buffer.byteLength(instructions) < 1024);
       for (const text of ['Serialize core-backed AISlide calls', 'apply_operations', 'asset_id', 'get_deck_summary', 'unmet requirements']) assert.ok(instructions.includes(text), text);
+      for (const text of ['Prefer explanatory visuals by default', 'Explicit user exclusions override this default', 'never force decoration']) assert.ok(instructions.includes(text), text);
+      for (const text of ['bounded cross-slide', 'accessibility edits', 'revision/hash guards',
+        'layers, evidence readings or activity-to-outcome mappings', 'recommend_recipes, preview_recipe and apply_recipe',
+        'returned base/candidate hashes on new empty slides', 'recipes choose their own layout and do not verify facts',
+        'Existing slides and approved ledgers keep their scope.']) assert.ok(instructions.includes(text), `${patterns}: ${text}`);
+      assert.equal(instructions.includes('Before placing body content on a new slide'), patterns === 'on');
+      if (patterns === 'on') {
+        assert.ok(instructions.indexOf('recipes choose their own layout') < instructions.indexOf('Before placing body content'));
+        assert.ok(instructions.includes('unless the user asks for free placement, no layout patterns or an existing template'));
+      }
+      const prompt = await prompts.get('author_presentation').callback();
+      const resource = await resources.get('aislide://authoring/workflow').callback();
+      assert.equal(prompt.messages[0].content.text, resource.contents[0].text);
+      assert.ok(prompt.messages[0].content.text.includes('Apply visual preferences only within the authorized scope and approved ledger.'));
+      assert.ok(!prompt.messages[0].content.text.includes('Existing slides and approved ledgers keep their scope.'),
+        'The short initialization safeguard must not duplicate the detailed workflow scope policy');
     } finally { await client.close(); }
-  }, []);
+  }, ['--layout-patterns', patterns]);
 });
 
 test('retest registered rasters expose validated dimensions and preserve image fit inputs', async () => {
@@ -1953,6 +1969,10 @@ function assertFeedbackWorkflow(prompt, resource) {
     /graphDiagnostics bound to the accepted revision\/hash without another core request/, /64 findings within 32 KiB/,
     /GRAPH_LABEL_BORDER_OVERLAP.*GRAPH_LABEL_OVERLAP.*GRAPH_NODE_LABEL_WRAPPED.*GRAPH_NODE_LABEL_SHRINK_LIMIT/,
     /unavailable does not mean no issues/, /on_overlap=error remains fatal/,
+    /Prefer explanatory visuals by default/, /Explicit user exclusions override this default/,
+    /architecture.*boundaries.*labeled edges/, /concept.*relations/, /native charts.*verified values/,
+    /No icons.*only icons/, /No diagrams excludes diagrams, not an otherwise permitted chart/,
+    /text-only or no visuals requests suppress/, /no fixed quota/, /no suitable visual/,
   ]) assert.match(text, pattern);
 }
 

@@ -19,6 +19,9 @@ During authorized planning, locate `## <purpose-id>` and read through the next l
 
 ## Workflow
 
+Follow [visual defaults](../aislide-authoring/references/visual-selection.md).
+Explicit user exclusions override this default.
+
 1. 読者の到達点を、応用できる学習、正しく行う操作、成果物や合意の作成、研究評価、調査結果の利用から確認する。業種や開催名で用途を決めず、担当ページを既存台帳へ記録する。
 2. 前提知識、説明材料、方法、観測結果、制約、根拠IDを整理する。実験結果、参加者の回答、合意を作らない。到達目標は実施後に確認できる行動で表す。
 3. 既知と新しい概念をつなぎ、必要な例・反例・問いを置く。研修には理解確認、共同作業には時間と出力形式を含める。ワークショップ形式の研修を名称だけで討議用途にしない。

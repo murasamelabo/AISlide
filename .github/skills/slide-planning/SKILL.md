@@ -56,8 +56,9 @@ If no purpose fits, propose a custom outline only when planning was requested.
   discussion or decision. Questions and tasks are valid titles. Choose visuals by
   that role; keep axes, sources and limits visible, not hidden in notes.
 - Add reader question, actual relation, primary visual, selected/rejected reasons,
-  emphasis and shared component roles to the same ledger. Choose representation
-  before layout; allow no fit. Record decisions, not private reasoning.
+  emphasis and shared component roles to the same ledger.
+  Follow [visual defaults](../aislide-authoring/references/visual-selection.md).
+  Explicit user exclusions override this default. Record decisions, not private reasoning.
 - Live talks use staged explanation and supporting notes; read-alone slides need
   enough context without a speaker. Learning/discussion needs tasks and expected outputs.
 - Preserve the user's voice, not authorship scores or banned-word quotas. Do not
