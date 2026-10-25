@@ -7,6 +7,9 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  checks: read
+  statuses: read
+  actions: read
 
 concurrency:
   group: pr-review-${{ github.event.pull_request.number }}
@@ -18,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      AI_MODEL: ${{ vars.AI_MODEL || 'claude-opus-5-5' }}
+      AI_MODEL: ${{ vars.AI_MODEL || 'claude-opus-5.5' }}
       COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -47,6 +50,15 @@ jobs:
           work="$(mktemp -d)"
           limit=80000
 
+          check_head() {
+            current="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq .headRefOid)"
+            if [ "$current" != "$HEAD_SHA" ]; then
+              echo "::notice::PR head moved from $HEAD_SHA to $current; skipping stale review."
+              exit 0
+            fi
+          }
+          check_head
+
           gh pr view "$PR_NUMBER" --repo "$REPO" \
             --json title,body,author,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,files \
             --jq '"Title: " + .title,
@@ -59,14 +71,14 @@ jobs:
                   "",
                   "Description:",
                   (.body // "")' > "$work/meta-full.txt"
-          head -c 20000 "$work/meta-full.txt" | iconv -c -f UTF-8 -t UTF-8 > "$work/meta.txt"
+          head -c 20000 "$work/meta-full.txt" | python3 -c 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read().decode("utf-8", "ignore").encode("utf-8"))' > "$work/meta.txt"
 
           diff_note=""
           if gh pr diff "$PR_NUMBER" --repo "$REPO" > "$work/diff-full.txt" 2> "$work/diff-error.txt"; then
             if [ "$(wc -c < "$work/diff-full.txt")" -gt "$limit" ]; then
               diff_note="差分は ${limit} バイトで切り詰められています。以降の差分は確認できていません。"
             fi
-            head -c "$limit" "$work/diff-full.txt" | iconv -c -f UTF-8 -t UTF-8 > "$work/diff.txt"
+            head -c "$limit" "$work/diff-full.txt" | python3 -c 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read().decode("utf-8", "ignore").encode("utf-8"))' > "$work/diff.txt"
           else
             diff_note="差分を取得できませんでした(大きすぎる可能性があります)。ファイル一覧のみで判断してください。"
             : > "$work/diff.txt"
@@ -74,6 +86,8 @@ jobs:
 
           gh pr checks "$PR_NUMBER" --repo "$REPO" > "$work/checks.txt" 2>&1 || true
           [ -s "$work/checks.txt" ] || echo "チェック結果を取得できませんでした。" > "$work/checks.txt"
+
+          check_head
 
           for f in meta diff checks; do
             sed -i -e 's/PR_BEGIN/PR-BEGIN/g' -e 's/PR_END/PR-END/g' "$work/$f.txt"
@@ -122,7 +136,7 @@ jobs:
           } > "$work/prompt.txt"
 
           timeout 1200 copilot -p "$(cat "$work/prompt.txt")" --model "$AI_MODEL" --silent \
-            --deny-tool=shell --deny-tool=write --deny-tool=url \
+            --deny-tool=shell --deny-tool=write --deny-tool=url --deny-tool=read --deny-tool=memory \
             --disable-builtin-mcps --no-ask-user --no-auto-update \
             > "$work/answer.md"
           sed -i '/./,$!d' "$work/answer.md"
@@ -134,6 +148,8 @@ jobs:
             '判定: マージ可'|'判定: 修正後マージ可'|'判定: マージ不可') ;;
             *) echo "::warning::The first line of the review is not a recognized verdict." ;;
           esac
+
+          check_head
 
           {
             printf '@%s AI レビュー結果です(助言のみ)。\n\n' "$DEVELOPER"

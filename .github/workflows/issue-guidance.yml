@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      AI_MODEL: ${{ vars.AI_MODEL || 'claude-opus-5-5' }}
+      AI_MODEL: ${{ vars.AI_MODEL || 'claude-opus-5.5' }}
       COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -52,7 +52,8 @@ jobs:
           if [ "$EVENT_NAME" = "issues" ]; then
             numbers="$EVENT_ISSUE_NUMBER"
           else
-            numbers="$(gh issue list --repo "$REPO" --state open --limit 500 --json number --jq '.[].number')"
+            numbers="$(gh api "repos/$REPO/issues?state=open&per_page=100" --paginate \
+              | jq -r --arg label "$LABEL" '.[] | select(has("pull_request") | not) | select(any(.labels[]; .name == $label) | not) | .number')"
           fi
           gh api "repos/$REPO/branches" --paginate --jq '.[].name' > "$work/branches.txt"
           git ls-files > "$work/all-files.txt"
@@ -85,7 +86,7 @@ jobs:
             fi
 
             jq -r '"# " + .title + "\n\n" + (.body // "")' "$work/issue.json" > "$work/issue-full.txt"
-            head -c 20000 "$work/issue-full.txt" | iconv -c -f UTF-8 -t UTF-8 \
+            head -c 20000 "$work/issue-full.txt" | python3 -c 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read().decode("utf-8", "ignore").encode("utf-8"))' \
               | sed -e 's/ISSUE_BEGIN/ISSUE-BEGIN/g' -e 's/ISSUE_END/ISSUE-END/g' > "$work/issue.txt"
             truncated=""
             if [ "$(wc -c < "$work/issue-full.txt")" -gt 20000 ]; then
@@ -118,7 +119,7 @@ jobs:
             } > "$work/prompt.txt"
 
             if ! timeout 900 copilot -p "$(cat "$work/prompt.txt")" --model "$AI_MODEL" --silent \
-                --deny-tool=shell --deny-tool=write --deny-tool=url \
+                --deny-tool=shell --deny-tool=write --deny-tool=url --deny-tool=read --deny-tool=memory \
                 --disable-builtin-mcps --no-ask-user --no-auto-update \
                 > "$work/answer.md" 2> "$work/copilot-error.txt"; then
               echo "::warning::Copilot CLI failed for issue #$n; continuing."

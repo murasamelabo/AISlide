@@ -223,7 +223,7 @@ See [docs/implementation.md](docs/implementation.md) for implementation boundari
 
 ### AI Guidance and Review Workflows
 
-`issue-guidance.yml` comments an implementation approach on open issues without a linked or issue-numbered branch, then labels them `ai-guidance`. `pr-review.yml` posts an advisory verdict on non-draft PRs without checking out PR code; it never approves or merges. Both use Copilot CLI and change no code. Setup: add the repository secret `COPILOT_GITHUB_TOKEN` (a fine-grained PAT with the Copilot Requests permission), optionally set the repository variable `AI_MODEL` (default `claude-opus-5-5`), and allow GitHub Actions to write to issues and pull requests.
+`issue-guidance.yml` comments an implementation approach on open issues without a linked or issue-numbered branch, then labels them `ai-guidance`. `pr-review.yml` posts an advisory verdict on non-draft PRs without checking out PR code; it never approves or merges. Both use Copilot CLI and change no code. Setup: add the repository secret `COPILOT_GITHUB_TOKEN` (a fine-grained PAT with the Copilot Requests permission), optionally set the repository variable `AI_MODEL` (default `claude-opus-5.5`), and allow GitHub Actions to write to issues and pull requests.
 
 ## Limitations
 
