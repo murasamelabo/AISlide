@@ -223,7 +223,26 @@ See [docs/implementation.md](docs/implementation.md) for implementation boundari
 
 ### AI Guidance and Review Workflows
 
-`issue-guidance.yml` comments an implementation approach on open issues without a linked or issue-numbered branch, then labels them `ai-guidance`. `pr-review.yml` posts an advisory verdict on non-draft PRs without checking out PR code; it never approves or merges. Both use Copilot CLI and change no code. Setup: add the repository secret `COPILOT_GITHUB_TOKEN` (a fine-grained PAT with the Copilot Requests permission), optionally set the repository variable `AI_MODEL` (default `claude-opus-5.5`), and allow GitHub Actions to write to issues and pull requests.
+`issue-guidance.yml` comments an implementation approach on open issues without a linked or issue-numbered branch, then labels them `ai-guidance`. It uses `AI_MODEL` (default `claude-opus-5.5`).
+
+`pr-review.yml` starts when a review is requested and waits for `Verify` to complete for that PR's head SHA. The `workflow_run` trigger resumes reviews with pending user or team requests, including fork PRs. Reviews run serially per PR; a bot comment marked `<!-- ai-pr-review head=SHA -->` prevents duplicate reviews of the same head. PR head code is never checked out or executed.
+
+The reviewer uses Copilot CLI. A `判定: マージ可` verdict permits approval and squash merge only when Verify succeeds, the PR is mergeable, the full diff was available, and the head SHA is unchanged. Branch protection can defer merging through `--auto`; it is not bypassed. Negative verdicts request changes. Fork PRs, authors outside the allowlist, and disabled auto-merge receive comments only. Verify failures, unrecognized verdicts, and failed approvals never permit merging. Comments mention `@murasamelabo` and record the model, head SHA, Verify job results and URL, and the action taken.
+
+Repository setup:
+
+| Setting | Purpose |
+| --- | --- |
+| Actions setting | Enable **Settings > Actions > General > Workflow permissions > Allow GitHub Actions to create and approve pull requests**. Allow the workflow's contents and pull-request write permissions. |
+| Secret `COPILOT_GITHUB_TOKEN` | Fine-grained PAT with **Copilot Requests** permission, used by both AI workflows. |
+| Secret `PR_MERGE_TOKEN` (optional) | Token with permission to approve and squash-merge PRs (for a fine-grained PAT: repository contents and pull requests write). Use an identity other than the PR author, since authors cannot approve their own PRs. Used only for approval, change requests, and merging; otherwise `GITHUB_TOKEN` is used. |
+| Variable `PR_REVIEW_MODEL` | PR review model; defaults to `claude-opus-5.5`, independently of issue guidance's `AI_MODEL`. |
+| Variable `AI_AUTO_MERGE` | Set to `false` to disable approval, change requests, and merging while keeping review comments. |
+| Variable `AUTO_MERGE_ALLOWED_AUTHORS` | Comma-separated, case-sensitive logins; defaults to `murasamelabo,Copilot,copilot-swe-agent[bot]`. |
+
+Approvals with `GITHUB_TOKEN` can be blocked by repository or organization settings. A merge made with `GITHUB_TOKEN` does **not** trigger the subsequent main-push Verify workflow; configure `PR_MERGE_TOKEN` if that run is required. Enable repository auto-merge if protected PRs should wait for remaining requirements. The `workflow_run` trigger becomes active after this workflow exists on the default branch. Removing the last pending review request stops a deferred review; to review a newer head, keep or submit a review request.
+
+Run the workflow regression tests with `node --test tools/pr-review-workflow.test.mjs`.
 
 ## Limitations
 
