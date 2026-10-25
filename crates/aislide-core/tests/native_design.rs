@@ -154,14 +154,14 @@ fn issue32_color_maps_and_overrides_resolve_across_templates_previews_and_contra
     let ed_bytes = save(&change(&doc, ed).document);
     assert!(Package::open(ed_bytes.clone()).unwrap().text(s1).unwrap().contains("val=\"dk1\"") && serde_json::to_value(&open(ed_bytes).deck.slides[0].elements[0]).unwrap()["color"] == "@dk1");
 
-    // Master background edit preserves synthesized layout background in saved PPTX.
-    let mut m_ed = doc.deck.clone();
-    m_ed.design.as_mut().unwrap().masters[0].background = "@lt2".into();
-    assert_eq!(open(save(&change(&doc, m_ed).document)).deck.design.as_ref().unwrap().layouts[0].background.as_deref(), Some("@dk1"));
-
-    let mut cyc = Package::open(bytes.clone()).unwrap();
-    cyc.replace_part("ppt/slideLayouts/_rels/slideLayout1.xml.rels", cyc.text("ppt/slideLayouts/_rels/slideLayout1.xml.rels").unwrap().replace("../slideMasters/slideMaster1.xml", "../slideLayouts/slideLayout1.xml").into_bytes()).unwrap();
-    assert_eq!(open(cyc.save().unwrap()).deck.slides[0].background, "@dk1");
+    let mut gp = Package::open(bytes.clone()).unwrap();
+    gp.replace_part(s1, gp.text(s1).unwrap().replace("<a:solidFill><a:schemeClr val=\"bg1\"/></a:solidFill>", "<a:gradFill><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"dk1\"/></a:gs></a:gsLst></a:gradFill>").into_bytes()).unwrap();
+    gp.replace_part("ppt/slideLayouts/_rels/slideLayout1.xml.rels", gp.text("ppt/slideLayouts/_rels/slideLayout1.xml.rels").unwrap().replace("../slideMasters/slideMaster1.xml", "../slideLayouts/slideLayout1.xml").into_bytes()).unwrap();
+    let g_doc = open(gp.save().unwrap());
+    let mut g_ed = g_doc.deck.clone();
+    g_ed.design.as_mut().unwrap().masters[0].background = "@lt2".into();
+    let g_saved = save(&change(&g_doc, g_ed).document);
+    assert!(open(g_saved.clone()).deck.design.as_ref().unwrap().layouts[0].background.as_deref() == Some("@dk1") && Package::open(g_saved).unwrap().text(s1).unwrap().contains("<a:gradFill>"));
 
     let re_ass = open(save(&change(&doc, aislide_core::design::assign_layout_with_options(doc.deck.clone(), "slide-1", "title-content", true).unwrap()).document));
     assert_eq!((re_ass.deck.slides[0].inherit_background, &serde_json::to_value(re_ass.deck.slides[0].elements.iter().find(|e| e.bounds().0 == "sc").unwrap()).unwrap()["color"]), (true, &json!("@lt1")));
@@ -173,10 +173,9 @@ fn issue32_color_maps_and_overrides_resolve_across_templates_previews_and_contra
     assert_eq!((&hr.deck.design.as_ref().unwrap().masters[0].background, &hr.deck.slides[0].background, hr.deck.slides[0].inherit_background, hr.deck.slides[0].hide_master_graphics), (&"@dk1".to_string(), &"@lt2".to_string(), false, true));
     let mut hr_m = hr.deck.clone();
     hr_m.design.as_mut().unwrap().masters[0].background = "@accent3".into();
-    assert_eq!(open(save(&change(&hr, hr_m).document)).deck.slides[0].background, "@lt2");
     let mut hr_re = aislide_core::design::assign_layout_with_options(hr.deck.clone(), "slide-1", "title-content", false).unwrap();
     hr_re.slides[0].inherit_background = false;
-    assert_eq!(open(save(&change(&hr, hr_re).document)).deck.slides[0].background, "@lt2");
+    assert_eq!((&open(save(&change(&hr, hr_m).document)).deck.slides[0].background, &open(save(&change(&hr, hr_re).document)).deck.slides[0].background), (&"@lt2".to_string(), &"@lt2".to_string()));
 
     let mut ph_deck = base.deck.clone();
     let t_ph: aislide_core::model::Element = el(json!({"type":"text","id":"pt","x":64,"y":80,"width":1152,"height":120,"text":"M","font_size":42,"color":"@dk1","bold":true,"format":{"font_family":"@major","placeholder":{"kind":"title","index":0}}}));
