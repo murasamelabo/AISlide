@@ -10,6 +10,7 @@ pub struct SlideReview {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")] pub table_headers: BTreeMap<String, TableHeaders>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")] pub accessibility: BTreeMap<String, ElementAccessibility>,
     #[serde(skip_serializing_if = "Vec::is_empty")] pub reading_order: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")] pub unverified_background: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -311,7 +312,8 @@ pub fn check_accessibility(deck: &crate::model::Deck) -> AccessibilityReport {
                         .chain(master.filter(|_| !slide.hide_master_graphics).into_iter().flat_map(|master| &master.elements))
                         .filter(|other| !matches!(other, Element::Text { format, .. } if format.placeholder.is_some()))
                         .any(|other| { let (other_id, other_left, other_top, other_width, other_height) = other.bounds(); other_id != id && left < other_left + other_width && other_left < left + width && top < other_top + other_height && other_top < top + height });
-                    let simple = element.visual().is_none() && (own_fill || ((!slide.inherit_background || deck.design.is_some()) && !crate::native::has_unverified_background(deck, slide))) && !inherited_overlap && !format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.style.highlight.as_deref().is_some_and(|value| value != "none") || run.style.baseline.is_some_and(|value| value != 0)) && slide.elements.iter().any(|candidate| candidate.bounds().0 == id)
+                    let unverified_bg = slide.inherit_background && slide.review.as_ref().is_some_and(|r| r.unverified_background);
+                    let simple = element.visual().is_none() && (own_fill || ((!slide.inherit_background || deck.design.is_some()) && !unverified_bg)) && !inherited_overlap && !format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.style.highlight.as_deref().is_some_and(|value| value != "none") || run.style.baseline.is_some_and(|value| value != 0)) && slide.elements.iter().any(|candidate| candidate.bounds().0 == id)
                         && !slide.elements.iter().any(|other| { let (other_id, other_left, other_top, other_width, other_height) = other.bounds(); other_id != id && left < other_left + other_width && other_left < left + width && top < other_top + other_height && other_top < top + height });
                     if !simple { issue("contrast_background_unverified", Some(id), "unsupported", None, None); continue; }
                     let background = match element { Element::Shape { fill, .. } if fill != "none" => resolve(fill), _ => resolve(crate::design::slide_background(slide, deck.design.as_ref())) };
