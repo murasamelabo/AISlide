@@ -77,7 +77,7 @@ fn color(node: Node<'_, '_>, default: &str) -> String {
 }
 
 fn background(node: Node<'_, '_>) -> Option<String> {
-    child(node, P, "cSld").and_then(|node| child(node, P, "bg")).and_then(|node| child(node, P, "bgPr")).map(|node| color(node, &format!("@{}", crate::design::xml_color_slot("bg1"))))
+    child(node, P, "cSld").and_then(|node| child(node, P, "bg")).and_then(|node| child(node, P, "bgPr")).map(|node| color(node, &format!("@{}", crate::design::color_slot("bg1"))))
 }
 
 fn has_non_solid_bg(root: Node<'_, '_>) -> bool {
@@ -166,7 +166,7 @@ fn shape_fill(node: Node<'_, '_>) -> String {
     if let Some(stop) = child(node, A, "gradFill").and_then(|node| child(node, A, "gsLst")).and_then(|node| child(node, A, "gs")) {
         if let Ok((color, _)) = crate::visual::read_color(stop) { return color; }
     }
-    if child(node, A, "noFill").is_some() { "none".into() } else { color(node, &format!("@{}", crate::design::xml_color_slot("bg1"))) }
+    if child(node, A, "noFill").is_some() { "none".into() } else { color(node, &format!("@{}", crate::design::color_slot("bg1"))) }
 }
 
 pub(crate) fn placeholder(node: Node<'_, '_>) -> Option<Placeholder> {
@@ -211,7 +211,7 @@ pub(crate) fn hyperlink_targets(package: &Package, part: &str) -> Result<BTreeMa
 }
 
 fn text_format(package: &Package, part: &str, body: Node<'_, '_>, template: Option<&Element>) -> Result<(f64, String, bool, TextFormat)> {
-    let (mut size, mut shade, mut bold, mut format) = match template { Some(Element::Text { font_size, color, bold, format, .. }) => (*font_size, color.clone(), *bold, format.clone()), _ => (24.0, format!("@{}", crate::design::xml_color_slot("tx1")), false, TextFormat::default()) };
+    let (mut size, mut shade, mut bold, mut format) = match template { Some(Element::Text { font_size, color, bold, format, .. }) => (*font_size, color.clone(), *bold, format.clone()), _ => (24.0, format!("@{}", crate::design::color_slot("tx1")), false, TextFormat::default()) };
     let inherited_style = crate::rich_text::RunStyle::frame(size, &shade, bold, &format);
     let inherited_format = format.clone(); format.paragraphs.clear();
     let list = child(body, A, "lstStyle").and_then(|node| child(node, A, "lvl1pPr"));
@@ -291,7 +291,7 @@ fn rich_run_style(node: Node<'_, '_>, style: &mut crate::rich_text::RunStyle) ->
     if let Some(baseline) = rich_number(node, "baseline")? { style.baseline = Some(baseline); }
     if let Some(language) = node.attribute("lang") { style.language = Some(language.into()); }
     if let Some(language) = node.attribute("altLang") { style.alternative_language = Some(language.into()); }
-    if child(node, A, "solidFill").is_some() { style.color = Some(color(node, &format!("@{}", crate::design::xml_color_slot("tx1")))); }
+    if child(node, A, "solidFill").is_some() { style.color = Some(color(node, &format!("@{}", crate::design::color_slot("tx1")))); }
     if let Some(highlight) = child(node, A, "highlight") {
         style.highlight = Some(if let Some(rgb) = child(highlight, A, "srgbClr").and_then(|node| node.attribute("val")) { rgb.into() }
             else if let Some(slot) = child(highlight, A, "schemeClr").and_then(|node| node.attribute("val")) { format!("@{}", crate::design::color_slot(slot)) }

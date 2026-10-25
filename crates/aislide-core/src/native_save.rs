@@ -31,7 +31,7 @@ pub(crate) fn check_copy_element(package: &Package, binding: &NativePart, elemen
     let _scope = crate::native::part_color_map(package, &binding.path).enter();
     let generated = scaled_element(element, &ids, theme, scale)?;
     fn copy_value(node: Node<'_, '_>) -> serde_json::Value {
-        let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), if attribute.namespace() == Some(crate::native::R) { "resource" } else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::xml_color_slot(attribute.value()) } else { attribute.value() })).collect();
+        let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), if attribute.namespace() == Some(crate::native::R) { "resource" } else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::color_slot(attribute.value()) } else { attribute.value() })).collect();
         let children: Vec<_> = node.children().filter_map(|node| {
             if node.is_element() { Some(copy_value(node)) }
             else if node.is_text() && !node.text().unwrap_or("").trim().is_empty() { Some(serde_json::json!(node.text())) }
@@ -66,7 +66,7 @@ fn xml_value(node: Node<'_, '_>) -> serde_json::Value {
 
 fn xml_value_with_hyperlinks(node: Node<'_, '_>, normalize_links: bool) -> serde_json::Value {
     let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| {
-        let value = if normalize_links && node.has_tag_name((A, "hlinkClick")) && attribute.namespace() == Some(crate::native::R) && attribute.name() == "id" { "hyperlink" } else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::xml_color_slot(attribute.value()) } else { attribute.value() };
+        let value = if normalize_links && node.has_tag_name((A, "hlinkClick")) && attribute.namespace() == Some(crate::native::R) && attribute.name() == "id" { "hyperlink" } else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::color_slot(attribute.value()) } else { attribute.value() };
         (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), value)
     }).collect();
     let children: Vec<_> = node.children().filter_map(|node| {
@@ -421,7 +421,7 @@ fn validate_rich_style(body: Node<'_, '_>, hyperlinks: &BTreeMap<String, String>
             let name = child.tag_name().name();
             if !children.contains(&name) || (!matches!(name, "p" | "r" | "tab") && !seen.insert(name)) { return Err(rich_style_error(child, None)); }
         }
-        if node.has_tag_name((A, "schemeClr")) && !node.attribute("val").is_some_and(|value| crate::design::COLOR_KEYS.contains(&crate::design::xml_color_slot(value))) { return Err(rich_style_error(node, Some("val"))); }
+        if node.has_tag_name((A, "schemeClr")) && !node.attribute("val").is_some_and(|value| crate::design::COLOR_KEYS.contains(&crate::design::color_slot(value))) { return Err(rich_style_error(node, Some("val"))); }
         if matches!(node.tag_name().name(), "rPr" | "defRPr" | "endParaRPr") {
             if node.attribute("u").is_some_and(|value| !["none", "sng"].contains(&value)) { return Err(rich_style_error(node, Some("u"))); }
             let latin = child(node, A, "latin").and_then(|node| node.attribute("typeface"));

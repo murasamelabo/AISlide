@@ -129,4 +129,4 @@ latter had a CFB signature. They were not used, overwritten, decrypted or
 redownloaded. External representative-template qualification remains pending;
 synthetic native tests do not establish arbitrary-template compatibility. Master
 `p:clrMap` and layout/slide/notes `p:clrMapOvr` (`a:overrideClrMapping`) resolve
-the 12 color-map keys across native projection and edits (see [API](../api.md)).
+the 12 color-map keys across native projection and edits, failing closed or warning on unmodeled extensions, remapped ancestor artwork or unrepresentable layout changes (see [API](../api.md)).
