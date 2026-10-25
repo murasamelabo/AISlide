@@ -221,6 +221,10 @@ The Open XML validator downloads pinned official NuGet packages from Microsoft's
 
 See [docs/implementation.md](docs/implementation.md) for implementation boundaries.
 
+### AI Guidance and Review Workflows
+
+`issue-guidance.yml` comments an implementation approach on open issues without a linked or issue-numbered branch, then labels them `ai-guidance`. `pr-review.yml` posts an advisory verdict on non-draft PRs without checking out PR code; it never approves or merges. Both use Copilot CLI and change no code. Setup: add the repository secret `COPILOT_GITHUB_TOKEN` (a fine-grained PAT with the Copilot Requests permission), optionally set the repository variable `AI_MODEL` (default `claude-opus-5.5`), and allow GitHub Actions to write to issues and pull requests.
+
 ## Limitations
 
 Full arbitrary-PPTX editing, unrestricted imported master/theme rewriting, exact Office typography, presentation/animation/video playback, encryption and cloud coauthoring are outside the current scope. The 24-kind chart catalog does not cover every Office chart family or formatting combination; histogram retains the explicit schema exception. Automatic scanned-PDF rendering/OCR, in-place source AutoSave, credential-vault UI, broad cloud-model qualification, signed installers and cross-platform distribution remain unqualified or unsupported. Imported SmartArt/OLE/media and unknown extensions are preserved, not executed or fully rendered. ZIP64, encrypted presentations, legacy `.ppt`, non-UTF-8 edited XML and signed-package edits are rejected; protected originals remain untouched. Parts have bounded data sizes; maps have generalized coastlines rather than country borders/geocoding, and nominal Venn layouts do not calculate area-accurate intersections. See the [support matrix](docs/support-matrix.md) for the supported subset.
