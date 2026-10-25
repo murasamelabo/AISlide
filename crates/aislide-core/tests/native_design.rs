@@ -25,10 +25,8 @@ fn change(document: &Document, deck: aislide_core::model::Deck) -> document::Tra
 fn issue32_custom_color_maps_warn_in_native_and_template_diagnostics_without_rewriting_source() {
     const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
     const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
-    let mut d = source().deck; d.design.as_mut().unwrap().masters[0].elements = vec![serde_json::from_value(json!({"type":"rect","id":"b","x":0,"y":0,"width":1280,"height":24,"fill":"@dk1"})).unwrap()];
-    let initial = change(&source(), d).document;
     for master in [false, true] {
-        let mut package = Package::open(save(&initial)).unwrap();
+        let mut package = Package::open(save(&source())).unwrap();
         let path = if master {"ppt/slideMasters/slideMaster1.xml"} else {"ppt/slideLayouts/slideLayout1.xml"};
         let mut xml = package.text(path).unwrap().to_owned();
         let parsed = roxmltree::Document::parse(&xml).unwrap();
@@ -36,10 +34,9 @@ fn issue32_custom_color_maps_warn_in_native_and_template_diagnostics_without_rew
             let value = parsed.descendants().find(|node| node.has_tag_name((P, "clrMap"))).unwrap().attribute_node("bg1").unwrap();
             (value.range(), "bg1=\"dk1\" custom=\"dk1\"".to_owned())
         } else {
-            let sm = "ppt/slideMasters/slideMaster1.xml"; package.replace_part(sm, package.text(sm).unwrap().replace("val=\"dk1\"", "val=\"tx1\"").into_bytes()).unwrap();
             let end = parsed.descendants().find(|node| node.has_tag_name((P, "cSld"))).unwrap().range().end;
             let range = parsed.descendants().find(|node| node.has_tag_name((P, "clrMapOvr"))).map(|node| node.range()).unwrap_or(end..end);
-            (range, format!("<p:clrMapOvr xmlns:p=\"{P}\"><a:overrideClrMapping xmlns:a=\"{A}\" bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr>"))
+            (range, format!("<p:clrMapOvr xmlns:p=\"{P}\"><a:overrideClrMapping xmlns:a=\"{A}\" custom=\"dk1\" bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr>"))
         };
         xml.replace_range(range, &replacement);
         package.replace_part(path, xml.into_bytes()).unwrap();
@@ -119,7 +116,7 @@ fn issue32_color_maps_and_overrides_resolve() {
     ed.slides[0].notes = "N1".into(); let r0 = &mut ed.slides[0].notes_paragraphs[0].runs[0]; r0.text = "N1".into(); r0.style.color = Some("@accent1".into());
     for e in [&mut ed.slides[0].elements[0], &mut ed.design.as_mut().unwrap().layouts[0].elements[0]] { if let Element::Text { color, .. } = e { *color = "@accent1".into(); } }
     let (ed_p, ed_o, mut gp) = { let b = save(&change(&doc, ed).document); (Package::open(b.clone()).unwrap(), open(b.clone()), Package::open(b).unwrap()) };
-    assert!([s1, lp, ns].into_iter().all(|p| ed_p.text(p).unwrap().contains("val=\"accent2\"")) && ed_o.deck.slides[0].notes_paragraphs[0].runs[0].style.color.as_deref() == Some("@accent1") && val(&ed_o.deck.slides[0].elements)[0]["color"] == "@accent1" && val(&ed_o.deck.design.as_ref().unwrap().layouts[0].elements)[0]["color"] == "@accent1");
+    assert!([s1, lp, ns].into_iter().all(|p| ed_p.text(p).unwrap().contains("val=\"accent2\"")) && aislide_core::render::render_slide_svg(&ed_o.deck, 0, false).unwrap().svg.contains("#087F73") && ed_o.deck.slides[0].notes_paragraphs[0].runs[0].style.color.as_deref() == Some("@accent1") && val(&ed_o.deck.slides[0].elements)[0]["color"] == "@accent1" && val(&ed_o.deck.design.as_ref().unwrap().layouts[0].elements)[0]["color"] == "@accent1");
     rep(&mut gp, s1, &[(sf_bg, gr_bg)]); rep(&mut gp, "ppt/slideLayouts/_rels/slideLayout1.xml.rels", &[("../slideMasters/slideMaster1.xml", "../slideLayouts/slideLayout1.xml")]);
     rep(&mut gp, "ppt/slideLayouts/slideLayout2.xml", &[("</p:cSld>", &ovr_l.replace("accent2=\"accent1\"", "accent2=\"accent2\""))]);
     let g_doc = open(gp.save().unwrap()); let mut g_ed = g_doc.deck.clone(); g_ed.design.as_mut().unwrap().masters[0].background = "@lt2".into();

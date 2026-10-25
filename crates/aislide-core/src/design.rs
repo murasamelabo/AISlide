@@ -22,8 +22,9 @@ impl ColorMap {
         let _guard = self.enter();
         run()
     }
-    pub(crate) fn resolve<'a>(&self, value: &'a str) -> &'a str {
-        COLOR_MAP_KEYS.iter().position(|key| *key == value).map_or(value, |index| self.0[index])
+    pub(crate) fn resolve<'a>(&self, xml_scheme_clr: &'a str) -> &'a str {
+        debug_assert!(!xml_scheme_clr.starts_with('@'));
+        COLOR_MAP_KEYS.iter().position(|key| *key == xml_scheme_clr).map_or(xml_scheme_clr, |index| self.0[index])
     }
     pub(crate) fn set(&mut self, name: &str, value: &str) -> bool {
         let (Some(index), Some(slot)) = (COLOR_MAP_KEYS.iter().position(|key| *key == name), COLOR_KEYS.iter().copied().find(|key| *key == value)) else { return false };
@@ -36,8 +37,9 @@ impl ColorMap {
     }
 }
 
-/// Resolves an XML `schemeClr`/`bg1`/`tx1` key under the active `ColorMap::enter` scope.
-pub(crate) fn color_slot(value: &str) -> &str { ColorMap::current().resolve(value) }
+/// Resolves a raw XML `schemeClr`/`bg1`/`tx1` attribute under the active `ColorMap::enter` scope.
+pub(crate) fn xml_color_slot(xml_scheme_clr: &str) -> &str { ColorMap::current().resolve(xml_scheme_clr) }
+pub(crate) fn color_slot(xml_scheme_clr: &str) -> &str { xml_color_slot(xml_scheme_clr) }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
