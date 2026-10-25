@@ -81,7 +81,7 @@ fn check_part(source: &Source, part: &NativePart, elements: &[Element], theme: &
     let expected = crate::pptx::parse(source.generated.text(&expected_part(source, part)?)?)?;
     let part_map = crate::native::part_color_map(&source.package, &part.path);
     let ignore_synthesized_bg = crate::native::child(xml.root_element(), crate::native::P, "cSld").and_then(|node| crate::native::child(node, crate::native::P, "bg")).is_none() && parent_color_map.is_none_or(|parent_map| part_map != parent_map);
-    if part_map.scope(|| xml_value(xml.root_element(), true, false)) != xml_value(expected.root_element(), true, ignore_synthesized_bg) {
+    if part_map.scope(|| xml_value(xml.root_element(), true, false)) != crate::design::ColorMap::default().scope(|| xml_value(expected.root_element(), true, ignore_synthesized_bg)) {
         return Err(Error::Unsupported("source background, master text styles or XML extensions cannot be preserved by editable master import".into()));
     }
     let tree = crate::native::child(xml.root_element(), crate::native::P, "cSld")

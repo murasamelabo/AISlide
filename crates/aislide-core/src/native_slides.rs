@@ -74,7 +74,7 @@ fn insert_slide(package: &mut Package, layouts: &[NativePart], deck: &Deck, slid
     let _scope = crate::native::part_color_map(package, &layout.path).enter();
     let blank = Slide { id: slide.id.clone(), elements: Vec::new(), layout_id: None, native_source_id: None, review: None, ..slide.clone() };
     let generated = Package::open(crate::pptx::export_pptx(&Deck { slides: vec![blank], design: None, ..deck.clone() })?)?;
-    let xml = remap_resources(generated.text("ppt/slides/slide1.xml")?.to_owned(), &BTreeMap::new())?; let parsed = parse(&xml)?;
+    let xml = crate::native_save::encode_scheme_colors(generated.text("ppt/slides/slide1.xml")?.to_owned(), crate::design::ColorMap::current())?; let parsed = parse(&xml)?;
     let tree = child(parsed.root_element(), P, "cSld").and_then(|node| child(node, P, "spTree")).ok_or_else(|| Error::Invalid("generated slide tree".into()))?;
     let ids: BTreeMap<_, _> = element_list(&slide.elements).into_iter().enumerate().map(|(index, element)| (element.bounds().0, index + 2)).collect();
     let binding = NativePart { path: path.into(), id: slide.id.clone(), nodes: ids.iter().map(|(id, numeric)| ((*id).into(), numeric.to_string())).collect() };

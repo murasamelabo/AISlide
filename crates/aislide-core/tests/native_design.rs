@@ -171,6 +171,9 @@ fn issue32_color_maps_and_overrides_resolve_across_templates_previews_and_contra
     hp.replace_part(s1, hp.text(s1).unwrap().replace("<p:sld ", "<p:sld showMasterSp=\"false\" ").replace("<p:bg><p:bgPr><a:solidFill><a:schemeClr val=\"lt1\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>", "").replace("<a:masterClrMapping/>", &ovr_xml("lt2", "dk2")).into_bytes()).unwrap();
     let hr = open(hp.save().unwrap());
     assert_eq!((&hr.deck.design.as_ref().unwrap().masters[0].background, &hr.deck.slides[0].background, hr.deck.slides[0].inherit_background, hr.deck.slides[0].hide_master_graphics), (&"@dk1".to_string(), &"@lt2".to_string(), false, true));
+    let mut hr_m = hr.deck.clone();
+    hr_m.design.as_mut().unwrap().masters[0].background = "@accent3".into();
+    assert_eq!(open(save(&change(&hr, hr_m).document)).deck.slides[0].background, "@lt2");
     let mut hr_re = aislide_core::design::assign_layout_with_options(hr.deck.clone(), "slide-1", "title-content", false).unwrap();
     hr_re.slides[0].inherit_background = false;
     assert_eq!(open(save(&change(&hr, hr_re).document)).deck.slides[0].background, "@lt2");

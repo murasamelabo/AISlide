@@ -29,7 +29,7 @@ pub(crate) fn check_copy_element(package: &Package, binding: &NativePart, elemen
     let node = parsed.descendants().find(|node| is_shape(*node) && properties(*node).and_then(|node| node.attribute("id")) == Some(numeric)).ok_or_else(|| Error::Invalid("native element missing".into()))?;
     let ids = binding.nodes.iter().map(|(id, numeric)| Ok((id.as_str(), numeric.parse::<usize>().map_err(|_| Error::Invalid("native shape identity".into()))?))).collect::<Result<BTreeMap<_, _>>>()?;
     let _scope = crate::native::part_color_map(package, &binding.path).enter();
-    let generated = remap_resources(scaled_element(element, &ids, theme, scale)?, &BTreeMap::new())?;
+    let generated = scaled_element(element, &ids, theme, scale)?;
     fn copy_value(node: Node<'_, '_>) -> serde_json::Value {
         let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), if attribute.namespace() == Some(crate::native::R) { "resource" } else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::color_slot(attribute.value()) } else { attribute.value() })).collect();
         let children: Vec<_> = node.children().filter_map(|node| {
@@ -130,20 +130,27 @@ pub(crate) fn chart_is_representable(package: &Package, binding: &NativePart, id
 
 pub(crate) fn remap_resources(xml: String, mapping: &BTreeMap<String, String>) -> Result<String> {
     let document = parse(&xml)?; let mut edits = Vec::new();
-    let color_map = crate::design::ColorMap::current();
-    let remap_colors = color_map != crate::design::ColorMap::default();
     for node in document.descendants() { for attribute in node.attributes() {
         if attribute.namespace() == Some(crate::native::R) { if let Some(value) = mapping.get(attribute.value()) { edits.push((attribute.range_value(), quick_xml::escape::escape(value).into_owned())); } }
-        else if remap_colors && node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" {
-            let encoded = color_map.encode(attribute.value()).ok_or_else(|| Error::Unsupported("native color map cannot represent the requested theme color slot".into()))?;
-            if encoded != attribute.value() { edits.push((attribute.range_value(), encoded.into())); }
-        }
     } }
     String::from_utf8(apply(xml, edits)?).map_err(|_| Error::Invalid("resource XML is not UTF-8".into()))
 }
 
+pub(crate) fn encode_scheme_colors(xml: String, color_map: crate::design::ColorMap) -> Result<String> {
+    if color_map == crate::design::ColorMap::default() { return Ok(xml); }
+    let document = parse(&xml)?; let mut edits = Vec::new();
+    for attribute in document.descendants().filter(|n| n.has_tag_name((A, "schemeClr"))).filter_map(|n| n.attributes().find(|a| a.namespace().is_none() && a.name() == "val")) {
+        let slot = crate::design::ColorMap::default().resolve(attribute.value());
+        if !crate::design::COLOR_KEYS.contains(&slot) { continue; }
+        let encoded = color_map.encode(slot).ok_or_else(|| Error::Unsupported("native color map cannot represent the requested theme color slot".into()))?;
+        if encoded != attribute.value() { edits.push((attribute.range_value(), encoded.into())); }
+    }
+    if edits.is_empty() { return Ok(xml); }
+    String::from_utf8(apply(xml, edits)?).map_err(|_| Error::Invalid("resource XML is not UTF-8".into()))
+}
+
 pub(crate) fn scaled_element(element: &Element, ids: &BTreeMap<&str, usize>, theme: &crate::design::Theme, scale: (f64, f64)) -> Result<String> {
-    let xml = crate::pptx::element_xml(element, ids[element.bounds().0], ids, theme);
+    let xml = encode_scheme_colors(crate::pptx::element_xml(element, ids[element.bounds().0], ids, theme), crate::design::ColorMap::current())?;
     if scale == (9525.0, 9525.0) { return Ok(xml); }
     let document = parse(&xml)?; let root = document.root_element();
     let transform = child(root, P, "xfrm").or_else(|| child(root, P, if matches!(element, Element::Group { .. }) { "grpSpPr" } else { "spPr" }).and_then(|node| child(node, A, "xfrm")));
@@ -188,7 +195,7 @@ pub(crate) fn resource_changes(package: &mut Package, binding: &NativePart, befo
     let relationships = crate::pptx::resource_parts(&mut parts, &resources, &mut chart_number, &mut picture_number, &mut types, Some(ids), &mut crate::pptx::MediaResources::new())?;
     for (path, data) in parts {
         let data = if path.starts_with("ppt/charts/") && path.ends_with(".xml") {
-            remap_resources(String::from_utf8(data).map_err(|_| Error::Invalid("chart XML encoding".into()))?, &BTreeMap::new())?.into_bytes()
+            encode_scheme_colors(String::from_utf8(data).map_err(|_| Error::Invalid("chart XML encoding".into()))?, crate::design::ColorMap::current())?.into_bytes()
         } else { data };
         package.add_part(path, data)?;
     }
@@ -563,7 +570,7 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
         return Ok(());
     }
     let parsed = parse(&generated)?; let next = parsed.root_element();
-    let previous = remap_resources(scaled_element(old, ids, theme, scale)?, &BTreeMap::new())?;
+    let previous = scaled_element(old, ids, theme, scale)?;
     let previous = parse(&previous)?; let previous = previous.root_element();
     if let (Element::Text { format: before, .. }, Element::Text { format: after, .. }) = (old, new) {
         if before.placeholder != after.placeholder {
@@ -1033,7 +1040,7 @@ pub(crate) fn patch_part(package: &mut Package, binding: &NativePart, before: &[
         let old = child(common, P, "bg");
         if let Some(shade) = background {
             let generated = crate::pptx::xml("p:bg", |writer| { writer.start_element("p:bgPr"); crate::pptx::color(writer, shade); crate::pptx::empty(writer, "a:effectLst", &[]); writer.end_element(); });
-            let generated = remap_resources(String::from_utf8(generated).map_err(|_| Error::Invalid("background XML".into()))?, &BTreeMap::new())?;
+            let generated = encode_scheme_colors(String::from_utf8(generated).map_err(|_| Error::Invalid("background XML".into()))?, crate::design::ColorMap::current())?;
             if let Some(old) = old { edits.push((old.range(), generated)); } else { insert_child(&xml, common, &generated, Some(tree), &mut edits)?; }
         } else if let Some(old) = old { edits.push((old.range(), String::new())); }
     }
@@ -1318,7 +1325,8 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
             let mut edits = Vec::new(); set_attribute(&xml, relation, "Target", &format!("/{path}"), &mut edits)?; package.replace_part(&relation_path, apply(xml, edits)?)?;
         }
         if before.notes != after.notes || before.notes_paragraphs != after.notes_paragraphs { patch_notes(package, main, &binding.path, after, deck)?; }
-        let background = (before.background != after.background || before.inherit_background != after.inherit_background || (before.layout_id != after.layout_id && !after.inherit_background)).then_some(if after.inherit_background { None } else { Some(after.background.as_str()) });
+        let parent_bg_changed = after.layout_id.as_ref().and_then(|id| old.layouts.iter().find(|l| &l.id == id).zip(design.layouts.iter().find(|l| &l.id == id))).is_some_and(|(bl, al)| bl.background != al.background || old.masters.iter().find(|m| m.id == al.master_id).zip(design.masters.iter().find(|m| m.id == al.master_id)).is_some_and(|(bm, am)| bm.background != am.background));
+        let background = (before.background != after.background || before.inherit_background != after.inherit_background || (!after.inherit_background && (before.layout_id != after.layout_id || parent_bg_changed))).then_some(if after.inherit_background { None } else { Some(after.background.as_str()) });
         patch_part(package, binding, &before.elements, &after.elements, crate::design::slide_theme(after, Some(design)).unwrap_or(&design.theme), (before.title != after.title).then_some(after.title.as_str()), background, scale)?;
         if before.hide_master_graphics != after.hide_master_graphics {
             let xml = package.text(&binding.path)?.to_owned(); let document = parse(&xml)?; let mut edits = Vec::new(); set_attribute(&xml, document.root_element(), "showMasterSp", if after.hide_master_graphics { "0" } else { "1" }, &mut edits)?; package.replace_part(&binding.path, apply(xml, edits)?)?;
