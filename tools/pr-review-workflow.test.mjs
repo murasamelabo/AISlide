@@ -200,9 +200,12 @@ test('protected branches fall back to auto and approval failures never attempt m
 
 test('negative verdicts request changes but never merge', async context => {
   for (const verdict of ['判定: 修正後マージ可', '判定: マージ不可']) {
-    const result = await run(context, 'Review pull request', { verdict });
-    assert.ok(reviews(result)[0].args.includes('--request-changes'));
-    assert.equal(merges(result).length, 0);
+    for (const conclusion of ['success', 'failure']) {
+      const result = await run(context, 'Review pull request', { verdict, run: { ...verify, conclusion } });
+      assert.ok(reviews(result)[0].args.includes('--request-changes'));
+      assert.equal(merges(result).length, 0);
+      if (conclusion === 'failure') assert.match(result.comment, /Verify が failure/);
+    }
   }
 });
 
@@ -239,6 +242,7 @@ test('unknown mergeability, missing/truncated diffs, changed head, and restarted
   for (const options of [
     { pr: { ...pr, mergeable: null } }, { diffFailed: true }, { largeDiff: true },
     { moved: true }, { finalPr: { ...pr, requested_reviewers: [] } },
+    { run: { ...verify, status: 'in_progress', conclusion: null } },
     { runs: [{ ...verify, status: 'in_progress', conclusion: null }] },
     { runs: [{ ...verify, run_attempt: 2 }] },
     { runs: [{ ...verify, id: 124, run_number: 11 }] },

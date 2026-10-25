@@ -172,6 +172,10 @@ jobs:
           fi
 
           gh api "repos/$REPO/actions/runs/$VERIFY_RUN_ID" > "$work/verify.json"
+          if [ "$(jq -r .status "$work/verify.json")" != completed ]; then
+            echo "::notice::Verify restarted; waiting for completion."
+            exit 0
+          fi
           verify_conclusion="$(jq -r .conclusion "$work/verify.json")"
           verify_url="$(jq -r .html_url "$work/verify.json")"
           {
@@ -275,12 +279,12 @@ jobs:
             exit 0
           fi
           verify_conclusion="$(jq -r .conclusion <<< "$latest_run")"
-          if [ "$verify_conclusion" != success ]; then
-            action="保留: Verify が $verify_conclusion のためマージしません。ジョブ結果は下記を確認してください。"
-          elif [ "$eligible" = true ]; then
+          if [ "$eligible" = true ]; then
             case "$verdict" in
               '判定: マージ可')
-                if [ "$(jq -r .mergeable <<< "$pr")" != true ]; then
+                if [ "$verify_conclusion" != success ]; then
+                  action="保留: Verify が成功していないため承認しません。"
+                elif [ "$(jq -r .mergeable <<< "$pr")" != true ]; then
                   action="保留: PR が mergeable ではありません(競合または判定待ち)。"
                 elif [ -n "$diff_note" ]; then
                   action="保留: 差分全体を確認できていません。"
@@ -309,6 +313,9 @@ jobs:
                 fi
                 ;;
             esac
+          fi
+          if [ "$verify_conclusion" != success ]; then
+            action="$action Verify が $verify_conclusion のためマージしません。ジョブ結果は上記を確認してください。"
           fi
           check_head
           {
