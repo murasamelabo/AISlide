@@ -1299,7 +1299,8 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
     }
     for (after, binding) in design.layouts.iter().zip(&topology.layouts) {
         let before = old.layouts.iter().find(|before| before.id == after.id);
-        patch_part(package, binding, before.map(|before| before.elements.as_slice()).unwrap_or(&[]), &after.elements, crate::design::master_theme(design, &after.master_id), before.is_some_and(|before| before.name != after.name).then_some(after.name.as_str()), before.is_some_and(|before| before.background != after.background).then_some(after.background.as_deref()), scale)?;
+        let master_bg_changed = old.masters.iter().find(|m| m.id == after.master_id).zip(design.masters.iter().find(|m| m.id == after.master_id)).is_some_and(|(bm, am)| bm.background != am.background);
+        patch_part(package, binding, before.map(|before| before.elements.as_slice()).unwrap_or(&[]), &after.elements, crate::design::master_theme(design, &after.master_id), before.is_some_and(|before| before.name != after.name).then_some(after.name.as_str()), (before.is_some_and(|before| before.background != after.background) || (master_bg_changed && after.background.is_some())).then_some(after.background.as_deref()), scale)?;
         crate::fields::write_part(package, &binding.path, &after.elements, Some(binding))?;
     }
     if let Some(slide) = deck.slides.iter().find(|slide| !slide.notes.is_empty() && slide.native_source_id.is_none() && !original.slides.iter().any(|binding| binding.id == slide.id)) {
@@ -1317,7 +1318,7 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
             let mut edits = Vec::new(); set_attribute(&xml, relation, "Target", &format!("/{path}"), &mut edits)?; package.replace_part(&relation_path, apply(xml, edits)?)?;
         }
         if before.notes != after.notes || before.notes_paragraphs != after.notes_paragraphs { patch_notes(package, main, &binding.path, after, deck)?; }
-        let background = (before.background != after.background || before.inherit_background != after.inherit_background).then_some(if after.inherit_background { None } else { Some(after.background.as_str()) });
+        let background = (before.background != after.background || before.inherit_background != after.inherit_background || (before.layout_id != after.layout_id && !after.inherit_background)).then_some(if after.inherit_background { None } else { Some(after.background.as_str()) });
         patch_part(package, binding, &before.elements, &after.elements, crate::design::slide_theme(after, Some(design)).unwrap_or(&design.theme), (before.title != after.title).then_some(after.title.as_str()), background, scale)?;
         if before.hide_master_graphics != after.hide_master_graphics {
             let xml = package.text(&binding.path)?.to_owned(); let document = parse(&xml)?; let mut edits = Vec::new(); set_attribute(&xml, document.root_element(), "showMasterSp", if after.hide_master_graphics { "0" } else { "1" }, &mut edits)?; package.replace_part(&binding.path, apply(xml, edits)?)?;

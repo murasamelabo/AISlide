@@ -30,9 +30,9 @@ impl ColorMap {
         self.0[index] = slot; true
     }
     pub(crate) fn encode<'a>(&self, slot: &'a str) -> Option<&'a str> {
-        let slot = Self::default().resolve(slot);
-        if *self == Self::default() && self.resolve(slot) == slot { return Some(slot); }
-        COLOR_MAP_KEYS.iter().copied().find(|key| self.resolve(key) == slot).or_else(|| (self.resolve(slot) == slot).then_some(slot))
+        let slot = COLOR_KEYS.iter().copied().find(|key| *key == slot)?;
+        if self.resolve(slot) == slot { return Some(slot); }
+        COLOR_MAP_KEYS.iter().copied().find(|key| self.resolve(key) == slot)
     }
 }
 
