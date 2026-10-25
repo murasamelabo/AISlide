@@ -3,9 +3,37 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const COLOR_KEYS: [&str; 12] = ["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
+pub const COLOR_MAP_KEYS: [&str; 12] = ["bg1", "tx1", "bg2", "tx2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct ColorMap([&'static str; 12]);
+
+impl Default for ColorMap {
+    fn default() -> Self {
+        Self(["lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"])
+    }
+}
+
+impl ColorMap {
+    pub(crate) fn resolve<'a>(&self, value: &'a str) -> &'a str {
+        COLOR_MAP_KEYS.iter().position(|key| *key == value).map_or(value, |index| self.0[index])
+    }
+
+    pub(crate) fn set(&mut self, name: &str, value: &str) -> bool {
+        let Some(index) = COLOR_MAP_KEYS.iter().position(|key| *key == name) else { return false };
+        let Some(slot) = COLOR_KEYS.iter().copied().find(|key| *key == value) else { return false };
+        self.0[index] = slot;
+        true
+    }
+
+    pub(crate) fn encode<'a>(&self, slot: &'a str) -> Option<&'a str> {
+        if self.resolve(slot) == slot { return Some(slot); }
+        COLOR_MAP_KEYS.iter().copied().find(|key| self.resolve(key) == slot)
+    }
+}
 
 pub(crate) fn color_slot(value: &str) -> &str {
-    match value { "tx1" => "dk1", "bg1" => "lt1", "tx2" => "dk2", "bg2" => "lt2", other => other }
+    ColorMap::default().resolve(value)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -218,7 +246,7 @@ pub fn apply_theme(mut deck: Deck, theme: Theme) -> Result<Deck> {
 }
 
 pub fn slide_background<'a>(slide: &'a Slide, design: Option<&'a Design>) -> &'a str {
-    if slide.inherit_background { if let Some(design) = design { if let Some(layout) = slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)) { return layout.background.as_deref().or_else(|| design.masters.iter().find(|master| master.id == layout.master_id).map(|master| master.background.as_str())).unwrap_or(&slide.background); } } }
+    if slide.inherit_background { if let Some(design) = design { if let Some(layout) = slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)).or_else(|| design.layouts.first()) { return layout.background.as_deref().or_else(|| design.masters.iter().find(|master| master.id == layout.master_id).map(|master| master.background.as_str())).unwrap_or(&slide.background); } } }
     &slide.background
 }
 

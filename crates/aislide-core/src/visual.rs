@@ -258,15 +258,15 @@ fn numeric(node: Node<'_, '_>, name: &str, default: f64) -> Result<f64> {
     if !value.is_finite() { return Err(Error::Invalid("nonfinite native visual".into())); } Ok(value)
 }
 fn is_true(node: Node<'_, '_>, name: &str) -> bool { matches!(node.attribute(name), Some("1" | "true")) }
-pub(crate) fn read_color(node: Node<'_, '_>) -> Result<(String, f64)> {
+pub(crate) fn read_color(node: Node<'_, '_>, color_map: crate::design::ColorMap) -> Result<(String, f64)> {
     let shade = node.children().find(|node| node.has_tag_name((A, "srgbClr")) || node.has_tag_name((A, "schemeClr"))).ok_or_else(|| Error::Unsupported("visual color type".into()))?;
     let value = shade.attribute("val").ok_or_else(|| Error::Invalid("visual color missing".into()))?;
-    let color = if shade.has_tag_name((A, "schemeClr")) { format!("@{}", crate::design::color_slot(value)) } else { value.into() };
+    let color = if shade.has_tag_name((A, "schemeClr")) { format!("@{}", color_map.resolve(value)) } else { value.into() };
     let opacity = child(shade, A, "alpha").map(|node| numeric(node, "val", 100000.0)).transpose()?.unwrap_or(100000.0) / 100000.0;
     Ok((color, opacity))
 }
 
-pub(crate) fn read(node: Node<'_, '_>) -> Result<Option<VisualStyle>> {
+pub(crate) fn read(node: Node<'_, '_>, color_map: crate::design::ColorMap) -> Result<Option<VisualStyle>> {
     let mut style = VisualStyle::default();
     let Some(parent) = child(node, P, if node.has_tag_name((P, "grpSp")) { "grpSpPr" } else { "spPr" }) else { return Ok(None); };
     if let Some(transform) = child(parent, A, "xfrm") {
@@ -279,10 +279,10 @@ pub(crate) fn read(node: Node<'_, '_>) -> Result<Option<VisualStyle>> {
     style.hidden = properties(node).is_some_and(|node| is_true(node, "hidden"));
     style.locked = locks(node).and_then(|(node, tag)| child(node, A, tag)).is_some_and(|node| ["noMove", "noResize", "noRot"].iter().all(|name| is_true(node, name)));
     if let Some(fill) = child(parent, A, "solidFill") {
-        if fill.descendants().any(|node| node.has_tag_name((A, "alpha"))) { style.opacity = Some(read_color(fill)?.1); }
+        if fill.descendants().any(|node| node.has_tag_name((A, "alpha"))) { style.opacity = Some(read_color(fill, color_map)?.1); }
     }
     if let Some(gradient) = child(parent, A, "gradFill") {
-        let stops = child(gradient, A, "gsLst").ok_or_else(|| Error::Invalid("gradient stops missing".into()))?.children().filter(|node| node.has_tag_name((A, "gs"))).map(|node| { let (color, opacity) = read_color(node)?; Ok(GradientStop { offset: numeric(node, "pos", 0.0)? / 100000.0, color, opacity }) }).collect::<Result<Vec<_>>>()?;
+        let stops = child(gradient, A, "gsLst").ok_or_else(|| Error::Invalid("gradient stops missing".into()))?.children().filter(|node| node.has_tag_name((A, "gs"))).map(|node| { let (color, opacity) = read_color(node, color_map)?; Ok(GradientStop { offset: numeric(node, "pos", 0.0)? / 100000.0, color, opacity }) }).collect::<Result<Vec<_>>>()?;
         style.gradient = Some(if let Some(linear) = child(gradient, A, "lin") { Gradient::Linear { angle: numeric(linear, "ang", 0.0)? / 60000.0, stops } }
         else if let Some(path) = child(gradient, A, "path").filter(|node| node.attribute("path") == Some("circle")) {
             let rect = child(path, A, "fillToRect").ok_or_else(|| Error::Unsupported("radial gradient center".into()))?;
@@ -290,8 +290,8 @@ pub(crate) fn read(node: Node<'_, '_>) -> Result<Option<VisualStyle>> {
         } else { return Err(Error::Unsupported("gradient geometry".into())); });
     }
     if let Some(effects) = child(parent, A, "effectLst") { for effect in effects.children().filter(|node| node.is_element()) { if effect.tag_name().namespace() != Some(A) { continue; } match effect.tag_name().name() {
-        "glow" => { let (color, opacity) = read_color(effect)?; style.glow = Some(Glow { color, opacity, radius: numeric(effect, "rad", 0.0)? / 9525.0 }); }
-        "outerShdw" => { let (color, opacity) = read_color(effect)?; style.shadow = Some(Shadow { color, opacity, blur: numeric(effect, "blurRad", 0.0)? / 9525.0, distance: numeric(effect, "dist", 0.0)? / 9525.0, angle: numeric(effect, "dir", 0.0)? / 60000.0 }); }
+        "glow" => { let (color, opacity) = read_color(effect, color_map)?; style.glow = Some(Glow { color, opacity, radius: numeric(effect, "rad", 0.0)? / 9525.0 }); }
+        "outerShdw" => { let (color, opacity) = read_color(effect, color_map)?; style.shadow = Some(Shadow { color, opacity, blur: numeric(effect, "blurRad", 0.0)? / 9525.0, distance: numeric(effect, "dist", 0.0)? / 9525.0, angle: numeric(effect, "dir", 0.0)? / 60000.0 }); }
         "softEdge" => style.soft_edge = Some(numeric(effect, "rad", 0.0)? / 9525.0),
         "reflection" => style.reflection = Some(Reflection { blur: numeric(effect, "blurRad", 0.0)? / 9525.0, distance: numeric(effect, "dist", 0.0)? / 9525.0, start_opacity: numeric(effect, "stA", 100000.0)? / 100000.0, end_opacity: numeric(effect, "endA", 0.0)? / 100000.0, end_position: numeric(effect, "endPos", 100000.0)? / 100000.0 }),
         _ => {}
@@ -325,22 +325,28 @@ pub(crate) fn read(node: Node<'_, '_>) -> Result<Option<VisualStyle>> {
 }
 
 pub(crate) fn signature(node: Node<'_, '_>, references: bool) -> serde_json::Value {
+    signature_with_map(node, references, crate::design::ColorMap::default())
+}
+
+pub(crate) fn signature_with_map(node: Node<'_, '_>, references: bool, color_map: crate::design::ColorMap) -> serde_json::Value {
     let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| {
-        let value = if references && attribute.namespace() == Some(crate::native::R) && attribute.name() == "embed" { "resource" } else { attribute.value() };
+        let value = if references && attribute.namespace() == Some(crate::native::R) && attribute.name() == "embed" { "resource" }
+        else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { color_map.resolve(attribute.value()) }
+        else { attribute.value() };
         (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), value)
     }).collect();
-    let children: Vec<_> = node.children().filter(|node| node.is_element()).map(|node| signature(node, references)).collect();
+    let children: Vec<_> = node.children().filter(|node| node.is_element()).map(|node| signature_with_map(node, references, color_map)).collect();
     serde_json::json!([node.tag_name().namespace(),node.tag_name().name(),attributes,children])
 }
 
-fn equivalent(parent: Node<'_, '_>, expected: Node<'_, '_>, names: &[&str], references: bool) -> Result<()> {
-    let selected = |parent: Node<'_, '_>| parent.children().filter(|node| node.tag_name().namespace() == Some(A) && names.contains(&node.tag_name().name())).map(|node| signature(node, references)).collect::<Vec<_>>();
-    if selected(parent) != selected(expected) { return Err(Error::Unsupported(format!("native {} contains unrepresented formatting; replacement is refused", names.join("/")))); }
+fn equivalent(parent: Node<'_, '_>, expected: Node<'_, '_>, names: &[&str], references: bool, color_map: crate::design::ColorMap) -> Result<()> {
+    let selected = |parent: Node<'_, '_>, map: crate::design::ColorMap| parent.children().filter(|node| node.tag_name().namespace() == Some(A) && names.contains(&node.tag_name().name())).map(|node| signature_with_map(node, references, map)).collect::<Vec<_>>();
+    if selected(parent, color_map) != selected(expected, crate::design::ColorMap::default()) { return Err(Error::Unsupported(format!("native {} contains unrepresented formatting; replacement is refused", names.join("/")))); }
     Ok(())
 }
 
-fn replace_generated(xml: &str, parent: Node<'_, '_>, generated: &str, next: Node<'_, '_>, previous: Node<'_, '_>, names: &[&str], order: &[&str], edits: &mut Edits) -> Result<()> {
-    equivalent(parent, previous, names, false)?;
+fn replace_generated(xml: &str, parent: Node<'_, '_>, generated: &str, next: Node<'_, '_>, previous: Node<'_, '_>, names: &[&str], order: &[&str], color_map: crate::design::ColorMap, edits: &mut Edits) -> Result<()> {
+    equivalent(parent, previous, names, false, color_map)?;
     let fragment: String = next.children().filter(|node| node.tag_name().namespace() == Some(A) && names.contains(&node.tag_name().name())).map(|node| crate::native_save::fragment(generated, node)).collect();
     replace(xml, parent, names, &fragment, order, edits)
 }
@@ -352,7 +358,7 @@ fn picture_changed(old: &Element, new: &Element) -> bool {
 /// Patches only represented visual properties, never an entire native shape.
 /// Unmodeled XML inside a replaced paint/effect/geometry subtree blocks edits;
 /// sibling extensions and unrelated attributes remain byte-for-byte intact.
-pub(crate) fn patch(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '_>, previous: Node<'_, '_>, old: &Element, new: &Element, edits: &mut Edits) -> Result<()> {
+pub(crate) fn patch(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '_>, previous: Node<'_, '_>, old: &Element, new: &Element, color_map: crate::design::ColorMap, edits: &mut Edits) -> Result<()> {
     if matches!(new, Element::Table { .. } | Element::Chart { .. }) { return Ok(()); }
     if let (Element::Picture { base64, svg: Some(svg), .. }, Element::Picture { base64: next, svg: Some(next_svg), .. }) = (old,new) {
         if base64 != next && svg == next_svg { return Err(Error::Invalid("raster edits must remove or replace the retained SVG in the same element replacement".into())); }
@@ -382,14 +388,14 @@ pub(crate) fn patch(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'
     }
     let fill = |element: &Element| match element { Element::Rect { fill, .. } | Element::Polygon { fill, .. } | Element::Shape { fill, .. } => Some(fill.clone()), _ => None };
     if fill(new).is_some() && (fill(old) != fill(new) || before.opacity != after.opacity || before.gradient != after.gradient) {
-        replace_generated(xml, parent, generated, next_parent, expected, &["noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill"], ORDER, edits)?;
+        replace_generated(xml, parent, generated, next_parent, expected, &["noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill"], ORDER, color_map, edits)?;
     }
     if (&before.shadow, &before.glow, before.soft_edge, &before.reflection) != (&after.shadow, &after.glow, after.soft_edge, &after.reflection) {
-        replace_generated(xml, parent, generated, next_parent, expected, &["effectLst", "effectDag"], ORDER, edits)?;
+        replace_generated(xml, parent, generated, next_parent, expected, &["effectLst", "effectDag"], ORDER, color_map, edits)?;
     }
     if before.text_warp != after.text_warp {
         let body = |node| child(node, P, "txBody").and_then(|node| child(node, A, "bodyPr")).ok_or_else(|| Error::Unsupported("native text warp body missing".into()));
-        replace_generated(xml, body(node)?, generated, body(next)?, body(previous)?, &["prstTxWarp"], &["prstTxWarp", "noAutofit", "normAutofit", "spAutoFit", "scene3d", "sp3d", "flatTx", "extLst"], edits)?;
+        replace_generated(xml, body(node)?, generated, body(next)?, body(previous)?, &["prstTxWarp"], &["prstTxWarp", "noAutofit", "normAutofit", "spAutoFit", "scene3d", "sp3d", "flatTx", "extLst"], color_map, edits)?;
     }
     let geometry_changed = match (old, new) {
         (Element::Polygon { points, .. }, Element::Polygon { points: next, .. }) => points != next || before.path != after.path,
@@ -398,18 +404,18 @@ pub(crate) fn patch(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'
         (Element::Picture { .. }, Element::Picture { .. }) => before.picture_mask != after.picture_mask,
         _ => false,
     };
-    if geometry_changed { replace_generated(xml, parent, generated, next_parent, expected, &["prstGeom", "custGeom"], ORDER, edits)?; }
+    if geometry_changed { replace_generated(xml, parent, generated, next_parent, expected, &["prstGeom", "custGeom"], ORDER, color_map, edits)?; }
     let outline_changed = matches!((old,new), (Element::Shape { stroke, stroke_width, .. }, Element::Shape { stroke: next, stroke_width: next_width, .. }) | (Element::Polygon { stroke, stroke_width, .. }, Element::Polygon { stroke: next, stroke_width: next_width, .. }) if stroke != next || stroke_width != next_width);
-    if outline_changed { replace_generated(xml, parent, generated, next_parent, expected, &["ln"], ORDER, edits)?; }
+    if outline_changed { replace_generated(xml, parent, generated, next_parent, expected, &["ln"], ORDER, color_map, edits)?; }
     if let (Element::Connector { routing: Some(before), color, stroke_width, arrow, .. }, Element::Connector { routing: Some(after), color: next_color, stroke_width: next_width, arrow: next_arrow, .. }) = (old, new) {
         if before.custom && after.custom && (before.points != after.points || before.start_arrow != after.start_arrow || before.dashed != after.dashed || color != next_color || stroke_width != next_width || arrow != next_arrow) {
-            replace_generated(xml, parent, generated, next_parent, expected, &["ln"], ORDER, edits)?;
+            replace_generated(xml, parent, generated, next_parent, expected, &["ln"], ORDER, color_map, edits)?;
         }
     }
     if matches!(new, Element::Picture { .. }) && (picture_changed(old,new) || before.opacity != after.opacity) {
         let fill = child(node, P, "blipFill").ok_or_else(|| Error::Unsupported("native picture fill missing".into()))?;
         let previous_fill = child(previous, P, "blipFill").ok_or_else(|| Error::Invalid("previous picture fill missing".into()))?;
-        equivalent(fill, previous_fill, &["blip"], true)?;
+        equivalent(fill, previous_fill, &["blip"], true, color_map)?;
         let next_blip = child(next, P, "blipFill").and_then(|node| child(node, A, "blip")).ok_or_else(|| Error::Invalid("generated picture blip missing".into()))?;
         let mut fragment = crate::native_save::fragment(generated, next_blip);
         if !picture_changed(old,new) {

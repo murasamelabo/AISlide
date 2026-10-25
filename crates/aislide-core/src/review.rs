@@ -187,7 +187,7 @@ fn write_accessibility(package: &mut crate::package::Package, binding: &crate::n
 pub(crate) fn write_generated(package: &mut crate::package::Package, deck: &crate::model::Deck) -> Result<()> {
     crate::comments::modern::validate_deck(deck)?;
     for (slide, path) in deck.slides.iter().zip(crate::pptx::slide_paths(package)?) {
-        let binding = crate::native::NativePart { path, id: slide.id.clone(), nodes: BTreeMap::new() };
+        let binding = crate::native::NativePart { path, id: slide.id.clone(), nodes: BTreeMap::new(), color_map: Default::default() };
         let comments = slide.review.as_ref().map(|review| review.comments.as_slice()).unwrap_or(&[]);
         crate::comments::write(package, &binding.path, &[], comments, false)?;
         crate::comments::modern::write(package, &binding.path, None, slide.review.as_ref().and_then(|review| review.modern_threads.as_deref()), false)?;
@@ -304,10 +304,23 @@ pub fn check_accessibility(deck: &crate::model::Deck) -> AccessibilityReport {
                 }
                 Element::Text { text, color, font_size, bold, format, .. } | Element::Shape { text, color, font_size, bold, format, .. } if !text.trim().is_empty() => {
                     let (_, left, top, width, height) = element.bounds();
-                    let simple = element.visual().is_none() && !slide.inherit_background && !format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.style.highlight.as_deref().is_some_and(|value| value != "none") || run.style.baseline.is_some_and(|value| value != 0)) && slide.elements.iter().any(|candidate| candidate.bounds().0 == id)
-                        && !slide.elements.iter().any(|other| { let (other_id, other_left, other_top, other_width, other_height) = other.bounds(); other_id != id && left < other_left + other_width && other_left < left + width && top < other_top + other_height && other_top < top + height });
+                    let own_fill = matches!(element, Element::Shape { fill, .. } if fill != "none");
+                    let overlaps = |other: &Element| {
+                        let (other_id, other_left, other_top, other_width, other_height) = other.bounds();
+                        other_id != id && left < other_left + other_width && other_left < left + width && top < other_top + other_height && other_top < top + height
+                    };
+                    let layout = deck.design.as_ref().and_then(|design| slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)).or_else(|| design.layouts.first()));
+                    let master = layout.and_then(|layout| deck.design.as_ref()?.masters.iter().find(|master| master.id == layout.master_id));
+                    let inherited_overlap = !own_fill && slide.inherit_background && layout.into_iter().flat_map(|layout| &layout.elements)
+                        .chain(master.filter(|_| !slide.hide_master_graphics).into_iter().flat_map(|master| &master.elements))
+                        .filter(|other| !matches!(other, Element::Text { format, .. } if format.placeholder.is_some()))
+                        .any(overlaps);
+                    let simple = element.visual().is_none() && (!slide.inherit_background || own_fill || deck.design.is_some()) && !inherited_overlap
+                        && !format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.style.highlight.as_deref().is_some_and(|value| value != "none") || run.style.baseline.is_some_and(|value| value != 0))
+                        && slide.elements.iter().any(|candidate| candidate.bounds().0 == id)
+                        && !slide.elements.iter().any(overlaps);
                     if !simple { issue("contrast_background_unverified", Some(id), "unsupported", None, None); continue; }
-                    let background = match element { Element::Shape { fill, .. } if fill != "none" => resolve(fill), _ => resolve(&slide.background) };
+                    let background = match element { Element::Shape { fill, .. } if fill != "none" => resolve(fill), _ => resolve(crate::design::slide_background(slide, deck.design.as_ref())) };
                     let mut check = |color: &str, size: f64, bold: bool| {
                         let required = if size >= 24.0 || (bold && size >= 56.0 / 3.0) { 3.0 } else { 4.5 };
                         match contrast_ratio(&resolve(color), &background) { Ok(ratio) if ratio < required => issue("text_contrast_low", Some(id), "finding", Some(ratio), Some(required)), Err(_) => issue("contrast_color_unverified", Some(id), "unsupported", None, None), _ => {} }

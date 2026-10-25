@@ -43,7 +43,7 @@ fn read_kind(node: roxmltree::Node<'_, '_>) -> Result<ChartKind> {
     })
 }
 
-pub(crate) fn read(document: &roxmltree::Document<'_>, read_color: fn(roxmltree::Node<'_, '_>, &str) -> String) -> Result<(ChartKind, Vec<String>, Vec<ChartSeries>, ChartOptions)> {
+pub(crate) fn read(document: &roxmltree::Document<'_>, read_color: impl Fn(roxmltree::Node<'_, '_>, &str) -> String + Copy) -> Result<(ChartKind, Vec<String>, Vec<ChartSeries>, ChartOptions)> {
     if document.root_element().has_tag_name((crate::chart_extended::NS, "chartSpace")) { return crate::chart_extended::read(document, read_color); }
     use crate::native::{A, C, child};
     use crate::Error;

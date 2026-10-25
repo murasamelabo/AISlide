@@ -67,7 +67,7 @@ fn store(hash: String, index: ProjectionIndex) -> Result<Arc<ProjectionIndex>> {
     Ok(index)
 }
 
-fn part(package: &Package, binding: &NativePart, elements: &[Element], design: bool) -> Result<ProjectionPart> {
+fn part(package: &Package, binding: &NativePart, elements: &[Element], design: bool, unsupported_color_mapping: bool) -> Result<ProjectionPart> {
     let parsed = crate::pptx::parse(package.text(&binding.path)?)?;
     let root = parsed.root_element();
     let tree = native::child(root, P, "cSld").and_then(|node| native::child(node, P, "spTree"))
@@ -93,7 +93,7 @@ fn part(package: &Package, binding: &NativePart, elements: &[Element], design: b
     Ok(ProjectionPart {
         path: binding.path.clone(), missing: missing.into_iter().collect(),
         hide_master_graphics: matches!(root.attribute("showMasterSp"), Some("0" | "false")),
-        unsupported_color_mapping: native::unsupported_color_mapping(root),
+        unsupported_color_mapping: native::unsupported_color_mapping(root) || unsupported_color_mapping,
     })
 }
 
@@ -102,18 +102,40 @@ fn build(package: &Package, source: &NativeDeck) -> Result<ProjectionIndex> {
     for binding in &source.slides {
         let slide = source.deck.slides.iter().find(|slide| slide.id == binding.id)
             .ok_or_else(|| Error::Invalid("native projection slide missing".into()))?;
-        index.slides.insert(binding.id.clone(), part(package, binding, &slide.elements, false)?);
+        let mut unsupported_color = false;
+        if let Some(design) = &source.deck.design {
+            let layout = slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)).or_else(|| design.layouts.first());
+            if let Some(layout) = layout {
+                if let Some(layout_binding) = source.layouts.iter().find(|entry| entry.id == layout.id) {
+                    let layout_xml = crate::pptx::parse(package.text(&layout_binding.path)?)?;
+                    unsupported_color |= native::has_remapped_nonplaceholder_scheme_color(layout_xml.root_element(), layout_binding.color_map, binding.color_map);
+                    if !slide.hide_master_graphics && !matches!(layout_xml.root_element().attribute("showMasterSp"), Some("0" | "false")) {
+                        if let Some(master_binding) = source.masters.iter().find(|entry| entry.id == layout.master_id) {
+                            let master_xml = crate::pptx::parse(package.text(&master_binding.path)?)?;
+                            unsupported_color |= native::has_remapped_nonplaceholder_scheme_color(master_xml.root_element(), master_binding.color_map, binding.color_map);
+                        }
+                    }
+                }
+            }
+        }
+        index.slides.insert(binding.id.clone(), part(package, binding, &slide.elements, false, unsupported_color)?);
     }
     if let Some(design) = &source.deck.design {
         for binding in &source.layouts {
             let layout = design.layouts.iter().find(|layout| layout.id == binding.id)
                 .ok_or_else(|| Error::Invalid("native projection layout missing".into()))?;
-            index.layouts.insert(binding.id.clone(), part(package, binding, &layout.elements, true)?);
+            let layout_xml = crate::pptx::parse(package.text(&binding.path)?)?;
+            let unsupported_color = !matches!(layout_xml.root_element().attribute("showMasterSp"), Some("0" | "false"))
+                && source.masters.iter().find(|entry| entry.id == layout.master_id).map(|master_binding| -> Result<bool> {
+                    let master_xml = crate::pptx::parse(package.text(&master_binding.path)?)?;
+                    Ok(native::has_remapped_nonplaceholder_scheme_color(master_xml.root_element(), master_binding.color_map, binding.color_map))
+                }).transpose()?.unwrap_or(false);
+            index.layouts.insert(binding.id.clone(), part(package, binding, &layout.elements, true, unsupported_color)?);
         }
         for binding in &source.masters {
             let master = design.masters.iter().find(|master| master.id == binding.id)
                 .ok_or_else(|| Error::Invalid("native projection master missing".into()))?;
-            index.masters.insert(binding.id.clone(), part(package, binding, &master.elements, true)?);
+            index.masters.insert(binding.id.clone(), part(package, binding, &master.elements, true, false)?);
         }
     }
     Ok(index)

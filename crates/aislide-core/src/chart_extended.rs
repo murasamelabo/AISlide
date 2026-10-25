@@ -231,7 +231,7 @@ fn cache_level(level: Node<'_, '_>) -> Result<Vec<String>> {
     values.into_iter().map(|value| value.ok_or_else(|| Error::Unsupported("chartEx sparse cache".into()))).collect()
 }
 
-pub(crate) fn read(document: &roxmltree::Document<'_>, read_color: fn(Node<'_, '_>, &str) -> String) -> Result<(ChartKind, Vec<String>, Vec<ChartSeries>, ChartOptions)> {
+pub(crate) fn read(document: &roxmltree::Document<'_>, read_color: impl Fn(Node<'_, '_>, &str) -> String + Copy) -> Result<(ChartKind, Vec<String>, Vec<ChartSeries>, ChartOptions)> {
     let root = document.root_element();
     let chart = required(root, "chart")?;
     let plot = required(chart, "plotArea")?;
