@@ -150,6 +150,7 @@ pub(crate) fn encode_scheme_colors(xml: String, color_map: crate::design::ColorM
 
 /// Generates element XML encoded under the active part's `ColorMap::enter` scope.
 pub(crate) fn scaled_element(element: &Element, ids: &BTreeMap<&str, usize>, theme: &crate::design::Theme, scale: (f64, f64)) -> Result<String> {
+    debug_assert!(crate::design::ColorMap::is_scoped());
     let xml = encode_scheme_colors(crate::pptx::element_xml(element, ids[element.bounds().0], ids, theme), crate::design::ColorMap::current())?;
     if scale == (9525.0, 9525.0) { return Ok(xml); }
     let document = parse(&xml)?; let root = document.root_element();

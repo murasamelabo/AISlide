@@ -7,8 +7,8 @@ pub(crate) const COLOR_MAP_KEYS: [&str; 12] = ["bg1", "tx1", "bg2", "tx2", "acce
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ColorMap([&'static str; 12]);
-thread_local! { static ACTIVE_COLOR_MAP: std::cell::Cell<ColorMap> = std::cell::Cell::new(ColorMap::default()); }
-pub(crate) struct ColorMapGuard(ColorMap);
+thread_local! { static ACTIVE_COLOR_MAP: std::cell::Cell<(ColorMap, usize)> = std::cell::Cell::new((ColorMap::default(), 0)); }
+pub(crate) struct ColorMapGuard((ColorMap, usize));
 impl Drop for ColorMapGuard { fn drop(&mut self) { ACTIVE_COLOR_MAP.with(|active| active.set(self.0)); } }
 
 impl Default for ColorMap {
@@ -16,8 +16,9 @@ impl Default for ColorMap {
 }
 
 impl ColorMap {
-    pub(crate) fn current() -> Self { ACTIVE_COLOR_MAP.with(std::cell::Cell::get) }
-    pub(crate) fn enter(self) -> ColorMapGuard { ColorMapGuard(ACTIVE_COLOR_MAP.with(|active| active.replace(self))) }
+    pub(crate) fn current() -> Self { ACTIVE_COLOR_MAP.with(|active| active.get().0) }
+    pub(crate) fn is_scoped() -> bool { ACTIVE_COLOR_MAP.with(|active| active.get().1 > 0) }
+    pub(crate) fn enter(self) -> ColorMapGuard { ColorMapGuard(ACTIVE_COLOR_MAP.with(|active| { let prev = active.get(); active.set((self, prev.1 + 1)); prev })) }
     pub(crate) fn scope<R>(self, run: impl FnOnce() -> R) -> R {
         let _guard = self.enter();
         run()

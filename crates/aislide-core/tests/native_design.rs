@@ -32,11 +32,11 @@ fn issue32_custom_color_maps_warn_in_native_and_template_diagnostics_without_rew
         let parsed = roxmltree::Document::parse(&xml).unwrap();
         let (range, replacement) = if master {
             let value = parsed.descendants().find(|node| node.has_tag_name((P, "clrMap"))).unwrap().attribute_node("bg1").unwrap();
-            (value.range(), "bg1=\"dk1\" custom=\"dk1\"".to_owned())
+            (value.range(), String::new())
         } else {
             let end = parsed.descendants().find(|node| node.has_tag_name((P, "cSld"))).unwrap().range().end;
             let range = parsed.descendants().find(|node| node.has_tag_name((P, "clrMapOvr"))).map(|node| node.range()).unwrap_or(end..end);
-            (range, format!("<p:clrMapOvr xmlns:p=\"{P}\"><a:overrideClrMapping xmlns:a=\"{A}\" custom=\"dk1\" bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr>"))
+            (range, format!("<p:clrMapOvr xmlns:p=\"{P}\"><a:overrideClrMapping xmlns:a=\"{A}\" bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"><a:extLst/></a:overrideClrMapping></p:clrMapOvr>"))
         };
         xml.replace_range(range, &replacement);
         package.replace_part(path, xml.into_bytes()).unwrap();
@@ -94,12 +94,11 @@ fn issue32_color_maps_and_overrides_resolve() {
     }
     let mut low = t_doc.deck.clone(); if let Element::Text { color, .. } = &mut low.slides[0].elements[0] { *color = "@dk1".into(); }
     assert!(a11y(&low).issues.iter().any(|i| i.element_id.as_deref() == Some("sc") && i.code == "text_contrast_low" && i.contrast_ratio == Some(1.0)));
-    let mut ins = t_doc.deck.clone();
-    ins.slides.push(Slide { id: "s2".into(), title: "I".into(), background: "@dk1".into(), elements: vec![txt("it", "@accent1"), el(json!({"type":"chart","id":"ic","x":80,"y":180,"width":500,"height":300,"kind":"bar","categories":["Q1","Q2"],"series":[{"name":"R","values":[10.0,20.0],"color":"@accent1"}]}))], notes: "N0".into(), notes_paragraphs: serde_json::from_value(json!([{"runs":[{"text":"N0","style":{"color":"@accent1"}}]}])).unwrap(), layout_id: Some("blank".into()), inherit_background: false, hide_master_graphics: false, native_source_id: None, review: None });
+    let mut ins = t_doc.deck.clone(); ins.slides[0].notes_paragraphs[0].runs[0].style.color = Some("@accent1".into());
+    ins.slides.push(Slide { id: "s2".into(), title: "I".into(), background: "@dk1".into(), elements: vec![txt("it", "@accent1"), el(json!({"type":"chart","id":"ic","x":80,"y":180,"width":500,"height":300,"kind":"bar","categories":["Q1","Q2"],"series":[{"name":"R","values":[10.0,20.0],"color":"@accent1"}]}))], notes: "N0".into(), notes_paragraphs: ins.slides[0].notes_paragraphs.clone(), layout_id: Some("blank".into()), inherit_background: false, hide_master_graphics: false, native_source_id: None, review: None });
     let ins_b = save(&change(&t_doc, ins).document); let exp_i = Package::open(ins_b.clone()).unwrap();
-    let add_x = exp_i.text(exp_i.parts().keys().find(|n| n.starts_with("ppt/slides/aislide-added-")).unwrap()).unwrap();
-    let add_n = exp_i.text(exp_i.parts().keys().find(|n| n.starts_with("ppt/notesSlides/aislide-added-")).unwrap()).unwrap();
-    assert!(exp_i.text(lp).unwrap().contains("overrideClrMapping") && exp_i.text("ppt/charts/chart1.xml").unwrap().contains("val=\"accent2\"") && add_n.contains("val=\"accent2\"") && add_x.contains("masterClrMapping") && add_x.contains("val=\"dk1\"") && add_x.contains("val=\"accent2\""));
+    let add_x = exp_i.text("ppt/slides/aislide-added-1.xml").unwrap();
+    assert!(exp_i.text(lp).unwrap().contains("overrideClrMapping") && ["ppt/charts/chart1.xml", "ppt/notesSlides/aislide-added-1.xml"].into_iter().all(|p| exp_i.text(p).unwrap().contains("val=\"accent2\"")) && add_x.contains("masterClrMapping") && add_x.contains("val=\"dk1\"") && add_x.contains("val=\"accent2\""));
     let re_i = open(ins_b); assert_eq!((re_i.deck.slides[1].background.as_str(), re_i.deck.slides[1].notes_paragraphs[0].runs[0].style.color.as_deref(), &val(&re_i.deck.slides[1].elements)[0]["color"], &val(&re_i.deck.slides[1].elements)[1]["series"][0]["color"]), ("@dk1", Some("@accent1"), &json!("@accent1"), &json!("@accent1")));
     let mut cd = re_i.deck.clone(); if let Element::Chart { series, .. } = &mut cd.slides[1].elements[1] { series[0].values = vec![15.0, 25.0]; }
     let cd_b = save(&change(&re_i, cd).document);
