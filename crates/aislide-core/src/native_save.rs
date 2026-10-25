@@ -195,9 +195,7 @@ pub(crate) fn resource_changes(package: &mut Package, binding: &NativePart, befo
     let _scope = crate::native::part_color_map(package, &binding.path).enter();
     let relationships = crate::pptx::resource_parts(&mut parts, &resources, &mut chart_number, &mut picture_number, &mut types, Some(ids), &mut crate::pptx::MediaResources::new())?;
     for (path, data) in parts {
-        let data = if path.starts_with("ppt/charts/") && path.ends_with(".xml") {
-            encode_scheme_colors(String::from_utf8(data).map_err(|_| Error::Invalid("chart XML encoding".into()))?, crate::design::ColorMap::current())?.into_bytes()
-        } else { data };
+        let data = if path.starts_with("ppt/charts/") && path.ends_with(".xml") { encode_scheme_colors(String::from_utf8(data).map_err(|_| Error::Invalid("chart XML encoding".into()))?, crate::design::ColorMap::current())?.into_bytes() } else { data };
         package.add_part(path, data)?;
     }
     let relation_path = relations_path(&binding.path);
@@ -1126,7 +1124,9 @@ fn add_notes_relation(package: &mut Package, source: &str, kind: &str, target: &
 
 fn notes_template(slide: &crate::model::Slide, deck: &Deck) -> Result<Package> {
     let blank = crate::model::Slide { elements: Vec::new(), layout_id: None, native_source_id: None, review: None, ..slide.clone() };
-    Package::open(crate::pptx::export_pptx(&Deck { slides: vec![blank], design: None, ..deck.clone() })?)
+    let mut pkg = Package::open(crate::pptx::export_pptx(&Deck { slides: vec![blank], design: None, ..deck.clone() })?)?;
+    if let Ok(xml) = pkg.text("ppt/notesSlides/notesSlide1.xml").map(str::to_owned) { pkg.replace_part("ppt/notesSlides/notesSlide1.xml", encode_scheme_colors(xml, crate::design::ColorMap::current())?.into_bytes())?; }
+    Ok(pkg)
 }
 
 fn ensure_notes_master(package: &mut Package, main: &str, generated: &Package) -> Result<String> {
@@ -1332,7 +1332,6 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
         if before.notes != after.notes || before.notes_paragraphs != after.notes_paragraphs {
             let notes_map = crate::pptx::relationship_targets(package, &binding.path, "notesSlide")?.into_values().next().or_else(|| crate::pptx::relationship_targets(package, main, "notesMaster").ok()?.into_values().next()).map_or_else(Default::default, |p| crate::native::part_color_map(package, &p));
             notes_map.scope(|| patch_notes(package, main, &binding.path, after, deck))?;
-            if let Some(np) = crate::pptx::relationship_targets(package, &binding.path, "notesSlide")?.into_values().next() { let nxml = encode_scheme_colors(package.text(&np)?.to_owned(), notes_map)?; package.replace_part(&np, nxml.into_bytes())?; }
         }
         let parent_bg_changed = after.layout_id.as_ref().and_then(|id| old.layouts.iter().find(|l| &l.id == id).zip(design.layouts.iter().find(|l| &l.id == id))).is_some_and(|(bl, al)| bl.background != al.background || old.masters.iter().find(|m| m.id == al.master_id).zip(design.masters.iter().find(|m| m.id == al.master_id)).is_some_and(|(bm, am)| bm.background != am.background));
         let background = (before.background != after.background || before.inherit_background != after.inherit_background || (!after.inherit_background && !has_explicit_bg(package, &binding.path) && (before.layout_id != after.layout_id || parent_bg_changed))).then_some(if after.inherit_background { None } else { Some(after.background.as_str()) });
@@ -1360,18 +1359,14 @@ fn rebase_slide_color_map(package: &mut Package, binding: &NativePart, elements:
     let common = child(parsed.root_element(), P, "cSld").ok_or_else(|| Error::Invalid("common slide data missing".into()))?;
     let tree = child(common, P, "spTree").ok_or_else(|| Error::Invalid("shape tree missing".into()))?;
     let projected: BTreeSet<_> = crate::model::element_list(elements).into_iter().filter_map(|e| binding.nodes.get(e.bounds().0).map(String::as_str)).collect();
-    if tree.descendants().filter(|n| is_shape(*n)).any(|n| properties(n).and_then(|p| p.attribute("id")).is_some_and(|id| !projected.contains(id) && n.descendants().any(|s| s.has_tag_name((A, "schemeClr")) && !s.ancestors().take_while(|a| *a != n).any(|a| is_shape(a)) && s.attribute("val").is_some_and(|v| new_map.resolve(v) != old_map.resolve(v))))) {
+    let changed = |n: Node<'_, '_>| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| new_map.resolve(v) != old_map.resolve(v));
+    if tree.descendants().filter(|n| is_shape(*n)).any(|n| properties(n).and_then(|p| p.attribute("id")).is_some_and(|id| !projected.contains(id) && n.descendants().any(|s| changed(s) && !s.ancestors().take_while(|a| *a != n).any(|a| is_shape(a))))) || ["chart", "chartEx"].into_iter().flat_map(|k| crate::pptx::relationship_targets(package, &binding.path, k).ok().into_iter().flat_map(|t| t.into_values())).any(|p| package.text(&p).ok().and_then(|t| parse(t).ok()).is_some_and(|d| d.descendants().any(changed))) {
         return Err(Error::Unsupported("slide layout change would alter unmodeled native scheme colors".into()));
-    }
-    if ["chart", "chartEx"].into_iter().flat_map(|k| crate::pptx::relationship_targets(package, &binding.path, k).ok().into_iter().flat_map(|t| t.into_values())).any(|p| package.text(&p).ok().and_then(|t| parse(t).ok()).is_some_and(|d| d.descendants().any(|n| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| new_map.resolve(v) != old_map.resolve(v))))) {
-        return Err(Error::Unsupported("slide layout change would alter native chart scheme colors".into()));
     }
     let mut edits = Vec::new();
     for attr in common.descendants().filter(|n| n.has_tag_name((A, "schemeClr"))).filter_map(|n| n.attributes().find(|a| a.namespace().is_none() && a.name() == "val")) {
         let old_slot = old_map.resolve(attr.value());
-        if new_map.resolve(attr.value()) != old_slot {
-            edits.push((attr.range_value(), new_map.encode(old_slot).ok_or_else(|| Error::Unsupported("target layout color map cannot represent an existing slide scheme color".into()))?.into()));
-        }
+        if new_map.resolve(attr.value()) != old_slot { edits.push((attr.range_value(), new_map.encode(old_slot).ok_or_else(|| Error::Unsupported("target layout color map cannot represent an existing slide scheme color".into()))?.into())); }
     }
     if !edits.is_empty() { package.replace_part(&binding.path, apply(xml, edits)?)?; }
     Ok(())

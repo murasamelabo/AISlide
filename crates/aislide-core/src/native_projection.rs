@@ -99,17 +99,11 @@ fn part(package: &Package, binding: &NativePart, elements: &[Element], design: b
 
 fn build(package: &Package, source: &NativeDeck) -> Result<ProjectionIndex> {
     let mut index = ProjectionIndex::default();
-    let docs = source.masters.iter().chain(&source.layouts).map(|b| Ok((b.path.as_str(), (crate::pptx::parse(package.text(&b.path)?)?, native::part_color_map(package, &b.path))))).collect::<Result<BTreeMap<_, _>>>()?;
     for binding in &source.slides {
         let slide = source.deck.slides.iter().find(|slide| slide.id == binding.id)
             .ok_or_else(|| Error::Invalid("native projection slide missing".into()))?;
-        let sx = crate::pptx::parse(package.text(&binding.path)?)?;
-        let sm = native::part_color_map(package, &binding.path);
         let unsupported_color = source.deck.design.as_ref().and_then(|d| slide.layout_id.as_ref().and_then(|id| d.layouts.iter().find(|l| &l.id == id)).or_else(|| d.layouts.first())).is_some_and(|l| {
-            source.layouts.iter().find(|e| e.id == l.id).zip(source.masters.iter().find(|e| e.id == l.master_id)).is_some_and(|(lb, mb)| {
-                let ((lx, lm), (mx, mm)) = (&docs[lb.path.as_str()], &docs[mb.path.as_str()]);
-                native::slide_remaps_ancestor_artwork(package, sx.root_element(), &lb.path, lx.root_element(), *lm, &mb.path, mx.root_element(), *mm, sm, slide.hide_master_graphics)
-            })
+            source.layouts.iter().find(|e| e.id == l.id).zip(source.masters.iter().find(|e| e.id == l.master_id)).is_some_and(|(lb, mb)| native::slide_remaps_ancestor_artwork(package, &binding.path, &lb.path, &mb.path))
         });
         index.slides.insert(binding.id.clone(), part(package, binding, &slide.elements, false, unsupported_color)?);
     }
@@ -117,11 +111,7 @@ fn build(package: &Package, source: &NativeDeck) -> Result<ProjectionIndex> {
         for binding in &source.layouts {
             let layout = design.layouts.iter().find(|layout| layout.id == binding.id)
                 .ok_or_else(|| Error::Invalid("native projection layout missing".into()))?;
-            let (lx, lm) = &docs[binding.path.as_str()];
-            let unsupported_color = source.masters.iter().find(|e| e.id == layout.master_id).is_some_and(|mb| {
-                let (mx, mm) = &docs[mb.path.as_str()];
-                native::layout_remaps_master_artwork(package, &mb.path, mx.root_element(), *mm, lx.root_element(), *lm)
-            });
+            let unsupported_color = source.masters.iter().find(|e| e.id == layout.master_id).is_some_and(|mb| native::layout_remaps_master_artwork(package, &binding.path, &mb.path));
             index.layouts.insert(binding.id.clone(), part(package, binding, &layout.elements, true, unsupported_color)?);
         }
         for binding in &source.masters {

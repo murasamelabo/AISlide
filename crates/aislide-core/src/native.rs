@@ -141,13 +141,17 @@ fn has_remapped_non_solid_bg(root: Node<'_, '_>, owner_map: crate::design::Color
     owner_map != child_map && has_non_solid_bg(root) && child(root, P, "cSld").and_then(|n| child(n, P, "bg")).is_some_and(|bg| bg.descendants().any(|n| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| child_map.resolve(v) != owner_map.resolve(v))))
 }
 
-pub(crate) fn layout_remaps_master_artwork(package: &Package, mp: &str, mx: Node<'_, '_>, mm: crate::design::ColorMap, lx: Node<'_, '_>, lm: crate::design::ColorMap) -> bool {
+pub(crate) fn layout_remaps_master_artwork(package: &Package, lp: &str, mp: &str) -> bool {
+    let (Some(lx), Some(mx)) = (package.text(lp).ok().and_then(|t| parse(t).ok()), package.text(mp).ok().and_then(|t| parse(t).ok())) else { return false };
+    let (lx, mx, lm, mm) = (lx.root_element(), mx.root_element(), part_color_map(package, lp), part_color_map(package, mp));
     (child(lx, P, "cSld").and_then(|n| child(n, P, "bg")).is_none() && has_remapped_non_solid_bg(mx, mm, lm)) || (!matches!(lx.attribute("showMasterSp"), Some("0" | "false")) && has_remapped_shapes(package, mp, mx, mm, lm))
 }
 
-pub(crate) fn slide_remaps_ancestor_artwork(package: &Package, sx: Node<'_, '_>, lp: &str, lx: Node<'_, '_>, lm: crate::design::ColorMap, mp: &str, mx: Node<'_, '_>, mm: crate::design::ColorMap, sm: crate::design::ColorMap, hide_master: bool) -> bool {
+pub(crate) fn slide_remaps_ancestor_artwork(package: &Package, sp: &str, lp: &str, mp: &str) -> bool {
+    let (Some(sx), Some(lx), Some(mx)) = (package.text(sp).ok().and_then(|t| parse(t).ok()), package.text(lp).ok().and_then(|t| parse(t).ok()), package.text(mp).ok().and_then(|t| parse(t).ok())) else { return false };
+    let (sx, lx, mx, sm, lm, mm) = (sx.root_element(), lx.root_element(), mx.root_element(), part_color_map(package, sp), part_color_map(package, lp), part_color_map(package, mp));
     let bg = child(sx, P, "cSld").and_then(|n| child(n, P, "bg")).is_none() && if child(lx, P, "cSld").and_then(|n| child(n, P, "bg")).is_some() { has_remapped_non_solid_bg(lx, lm, sm) } else { has_remapped_non_solid_bg(mx, mm, sm) };
-    bg || has_remapped_shapes(package, lp, lx, lm, sm) || (!hide_master && !matches!(lx.attribute("showMasterSp"), Some("0" | "false")) && has_remapped_shapes(package, mp, mx, mm, sm))
+    bg || has_remapped_shapes(package, lp, lx, lm, sm) || (!matches!(sx.attribute("showMasterSp"), Some("0" | "false")) && !matches!(lx.attribute("showMasterSp"), Some("0" | "false")) && has_remapped_shapes(package, mp, mx, mm, sm))
 }
 
 pub(crate) fn color_mapping_warning(path: &str) -> String {
@@ -730,9 +734,8 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
         for layout in layout_list.children().filter(|node| node.has_tag_name((P, "sldLayoutId"))) {
             let layout_path = layout.attribute((R, "id")).and_then(|id| targets.get(id)).ok_or_else(|| Error::Invalid("layout relationship missing".into()))?;
             let id = identity(layout_path, format!("layout-{}", layouts.len() + 1));
-            let layout_xml = parse(package.text(layout_path)?)?;
-            let (layout_map, _) = resolve_color_map(layout_xml.root_element(), master_map);
-            if layout_remaps_master_artwork(package, path, master_xml.root_element(), master_map, layout_xml.root_element(), layout_map) { warnings.push(color_mapping_warning(layout_path)); }
+            let layout_map = part_color_map(package, layout_path);
+            if layout_remaps_master_artwork(package, layout_path, path) { warnings.push(color_mapping_warning(layout_path)); }
             let mapped_master = (layout_map != master_map && !elements.is_empty()).then(|| read_part_with_map(package, path, master_id.clone(), scale, &[], layout_map, false, &mut Vec::new(), metadata.as_ref(), canvas).map(|part| part.2)).transpose()?;
             let (name, background, elements, layout_binding) = read_part_with_map(package, layout_path, id.clone(), scale, mapped_master.as_deref().unwrap_or(&elements), master_map, true, &mut warnings, metadata.as_ref(), canvas)?;
             let background = background.or_else(|| (layout_map != master_map && !has_non_solid_bg(master_xml.root_element())).then(|| layout_map.scope(|| self::background(master_xml.root_element())).unwrap_or_else(|| format!("@{}", layout_map.resolve("bg1")))).filter(|inherited| inherited != &master_background));
@@ -742,7 +745,6 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
     }
     if let Some(identities) = &design_identities { identities.order(&master_parts, &mut layouts, &mut layout_parts)?; }
     let design = Design { theme: theme.unwrap_or_default(), masters, layouts };
-    let parsed_docs = master_parts.iter().chain(&layout_parts).map(|p| Ok((p.path.as_str(), (parse(package.text(&p.path)?)?, part_color_map(package, &p.path))))).collect::<Result<BTreeMap<_, _>>>()?;
     let paths = slide_paths(package)?;
     let mut slides = Vec::new(); let mut slide_parts = Vec::new();
     for (index, path) in paths.iter().enumerate() {
@@ -753,11 +755,10 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
         let (master, master_binding) = (&design.masters[master_index], &master_parts[master_index]);
         let id = identity(path, format!("slide-{}", index + 1));
         let xml = parse(package.text(path)?)?;
-        let ((layout_doc, layout_map), (master_doc, master_map)) = (&parsed_docs[layout_binding.path.as_str()], &parsed_docs[master_binding.path.as_str()]);
-        let (layout_xml, master_xml, layout_map, master_map) = (layout_doc.root_element(), master_doc.root_element(), *layout_map, *master_map);
+        let (layout_doc, master_doc) = (parse(package.text(&layout_binding.path)?)?, parse(package.text(&master_binding.path)?)?);
+        let (layout_xml, master_xml, layout_map, master_map) = (layout_doc.root_element(), master_doc.root_element(), part_color_map(package, &layout_binding.path), part_color_map(package, &master_binding.path));
         let (slide_map, _) = resolve_color_map(xml.root_element(), layout_map);
-        let hide_master_graphics = matches!(xml.root_element().attribute("showMasterSp"), Some("0" | "false"));
-        if slide_remaps_ancestor_artwork(package, xml.root_element(), &layout_binding.path, layout_xml, layout_map, &master_binding.path, master_xml, master_map, slide_map, hide_master_graphics) { warnings.push(color_mapping_warning(path)); }
+        if slide_remaps_ancestor_artwork(package, path, &layout_binding.path, &master_binding.path) { warnings.push(color_mapping_warning(path)); }
         let mapped_layout = (slide_map != layout_map && !layout.elements.is_empty()).then(|| {
             let mm = (slide_map != master_map && !master.elements.is_empty()).then(|| read_part_with_map(package, &master_binding.path, master.id.clone(), scale, &[], slide_map, false, &mut Vec::new(), metadata.as_ref(), canvas).map(|p| p.2)).transpose()?;
             read_part_with_map(package, &layout_binding.path, layout.id.clone(), scale, mm.as_deref().unwrap_or(&master.elements), slide_map, false, &mut Vec::new(), metadata.as_ref(), canvas).map(|p| p.2)
@@ -795,7 +796,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
             bodies.into_iter().map(body_text).collect::<Vec<_>>().join("\n")
         } else { String::new() };
         let review = crate::review::read_slide(package, &binding, &elements)?;
-        slides.push(Slide { id, title: name, background: background.clone().unwrap_or_else(|| format!("@{}", slide_map.resolve("bg1"))), elements, notes, notes_paragraphs, layout_id: Some(layout.id.clone()), inherit_background: background.is_none(), hide_master_graphics, native_source_id: None, review });
+        slides.push(Slide { id, title: name, background: background.clone().unwrap_or_else(|| format!("@{}", slide_map.resolve("bg1"))), elements, notes, notes_paragraphs, layout_id: Some(layout.id.clone()), inherit_background: background.is_none(), hide_master_graphics: matches!(xml.root_element().attribute("showMasterSp"), Some("0" | "false")), native_source_id: None, review });
         slide_parts.push(binding);
     }
     let title = package.parts().iter().filter(|(path, _)| path.starts_with("docProps/") && path.ends_with(".xml")).find_map(|(_, value)| std::str::from_utf8(value).ok().and_then(|value| parse(value).ok()).and_then(|document| document.descendants().find(|node| node.has_tag_name(("http://purl.org/dc/elements/1.1/", "title"))).and_then(|node| node.text()).map(str::to_owned)))

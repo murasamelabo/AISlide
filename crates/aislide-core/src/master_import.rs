@@ -118,13 +118,11 @@ fn check_master(source: &Source, id: &str) -> Result<()> {
     if xml_value(actual_theme.root_element(), false, false) != xml_value(expected_theme.root_element(), false, false) {
         return Err(Error::Unsupported("source theme effects or extensions are not represented by editable master import".into()));
     }
-    let master_xml = crate::pptx::parse(source.package.text(&part.path)?)?;
     let master_map = crate::native::part_color_map(&source.package, &part.path);
     check_part(source, part, &master.elements, theme, None)?;
     for layout in design.layouts.iter().filter(|layout| layout.master_id == id) {
         let lp = source.native.layouts.iter().find(|p| p.id == layout.id).ok_or_else(|| Error::Invalid("source layout binding missing".into()))?;
-        let (lx, lm) = (crate::pptx::parse(source.package.text(&lp.path)?)?, crate::native::part_color_map(&source.package, &lp.path));
-        if crate::native::layout_remaps_master_artwork(&source.package, &part.path, master_xml.root_element(), master_map, lx.root_element(), lm) {
+        if crate::native::layout_remaps_master_artwork(&source.package, &lp.path, &part.path) {
             return Err(Error::Unsupported("source layout color map remaps shared master artwork".into()));
         }
         check_part(source, lp, &layout.elements, theme, Some(master_map))?;
@@ -141,12 +139,10 @@ fn check_slide(source: &Source, id: &str) -> Result<()> {
     let part = source.native.slides.iter().find(|part| part.id == id).ok_or_else(|| Error::Invalid("source slide binding missing".into()))?;
     let lp = source.native.layouts.iter().find(|p| p.id == layout.id).ok_or_else(|| Error::Invalid("source layout binding missing".into()))?;
     let mp = source.native.masters.iter().find(|p| p.id == layout.master_id).ok_or_else(|| Error::Invalid("source master binding missing".into()))?;
-    let (sx, lx, mx) = (crate::pptx::parse(source.package.text(&part.path)?)?, crate::pptx::parse(source.package.text(&lp.path)?)?, crate::pptx::parse(source.package.text(&mp.path)?)?);
-    let (sm, lm, mm) = (crate::native::part_color_map(&source.package, &part.path), crate::native::part_color_map(&source.package, &lp.path), crate::native::part_color_map(&source.package, &mp.path));
-    if crate::native::slide_remaps_ancestor_artwork(&source.package, sx.root_element(), &lp.path, lx.root_element(), lm, &mp.path, mx.root_element(), mm, sm, slide.hide_master_graphics) {
+    if crate::native::slide_remaps_ancestor_artwork(&source.package, &part.path, &lp.path, &mp.path) {
         return Err(Error::Unsupported("source slide color map remaps shared layout or master artwork".into()));
     }
-    check_part(source, part, &slide.elements, crate::design::master_theme(design, &layout.master_id), Some(lm))?;
+    check_part(source, part, &slide.elements, crate::design::master_theme(design, &layout.master_id), Some(crate::native::part_color_map(&source.package, &lp.path)))?;
     let master = design.masters.iter().find(|master| master.id == layout.master_id).ok_or_else(|| Error::Invalid("source master missing".into()))?;
     sample_elements(slide, master, layout)?;
     Ok(())
