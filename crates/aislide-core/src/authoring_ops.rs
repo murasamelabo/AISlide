@@ -143,7 +143,7 @@ pub fn apply_format(document: &Document, expected_revision: u64, slide_id: &str,
     let mut result = replace_deck(document, expected_revision, deck)?;
     if let Some(page_index) = document.deck.slides.iter().position(|slide| slide.id == slide_id) {
         result.render_warnings.extend(mixed.into_iter().map(|element_id| crate::export_static::RenderWarning {
-            code: "FORMAT_PAINTER_RUNS_UNIFIED".into(), page_index, element_id,
+            code: "FORMAT_PAINTER_RUNS_UNIFIED".into(), page_index, element_id, scope: Some("slide".into()),
             message: "Text format painting unifies supplied style properties across mixed runs. For appearance-only edits, use kind:\"filled\" or apply_operations set_surface/set_effects to retain rich text formatting.".into(),
         }));
     }

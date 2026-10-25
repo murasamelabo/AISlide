@@ -486,7 +486,7 @@ pub struct CleanCopyOptions { pub new_document_id: String, pub categories: BTree
 pub struct CleanCopy { pub bytes: Vec<u8>, pub document: crate::document::Document, pub inspection: InspectionReport }
 
 #[derive(Clone)]
-struct Relationship { source: String, part: String, id: String, kind: String, target: Option<String> }
+struct Relationship { source: String, part: String, id: String, kind: String, target: Option<String>, external: bool }
 
 fn relationships(package: &crate::package::Package, resolve_internal_targets: bool) -> Result<Vec<Relationship>> {
     let mut result = Vec::new();
@@ -508,10 +508,29 @@ fn relationships(package: &crate::package::Package, resolve_internal_targets: bo
                 Some("Internal") | None => None,
                 _ => return Err(Error::Unsupported("OPC relationship mode".into())),
             };
-            result.push(Relationship { source: source.clone(), part: path.into(), id: id.into(), kind: node.attribute("Type").unwrap_or("").into(), target });
+            result.push(Relationship { source: source.clone(), part: path.into(), id: id.into(), kind: node.attribute("Type").unwrap_or("").into(), target, external: node.attribute("TargetMode") == Some("External") });
         }
     }
     Ok(result)
+}
+
+pub(crate) fn remove_unused_hyperlinks(package: &mut crate::package::Package) -> Result<()> {
+    let mut candidates: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for relation in relationships(package, false)? {
+        if !relation.source.is_empty() && relation.external && relation.kind == crate::pptx::relationship_type("hyperlink") {
+            candidates.entry((relation.source, relation.part)).or_default().insert(relation.id);
+        }
+    }
+    for ((source, path), mut ids) in candidates {
+        if !package.part_names().contains(source.as_str()) { continue; }
+        let owner = crate::pptx::parse(package.text(&source)?)?;
+        for attribute in owner.descendants().flat_map(|node| node.attributes()).filter(|attribute| matches!(attribute.namespace(), Some(namespace) if namespace == crate::native::R || namespace == "http://purl.oclc.org/ooxml/officeDocument/relationships")) { ids.remove(attribute.value()); }
+        if ids.is_empty() { continue; }
+        let xml = package.text(&path)?.to_owned(); let parsed = crate::pptx::parse(&xml)?;
+        let edits = parsed.root_element().children().filter(|node| node.has_tag_name((crate::native::REL, "Relationship")) && node.attribute("Id").is_some_and(|id| ids.contains(id))).map(|node| (node.range(), String::new())).collect();
+        package.replace_part(&path, crate::native_save::apply(xml, edits)?)?;
+    }
+    Ok(())
 }
 
 fn content_types(package: &crate::package::Package) -> Result<BTreeMap<String, String>> {
@@ -808,6 +827,7 @@ pub fn export_clean_copy(document: &crate::document::Document, options: &CleanCo
     }
     if options.categories.contains(&Comments) { remove_modern_links(&mut package)?; }
     remove_parts(&mut package, &removed)?;
+    remove_unused_hyperlinks(&mut package)?;
     let native = crate::native::read(&package)?;
     sanitized.deck = native.deck;
     let bytes = crate::provenance::attach(package.save()?, &sanitized)?;

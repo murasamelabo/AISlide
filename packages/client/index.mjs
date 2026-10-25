@@ -514,7 +514,9 @@ function renderWarningsSnapshot(result, document) {
       const item = data(source, String(index));
       const page_index = data(item, 'page_index');
       if (!Number.isSafeInteger(page_index) || page_index < 0 || page_index > 255) throw new Error('Render warning page index');
-      warnings.push({ code: text(data(item, 'code'), 64), page_index, element_id: text(data(item, 'element_id'), 80), message: text(data(item, 'message'), 2048) });
+      const scope = data(item, 'scope');
+      warnings.push({ code: text(data(item, 'code'), 64), page_index, element_id: text(data(item, 'element_id'), 80),
+        ...(scope === undefined ? {} : { scope: text(scope, 192) }), message: text(data(item, 'message'), 2048) });
     }
     return { ...binding, status: 'complete', warnings };
   } catch {

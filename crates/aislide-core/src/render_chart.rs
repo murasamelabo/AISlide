@@ -24,7 +24,7 @@ fn text(writer: &mut XmlWriter, position: [f64; 2], value: &str, color: &str, si
     writer.end_element();
 }
 
-pub(super) fn svg(kind: ChartKind, categories: &[String], series: &[ChartSeries], options: &ChartOptions, width: f64, height: f64, theme: &Theme) -> Result<String> {
+pub(super) fn svg(kind: ChartKind, categories: &[String], series: &[ChartSeries], options: &ChartOptions, width: f64, height: f64, theme: &Theme, fonts: &mut cosmic_text::FontSystem) -> Result<String> {
     if width < 160.0 || height < 120.0 { return Err(Error::Unsupported("statistical chart needs at least 160 x 120".into())); }
     let model = chart_format::compute_chart_presentation(kind, categories, series, options)?;
     let color = |value: &str| format!("#{}", value.strip_prefix('@').and_then(|slot| theme.colors.get(slot)).map_or(value, String::as_str));
@@ -46,8 +46,12 @@ pub(super) fn svg(kind: ChartKind, categories: &[String], series: &[ChartSeries]
     let top = 10.0 + equations.len() as f64 * 12.0;
     let legend = options.legend.unwrap_or(LegendPosition::Bottom);
     let legend_rows = if legend == LegendPosition::Hidden { 0 } else { series.len() };
-    let left = if horizontal { 80.0 } else { 58.0 };
-    let plot_width = (width - left - 58.0).max(30.0);
+    let widest = |fonts: &mut cosmic_text::FontSystem, axis: &chart_format::PresentationAxis| axis.ticks.iter()
+        .map(|tick| super::chart_text_extent(fonts, &tick.label, 10.0, crate::fonts::requested_family(&tick.label, None, theme))).fold(0.0, f64::max);
+    let left = (widest(fonts, if horizontal { &model.category_axis } else { &model.primary_axis }) + 12.0).max(if horizontal { 80.0 } else { 58.0 });
+    let right = if horizontal { 58.0 } else { model.secondary_axis.as_ref().map_or(58.0, |axis| (widest(fonts, axis) + 12.0).max(58.0)) };
+    let plot_width = width - left - right;
+    if plot_width < 30.0 { return Err(Error::Unsupported("chart axis labels do not fit the requested font and format; enlarge the chart or use a compact number format".into())); }
     let plot_height = height - top - 42.0 - legend_rows as f64 * 13.0;
     if plot_height < 30.0 { return Err(Error::Unsupported("chart equations/legend do not fit; enlarge chart".into())); }
     for (index, equation) in equations.iter().enumerate() { text(&mut writer, [left, index as f64 * 12.0], equation, &ink, (plot_width / (equation.len().max(1) as f64 * 0.6)).clamp(4.0, 10.0), "start"); }

@@ -8,10 +8,11 @@ use std::collections::BTreeSet;
 pub struct PreflightOptions {
 	pub page_indices: Option<Vec<usize>>,
 	pub min_font_size: f64,
+	pub include_inherited: bool,
 }
 
 impl Default for PreflightOptions {
-	fn default() -> Self { Self { page_indices: None, min_font_size: 16.0 } }
+	fn default() -> Self { Self { page_indices: None, min_font_size: 16.0, include_inherited: true } }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -28,6 +29,8 @@ pub struct Finding {
 	pub evidence: String,
 	pub page_index: usize,
 	pub slide_id: String,
+	pub affected_page_indices: Vec<usize>,
+	pub affected_slide_ids: Vec<String>,
 	pub element_ids: Vec<String>,
 	pub scopes: Vec<String>,
 	pub bounds: Bounds,
@@ -45,6 +48,7 @@ pub struct PreflightReport {
 	pub limitations: Vec<String>,
 	pub office_visual_parity: bool,
 	pub semantic_truth_verified: bool,
+	#[serde(skip)] include_inherited: bool,
 }
 
 struct Object<'a> {
@@ -225,9 +229,22 @@ fn route_crosses_badge_center(object: &Object<'_>, connector: &Object<'_>) -> bo
 }
 
 fn push_finding(report: &mut PreflightReport, page: usize, slide: &str, objects: &[&Object<'_>], code: &str, severity: &str, evidence: &str, message: &str, suggestions: &[&str]) -> Result<()> {
+	let inherited = !objects.is_empty() && objects.iter().all(|object| object.scope != "slide");
+	if inherited && !report.include_inherited { return Ok(()); }
+	let aggregate = inherited && matches!(code, "SMALL_TEXT" | "FONT_FALLBACK");
+	if aggregate {
+		if let Some(finding) = report.findings.iter_mut().find(|finding| finding.code == code && finding.message == message && finding.evidence == evidence
+			&& finding.element_ids.iter().map(String::as_str).eq(objects.iter().map(|object| object.id))
+			&& finding.scopes.iter().map(String::as_str).eq(objects.iter().map(|object| object.scope.as_str())))
+		{
+			if !finding.affected_page_indices.contains(&page) { finding.affected_page_indices.push(page); finding.affected_slide_ids.push(slide.into()); }
+			return Ok(());
+		}
+	}
 	if report.findings.len() >= 256 { return Err(Error::Limit("visual preflight exceeds 256 findings; select fewer pages or resolve reported density".into())); }
 	let bounds = objects.iter().map(|object| object.bounds).reduce(|first, next| first.union(next)).unwrap_or(Rect::ZERO);
-	report.findings.push(Finding { code: code.into(), severity: severity.into(), evidence: evidence.into(), page_index: page, slide_id: slide.into(),
+	report.findings.push(Finding { code: code.into(), severity: if aggregate { "info".into() } else { severity.into() }, evidence: evidence.into(), page_index: page, slide_id: slide.into(),
+		affected_page_indices: vec![page], affected_slide_ids: vec![slide.into()],
 		element_ids: objects.iter().map(|object| object.id.into()).collect(), scopes: objects.iter().map(|object| object.scope.clone()).collect(), bounds: bounds.into(),
 		message: message.into(), suggestions: suggestions.iter().map(|suggestion| (*suggestion).into()).collect() });
 	Ok(())
@@ -322,7 +339,8 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 	let mut report = PreflightReport { revision: document.revision, hash: document.hash.clone(), page_indices: selected.clone(), findings: Vec::new(),
 		checks: ["renderer_warnings", "off_slide", "text_overlap", "connector_label_interference", "connector_badge_overlap", "container_clearance", "small_text", "density"].map(String::from).to_vec(),
 		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed shaped-glyph metric bounds with alignment, padding and clipping, not exact ink intersection; warped text conservatively uses its content frame", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices are summarized per page as info; specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
-		office_visual_parity: false, semantic_truth_verified: false };
+		office_visual_parity: false, semantic_truth_verified: false, include_inherited: options.include_inherited };
+	report.limitations.push("Template-owned SMALL_TEXT and FONT_FALLBACK are informational and aggregated by owner and element before the finding limit; affected_page_indices and affected_slide_ids retain coverage. include_inherited:false omits inherited-only findings, not interactions with slide objects or unprojected native content.".into());
 	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into(), "numbered_sequence_spacing".into(), "part_aspect".into()]);
 	report.limitations.push("Over-budget shadow, glow, soft-edge and reflection are omitted only from the diagnostic view at scale 1, with an EFFECT_APPROXIMATION finding; native content is unchanged and other renderer failures still reject.".into());
 	report.limitations.push("Reference URL detection uses normalized HTTP(S) tokens terminated by CJK prose; percent-encode CJK URL paths. Warnings do not echo private note URLs. Fixed-reference collisions require explicit repair, not automatic reflow.".into());
@@ -351,7 +369,8 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		let mut chart_notices: Vec<&Object<'_>> = Vec::new();
 		for warning in rendered.warnings.into_iter().chain(projection_warnings.iter().filter(|warning| warning.page_index == page).cloned()) {
 			let object = if warning.code == "NATIVE_OBJECT_NOT_PREVIEWED" { None } else {
-				objects.iter().rev().find(|object| warning.element_id == object.id || warning.element_id.starts_with(&format!("{}[", object.id)))
+				objects.iter().rev().find(|object| warning.scope.as_deref().is_none_or(|scope| scope == object.scope)
+					&& (warning.element_id == object.id || warning.element_id.starts_with(&format!("{}[", object.id))))
 			};
 			let generic_chart_notice = matches!((warning.code.as_str(), warning.message.as_str()),
 				("CHART_PREVIEW", "Plotters chart layout; axis/legend placement is not Office parity")
@@ -431,7 +450,8 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			}
 		}
 		if objects.iter().map(|object| object.characters).sum::<usize>() > 1200 || objects.iter().filter(|object| object.text).count() > 80 {
-			push_finding(&mut report, page, &slide.id, &[], "DENSE_SLIDE", "warning", "heuristic", "Slide exceeds 1200 text scalars or 80 text frames", &["Split content into overview and detail slides", "Move supporting narrative to speaker notes"])?;
+			let contributors = objects.iter().filter(|object| object.text || object.characters > 0).collect::<Vec<_>>();
+			push_finding(&mut report, page, &slide.id, &contributors, "DENSE_SLIDE", "warning", "heuristic", "Slide exceeds 1200 text scalars or 80 text frames", &["Split content into overview and detail slides", "Move supporting narrative to speaker notes"])?;
 		}
 		if document.bindings.iter().any(|binding| binding.stale) {
 			push_finding(&mut report, page, &slide.id, &[], "SOURCE_BINDINGS_STALE", "warning", "document", "Document has stale source bindings; this report does not verify the claims", &["Undo or rebind before export"])?;

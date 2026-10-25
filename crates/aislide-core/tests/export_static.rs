@@ -18,6 +18,58 @@ fn deck() -> Deck {
 }
 
 #[test]
+fn review46_chart_fit_error_identifies_the_page_and_chart() {
+    let mut source: Deck = serde_json::from_value(json!({"version":1,"title":"Synthetic crowded chart","width":1280,"height":720,
+        "slides":[{"id":"page-a","title":"Provided values","background":"FFFFFF","notes":"","elements":[{
+            "type":"chart","id":"crowded-chart","x":20,"y":20,"width":160,"height":120,"kind":"column","categories":["Provided"],
+            "series":[{"name":"Synthetic fixture","values":[41172],"color":"1976D2"}],
+            "options":{"primary_axis":{"number_format":"0.000000000000"}}
+        }]}]})).unwrap();
+    source.design = Some(aislide_core::design::Design::default());
+    source.design.as_mut().unwrap().theme.fonts.minor = "BIZ UDPGothic".into();
+    let error = render_slide_svg(&source,0,false).err().expect("tick labels must not be silently clipped").to_string();
+    assert!(error.contains("chart axis labels do not fit"),"{error}");
+    assert!(error.contains("crowded-chart") && error.contains("page_index 0"),"{error}");
+}
+
+#[test]
+fn issue45_wide_font_axis_ticks_keep_the_leading_digit_inside_the_rendered_chart() {
+    use kurbo::Shape;
+    let mut source: Deck = serde_json::from_value(json!({"version":1,"title":"Synthetic wide-font chart","width":1280,"height":720,
+        "slides":[{"id":"chart-slide","title":"Provided values","background":"FFFFFF","notes":"","elements":[
+            {"type":"chart","id":"wide-chart","x":40,"y":40,"width":720,"height":400,"kind":"column","categories":["Provided"],
+                "series":[{"name":"Synthetic fixture","values":[41172],"color":"1976D2"}]}
+        ]}]})).unwrap();
+    let mut design = aislide_core::design::Design::default();
+    design.theme.fonts.minor = "BIZ UDPGothic".into();
+    design.theme.fonts.major = "BIZ UDPGothic".into();
+    design.theme.fonts.east_asian = "BIZ UDPGothic".into();
+    source.design = Some(design);
+    for format in [None, Some("0.000000")] {
+    if let aislide_core::model::Element::Chart { options, .. } = &mut source.slides[0].elements[0] {
+        *options = if let Some(format) = format { serde_json::from_value(json!({"primary_axis":{"min":0,"max":50000,"major_unit":5000,"number_format":format}})).unwrap() } else { Default::default() };
+    }
+    let rendered = render_slide_svg(&source, 0, false).unwrap();
+    let parsed = roxmltree::Document::parse(&rendered.svg).unwrap();
+    let title = parsed.descendants().find(|node| node.tag_name().name() == "title" && node.text().and_then(|text| text.parse::<f64>().ok()) == Some(45000.0)).expect("the 45000 tick must be rendered");
+    let frame = title.ancestors().find_map(|node| node.attribute("transform").and_then(|transform| transform.strip_prefix("translate(")).and_then(|transform| transform.strip_suffix(')'))).unwrap();
+    let position = frame.split_whitespace().map(|value| value.parse::<f64>().unwrap()).collect::<Vec<_>>();
+    let first_digit = title.parent().unwrap().descendants().find(|node| node.tag_name().name() == "path").unwrap();
+    let ink = kurbo::BezPath::from_svg(first_digit.attribute("d").unwrap()).unwrap().bounding_box();
+    let left = position[0] + ink.x0;
+    assert!(left >= 1.0, "45000's leading 4 is clipped at chart-local x={left}");
+    assert_eq!(title.text(), Some(if format.is_some() { "45000.000000" } else { "45000" }), "default ticks must not add decimals, and explicit formats must be retained");
+    let output = export_static(&source, &ExportOptions::default()).unwrap();
+    let pixels = image::load_from_memory(&output.artifacts[0].bytes).unwrap().into_rgb8();
+    let painted = pixels.enumerate_pixels().filter(|(x, y, pixel)| {
+        let x=f64::from(*x)-40.0-position[0];let y=f64::from(*y)-40.0-position[1];
+        x>=ink.x0 && x<=ink.x1 && y>=ink.y0 && y<=ink.y1 && pixel.0.iter().all(|channel| *channel<160)
+    }).count();
+    assert!(painted >= 8, "the leading 4 must paint actual visible ink, got {painted} pixels");
+    }
+}
+
+#[test]
 fn png_has_requested_resolution_real_pixels_and_does_not_mutate_source() {
     let source = deck();
     let original = serde_json::to_vec(&source).unwrap();

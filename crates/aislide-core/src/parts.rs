@@ -311,6 +311,22 @@ pub(crate) fn fixed_typography(spec: &PartSpec, floor: f64) -> bool {
     body.is_none_or(|size| size + 0.01 >= floor)
 }
 
+pub(crate) fn fixed_annotation_ids(id: &str, spec: &PartSpec, element: &Element) -> Result<BTreeSet<String>> {
+    if let PartData::Diagram { graph } = &spec.data {
+        let (graph_id, graph, _) = graph_context(id, spec, graph)?;
+        return crate::graphs::fixed_annotation_ids(&graph_id, &graph);
+    }
+    let PartData::StepCards { steps, step_label, .. } = &spec.data else { return Ok(BTreeSet::new()); };
+    let label = if step_label.is_empty() { "STEP" } else { step_label };
+    let badges: BTreeSet<_> = (1..=steps.len()).map(|index| format!("{label} {index}")).collect();
+    Ok(crate::model::element_list(std::slice::from_ref(element)).into_iter().filter_map(|element| {
+        if let Element::Shape { id, text, preset, .. } = element {
+            if preset == "roundRect" && badges.contains(text) { return Some(id.clone()); }
+        }
+        None
+    }).collect())
+}
+
 pub fn create(id: &str, spec: &PartSpec) -> Result<Element> { create_with_theme(id, spec, &crate::design::Theme::default()) }
 
 pub(crate) fn graph_render_context(id: &str, spec: &PartSpec) -> Result<(String, crate::graphs::GraphSpec, f64)> {

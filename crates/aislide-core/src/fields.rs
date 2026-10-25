@@ -1,6 +1,8 @@
 ﻿use crate::{Error, Result, model::valid_text};
 use serde::{Deserialize, Serialize};
 
+pub(crate) const SLIDE_TOTAL: &str = "aislide_slidetotal";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Field {
@@ -72,7 +74,7 @@ fn parse_time(value: &str) -> Result<(u32, u32, u32)> {
 }
 
 pub(crate) fn supported_kind(kind: &str) -> bool {
-    kind == "slidenum" || matches!(kind, "datetime1" | "datetime2" | "datetime3" | "datetime4" | "datetime5" | "datetime6" | "datetime7" | "datetime8" | "datetime9" | "datetime10" | "datetime11" | "datetime12" | "datetime13")
+    kind == "slidenum" || kind == SLIDE_TOTAL || matches!(kind, "datetime1" | "datetime2" | "datetime3" | "datetime4" | "datetime5" | "datetime6" | "datetime7" | "datetime8" | "datetime9" | "datetime10" | "datetime11" | "datetime12" | "datetime13")
 }
 
 pub fn parse_id(value: &str) -> Result<[u8; 16]> {
@@ -140,6 +142,7 @@ pub fn refresh_with_options(deck: &crate::model::Deck, reference_date: &str, ref
         }
         if !slide.notes_paragraphs.is_empty() { slide.notes = crate::rich_text::plain_text(&slide.notes_paragraphs); }
     }
+    refresh_pagination(&mut next, None);
     crate::model::validate_deck(&next)?;
     Ok(next)
 }
@@ -163,7 +166,7 @@ pub(crate) fn replace_body(mut element: crate::model::Element, replacement: Stri
         for run in &paragraph.runs {
             let chars: Vec<_> = run.text.chars().collect();
             let limit = offset + chars.len();
-            if run.field.is_some() && ((prefix < limit && end > offset) || (prefix == end && prefix > offset && prefix < limit) || (chars.is_empty() && prefix <= offset && end >= offset)) { return Err(Error::Unsupported("plain body edits cannot modify or remove dynamic fields".into())); }
+            if run.field.is_some() && ((prefix < limit && end > offset) || (prefix == end && prefix > offset && prefix < limit) || (chars.is_empty() && prefix <= offset && end >= offset)) { return Err(Error::Unsupported("plain body edits cannot modify or remove dynamic fields; use refresh_fields for display caches, or set_text_style on the authored source for formatting before native export".into())); }
             if !inserted && prefix <= limit {
                 let left = prefix.saturating_sub(offset).min(chars.len());
                 if left > 0 { let mut kept = run.clone(); kept.text = chars[..left].iter().collect(); runs.push(kept); }
@@ -230,19 +233,19 @@ pub(crate) fn patch_paragraph_cache(xml: &str, node: roxmltree::Node<'_, '_>, be
     Ok(true)
 }
 
-pub(crate) fn patch_cache_only(xml: &str, node: roxmltree::Node<'_, '_>, old: &crate::model::Element, new: &crate::model::Element,
+pub(crate) fn patch_text_cache(xml: &str, node: roxmltree::Node<'_, '_>, old: &crate::model::Element, new: &crate::model::Element,
     edits: &mut Vec<(std::ops::Range<usize>, String)>) -> Result<bool> {
     use crate::{model::Element, native::{A, P, child}};
     if !has_fields(old) { return Ok(false); }
     crate::rich_text::validate_element(old)?;
     crate::rich_text::validate_element(new)?;
-    let (old_text, before) = match old { Element::Text { text, format, .. } | Element::Shape { text, format, .. } => (text, format), _ => return Ok(false) };
-    let after = match new { Element::Text { format, .. } | Element::Shape { format, .. } => format, _ => return Ok(false) };
-    let mut normalized = new.clone();
-    let (normalized_text, normalized_format) = match &mut normalized { Element::Text { text, format, .. } | Element::Shape { text, format, .. } => (text, format), _ => return Ok(false) };
+    let (old_size, old_color, old_bold, before) = match old { Element::Text { font_size, color, bold, format, .. } | Element::Shape { font_size, color, bold, format, .. } => (font_size, color, bold, format), _ => return Ok(false) };
+    let (size, color, bold, after) = match new { Element::Text { font_size, color, bold, format, .. } | Element::Shape { font_size, color, bold, format, .. } => (font_size, color, bold, format), _ => return Ok(false) };
+    let mut normalized = after.clone();
+    normalized.padding = before.padding.clone();
     if before.paragraphs.len() != after.paragraphs.len() { return Ok(false); }
     let mut changed = false;
-    for (previous, next) in before.paragraphs.iter().zip(&mut normalized_format.paragraphs) {
+    for (previous, next) in before.paragraphs.iter().zip(&mut normalized.paragraphs) {
         if previous.runs.len() != next.runs.len() { return Ok(false); }
         for (previous, next) in previous.runs.iter().zip(&mut next.runs) {
             if previous.text != next.text && previous.field.as_ref().is_some_and(|field| supported_kind(&field.kind)) {
@@ -251,8 +254,7 @@ pub(crate) fn patch_cache_only(xml: &str, node: roxmltree::Node<'_, '_>, old: &c
             }
         }
     }
-    *normalized_text = old_text.clone();
-    if !changed || crate::canonical::bytes(old)? != crate::canonical::bytes(&normalized)? { return Ok(false); }
+    if !changed || crate::canonical::bytes(&(old_size, old_color, old_bold, before))? != crate::canonical::bytes(&(size, color, bold, &normalized))? { return Ok(false); }
     let body = child(node, P, "txBody").ok_or_else(|| Error::Conflict("field text body missing".into()))?;
     let paragraphs: Vec<_> = body.children().filter(|node| node.has_tag_name((A, "p"))).collect();
     if paragraphs.len() != before.paragraphs.len() { return Err(Error::Conflict("field paragraph count mismatch".into())); }
@@ -383,7 +385,52 @@ fn instance_id(scope: &str, element: &str, ordinal: usize) -> String {
     use sha2::{Digest, Sha256};
     let bytes = Sha256::digest(format!("aislide-field\0{scope}\0{element}\0{ordinal}"));
     let hex = format!("{bytes:x}");
-    format!("{}-{}-4{}-8{}-{}", &hex[..8], &hex[8..12], &hex[13..16], &hex[17..20], &hex[20..32])
+    format!("{{{}-{}-4{}-8{}-{}}}", &hex[..8], &hex[8..12], &hex[13..16], &hex[17..20], &hex[20..32]).to_ascii_uppercase()
+}
+
+pub(crate) fn pagination(element: &mut crate::model::Element, scope: &str, number: usize, total: usize) {
+    use crate::{model::Element, rich_text::{RichParagraph, RichRun}};
+    if let Element::Text { id, text, format, .. } = element {
+        format.paragraphs = vec![RichParagraph { runs: vec![
+            RichRun { text: number.to_string(), field: Some(Field { id: instance_id(scope, id, 0), kind: "slidenum".into() }), ..Default::default() },
+            RichRun { text: " / ".into(), ..Default::default() },
+            RichRun { text: total.to_string(), field: Some(Field { id: instance_id(scope, id, 1), kind: SLIDE_TOTAL.into() }), ..Default::default() },
+        ], ..Default::default() }];
+        *text = crate::rich_text::plain_text(&format.paragraphs);
+    }
+}
+
+pub(crate) fn refresh_pagination(deck: &mut crate::model::Deck, previous: Option<&crate::model::Deck>) {
+    use crate::model::Element;
+    fn visit(elements: &mut [Element], number: usize, total: usize, previous: &std::collections::BTreeMap<&str, &str>) {
+        for element in elements {
+            match element {
+                Element::Group { children, .. } => visit(children, number, total, previous),
+                Element::Text { text, format, .. } | Element::Shape { text, format, .. }
+                    if format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.field.as_ref().is_some_and(|field| field.kind == SLIDE_TOTAL)) => {
+                    for run in format.paragraphs.iter_mut().flat_map(|paragraph| &mut paragraph.runs) {
+                        if let Some(field) = &run.field {
+                            // Explicit cache edits, including Undo's inverse patch, retain their exact bytes.
+                            if previous.get(field.id.as_str()).is_some_and(|old| *old != run.text) { continue; }
+                            if field.kind == "slidenum" { run.text = number.to_string(); }
+                            if field.kind == SLIDE_TOTAL { run.text = total.to_string(); }
+                        }
+                    }
+                    *text = crate::rich_text::plain_text(&format.paragraphs);
+                }
+                _ => {}
+            }
+        }
+    }
+    let total = deck.slides.len();
+    for (index, slide) in deck.slides.iter_mut().enumerate() {
+        let old = previous.and_then(|deck| deck.slides.iter().find(|old| old.id == slide.id));
+        let fields: std::collections::BTreeMap<_, _> = old.into_iter().flat_map(|slide| crate::model::element_list(&slide.elements)).flat_map(|element| match element {
+            Element::Text { format, .. } | Element::Shape { format, .. } => format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).filter_map(|run| run.field.as_ref().map(|field| (field.id.as_str(), run.text.as_str()))).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        }).collect();
+        visit(&mut slide.elements, index + 1, total, &fields);
+    }
 }
 
 fn instantiate(element: &crate::model::Element, scope: &str, number: usize) -> crate::model::Element {
@@ -543,7 +590,7 @@ pub(crate) fn propagate_defaults(previous: Option<&crate::design::Design>, deck:
 pub fn capabilities() -> serde_json::Value {
     serde_json::json!({
         "master_theme_override":true,"default_theme_preserves_explicit_masters":true,"native_theme_copy_on_write":true,
-        "field_kinds":["slidenum","datetime1","datetime2","datetime3","datetime4","datetime5","datetime6","datetime7","datetime8","datetime9","datetime10","datetime11","datetime12","datetime13"],"placeholder_kinds":["slide_number","date","footer"],
+        "field_kinds":["slidenum","aislide_slidetotal","datetime1","datetime2","datetime3","datetime4","datetime5","datetime6","datetime7","datetime8","datetime9","datetime10","datetime11","datetime12","datetime13"],"placeholder_kinds":["slide_number","date","footer"],
         "scopes":["master","layout"],"reference_date":"caller supplied YYYY-MM-DD","page_number_projection":true,
         "native_fields":true,"native_field_cache_refresh":true,"unknown_fields":"preserved without evaluation",
         "notes_master":true,"handout_master":true,"rich_notes":true,"table_fields":false,"office_recalculation_verified":false,
@@ -563,7 +610,7 @@ pub(crate) fn evaluation_warnings(deck: &crate::model::Deck, reference_time: Opt
         kinds.extend(slide.notes_paragraphs.iter().flat_map(|paragraph| &paragraph.runs).filter_map(|run| run.field.as_ref().map(|field| field.kind.clone())));
     }
     kinds.into_iter().filter_map(|kind| {
-        let reason = if !supported_kind(&kind) { "unknown field type" } else if kind != "slidenum" && locale != "en-US" { "unsupported date locale" }
+        let reason = if !supported_kind(&kind) { "unknown field type" } else if kind != "slidenum" && kind != SLIDE_TOTAL && locale != "en-US" { "unsupported date locale" }
             else if reference_time.is_none() && matches!(kind.as_str(), "datetime8" | "datetime9" | "datetime10" | "datetime11" | "datetime12" | "datetime13") { "explicit reference time required" } else { return None; };
         Some(format!("{kind}: cached text retained ({reason})"))
     }).collect()
