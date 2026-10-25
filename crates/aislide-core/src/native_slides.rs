@@ -71,10 +71,11 @@ fn insert_slide(package: &mut Package, layouts: &[NativePart], deck: &Deck, slid
     let design = deck.design.as_ref().ok_or_else(|| Error::Invalid("native design missing".into()))?;
     let layout_id = slide.layout_id.as_ref().unwrap_or(&design.layouts[0].id);
     let layout = layouts.iter().find(|layout| &layout.id == layout_id).ok_or_else(|| Error::Invalid("native layout missing".into()))?;
-    let _scope = crate::native::part_color_map(package, &layout.path).enter();
+    let layout_map = crate::native::part_color_map(package, &layout.path);
+    let _scope = layout_map.enter();
     let blank = Slide { id: slide.id.clone(), elements: Vec::new(), layout_id: None, native_source_id: None, review: None, ..slide.clone() };
     let generated = Package::open(crate::pptx::export_pptx(&Deck { slides: vec![blank], design: None, ..deck.clone() })?)?;
-    let xml = crate::native_save::encode_scheme_colors(generated.text("ppt/slides/slide1.xml")?.to_owned(), crate::design::ColorMap::current())?; let parsed = parse(&xml)?;
+    let xml = crate::native_save::encode_scheme_colors(generated.text("ppt/slides/slide1.xml")?.to_owned(), layout_map)?; let parsed = parse(&xml)?;
     let tree = child(parsed.root_element(), P, "cSld").and_then(|node| child(node, P, "spTree")).ok_or_else(|| Error::Invalid("generated slide tree".into()))?;
     let ids: BTreeMap<_, _> = element_list(&slide.elements).into_iter().enumerate().map(|(index, element)| (element.bounds().0, index + 2)).collect();
     let binding = NativePart { path: path.into(), id: slide.id.clone(), nodes: ids.iter().map(|(id, numeric)| ((*id).into(), numeric.to_string())).collect() };

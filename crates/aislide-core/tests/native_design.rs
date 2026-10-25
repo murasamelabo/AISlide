@@ -125,7 +125,7 @@ fn issue32_color_maps_and_overrides_resolve() {
     rep(&mut gp, "ppt/slideLayouts/slideLayout2.xml", &[("</p:cSld>", &ovr_l.replace("lt1", "dk1"))]);
     let g_doc = open(gp.save().unwrap()); let mut g_ed = g_doc.deck.clone(); g_ed.design.as_mut().unwrap().masters[0].background = "@lt2".into();
     let g_s = save(&change(&g_doc, g_ed).document);
-    let fail = |d: &Document, s, l| document::transact(d, Transaction { expected_revision: d.revision, expected_hash: d.hash.clone(), operations: el(json!([{"op":"replace","path":"/deck","value":assign(d.deck.clone(), s, l, true).unwrap()}])) }).unwrap_err().to_string();
+    let fail = |d: &Document, s, l| document::export_presentation(&change(d, assign(d.deck.clone(), s, l, true).unwrap()).document).unwrap_err().to_string();
     assert!(open(g_s.clone()).deck.design.as_ref().unwrap().layouts[0].background.as_deref() == Some("@dk1") && Package::open(g_s).unwrap().text(s1).unwrap().contains("<a:gradFill>") && fail(&re_i, "s2", "title-content").contains("unmodeled") && fail(&g_doc, "slide-1", "title-content").contains("cannot represent"));
     let re_ass = open(save(&change(&doc, assign(doc.deck.clone(), "slide-1", "title-content", true).unwrap()).document));
     assert_eq!((re_ass.deck.slides[0].inherit_background, &val(&re_ass.deck.slides[0].elements)[0]["color"]), (true, &json!("@lt1")));
