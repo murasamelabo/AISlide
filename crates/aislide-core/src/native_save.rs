@@ -192,7 +192,6 @@ pub(crate) fn resource_changes(package: &mut Package, binding: &NativePart, befo
     let mut picture_number = maximum("ppt/media/image");
     if chart_number > u32::MAX as usize - 2048 || picture_number > u32::MAX as usize - 2048 { return Err(Error::Limit("native resource IDs exhausted".into())); }
     let mut parts = BTreeMap::new(); let mut types = Vec::new();
-    let _scope = crate::native::part_color_map(package, &binding.path).enter();
     let relationships = crate::pptx::resource_parts(&mut parts, &resources, &mut chart_number, &mut picture_number, &mut types, Some(ids), &mut crate::pptx::MediaResources::new())?;
     for (path, data) in parts {
         let data = if path.starts_with("ppt/charts/") && path.ends_with(".xml") { encode_scheme_colors(String::from_utf8(data).map_err(|_| Error::Invalid("chart XML encoding".into()))?, crate::design::ColorMap::current())?.into_bytes() } else { data };
@@ -1025,6 +1024,7 @@ fn patch_elements(xml: &str, tree: Node<'_, '_>, before: &[Element], after: &[El
 }
 
 pub(crate) fn patch_part(package: &mut Package, binding: &NativePart, before: &[Element], after: &[Element], theme: &crate::design::Theme, name: Option<&str>, background: Option<Option<&str>>, scale: (f64, f64)) -> Result<()> {
+    let _scope = crate::native::part_color_map(package, &binding.path).enter();
     let xml = package.text(&binding.path)?.to_owned(); let document = parse(&xml)?;
     let common = child(document.root_element(), P, "cSld").ok_or_else(|| Error::Invalid("common slide data missing".into()))?;
     let tree = child(common, P, "spTree").ok_or_else(|| Error::Invalid("shape tree missing".into()))?;
@@ -1034,7 +1034,6 @@ pub(crate) fn patch_part(package: &mut Package, binding: &NativePart, before: &[
     let resources = PartResources { mapping: resource_changes(package, binding, before, after, &ids)?, hyperlinks: crate::native::hyperlink_targets(package, &binding.path)? };
     let mut edits = Vec::new();
     if let Some(name) = name { set_attribute(&xml, common, "name", name, &mut edits)?; }
-    let _scope = crate::native::part_color_map(package, &binding.path).enter();
     if let Some(background) = background {
         let old = child(common, P, "bg");
         if let Some(shade) = background {

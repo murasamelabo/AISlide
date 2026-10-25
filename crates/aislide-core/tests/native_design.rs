@@ -129,10 +129,10 @@ fn issue32_color_maps_and_overrides_resolve_across_templates_previews_and_contra
     assert_eq!((doc.deck.slides[0].notes_paragraphs[0].runs[0].style.color.as_deref(), cat["masters"][0]["importable"].as_bool(), cat["slides"][0]["importable"].as_bool()), (Some("@lt1"), Some(true), Some(true)));
     let mut ed = doc.deck.clone();
     ed.slides[0].notes = "N1".into(); let r0 = &mut ed.slides[0].notes_paragraphs[0].runs[0]; r0.text = "N1".into(); r0.style.color = Some("@accent1".into());
-    if let Element::Text { color, .. } = &mut ed.slides[0].elements[0] { *color = "@accent1".into(); }
+    for e in [&mut ed.slides[0].elements[0], &mut ed.design.as_mut().unwrap().layouts[0].elements[0]] { if let Element::Text { color, .. } = e { *color = "@accent1".into(); } }
     let ed_b = save(&change(&doc, ed).document);
     let (ed_p, ed_o) = (Package::open(ed_b.clone()).unwrap(), open(ed_b));
-    assert!(ed_p.text(s1).unwrap().contains("val=\"accent2\"") && ed_p.text(ns).unwrap().contains("val=\"accent2\"") && ed_o.deck.slides[0].notes_paragraphs[0].runs[0].style.color.as_deref() == Some("@accent1") && val(&ed_o.deck.slides[0].elements)[0]["color"] == "@accent1");
+    assert!([s1, lp, ns].into_iter().all(|p| ed_p.text(p).unwrap().contains("val=\"accent2\"")) && ed_o.deck.slides[0].notes_paragraphs[0].runs[0].style.color.as_deref() == Some("@accent1") && val(&ed_o.deck.slides[0].elements)[0]["color"] == "@accent1" && val(&ed_o.deck.design.as_ref().unwrap().layouts[0].elements)[0]["color"] == "@accent1");
     let mut gp = Package::open(bytes.clone()).unwrap();
     rep(&mut gp, s1, &[(sf_bg, gr_bg)]); rep(&mut gp, "ppt/slideLayouts/_rels/slideLayout1.xml.rels", &[("../slideMasters/slideMaster1.xml", "../slideLayouts/slideLayout1.xml")]);
     let g_doc = open(gp.save().unwrap()); let mut g_ed = g_doc.deck.clone(); g_ed.design.as_mut().unwrap().masters[0].background = "@lt2".into();
