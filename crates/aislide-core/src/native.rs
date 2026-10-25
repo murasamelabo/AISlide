@@ -127,7 +127,6 @@ pub(crate) fn part_color_map(package: &Package, path: &str) -> crate::design::Co
 
 pub(crate) fn has_remapped_nonplaceholder_scheme_color(package: &Package, path: &str, root: Node<'_, '_>, owner_map: crate::design::ColorMap, child_map: crate::design::ColorMap) -> bool {
     if owner_map == child_map { return false; }
-    if has_non_solid_bg(root) && child(root, P, "cSld").and_then(|n| child(n, P, "bg")).is_some_and(|bg| bg.descendants().any(|n| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| child_map.resolve(v) != owner_map.resolve(v)))) { return true; }
     let Some(tree) = child(root, P, "cSld").and_then(|node| child(node, P, "spTree")) else { return false };
     for container in tree.children().filter(|node| node.is_element()).map(|node| crate::interactive::office::static_fallback(node).unwrap_or(node)) {
         for node in container.descendants().filter(|node| is_shape(*node) && placeholder(*node).is_none() && !node.ancestors().filter(|a| is_shape(*a)).any(|a| properties(a).is_some_and(|p| matches!(p.attribute("hidden"), Some("1" | "true"))))) {
@@ -138,8 +137,18 @@ pub(crate) fn has_remapped_nonplaceholder_scheme_color(package: &Package, path: 
         .any(|p| package.text(&p).ok().and_then(|t| parse(t).ok()).is_some_and(|doc| doc.descendants().any(|n| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| child_map.resolve(v) != owner_map.resolve(v)))))
 }
 
-pub(crate) fn slide_remaps_ancestor_artwork(package: &Package, lp: &str, lx: Node<'_, '_>, lm: crate::design::ColorMap, mp: &str, mx: Node<'_, '_>, mm: crate::design::ColorMap, sm: crate::design::ColorMap, hide_master: bool) -> bool {
-    has_remapped_nonplaceholder_scheme_color(package, lp, lx, lm, sm) || (!hide_master && !matches!(lx.attribute("showMasterSp"), Some("0" | "false")) && has_remapped_nonplaceholder_scheme_color(package, mp, mx, mm, sm))
+fn has_remapped_non_solid_bg(root: Node<'_, '_>, owner_map: crate::design::ColorMap, child_map: crate::design::ColorMap) -> bool {
+    owner_map != child_map && has_non_solid_bg(root) && child(root, P, "cSld").and_then(|n| child(n, P, "bg")).is_some_and(|bg| bg.descendants().any(|n| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| child_map.resolve(v) != owner_map.resolve(v))))
+}
+
+pub(crate) fn layout_remaps_master_artwork(package: &Package, mp: &str, mx: Node<'_, '_>, mm: crate::design::ColorMap, lx: Node<'_, '_>, lm: crate::design::ColorMap) -> bool {
+    (child(lx, P, "cSld").and_then(|n| child(n, P, "bg")).is_none() && has_remapped_non_solid_bg(mx, mm, lm))
+        || (!matches!(lx.attribute("showMasterSp"), Some("0" | "false")) && has_remapped_nonplaceholder_scheme_color(package, mp, mx, mm, lm))
+}
+
+pub(crate) fn slide_remaps_ancestor_artwork(package: &Package, sx: Node<'_, '_>, lp: &str, lx: Node<'_, '_>, lm: crate::design::ColorMap, mp: &str, mx: Node<'_, '_>, mm: crate::design::ColorMap, sm: crate::design::ColorMap, hide_master: bool) -> bool {
+    let bg_remapped = child(sx, P, "cSld").and_then(|n| child(n, P, "bg")).is_none() && if child(lx, P, "cSld").and_then(|n| child(n, P, "bg")).is_some() { has_remapped_non_solid_bg(lx, lm, sm) } else { has_remapped_non_solid_bg(mx, mm, sm) };
+    bg_remapped || has_remapped_nonplaceholder_scheme_color(package, lp, lx, lm, sm) || (!hide_master && !matches!(lx.attribute("showMasterSp"), Some("0" | "false")) && has_remapped_nonplaceholder_scheme_color(package, mp, mx, mm, sm))
 }
 
 pub(crate) fn color_mapping_warning(path: &str) -> String {
@@ -724,7 +733,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
             let id = identity(layout_path, format!("layout-{}", layouts.len() + 1));
             let layout_xml = parse(package.text(layout_path)?)?;
             let (layout_map, _) = resolve_color_map(layout_xml.root_element(), master_map);
-            if !matches!(layout_xml.root_element().attribute("showMasterSp"), Some("0" | "false")) && has_remapped_nonplaceholder_scheme_color(package, path, master_xml.root_element(), master_map, layout_map) { warnings.push(color_mapping_warning(layout_path)); }
+            if layout_remaps_master_artwork(package, path, master_xml.root_element(), master_map, layout_xml.root_element(), layout_map) { warnings.push(color_mapping_warning(layout_path)); }
             let mapped_master = (layout_map != master_map && !elements.is_empty()).then(|| read_part_with_map(package, path, master_id.clone(), scale, &[], layout_map, false, &mut Vec::new(), metadata.as_ref(), canvas).map(|part| part.2)).transpose()?;
             let (name, background, elements, layout_binding) = read_part_with_map(package, layout_path, id.clone(), scale, mapped_master.as_deref().unwrap_or(&elements), master_map, true, &mut warnings, metadata.as_ref(), canvas)?;
             let background = background.or_else(|| (layout_map != master_map && !has_non_solid_bg(master_xml.root_element())).then(|| layout_map.scope(|| self::background(master_xml.root_element())).unwrap_or_else(|| format!("@{}", layout_map.resolve("bg1")))).filter(|inherited| inherited != &master_background));
@@ -749,7 +758,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
         let (layout_xml, master_xml, layout_map, master_map) = (layout_doc.root_element(), master_doc.root_element(), *layout_map, *master_map);
         let (slide_map, _) = resolve_color_map(xml.root_element(), layout_map);
         let hide_master_graphics = matches!(xml.root_element().attribute("showMasterSp"), Some("0" | "false"));
-        if slide_remaps_ancestor_artwork(package, &layout_binding.path, layout_xml, layout_map, &master_binding.path, master_xml, master_map, slide_map, hide_master_graphics) { warnings.push(color_mapping_warning(path)); }
+        if slide_remaps_ancestor_artwork(package, xml.root_element(), &layout_binding.path, layout_xml, layout_map, &master_binding.path, master_xml, master_map, slide_map, hide_master_graphics) { warnings.push(color_mapping_warning(path)); }
         let mapped_layout = (slide_map != layout_map && !layout.elements.is_empty()).then(|| {
             let mm = (slide_map != master_map && !master.elements.is_empty()).then(|| read_part_with_map(package, &master_binding.path, master.id.clone(), scale, &[], slide_map, false, &mut Vec::new(), metadata.as_ref(), canvas).map(|p| p.2)).transpose()?;
             read_part_with_map(package, &layout_binding.path, layout.id.clone(), scale, mm.as_deref().unwrap_or(&master.elements), slide_map, false, &mut Vec::new(), metadata.as_ref(), canvas).map(|p| p.2)
