@@ -309,7 +309,7 @@ pub fn check_accessibility(deck: &crate::model::Deck) -> AccessibilityReport {
                         let (other_id, other_left, other_top, other_width, other_height) = other.bounds();
                         other_id != id && left < other_left + other_width && other_left < left + width && top < other_top + other_height && other_top < top + height
                     };
-                    let layout = deck.design.as_ref().and_then(|design| slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)).or_else(|| design.layouts.first()));
+                    let layout = deck.design.as_ref().and_then(|design| slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)));
                     let master = layout.and_then(|layout| deck.design.as_ref()?.masters.iter().find(|master| master.id == layout.master_id));
                     let inherited_overlap = !own_fill && slide.inherit_background && layout.into_iter().flat_map(|layout| &layout.elements)
                         .chain(master.filter(|_| !slide.hide_master_graphics).into_iter().flat_map(|master| &master.elements))

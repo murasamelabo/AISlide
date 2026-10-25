@@ -246,7 +246,7 @@ pub fn apply_theme(mut deck: Deck, theme: Theme) -> Result<Deck> {
 }
 
 pub fn slide_background<'a>(slide: &'a Slide, design: Option<&'a Design>) -> &'a str {
-    if slide.inherit_background { if let Some(design) = design { if let Some(layout) = slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)).or_else(|| design.layouts.first()) { return layout.background.as_deref().or_else(|| design.masters.iter().find(|master| master.id == layout.master_id).map(|master| master.background.as_str())).unwrap_or(&slide.background); } } }
+    if slide.inherit_background { if let Some(design) = design { if let Some(layout) = slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)) { return layout.background.as_deref().or_else(|| design.masters.iter().find(|master| master.id == layout.master_id).map(|master| master.background.as_str())).unwrap_or(&slide.background); } } }
     &slide.background
 }
 
