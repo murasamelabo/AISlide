@@ -125,16 +125,16 @@ pub(crate) fn part_color_map(package: &Package, path: &str) -> crate::design::Co
     step(package, path, None, 0)
 }
 
-pub(crate) fn has_remapped_nonplaceholder_scheme_color(package: &Package, path: &str, root: Node<'_, '_>, owner_map: crate::design::ColorMap, child_map: crate::design::ColorMap) -> bool {
+fn has_remapped_shapes(package: &Package, path: &str, root: Node<'_, '_>, owner_map: crate::design::ColorMap, child_map: crate::design::ColorMap) -> bool {
     if owner_map == child_map { return false; }
     let Some(tree) = child(root, P, "cSld").and_then(|node| child(node, P, "spTree")) else { return false };
-    for container in tree.children().filter(|node| node.is_element()).map(|node| crate::interactive::office::static_fallback(node).unwrap_or(node)) {
-        for node in container.descendants().filter(|node| is_shape(*node) && placeholder(*node).is_none() && !node.ancestors().filter(|a| is_shape(*a)).any(|a| properties(a).is_some_and(|p| matches!(p.attribute("hidden"), Some("1" | "true"))))) {
-            if node.descendants().any(|d| d.has_tag_name((A, "schemeClr")) && !d.ancestors().take_while(|a| *a != node).any(|a| is_shape(a)) && d.attribute("val").is_some_and(|v| child_map.resolve(v) != owner_map.resolve(v))) { return true; }
+    for c in tree.children().filter(|n| n.is_element()).map(|n| crate::interactive::office::static_fallback(n).unwrap_or(n)) {
+        for n in c.descendants().filter(|n| is_shape(*n) && placeholder(*n).is_none() && !n.ancestors().filter(|a| is_shape(*a)).any(|a| properties(a).is_some_and(|p| matches!(p.attribute("hidden"), Some("1" | "true"))))) {
+            if n.descendants().any(|d| d.has_tag_name((A, "schemeClr")) && !d.ancestors().take_while(|a| *a != n).any(|a| is_shape(a)) && d.attribute("val").is_some_and(|v| child_map.resolve(v) != owner_map.resolve(v))) { return true; }
         }
     }
-    ["chart", "chartEx"].into_iter().flat_map(|kind| relationship_targets(package, path, kind).ok().into_iter().flat_map(|t| t.into_values()))
-        .any(|p| package.text(&p).ok().and_then(|t| parse(t).ok()).is_some_and(|doc| doc.descendants().any(|n| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| child_map.resolve(v) != owner_map.resolve(v)))))
+    ["chart", "chartEx"].into_iter().flat_map(|k| relationship_targets(package, path, k).ok().into_iter().flat_map(|t| t.into_values()))
+        .any(|p| package.text(&p).ok().and_then(|t| parse(t).ok()).is_some_and(|d| d.descendants().any(|n| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| child_map.resolve(v) != owner_map.resolve(v)))))
 }
 
 fn has_remapped_non_solid_bg(root: Node<'_, '_>, owner_map: crate::design::ColorMap, child_map: crate::design::ColorMap) -> bool {
@@ -142,13 +142,12 @@ fn has_remapped_non_solid_bg(root: Node<'_, '_>, owner_map: crate::design::Color
 }
 
 pub(crate) fn layout_remaps_master_artwork(package: &Package, mp: &str, mx: Node<'_, '_>, mm: crate::design::ColorMap, lx: Node<'_, '_>, lm: crate::design::ColorMap) -> bool {
-    (child(lx, P, "cSld").and_then(|n| child(n, P, "bg")).is_none() && has_remapped_non_solid_bg(mx, mm, lm))
-        || (!matches!(lx.attribute("showMasterSp"), Some("0" | "false")) && has_remapped_nonplaceholder_scheme_color(package, mp, mx, mm, lm))
+    (child(lx, P, "cSld").and_then(|n| child(n, P, "bg")).is_none() && has_remapped_non_solid_bg(mx, mm, lm)) || (!matches!(lx.attribute("showMasterSp"), Some("0" | "false")) && has_remapped_shapes(package, mp, mx, mm, lm))
 }
 
 pub(crate) fn slide_remaps_ancestor_artwork(package: &Package, sx: Node<'_, '_>, lp: &str, lx: Node<'_, '_>, lm: crate::design::ColorMap, mp: &str, mx: Node<'_, '_>, mm: crate::design::ColorMap, sm: crate::design::ColorMap, hide_master: bool) -> bool {
-    let bg_remapped = child(sx, P, "cSld").and_then(|n| child(n, P, "bg")).is_none() && if child(lx, P, "cSld").and_then(|n| child(n, P, "bg")).is_some() { has_remapped_non_solid_bg(lx, lm, sm) } else { has_remapped_non_solid_bg(mx, mm, sm) };
-    bg_remapped || has_remapped_nonplaceholder_scheme_color(package, lp, lx, lm, sm) || (!hide_master && !matches!(lx.attribute("showMasterSp"), Some("0" | "false")) && has_remapped_nonplaceholder_scheme_color(package, mp, mx, mm, sm))
+    let bg = child(sx, P, "cSld").and_then(|n| child(n, P, "bg")).is_none() && if child(lx, P, "cSld").and_then(|n| child(n, P, "bg")).is_some() { has_remapped_non_solid_bg(lx, lm, sm) } else { has_remapped_non_solid_bg(mx, mm, sm) };
+    bg || has_remapped_shapes(package, lp, lx, lm, sm) || (!hide_master && !matches!(lx.attribute("showMasterSp"), Some("0" | "false")) && has_remapped_shapes(package, mp, mx, mm, sm))
 }
 
 pub(crate) fn color_mapping_warning(path: &str) -> String {
@@ -796,7 +795,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
             bodies.into_iter().map(body_text).collect::<Vec<_>>().join("\n")
         } else { String::new() };
         let review = crate::review::read_slide(package, &binding, &elements)?;
-        slides.push(Slide { id, title: name, background: background.clone().unwrap_or_else(|| "@lt1".into()), elements, notes, notes_paragraphs, layout_id: Some(layout.id.clone()), inherit_background: background.is_none(), hide_master_graphics, native_source_id: None, review });
+        slides.push(Slide { id, title: name, background: background.clone().unwrap_or_else(|| format!("@{}", slide_map.resolve("bg1"))), elements, notes, notes_paragraphs, layout_id: Some(layout.id.clone()), inherit_background: background.is_none(), hide_master_graphics, native_source_id: None, review });
         slide_parts.push(binding);
     }
     let title = package.parts().iter().filter(|(path, _)| path.starts_with("docProps/") && path.ends_with(".xml")).find_map(|(_, value)| std::str::from_utf8(value).ok().and_then(|value| parse(value).ok()).and_then(|document| document.descendants().find(|node| node.has_tag_name(("http://purl.org/dc/elements/1.1/", "title"))).and_then(|node| node.text()).map(str::to_owned)))

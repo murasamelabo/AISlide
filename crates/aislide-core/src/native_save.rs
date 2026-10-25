@@ -192,6 +192,7 @@ pub(crate) fn resource_changes(package: &mut Package, binding: &NativePart, befo
     let mut picture_number = maximum("ppt/media/image");
     if chart_number > u32::MAX as usize - 2048 || picture_number > u32::MAX as usize - 2048 { return Err(Error::Limit("native resource IDs exhausted".into())); }
     let mut parts = BTreeMap::new(); let mut types = Vec::new();
+    let _scope = crate::native::part_color_map(package, &binding.path).enter();
     let relationships = crate::pptx::resource_parts(&mut parts, &resources, &mut chart_number, &mut picture_number, &mut types, Some(ids), &mut crate::pptx::MediaResources::new())?;
     for (path, data) in parts {
         let data = if path.starts_with("ppt/charts/") && path.ends_with(".xml") {
@@ -1032,10 +1033,10 @@ pub(crate) fn patch_part(package: &mut Package, binding: &NativePart, before: &[
     let mut maximum = binding.nodes.values().filter_map(|value| value.parse::<usize>().ok()).max().unwrap_or(1);
     let mut ids: BTreeMap<&str, usize> = binding.nodes.iter().map(|(id, value)| value.parse().map(|number| (id.as_str(), number)).map_err(|_| Error::Invalid("shape ID is not numeric".into()))).collect::<Result<_>>()?;
     for element in crate::model::element_list(after) { if !ids.contains_key(element.bounds().0) { maximum = maximum.checked_add(1).filter(|value| *value <= u32::MAX as usize).ok_or_else(|| Error::Limit("native shape IDs exhausted".into()))?; ids.insert(element.bounds().0, maximum); } }
-    let _scope = crate::native::part_color_map(package, &binding.path).enter();
     let resources = PartResources { mapping: resource_changes(package, binding, before, after, &ids)?, hyperlinks: crate::native::hyperlink_targets(package, &binding.path)? };
     let mut edits = Vec::new();
     if let Some(name) = name { set_attribute(&xml, common, "name", name, &mut edits)?; }
+    let _scope = crate::native::part_color_map(package, &binding.path).enter();
     if let Some(background) = background {
         let old = child(common, P, "bg");
         if let Some(shade) = background {
@@ -1306,13 +1307,16 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
     }
     for (after, binding) in design.layouts.iter().zip(&topology.layouts) {
         let before = old.layouts.iter().find(|before| before.id == after.id);
-        let master_bg_changed = old.masters.iter().find(|m| m.id == after.master_id).zip(design.masters.iter().find(|m| m.id == after.master_id)).is_some_and(|(bm, am)| bm.background != am.background);
-        let bg = (before.is_some_and(|before| before.background != after.background) || (master_bg_changed && after.background.is_some() && !has_explicit_bg(package, &binding.path))).then_some(after.background.as_deref());
-        patch_part(package, binding, before.map(|before| before.elements.as_slice()).unwrap_or(&[]), &after.elements, crate::design::master_theme(design, &after.master_id), before.is_some_and(|before| before.name != after.name).then_some(after.name.as_str()), bg, scale)?;
+        patch_part(package, binding, before.map(|before| before.elements.as_slice()).unwrap_or(&[]), &after.elements, crate::design::master_theme(design, &after.master_id), before.is_some_and(|before| before.name != after.name).then_some(after.name.as_str()), before.is_some_and(|before| before.background != after.background).then_some(after.background.as_deref()), scale)?;
         crate::fields::write_part(package, &binding.path, &after.elements, Some(binding))?;
     }
     if let Some(slide) = deck.slides.iter().find(|slide| !slide.notes.is_empty() && slide.native_source_id.is_none() && !original.slides.iter().any(|binding| binding.id == slide.id)) {
         ensure_notes_master(package, main, &notes_template(slide, deck)?)?;
+    }
+    for (after, binding) in design.layouts.iter().zip(&topology.layouts) {
+        if after.background.is_some() && !has_explicit_bg(package, &binding.path) && old.masters.iter().find(|m| m.id == after.master_id).zip(design.masters.iter().find(|m| m.id == after.master_id)).is_some_and(|(bm, am)| bm.background != am.background) {
+            patch_part(package, binding, &after.elements, &after.elements, crate::design::master_theme(design, &after.master_id), None, Some(after.background.as_deref()), scale)?;
+        }
     }
     let bindings = crate::native_slides::prepare(package, original, deck, main, scale, &topology.layouts)?;
     for (after, binding) in deck.slides.iter().zip(&bindings) {
@@ -1325,7 +1329,11 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
             let relation = document.root_element().children().find(|node| node.attribute("Type") == Some(format!("{}/slideLayout", crate::native::R).as_str())).ok_or_else(|| Error::Invalid("slide layout relationship missing".into()))?;
             let mut edits = Vec::new(); set_attribute(&xml, relation, "Target", &format!("/{path}"), &mut edits)?; package.replace_part(&relation_path, apply(xml, edits)?)?;
         }
-        if before.notes != after.notes || before.notes_paragraphs != after.notes_paragraphs { patch_notes(package, main, &binding.path, after, deck)?; }
+        if before.notes != after.notes || before.notes_paragraphs != after.notes_paragraphs {
+            let notes_map = crate::pptx::relationship_targets(package, &binding.path, "notesSlide")?.into_values().next().or_else(|| crate::pptx::relationship_targets(package, main, "notesMaster").ok()?.into_values().next()).map_or_else(Default::default, |p| crate::native::part_color_map(package, &p));
+            notes_map.scope(|| patch_notes(package, main, &binding.path, after, deck))?;
+            if let Some(np) = crate::pptx::relationship_targets(package, &binding.path, "notesSlide")?.into_values().next() { let nxml = encode_scheme_colors(package.text(&np)?.to_owned(), notes_map)?; package.replace_part(&np, nxml.into_bytes())?; }
+        }
         let parent_bg_changed = after.layout_id.as_ref().and_then(|id| old.layouts.iter().find(|l| &l.id == id).zip(design.layouts.iter().find(|l| &l.id == id))).is_some_and(|(bl, al)| bl.background != al.background || old.masters.iter().find(|m| m.id == al.master_id).zip(design.masters.iter().find(|m| m.id == al.master_id)).is_some_and(|(bm, am)| bm.background != am.background));
         let background = (before.background != after.background || before.inherit_background != after.inherit_background || (!after.inherit_background && !has_explicit_bg(package, &binding.path) && (before.layout_id != after.layout_id || parent_bg_changed))).then_some(if after.inherit_background { None } else { Some(after.background.as_str()) });
         patch_part(package, binding, &before.elements, &after.elements, crate::design::slide_theme(after, Some(design)).unwrap_or(&design.theme), (before.title != after.title).then_some(after.title.as_str()), background, scale)?;
