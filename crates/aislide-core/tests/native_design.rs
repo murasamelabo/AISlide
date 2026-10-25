@@ -118,11 +118,10 @@ fn issue32_color_maps_and_overrides_resolve() {
     let mut ed = doc.deck.clone();
     ed.slides[0].notes = "N1".into(); let r0 = &mut ed.slides[0].notes_paragraphs[0].runs[0]; r0.text = "N1".into(); r0.style.color = Some("@accent1".into());
     for e in [&mut ed.slides[0].elements[0], &mut ed.design.as_mut().unwrap().layouts[0].elements[0]] { if let Element::Text { color, .. } = e { *color = "@accent1".into(); } }
-    let (ed_p, ed_o) = { let b = save(&change(&doc, ed).document); (Package::open(b.clone()).unwrap(), open(b)) };
+    let (ed_p, ed_o, mut gp) = { let b = save(&change(&doc, ed).document); (Package::open(b.clone()).unwrap(), open(b.clone()), Package::open(b).unwrap()) };
     assert!([s1, lp, ns].into_iter().all(|p| ed_p.text(p).unwrap().contains("val=\"accent2\"")) && ed_o.deck.slides[0].notes_paragraphs[0].runs[0].style.color.as_deref() == Some("@accent1") && val(&ed_o.deck.slides[0].elements)[0]["color"] == "@accent1" && val(&ed_o.deck.design.as_ref().unwrap().layouts[0].elements)[0]["color"] == "@accent1");
-    let mut gp = Package::open(bytes.clone()).unwrap();
     rep(&mut gp, s1, &[(sf_bg, gr_bg)]); rep(&mut gp, "ppt/slideLayouts/_rels/slideLayout1.xml.rels", &[("../slideMasters/slideMaster1.xml", "../slideLayouts/slideLayout1.xml")]);
-    rep(&mut gp, "ppt/slideLayouts/slideLayout2.xml", &[("</p:cSld>", &ovr_l.replace("lt1", "dk1"))]);
+    rep(&mut gp, "ppt/slideLayouts/slideLayout2.xml", &[("</p:cSld>", &ovr_l.replace("accent2=\"accent1\"", "accent2=\"accent2\""))]);
     let g_doc = open(gp.save().unwrap()); let mut g_ed = g_doc.deck.clone(); g_ed.design.as_mut().unwrap().masters[0].background = "@lt2".into();
     let g_s = save(&change(&g_doc, g_ed).document);
     let fail = |d: &Document, s, l| document::transact(d, Transaction { expected_revision: d.revision, expected_hash: d.hash.clone(), operations: serde_json::from_value(json!([{"op":"replace","path":"/deck","value":assign(d.deck.clone(), s, l, true).unwrap()}])).unwrap() }).err().unwrap().to_string();
