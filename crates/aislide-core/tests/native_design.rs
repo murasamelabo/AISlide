@@ -22,219 +22,176 @@ fn change(document: &Document, deck: aislide_core::model::Deck) -> document::Tra
 }
 
 #[test]
-fn issue32_color_maps_and_overrides_resolve_across_templates_previews_and_contrast_checks() {
+fn issue32_unrepresentable_color_map_extensions_or_shared_master_remaps_still_warn() {
     const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
     const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+    let mut initial = source();
+    initial.deck.design.as_mut().unwrap().masters[0].elements = vec![serde_json::from_value(json!({"type":"rect","id":"master-banner","x":0,"y":0,"width":1280,"height":24,"fill":"@dk1"})).unwrap()];
+    let initial = change(&source(), initial.deck).document;
+    for master in [false, true] {
+        let mut package = Package::open(save(&initial)).unwrap();
+        let path = if master {"ppt/slideMasters/slideMaster1.xml"} else {"ppt/slideLayouts/slideLayout1.xml"};
+        let mut xml = package.text(path).unwrap().to_owned();
+        let parsed = roxmltree::Document::parse(&xml).unwrap();
+        let (range, replacement) = if master {
+            let value = parsed.descendants().find(|node| node.has_tag_name((P, "clrMap"))).unwrap().attribute_node("bg1").unwrap();
+            (value.range(), "bg1=\"dk1\" custom=\"dk1\"".to_owned())
+        } else {
+            package.replace_part("ppt/slideMasters/slideMaster1.xml", package.text("ppt/slideMasters/slideMaster1.xml").unwrap().replace("val=\"dk1\"", "val=\"tx1\"").into_bytes()).unwrap();
+            let end = parsed.descendants().find(|node| node.has_tag_name((P, "cSld"))).unwrap().range().end;
+            let range = parsed.descendants().find(|node| node.has_tag_name((P, "clrMapOvr"))).map(|node| node.range()).unwrap_or(end..end);
+            (range, format!("<p:clrMapOvr xmlns:p=\"{P}\"><a:overrideClrMapping xmlns:a=\"{A}\" bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr>"))
+        };
+        xml.replace_range(range, &replacement);
+        package.replace_part(path, xml.into_bytes()).unwrap();
+        let bytes = package.save().unwrap();
+        let document = open(bytes.clone());
+        assert_eq!(save(&document), bytes);
+        for document in [document, {
+            let mut template = Package::open(bytes.clone()).unwrap();
+            let types = template.text("[Content_Types].xml").unwrap().replace(
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml");
+            template.replace_part("[Content_Types].xml", types.into_bytes()).unwrap();
+            aislide_core::templates::load_potx("color-template".into(), template.save().unwrap()).unwrap()
+        }] {
+            let preview = aislide_core::execute_request(json!({"op":"preview_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
+            let warnings: Vec<_> = preview["warnings"].as_array().unwrap().iter().filter(|warning| warning["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED").collect();
+            assert!(!warnings.is_empty(), "{master}: missing custom color-map warning");
+            assert!(warnings.iter().any(|warning| warning["message"].as_str().unwrap().contains(path)));
+            let preflight = aislide_core::execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
+            assert!(preflight["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED" && finding["severity"] == "warning"));
+        }
+    }
+}
+
+fn ovr_xml(bg1: &str, tx1: &str) -> String {
+    format!("<a:overrideClrMapping xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" bg1=\"{bg1}\" tx1=\"{tx1}\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/>")
+}
+
+#[test]
+fn issue32_color_maps_and_overrides_resolve_across_templates_previews_and_contrast_checks() {
+    const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+    let to_potx = |pptx: Vec<u8>| {
+        let mut pkg = Package::open(pptx).unwrap();
+        let ct = pkg.text("[Content_Types].xml").unwrap().replace("presentationml.presentation.main+xml", "presentationml.template.main+xml");
+        pkg.replace_part("[Content_Types].xml", ct.into_bytes()).unwrap(); pkg.save().unwrap()
+    };
+    let el = |v| serde_json::from_value(v).unwrap();
     let base = source();
     let mut initial_deck = base.deck.clone();
     initial_deck.design.as_mut().unwrap().layouts[0].elements = vec![
-        serde_json::from_value(json!({"type":"text","id":"closing-note","x":80,"y":120,"width":600,"height":80,"text":"Closing note","font_size":28,"color":"@dk1","bold":false})).unwrap(),
-        serde_json::from_value(json!({"type":"shape","id":"badge","x":80,"y":240,"width":240,"height":90,"preset":"roundRect","fill":"@lt2","stroke":"@dk2","stroke_width":2,"rotation":0,"text":"Tag","font_size":20,"color":"@dk1","bold":true})).unwrap(),
-        serde_json::from_value(json!({"type":"table","id":"grid","x":80,"y":360,"width":500,"height":160,"rows":[["Header","Value"],["Item","42"]],"font_size":18,"format":{"cells":[{"row":1,"column":0,"style":{"fill":"@lt1","text_style":{"color":"@dk1"}}}]}})).unwrap(),
+        el(json!({"type":"text","id":"closing-note","x":80,"y":120,"width":600,"height":80,"text":"Closing note","font_size":28,"color":"@dk1","bold":false})),
+        el(json!({"type":"shape","id":"badge","x":80,"y":240,"width":240,"height":90,"preset":"roundRect","fill":"@lt2","stroke":"@dk2","stroke_width":2,"rotation":0,"text":"Tag","font_size":20,"color":"@dk1","bold":true})),
+        el(json!({"type":"table","id":"grid","x":80,"y":360,"width":500,"height":160,"rows":[["Header","Value"],["Item","42"]],"font_size":18,"format":{"cells":[{"row":1,"column":0,"style":{"fill":"@lt1","text_style":{"color":"@dk1"}}}]}})),
     ];
     initial_deck.slides[0].inherit_background = true;
-    initial_deck.slides[0].elements = vec![
-        serde_json::from_value(json!({"type":"text","id":"slide-copy","x":80,"y":620,"width":600,"height":60,"text":"Readable white text","font_size":24,"color":"@dk1","bold":false})).unwrap(),
-    ];
-    let initial = change(&base, initial_deck).document;
-    let mut package = Package::open(save(&initial)).unwrap();
-    let master_bg_xml = package.text("ppt/slideMasters/slideMaster1.xml").unwrap().replace("val=\"lt1\"", "val=\"bg1\"");
-    package.replace_part("ppt/slideMasters/slideMaster1.xml", master_bg_xml.into_bytes()).unwrap();
+    initial_deck.slides[0].elements = vec![el(json!({"type":"text","id":"slide-copy","x":80,"y":620,"width":600,"height":60,"text":"Readable white text","font_size":24,"color":"@dk1","bold":false}))];
+    let mut authored_dark = initial_deck.clone();
+    authored_dark.design.as_mut().unwrap().layouts[0].background = Some("@dk1".into());
+    assert!(aislide_core::review::check_accessibility(&authored_dark).issues.iter().any(|i| i.element_id.as_deref() == Some("slide-copy") && i.code == "text_contrast_low"));
+
+    let mut package = Package::open(save(&change(&base, initial_deck).document)).unwrap();
+    package.replace_part("ppt/slideMasters/slideMaster1.xml", package.text("ppt/slideMasters/slideMaster1.xml").unwrap().replace("val=\"lt1\"", "val=\"bg1\"").into_bytes()).unwrap();
     let layout_path = "ppt/slideLayouts/slideLayout1.xml";
-    let mut layout_xml = package.text(layout_path).unwrap().to_owned();
-    layout_xml = layout_xml
-        .replace("val=\"dk1\"", "val=\"tx1\"")
-        .replace("val=\"lt1\"", "val=\"bg1\"")
-        .replace("val=\"lt2\"", "val=\"bg2\"")
-        .replace("val=\"dk2\"", "val=\"tx2\"")
-        .replace("</p:cSld>", &format!("</p:cSld><p:clrMapOvr xmlns:p=\"{P}\"><a:overrideClrMapping xmlns:a=\"{A}\" bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr>"));
+    let layout_xml = package.text(layout_path).unwrap().replace("val=\"dk1\"", "val=\"tx1\"").replace("val=\"lt1\"", "val=\"bg1\"").replace("val=\"lt2\"", "val=\"bg2\"").replace("val=\"dk2\"", "val=\"tx2\"").replace("</p:cSld>", &format!("</p:cSld><p:clrMapOvr xmlns:p=\"{P}\">{}</p:clrMapOvr>", ovr_xml("dk1", "lt1")));
     package.replace_part(layout_path, layout_xml.into_bytes()).unwrap();
-    let slide_xml = package.text("ppt/slides/slide1.xml").unwrap().replace("val=\"dk1\"", "val=\"tx1\"");
-    package.replace_part("ppt/slides/slide1.xml", slide_xml.into_bytes()).unwrap();
+    package.replace_part("ppt/slides/slide1.xml", package.text("ppt/slides/slide1.xml").unwrap().replace("val=\"dk1\"", "val=\"tx1\"").into_bytes()).unwrap();
     let bytes = package.save().unwrap();
     let opened = document::open_presentation("issue32-pptx".into(), bytes.clone()).unwrap();
-    assert!(!opened["warnings"].as_array().unwrap().iter().any(|warning| warning.as_str().is_some_and(|message| message.contains("Custom native color mapping"))), "{}", opened["warnings"]);
+    assert!(!opened["warnings"].as_array().unwrap().iter().any(|w| w.as_str().is_some_and(|m| m.contains("Custom native color mapping"))));
     let document: Document = serde_json::from_value(opened["document"].clone()).unwrap();
     assert_eq!(save(&document), bytes);
-
-    let mut potx_package = Package::open(bytes.clone()).unwrap();
-    let types = potx_package.text("[Content_Types].xml").unwrap().replace(
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
-        "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml");
-    potx_package.replace_part("[Content_Types].xml", types.into_bytes()).unwrap();
-    let potx_bytes = potx_package.save().unwrap();
+    let potx_bytes = to_potx(bytes.clone());
     let template_doc = aislide_core::templates::load_potx("issue32-potx".into(), potx_bytes.clone()).unwrap();
 
     for candidate in [&document, &template_doc] {
         let layout = &candidate.deck.design.as_ref().unwrap().layouts[0];
-        assert_eq!(layout.background.as_deref(), Some("@dk1"));
-        let layout_json = serde_json::to_value(&layout.elements).unwrap();
-        assert_eq!(layout_json[0]["color"], "@lt1");
-        assert_eq!(layout_json[1]["fill"], "@dk2");
-        assert_eq!(layout_json[1]["stroke"], "@lt2");
-        assert_eq!(layout_json[1]["color"], "@lt1");
-        let cell0 = layout_json[2]["format"]["cells"].as_array().unwrap().iter().find(|cell| cell["row"] == 0 && cell["column"] == 0).unwrap();
-        assert_eq!(cell0["style"]["text_style"]["color"], "@dk1");
-        let cell1 = layout_json[2]["format"]["cells"].as_array().unwrap().iter().find(|cell| cell["row"] == 1 && cell["column"] == 0).unwrap();
-        assert_eq!(cell1["style"]["fill"], "@dk1");
-        assert_eq!(cell1["style"]["text_style"]["color"], "@lt1");
-        let slide_json = serde_json::to_value(&candidate.deck.slides[0].elements).unwrap();
-        assert_eq!(slide_json[0]["color"], "@lt1");
-
+        assert_eq!((layout.background.as_deref(), candidate.deck.slides[0].inherit_background), (Some("@dk1"), true));
+        let lj = serde_json::to_value(&layout.elements).unwrap();
+        assert_eq!((&lj[0]["color"], &lj[1]["fill"], &lj[1]["stroke"], &lj[1]["color"]), (&json!("@lt1"), &json!("@dk2"), &json!("@lt2"), &json!("@lt1")));
+        let cells = lj[2]["format"]["cells"].as_array().unwrap();
+        assert_eq!(cells.iter().find(|c| c["row"] == 0 && c["column"] == 0).unwrap()["style"]["text_style"]["color"], "@dk1");
+        let cell1 = cells.iter().find(|c| c["row"] == 1 && c["column"] == 0).unwrap();
+        assert_eq!((&cell1["style"]["fill"], &cell1["style"]["text_style"]["color"], &serde_json::to_value(&candidate.deck.slides[0].elements).unwrap()[0]["color"]), (&json!("@dk1"), &json!("@lt1"), &json!("@lt1")));
         let rendered = aislide_core::render::render_slide_svg(&candidate.deck, 0, false).unwrap();
-        assert!(rendered.svg.contains("fill=\"#202525\""), "dark overridden background missing in SVG: {}", rendered.svg);
-        assert!(rendered.svg.contains("fill=\"#FFFFFF\""), "light overridden text missing in SVG: {}", rendered.svg);
-        let preview = aislide_core::execute_request(json!({"op":"preview_presentation","document":candidate,"options":{"page_indices":[0]}})).unwrap();
-        assert!(!preview["warnings"].as_array().unwrap().iter().any(|warning| warning["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED"), "{preview}");
-        let preflight = aislide_core::execute_request(json!({"op":"preflight_presentation","document":candidate,"options":{"page_indices":[0]}})).unwrap();
-        assert!(!preflight["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED"), "{preflight}");
-
-        let accessibility = aislide_core::review::check_accessibility(&candidate.deck);
-        assert!(!accessibility.issues.iter().any(|issue| issue.element_id.as_deref() == Some("slide-copy") && ["text_contrast_low", "contrast_background_unverified"].contains(&issue.code.as_str())), "{accessibility:?}");
+        assert!(rendered.svg.contains("fill=\"#202525\"") && rendered.svg.contains("fill=\"#FFFFFF\""));
+        for op in ["preview_presentation", "preflight_presentation"] {
+            let res = aislide_core::execute_request(json!({"op":op,"document":candidate,"options":{"page_indices":[0]}})).unwrap();
+            let key = if op == "preview_presentation" { "warnings" } else { "findings" };
+            assert!(!res[key].as_array().unwrap().iter().any(|w| w["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED"));
+        }
+        assert!(!aislide_core::review::check_accessibility(&candidate.deck).issues.iter().any(|i| i.element_id.as_deref() == Some("slide-copy") && ["text_contrast_low", "contrast_background_unverified"].contains(&i.code.as_str())));
     }
 
     let mut low_contrast = template_doc.deck.clone();
     if let aislide_core::model::Element::Text { color, .. } = &mut low_contrast.slides[0].elements[0] { *color = "@dk1".into(); }
-    let accessibility = aislide_core::review::check_accessibility(&low_contrast);
-    assert!(accessibility.issues.iter().any(|issue| issue.element_id.as_deref() == Some("slide-copy") && issue.code == "text_contrast_low" && issue.contrast_ratio == Some(1.0)), "{accessibility:?}");
+    assert!(aislide_core::review::check_accessibility(&low_contrast).issues.iter().any(|i| i.element_id.as_deref() == Some("slide-copy") && i.code == "text_contrast_low" && i.contrast_ratio == Some(1.0)));
 
     let mut inserted_deck = template_doc.deck.clone();
     inserted_deck.slides.push(aislide_core::model::Slide {
-        id: "slide-2".into(), title: "Inserted".into(), background: "@lt1".into(), elements: Vec::new(),
-        notes: String::new(), notes_paragraphs: Vec::new(), layout_id: Some("blank".into()),
-        inherit_background: true, hide_master_graphics: false, native_source_id: None, review: None,
+        id: "slide-2".into(), title: "Inserted".into(), background: "@dk1".into(),
+        elements: vec![
+            el(json!({"type":"text","id":"ins-txt","x":80,"y":80,"width":400,"height":60,"text":"Light text","font_size":24,"color":"@lt1","bold":false})),
+            el(json!({"type":"chart","id":"ins-chart","x":80,"y":180,"width":500,"height":300,"kind":"bar","categories":["Q1","Q2"],"series":[{"name":"Rev","values":[10.0,20.0],"color":"@accent1"}]})),
+        ],
+        notes: String::new(), notes_paragraphs: Vec::new(), layout_id: Some("blank".into()), inherit_background: false, hide_master_graphics: false, native_source_id: None, review: None,
     });
     let with_inserted = change(&template_doc, inserted_deck).document;
     let exported_inserted = Package::open(save(&with_inserted)).unwrap();
     assert!(exported_inserted.text(layout_path).unwrap().contains("overrideClrMapping"));
-    let added_slide = exported_inserted.parts().keys().find(|name| name.starts_with("ppt/slides/aislide-added-")).unwrap();
-    assert!(exported_inserted.text(added_slide).unwrap().contains("masterClrMapping"));
+    let added_xml = exported_inserted.text(exported_inserted.parts().keys().find(|n| n.starts_with("ppt/slides/aislide-added-")).unwrap()).unwrap();
+    assert!(added_xml.contains("masterClrMapping") && added_xml.contains("val=\"bg1\"") && added_xml.contains("val=\"tx1\""));
+    let reopened_inserted = open(save(&with_inserted));
+    assert_eq!((&reopened_inserted.deck.slides[1].background, &serde_json::to_value(&reopened_inserted.deck.slides[1].elements[0]).unwrap()["color"]), (&"@dk1".to_string(), &json!("@lt1")));
+    let mut chart_edited_deck = reopened_inserted.deck.clone();
+    if let aislide_core::model::Element::Chart { series, .. } = &mut chart_edited_deck.slides[1].elements[1] { series[0].values = vec![15.0, 25.0]; }
+    assert_eq!(serde_json::to_value(&open(save(&change(&reopened_inserted, chart_edited_deck).document)).deck.slides[1].elements[1]).unwrap()["series"][0]["values"], json!([15.0, 25.0]));
 
     let catalog = aislide_core::execute_request(json!({"op":"inspect_master_source","kind":"potx","base64":STANDARD.encode(&potx_bytes)})).unwrap();
-    assert_eq!(catalog["masters"][0]["importable"], true, "{catalog}");
-    assert_eq!(catalog["slides"][0]["importable"], true, "{catalog}");
+    assert_eq!((&catalog["masters"][0]["importable"], &catalog["slides"][0]["importable"]), (&json!(true), &json!(true)));
     for (mode, ids, prefix) in [("masters", json!([catalog["masters"][0]["id"]]), "imp-m"), ("slides", json!([catalog["slides"][0]["id"]]), "imp-s")] {
-        let import_input = json!({"kind":"potx","base64":STANDARD.encode(&potx_bytes),"source_sha256":catalog["source_sha256"],"mode":mode,"ids":ids,"prefix":prefix,"name":"Imported"});
-        let import_preview = aislide_core::execute_request(json!({"op":"preview_master_import","document":base,"expected_revision":base.revision,"expected_hash":base.hash,"input":import_input})).unwrap();
-        let imported = aislide_core::execute_request(json!({"op":"import_masters","document":base,"expected_revision":base.revision,"expected_hash":base.hash,"input":import_input,"expected_candidate_hash":import_preview["candidate_hash"]})).unwrap()["document"].clone();
-        let imported_doc: Document = serde_json::from_value(imported).unwrap();
-        let imported_design = imported_doc.deck.design.as_ref().unwrap();
-        if mode == "masters" {
-            let imported_layout = imported_design.layouts.iter().find(|l| l.id == "imp-m-l1").unwrap();
-            assert_eq!(imported_layout.background.as_deref(), Some("@dk1"));
-        } else {
-            let imported_master = imported_design.masters.iter().find(|m| m.id == "imp-s-m1").unwrap();
-            assert_eq!(imported_master.background, "@dk1");
-        }
+        let input = json!({"kind":"potx","base64":STANDARD.encode(&potx_bytes),"source_sha256":catalog["source_sha256"],"mode":mode,"ids":ids,"prefix":prefix,"name":"Imported"});
+        let preview = aislide_core::execute_request(json!({"op":"preview_master_import","document":base,"expected_revision":base.revision,"expected_hash":base.hash,"input":input})).unwrap();
+        let imported: Document = serde_json::from_value(aislide_core::execute_request(json!({"op":"import_masters","document":base,"expected_revision":base.revision,"expected_hash":base.hash,"input":input,"expected_candidate_hash":preview["candidate_hash"]})).unwrap()["document"].clone()).unwrap();
+        let d = imported.deck.design.as_ref().unwrap();
+        if mode == "masters" { assert_eq!(d.layouts.iter().find(|l| l.id == "imp-m-l1").unwrap().background.as_deref(), Some("@dk1")); }
+        else { assert_eq!(d.masters.iter().find(|m| m.id == "imp-s-m1").unwrap().background, "@dk1"); }
     }
 
     let mut edited_deck = document.deck.clone();
     if let aislide_core::model::Element::Text { color, .. } = &mut edited_deck.slides[0].elements[0] { *color = "@accent2".into(); }
-    let edited = change(&document, edited_deck).document;
-    let reopened_edited = open(save(&edited));
-    assert_eq!(serde_json::to_value(&reopened_edited.deck.slides[0].elements[0]).unwrap()["color"], "@accent2");
+    assert_eq!(serde_json::to_value(&open(save(&change(&document, edited_deck).document)).deck.slides[0].elements[0]).unwrap()["color"], "@accent2");
 
-    let reassigned_deck = aislide_core::design::assign_layout_with_options(document.deck.clone(), "slide-1", "title-content", true).unwrap();
-    let reassigned = change(&document, reassigned_deck).document;
-    let reopened_reassigned = open(save(&reassigned));
-    let reassigned_text = reopened_reassigned.deck.slides[0].elements.iter().find(|element| element.bounds().0 == "slide-copy").unwrap();
-    assert_eq!(serde_json::to_value(reassigned_text).unwrap()["color"], "@lt1");
-    let reassigned_accessibility = aislide_core::review::check_accessibility(&reopened_reassigned.deck);
-    assert!(reassigned_accessibility.issues.iter().any(|issue| issue.element_id.as_deref() == Some("slide-copy") && issue.code == "text_contrast_low" && issue.contrast_ratio == Some(1.0)), "{reassigned_accessibility:?}");
+    let reopened_reassigned = open(save(&change(&document, aislide_core::design::assign_layout_with_options(document.deck.clone(), "slide-1", "title-content", true).unwrap()).document));
+    assert_eq!(serde_json::to_value(reopened_reassigned.deck.slides[0].elements.iter().find(|e| e.bounds().0 == "slide-copy").unwrap()).unwrap()["color"], "@lt1");
+    assert!(aislide_core::review::check_accessibility(&reopened_reassigned.deck).issues.iter().any(|i| i.element_id.as_deref() == Some("slide-copy") && i.code == "text_contrast_low" && i.contrast_ratio == Some(1.0)));
 
-    let mut hierarchy_package = Package::open(save(&source())).unwrap();
-    let master_xml = hierarchy_package.text("ppt/slideMasters/slideMaster1.xml").unwrap()
-        .replace("val=\"lt1\"", "val=\"bg1\"")
-        .replace("bg1=\"lt1\" tx1=\"dk1\"", "bg1=\"dk1\" tx1=\"lt1\"");
-    hierarchy_package.replace_part("ppt/slideMasters/slideMaster1.xml", master_xml.into_bytes()).unwrap();
-    let slide_xml = hierarchy_package.text("ppt/slides/slide1.xml").unwrap()
-        .replace("val=\"lt1\"", "val=\"bg1\"")
-        .replace("<a:masterClrMapping/>", &format!("<a:overrideClrMapping xmlns:a=\"{A}\" bg1=\"lt2\" tx1=\"dk2\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/>"));
-    hierarchy_package.replace_part("ppt/slides/slide1.xml", slide_xml.into_bytes()).unwrap();
-    let hierarchy = open(hierarchy_package.save().unwrap());
-    assert_eq!(hierarchy.deck.design.as_ref().unwrap().masters[0].background, "@dk1");
-    assert_eq!(hierarchy.deck.slides[0].background, "@lt2");
+    let mut hp = Package::open(save(&source())).unwrap();
+    hp.replace_part("ppt/slideMasters/slideMaster1.xml", hp.text("ppt/slideMasters/slideMaster1.xml").unwrap().replace("val=\"lt1\"", "val=\"bg1\"").replace("bg1=\"lt1\" tx1=\"dk1\"", "bg1=\"dk1\" tx1=\"lt1\"").into_bytes()).unwrap();
+    hp.replace_part("ppt/slides/slide1.xml", hp.text("ppt/slides/slide1.xml").unwrap().replace("val=\"lt1\"", "val=\"bg1\"").replace("<a:masterClrMapping/>", &ovr_xml("lt2", "dk2")).into_bytes()).unwrap();
+    let hierarchy = open(hp.save().unwrap());
+    assert_eq!((&hierarchy.deck.design.as_ref().unwrap().masters[0].background, &hierarchy.deck.slides[0].background), (&"@dk1".to_string(), &"@lt2".to_string()));
 
-    // Inherited placeholder colors: master placeholder has tx1, layout placeholder has no explicit fill,
-    // layout overrideClrMapping maps bg1->dk1 and tx1->lt1, and slide overrideClrMapping maps bg1->lt2 and tx1->accent1.
     let mut ph_deck = base.deck.clone();
-    let title_ph: aislide_core::model::Element = serde_json::from_value(json!({
-        "type":"text","id":"ph-title","x":64,"y":80,"width":1152,"height":120,"text":"Master title","font_size":42,"color":"@dk1","bold":true,
-        "format":{"font_family":"@major","placeholder":{"kind":"title","index":0}}
-    })).unwrap();
+    let title_ph: aislide_core::model::Element = el(json!({"type":"text","id":"ph-title","x":64,"y":80,"width":1152,"height":120,"text":"Master title","font_size":42,"color":"@dk1","bold":true,"format":{"font_family":"@major","placeholder":{"kind":"title","index":0}}}));
     ph_deck.design.as_mut().unwrap().masters[0].elements = vec![title_ph.clone()];
     ph_deck.design.as_mut().unwrap().layouts[0].elements = vec![title_ph];
     ph_deck.slides[0].inherit_background = true;
-    ph_deck.slides[0].elements = vec![serde_json::from_value(json!({
-        "type":"text","id":"slide-title","x":64,"y":80,"width":1152,"height":120,"text":"Slide title","font_size":42,"color":"@dk1","bold":true,
-        "format":{"font_family":"@major","placeholder":{"kind":"title","index":0},"inherit_layout":true}
-    })).unwrap()];
-    let ph_doc = change(&base, ph_deck).document;
-    let mut ph_pkg = Package::open(save(&ph_doc)).unwrap();
-    let master_ph_xml = ph_pkg.text("ppt/slideMasters/slideMaster1.xml").unwrap()
-        .replace("val=\"lt1\"", "val=\"bg1\"")
-        .replace("val=\"dk1\"", "val=\"tx1\"");
-    ph_pkg.replace_part("ppt/slideMasters/slideMaster1.xml", master_ph_xml.into_bytes()).unwrap();
-    let layout_ph_xml = ph_pkg.text(layout_path).unwrap()
-        .replace("<a:solidFill><a:schemeClr val=\"dk1\"/></a:solidFill>", "")
-        .replace("</p:cSld>", &format!("</p:cSld><p:clrMapOvr xmlns:p=\"{P}\"><a:overrideClrMapping xmlns:a=\"{A}\" bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr>"));
-    ph_pkg.replace_part(layout_path, layout_ph_xml.into_bytes()).unwrap();
-    let slide_ph_base = ph_pkg.text("ppt/slides/slide1.xml").unwrap()
-        .replace("<a:solidFill><a:schemeClr val=\"dk1\"/></a:solidFill>", "");
+    ph_deck.slides[0].elements = vec![el(json!({"type":"text","id":"slide-title","x":64,"y":80,"width":1152,"height":120,"text":"Slide title","font_size":42,"color":"@dk1","bold":true,"format":{"font_family":"@major","placeholder":{"kind":"title","index":0},"inherit_layout":true}}))];
+    let mut ph_pkg = Package::open(save(&change(&base, ph_deck).document)).unwrap();
+    ph_pkg.replace_part("ppt/slideMasters/slideMaster1.xml", ph_pkg.text("ppt/slideMasters/slideMaster1.xml").unwrap().replace("val=\"lt1\"", "val=\"bg1\"").replace("val=\"dk1\"", "val=\"tx1\"").into_bytes()).unwrap();
+    ph_pkg.replace_part(layout_path, ph_pkg.text(layout_path).unwrap().replace("<a:solidFill><a:schemeClr val=\"dk1\"/></a:solidFill>", "").replace("</p:cSld>", &format!("</p:cSld><p:clrMapOvr xmlns:p=\"{P}\">{}</p:clrMapOvr>", ovr_xml("dk1", "lt1"))).into_bytes()).unwrap();
+    let slide_ph_base = ph_pkg.text("ppt/slides/slide1.xml").unwrap().replace("<a:solidFill><a:schemeClr val=\"dk1\"/></a:solidFill>", "");
     ph_pkg.replace_part("ppt/slides/slide1.xml", slide_ph_base.clone().into_bytes()).unwrap();
     let ph_opened = open(ph_pkg.save().unwrap());
     let ph_layout = &ph_opened.deck.design.as_ref().unwrap().layouts[0];
-    assert_eq!(ph_layout.background.as_deref(), Some("@dk1"));
-    assert_eq!(serde_json::to_value(&ph_layout.elements[0]).unwrap()["color"], "@lt1");
-    assert_eq!(serde_json::to_value(&ph_opened.deck.slides[0].elements[0]).unwrap()["color"], "@lt1");
+    assert_eq!((ph_layout.background.as_deref(), &serde_json::to_value(&ph_layout.elements[0]).unwrap()["color"], &serde_json::to_value(&ph_opened.deck.slides[0].elements[0]).unwrap()["color"]), (Some("@dk1"), &json!("@lt1"), &json!("@lt1")));
+    assert_eq!(aislide_core::execute_request(json!({"op":"inspect_master_source","kind":"potx","base64":STANDARD.encode(to_potx(ph_pkg.save().unwrap()))})).unwrap()["masters"][0]["importable"], false);
 
-    // Both layout and slide have overrideClrMapping.
-    let slide_override_xml = slide_ph_base.replace(
-        "<a:masterClrMapping/>",
-        &format!("<a:overrideClrMapping xmlns:a=\"{A}\" bg1=\"lt2\" tx1=\"accent1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/>"),
-    );
-    ph_pkg.replace_part("ppt/slides/slide1.xml", slide_override_xml.into_bytes()).unwrap();
+    ph_pkg.replace_part("ppt/slides/slide1.xml", slide_ph_base.replace("<a:masterClrMapping/>", &ovr_xml("lt2", "accent1")).into_bytes()).unwrap();
     let both_overridden = open(ph_pkg.save().unwrap());
-    assert_eq!(both_overridden.deck.slides[0].background, "@lt2");
-    assert!(!both_overridden.deck.slides[0].inherit_background);
-    assert_eq!(serde_json::to_value(&both_overridden.deck.slides[0].elements[0]).unwrap()["color"], "@accent1");
-}
-
-#[test]
-fn issue32_unrepresentable_color_map_extensions_or_shared_master_remaps_still_warn() {
-    const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
-    const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
-    let base = source();
-    let mut initial_deck = base.deck.clone();
-    initial_deck.design.as_mut().unwrap().masters[0].elements = vec![
-        serde_json::from_value(json!({"type":"rect","id":"master-banner","x":0,"y":0,"width":1280,"height":24,"fill":"@dk1"})).unwrap(),
-    ];
-    let initial = change(&base, initial_deck).document;
-    for master_extension in [false, true] {
-        let mut package = Package::open(save(&initial)).unwrap();
-        let path = if master_extension { "ppt/slideMasters/slideMaster1.xml" } else { "ppt/slideLayouts/slideLayout1.xml" };
-        if master_extension {
-            let xml = package.text(path).unwrap().replace("folHlink=\"folHlink\"/>", &format!("folHlink=\"folHlink\"><a:extLst xmlns:a=\"{A}\"/></p:clrMap>"));
-            package.replace_part(path, xml.into_bytes()).unwrap();
-        } else {
-            let master_xml = package.text("ppt/slideMasters/slideMaster1.xml").unwrap().replace("val=\"dk1\"", "val=\"tx1\"");
-            package.replace_part("ppt/slideMasters/slideMaster1.xml", master_xml.into_bytes()).unwrap();
-            let mut xml = package.text(path).unwrap().to_owned();
-            let parsed = roxmltree::Document::parse(&xml).unwrap();
-            let end = parsed.descendants().find(|node| node.has_tag_name((P, "cSld"))).unwrap().range().end;
-            xml.replace_range(end..end, &format!("<p:clrMapOvr xmlns:p=\"{P}\"><a:overrideClrMapping xmlns:a=\"{A}\" bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr>"));
-            package.replace_part(path, xml.into_bytes()).unwrap();
-        }
-        let bytes = package.save().unwrap();
-        let document = open(bytes.clone());
-        assert_eq!(save(&document), bytes);
-        let preview = aislide_core::execute_request(json!({"op":"preview_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
-        let warnings: Vec<_> = preview["warnings"].as_array().unwrap().iter().filter(|warning| warning["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED").collect();
-        assert!(!warnings.is_empty(), "{master_extension}: missing unsupported color-map warning");
-        assert!(warnings.iter().any(|warning| warning["message"].as_str().unwrap().contains(path)));
-        let preflight = aislide_core::execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
-        assert!(preflight["findings"].as_array().unwrap().iter().any(|finding| finding["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED" && finding["severity"] == "warning"));
-    }
+    assert_eq!((&both_overridden.deck.slides[0].background, both_overridden.deck.slides[0].inherit_background, &serde_json::to_value(&both_overridden.deck.slides[0].elements[0]).unwrap()["color"]), (&"@lt2".to_string(), false, &json!("@accent1")));
 }
 
 #[test]

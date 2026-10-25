@@ -12,8 +12,7 @@ pub(crate) const REL: &str = "http://schemas.openxmlformats.org/package/2006/rel
 pub(crate) const CONNECTOR_NS: &str = "urn:aislide:connector:v1";
 const CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 
-#[derive(Clone)]
-pub(crate) struct NativePart { pub path: String, pub id: String, pub nodes: BTreeMap<String, String>, pub color_map: crate::design::ColorMap }
+pub(crate) struct NativePart { pub path: String, pub id: String, pub nodes: BTreeMap<String, String> }
 pub(crate) struct NativeDeck { pub deck: Deck, pub slides: Vec<NativePart>, pub masters: Vec<NativePart>, pub layouts: Vec<NativePart>, pub warnings: Vec<String>, pub metadata: Option<crate::provenance::Metadata> }
 
 pub(crate) fn child<'a>(node: Node<'a, '_>, namespace: &str, name: &str) -> Option<Node<'a, 'a>> { node.children().find(|node| node.has_tag_name((namespace, name))) }
@@ -77,63 +76,53 @@ fn color(node: Node<'_, '_>, default: &str) -> String {
     default.into()
 }
 
-pub(crate) fn background(node: Node<'_, '_>, color_map: crate::design::ColorMap) -> Option<String> {
-    color_map.scope(|| child(node, P, "cSld").and_then(|node| child(node, P, "bg")).and_then(|node| child(node, P, "bgPr"))
-        .map(|node| color(node, &format!("@{}", crate::design::color_slot("bg1")))))
+fn background(node: Node<'_, '_>) -> Option<String> {
+    child(node, P, "cSld").and_then(|node| child(node, P, "bg")).and_then(|node| child(node, P, "bgPr")).map(|node| color(node, &format!("@{}", crate::design::color_slot("bg1"))))
 }
 
 pub(crate) fn apply_color_map_node(map: &mut crate::design::ColorMap, node: Node<'_, '_>) -> bool {
-    if node.children().any(|child| child.is_element()) || node.attributes().count() != crate::design::COLOR_MAP_KEYS.len() { return false; }
     let mut next = *map;
-    if !crate::design::COLOR_MAP_KEYS.iter().all(|key| node.attribute(*key).is_some_and(|value| next.set(key, value))) { return false; }
-    *map = next;
-    true
+    if node.children().any(|child| child.is_element()) || node.attributes().count() != crate::design::COLOR_MAP_KEYS.len() || !crate::design::COLOR_MAP_KEYS.iter().all(|key| node.attribute(*key).is_some_and(|value| next.set(key, value))) { return false; }
+    *map = next; true
 }
 
 pub(crate) fn resolve_color_map(root: Node<'_, '_>, parent: crate::design::ColorMap) -> (crate::design::ColorMap, bool) {
-    let mut map = parent;
-    let mut unsupported = false;
-    if let Some(node) = child(root, P, "clrMap") {
-        if !apply_color_map_node(&mut map, node) { unsupported = true; }
-    }
+    let (mut map, mut unsupported) = (parent, false);
+    if let Some(node) = child(root, P, "clrMap") { if !apply_color_map_node(&mut map, node) { unsupported = true; } }
     if let Some(ovr) = child(root, P, "clrMapOvr") {
         if ovr.attributes().len() != 0 { unsupported = true; }
-        let children: Vec<_> = ovr.children().filter(|node| node.is_element()).collect();
-        match children.as_slice() {
+        match ovr.children().filter(|node| node.is_element()).collect::<Vec<_>>().as_slice() {
             [] => {}
             [node] if node.has_tag_name((A, "masterClrMapping")) && node.attributes().len() == 0 && !node.children().any(|child| child.is_element()) => {}
-            [node] if node.has_tag_name((A, "overrideClrMapping")) => {
-                if !apply_color_map_node(&mut map, *node) { unsupported = true; }
-            }
+            [node] if node.has_tag_name((A, "overrideClrMapping")) => if !apply_color_map_node(&mut map, *node) { unsupported = true; },
             _ => unsupported = true,
         }
     }
     (map, unsupported)
 }
 
-pub(crate) fn unsupported_color_mapping(root: Node<'_, '_>) -> bool {
-    resolve_color_map(root, crate::design::ColorMap::default()).1
+pub(crate) fn unsupported_color_mapping(root: Node<'_, '_>) -> bool { resolve_color_map(root, crate::design::ColorMap::default()).1 }
+
+pub(crate) fn part_color_map(package: &Package, path: &str) -> crate::design::ColorMap {
+    let doc = package.text(path).ok().and_then(|xml| parse(xml).ok());
+    let parent_kind = match doc.as_ref().map(|d| d.root_element().tag_name().name()) {
+        Some("sld") => Some("slideLayout"), Some("sldLayout") => Some("slideMaster"), Some("notes") => Some("notesMaster"),
+        None if path.starts_with("ppt/slides/") => Some("slideLayout"), _ => None,
+    };
+    let parent = parent_kind.and_then(|kind| relationship_targets(package, path, kind).ok()?.into_values().next()).map_or_else(Default::default, |target| part_color_map(package, &target));
+    doc.map_or(parent, |doc| resolve_color_map(doc.root_element(), parent).0)
 }
 
-pub(crate) fn has_remapped_nonplaceholder_scheme_color(root: Node<'_, '_>, owner_map: crate::design::ColorMap, child_map: crate::design::ColorMap) -> bool {
+pub(crate) fn has_remapped_nonplaceholder_scheme_color(package: &Package, path: &str, root: Node<'_, '_>, owner_map: crate::design::ColorMap, child_map: crate::design::ColorMap) -> bool {
     if owner_map == child_map { return false; }
     let Some(tree) = child(root, P, "cSld").and_then(|node| child(node, P, "spTree")) else { return false };
-    for container in tree.children().filter(|node| node.is_element()) {
-        let container = crate::interactive::office::static_fallback(container).unwrap_or(container);
-        for node in container.descendants().filter(|node| is_shape(*node)) {
-            if placeholder(node).is_some() { continue; }
-            if node.ancestors().filter(|ancestor| is_shape(*ancestor))
-                .any(|ancestor| properties(ancestor).is_some_and(|props| matches!(props.attribute("hidden"), Some("1" | "true"))))
-            { continue; }
-            for descendant in node.descendants().filter(|descendant| descendant.has_tag_name((A, "schemeClr"))) {
-                if descendant.ancestors().take_while(|ancestor| *ancestor != node).any(|ancestor| is_shape(ancestor)) { continue; }
-                if let Some(value) = descendant.attribute("val") {
-                    if child_map.resolve(value) != owner_map.resolve(value) { return true; }
-                }
-            }
+    for container in tree.children().filter(|node| node.is_element()).map(|node| crate::interactive::office::static_fallback(node).unwrap_or(node)) {
+        for node in container.descendants().filter(|node| is_shape(*node) && placeholder(*node).is_none() && !node.ancestors().filter(|a| is_shape(*a)).any(|a| properties(a).is_some_and(|p| matches!(p.attribute("hidden"), Some("1" | "true"))))) {
+            if node.descendants().any(|d| d.has_tag_name((A, "schemeClr")) && !d.ancestors().take_while(|a| *a != node).any(|a| is_shape(a)) && d.attribute("val").is_some_and(|v| child_map.resolve(v) != owner_map.resolve(v))) { return true; }
         }
     }
-    false
+    ["chart", "chartEx"].into_iter().flat_map(|kind| relationship_targets(package, path, kind).ok().into_iter().flat_map(|t| t.into_values()))
+        .any(|p| package.text(&p).ok().and_then(|t| parse(t).ok()).is_some_and(|doc| doc.descendants().any(|n| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| child_map.resolve(v) != owner_map.resolve(v)))))
 }
 
 pub(crate) fn color_mapping_warning(path: &str) -> String {
@@ -604,6 +593,7 @@ pub(crate) fn read_part(package: &Package, path: &str, id: String, scale: (f64, 
 pub(crate) fn read_part_with_map(package: &Package, path: &str, id: String, scale: (f64, f64), templates: &[Element], parent_map: crate::design::ColorMap, apply_part_map: bool, warnings: &mut Vec<String>, metadata: Option<&crate::provenance::Metadata>, canvas: (u32, u32)) -> Result<(String, Option<String>, Vec<Element>, NativePart)> {
     let document = parse(package.text(path)?)?;
     let (color_map, unsupported) = if apply_part_map { resolve_color_map(document.root_element(), parent_map) } else { (parent_map, false) };
+    let _scope = color_map.enter();
     if unsupported { warnings.push(color_mapping_warning(path)); }
     let common = child(document.root_element(), P, "cSld").ok_or_else(|| Error::Invalid("native common slide data missing".into()))?;
     let tree = child(common, P, "spTree").ok_or_else(|| Error::Invalid("native shape tree missing".into()))?;
@@ -617,7 +607,7 @@ pub(crate) fn read_part_with_map(package: &Package, path: &str, id: String, scal
         } else { node };
         let element_id = properties(node).and_then(|node| node.attribute("id")).and_then(|numeric| ids.get(numeric)).map(String::as_str).unwrap_or("unknown");
         let context = format!("{scope} {id}, {path}, element {element_id}");
-        let result = if is_shape(node) { color_map.scope(|| read_element(package, path, node, scale, &ids, templates, 0)) } else { Err(Error::Unsupported(node.tag_name().name().into())) };
+        let result = if is_shape(node) { read_element(package, path, node, scale, &ids, templates, 0) } else { Err(Error::Unsupported(node.tag_name().name().into())) };
         match result {
             Ok(mut element) => {
                 if !document.root_element().has_tag_name((P, "sld")) { if let Element::Text { format, .. } = &mut element { format.inherit_layout = false; } }
@@ -650,7 +640,7 @@ pub(crate) fn read_part_with_map(package: &Package, path: &str, id: String, scal
             for connection in [start, end] { if connection.as_ref().is_some_and(|connection| !available.contains(&connection.element_id)) { *connection = None; warnings.push(format!("{path}: connection to an unpreviewed object retained in source")); } }
         }
     }
-    Ok((common.attribute("name").unwrap_or(&id).chars().take(100).collect(), background(document.root_element(), color_map), elements, NativePart { path: path.into(), id, nodes: ids.into_iter().map(|(numeric, id)| (id, numeric)).collect(), color_map }))
+    Ok((common.attribute("name").unwrap_or(&id).chars().take(100).collect(), background(document.root_element()), elements, NativePart { path: path.into(), id, nodes: ids.into_iter().map(|(numeric, id)| (id, numeric)).collect() }))
 }
 
 pub(crate) fn read_theme(package: &Package, path: &str) -> Result<Theme> {
@@ -708,88 +698,60 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
         if theme.is_none() { theme = Some(current_theme.clone()); }
         let override_theme = if crate::canonical::bytes(&theme)? != crate::canonical::bytes(&Some(&current_theme))? { Some(current_theme) } else { None };
         let master_xml = parse(package.text(path)?)?;
-        let master_background = background.unwrap_or_else(|| format!("@{}", binding.color_map.resolve("bg1")));
+        let master_map = part_color_map(package, path);
+        let master_background = background.unwrap_or_else(|| format!("@{}", master_map.resolve("bg1")));
         let layout_list = child(master_xml.root_element(), P, "sldLayoutIdLst").ok_or_else(|| Error::Unsupported("master layout list missing".into()))?;
         let targets = relationship_targets(package, path, "slideLayout")?;
         for layout in layout_list.children().filter(|node| node.has_tag_name((P, "sldLayoutId"))) {
             let layout_path = layout.attribute((R, "id")).and_then(|id| targets.get(id)).ok_or_else(|| Error::Invalid("layout relationship missing".into()))?;
             let id = identity(layout_path, format!("layout-{}", layouts.len() + 1));
             let layout_xml = parse(package.text(layout_path)?)?;
-            let (layout_map, _) = resolve_color_map(layout_xml.root_element(), binding.color_map);
-            if !matches!(layout_xml.root_element().attribute("showMasterSp"), Some("0" | "false"))
-                && has_remapped_nonplaceholder_scheme_color(master_xml.root_element(), binding.color_map, layout_map)
-            {
-                warnings.push(color_mapping_warning(layout_path));
-            }
-            let mapped_master = if layout_map != binding.color_map && !elements.is_empty() {
-                Some(read_part_with_map(package, path, master_id.clone(), scale, &[], layout_map, false, &mut Vec::new(), metadata.as_ref(), canvas)?.2)
-            } else { None };
-            let (name, background, elements, layout_binding) = read_part_with_map(package, layout_path, id.clone(), scale, mapped_master.as_deref().unwrap_or(&elements), binding.color_map, true, &mut warnings, metadata.as_ref(), canvas)?;
-            let background = background.or_else(|| {
-                (layout_binding.color_map != binding.color_map)
-                    .then(|| self::background(master_xml.root_element(), layout_binding.color_map).unwrap_or_else(|| format!("@{}", layout_binding.color_map.resolve("bg1"))))
-                    .filter(|inherited| inherited != &master_background)
-            });
+            let (layout_map, _) = resolve_color_map(layout_xml.root_element(), master_map);
+            if !matches!(layout_xml.root_element().attribute("showMasterSp"), Some("0" | "false")) && has_remapped_nonplaceholder_scheme_color(package, path, master_xml.root_element(), master_map, layout_map) { warnings.push(color_mapping_warning(layout_path)); }
+            let mapped_master = (layout_map != master_map && !elements.is_empty()).then(|| read_part_with_map(package, path, master_id.clone(), scale, &[], layout_map, false, &mut Vec::new(), metadata.as_ref(), canvas).map(|part| part.2)).transpose()?;
+            let (name, background, elements, layout_binding) = read_part_with_map(package, layout_path, id.clone(), scale, mapped_master.as_deref().unwrap_or(&elements), master_map, true, &mut warnings, metadata.as_ref(), canvas)?;
+            let background = background.or_else(|| (layout_map != master_map).then(|| layout_map.scope(|| self::background(master_xml.root_element())).unwrap_or_else(|| format!("@{}", layout_map.resolve("bg1")))).filter(|inherited| inherited != &master_background));
             layouts.push(SlideLayout { id, name, master_id: master_id.clone(), source_id: Some(layout_path.clone()), background, elements }); layout_parts.push(layout_binding);
         }
         masters.push(Master { id: master_id, name, background: master_background, elements, theme: override_theme }); master_parts.push(binding);
     }
     if let Some(identities) = &design_identities { identities.order(&master_parts, &mut layouts, &mut layout_parts)?; }
     let design = Design { theme: theme.unwrap_or_default(), masters, layouts };
+    let parsed_docs = master_parts.iter().chain(&layout_parts).map(|p| Ok((p.path.as_str(), (parse(package.text(&p.path)?)?, part_color_map(package, &p.path))))).collect::<Result<BTreeMap<_, _>>>()?;
     let paths = slide_paths(package)?;
     let mut slides = Vec::new(); let mut slide_parts = Vec::new();
     for (index, path) in paths.iter().enumerate() {
         let targets = relationship_targets(package, path, "slideLayout")?;
         let layout_index = targets.values().next().and_then(|path| layout_parts.iter().position(|entry| &entry.path == path)).ok_or_else(|| Error::Unsupported("slide layout unavailable".into()))?;
-        let layout = &design.layouts[layout_index];
-        let layout_binding = &layout_parts[layout_index];
+        let (layout, layout_binding) = (&design.layouts[layout_index], &layout_parts[layout_index]);
         let master_index = design.masters.iter().position(|master| master.id == layout.master_id).ok_or_else(|| Error::Invalid("slide master missing".into()))?;
-        let master = &design.masters[master_index];
-        let master_binding = &master_parts[master_index];
+        let (master, master_binding) = (&design.masters[master_index], &master_parts[master_index]);
         let id = identity(path, format!("slide-{}", index + 1));
         let xml = parse(package.text(path)?)?;
-        let layout_xml = parse(package.text(&layout_binding.path)?)?;
-        let master_xml = parse(package.text(&master_binding.path)?)?;
-        let (slide_map, _) = resolve_color_map(xml.root_element(), layout_binding.color_map);
-        let hide_master_graphics = matches!(xml.root_element().attribute("showMasterSp"), Some("0" | "false"));
-        if has_remapped_nonplaceholder_scheme_color(layout_xml.root_element(), layout_binding.color_map, slide_map)
-            || (!hide_master_graphics && !matches!(layout_xml.root_element().attribute("showMasterSp"), Some("0" | "false"))
-                && has_remapped_nonplaceholder_scheme_color(master_xml.root_element(), master_binding.color_map, slide_map))
-        {
-            warnings.push(color_mapping_warning(path));
-        }
-        let mapped_layout = if slide_map != layout_binding.color_map && !layout.elements.is_empty() {
-            let mapped_master = if slide_map != master_binding.color_map && !master.elements.is_empty() {
-                Some(read_part_with_map(package, &master_binding.path, master.id.clone(), scale, &[], slide_map, false, &mut Vec::new(), metadata.as_ref(), canvas)?.2)
-            } else { None };
+        let ((layout_doc, layout_map), (master_doc, master_map)) = (&parsed_docs[layout_binding.path.as_str()], &parsed_docs[master_binding.path.as_str()]);
+        let (layout_xml, master_xml, layout_map, master_map) = (layout_doc.root_element(), master_doc.root_element(), *layout_map, *master_map);
+        let (slide_map, _) = resolve_color_map(xml.root_element(), layout_map);
+        if has_remapped_nonplaceholder_scheme_color(package, &layout_binding.path, layout_xml, layout_map, slide_map)
+            || (!matches!(xml.root_element().attribute("showMasterSp"), Some("0" | "false")) && !matches!(layout_xml.attribute("showMasterSp"), Some("0" | "false")) && has_remapped_nonplaceholder_scheme_color(package, &master_binding.path, master_xml, master_map, slide_map)) { warnings.push(color_mapping_warning(path)); }
+        let mapped_layout = if slide_map != layout_map && !layout.elements.is_empty() {
+            let mapped_master = (slide_map != master_map && !master.elements.is_empty()).then(|| read_part_with_map(package, &master_binding.path, master.id.clone(), scale, &[], slide_map, false, &mut Vec::new(), metadata.as_ref(), canvas).map(|part| part.2)).transpose()?;
             Some(read_part_with_map(package, &layout_binding.path, layout.id.clone(), scale, mapped_master.as_deref().unwrap_or(&master.elements), slide_map, false, &mut Vec::new(), metadata.as_ref(), canvas)?.2)
         } else { None };
-        let (name, background, mut elements, binding) = read_part_with_map(package, path, id.clone(), scale, mapped_layout.as_deref().unwrap_or(&layout.elements), layout_binding.color_map, true, &mut warnings, metadata.as_ref(), canvas)?;
+        let (name, background, mut elements, binding) = read_part_with_map(package, path, id.clone(), scale, mapped_layout.as_deref().unwrap_or(&layout.elements), layout_map, true, &mut warnings, metadata.as_ref(), canvas)?;
         if mapped_layout.is_some() {
             for element in &mut elements {
                 if let Element::Text { color, format, .. } = element {
-                    if format.inherit_layout && !layout.elements.iter().any(| entry| matches!(entry, Element::Text { color: other_color, format: other_format, .. } if other_format.placeholder == format.placeholder && other_color == color)) {
-                        format.inherit_layout = false;
-                    }
+                    if format.inherit_layout && !layout.elements.iter().any(|entry| matches!(entry, Element::Text { color: c, format: f, .. } if f.placeholder == format.placeholder && c == color)) { format.inherit_layout = false; }
                 }
             }
         }
         let layout_effective_bg = layout.background.as_deref().unwrap_or(&master.background);
-        let background = background.or_else(|| {
-            (binding.color_map != layout_binding.color_map)
-                .then(|| self::background(layout_xml.root_element(), binding.color_map)
-                    .or_else(|| self::background(master_xml.root_element(), binding.color_map))
-                    .unwrap_or_else(|| format!("@{}", binding.color_map.resolve("bg1"))))
-                .filter(|inherited| inherited != layout_effective_bg)
-        });
+        let background = background.or_else(|| (slide_map != layout_map).then(|| slide_map.scope(|| self::background(layout_xml).or_else(|| self::background(master_xml))).unwrap_or_else(|| format!("@{}", slide_map.resolve("bg1")))).filter(|inherited| inherited != layout_effective_bg));
         let note_targets = relationship_targets(package, path, "notesSlide")?;
         let mut notes_paragraphs = Vec::new();
         let notes = if let Some(path) = note_targets.values().next() {
             let document = parse(package.text(path)?)?;
-            let notes_master_map = relationship_targets(package, path, "notesMaster")?.into_values().next()
-                .and_then(|master_path| package.text(&master_path).ok().and_then(|text| parse(text).ok()).map(|master_doc| resolve_color_map(master_doc.root_element(), crate::design::ColorMap::default()).0))
-                .unwrap_or_default();
-            let (notes_map, _) = resolve_color_map(document.root_element(), notes_master_map);
+            let _notes_scope = part_color_map(package, path).enter();
             let bodies: Vec<_> = document.descendants().filter(|node| node.has_tag_name((P, "sp")) && placeholder(*node).is_some_and(|ph| ph.kind == PlaceholderKind::Body)).filter_map(|node| child(node, P, "txBody")).collect();
             if note_targets.len() == 1 && bodies.len() == 1 {
                 let body = bodies[0];
@@ -806,12 +768,12 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
                     || node.has_tag_name((A, "spcBef")) || node.has_tag_name((A, "spcAft"))
                     || has_text && node.has_tag_name((A, "spcPts"))
                     || node.has_tag_name((A, "spcPct")) && node.attribute("val") != Some("115000"));
-                if rich { match notes_map.scope(|| read_rich_paragraphs_with_limit(body, &Default::default(), &Default::default(), 8000)) { Ok(value) => notes_paragraphs = value, Err(error) => warnings.push(format!("{path}: rich notes retained ({error})")) } }
+                if rich { match read_rich_paragraphs_with_limit(body, &Default::default(), &Default::default(), 8000) { Ok(value) => notes_paragraphs = value, Err(error) => warnings.push(format!("{path}: rich notes retained ({error})")) } }
             }
             bodies.into_iter().map(body_text).collect::<Vec<_>>().join("\n")
         } else { String::new() };
         let review = crate::review::read_slide(package, &binding, &elements)?;
-        slides.push(Slide { id, title: name, background: background.clone().unwrap_or_else(|| "@lt1".into()), elements, notes, notes_paragraphs, layout_id: Some(layout.id.clone()), inherit_background: background.is_none(), hide_master_graphics, native_source_id: None, review });
+        slides.push(Slide { id, title: name, background: background.clone().unwrap_or_else(|| "@lt1".into()), elements, notes, notes_paragraphs, layout_id: Some(layout.id.clone()), inherit_background: background.is_none(), hide_master_graphics: xml.root_element().attribute("showMasterSp") == Some("0"), native_source_id: None, review });
         slide_parts.push(binding);
     }
     let title = package.parts().iter().filter(|(path, _)| path.starts_with("docProps/") && path.ends_with(".xml")).find_map(|(_, value)| std::str::from_utf8(value).ok().and_then(|value| parse(value).ok()).and_then(|document| document.descendants().find(|node| node.has_tag_name(("http://purl.org/dc/elements/1.1/", "title"))).and_then(|node| node.text()).map(str::to_owned)))
@@ -840,7 +802,7 @@ fn prepare_clipped_projection_edits(package: &Package, binding: &NativePart, bef
         if unchanged { continue; }
         let numeric = binding.nodes.get(&id).ok_or_else(|| Error::Invalid("native clipped projection identity missing".into()))?;
         let node = xml.descendants().find(|node| is_shape(*node) && properties(*node).and_then(|node| node.attribute("id")) == Some(numeric.as_str())).ok_or_else(|| Error::Invalid("native clipped projection node missing".into()))?;
-        let native = binding.color_map.scope(|| read_element(package, &binding.path, node, scale, &ids, &[], 0))?;
+        let native = part_color_map(package, &binding.path).scope(|| read_element(package, &binding.path, node, scale, &ids, &[], 0))?;
         let mut projected = native.clone();
         if normalize_native_frame(&mut projected, node, canvas)?.is_none() { continue; }
         if candidates.is_empty() || candidates.iter().any(|candidate| candidate.is_none_or(|new| new.visual().is_some_and(|style| locked && style.locked || hidden && style.hidden))) { return Err(Error::Unsupported(format!("{}: normalized native projection {id} is locked or hidden; explicitly unlock/unhide before editing or removing it", binding.path))); }

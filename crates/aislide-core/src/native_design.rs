@@ -144,8 +144,8 @@ fn row(previous: Option<&String>, name: &str, numeric: u32, relation: &str) -> R
 }
 
 fn binding(original: &[NativePart], id: &str, path: String) -> NativePart {
-    original.iter().find(|part| part.id == id).cloned()
-        .unwrap_or_else(|| NativePart { id: id.into(), path, nodes: BTreeMap::new(), color_map: Default::default() })
+    original.iter().find(|part| part.id == id).map(|part| NativePart { id: part.id.clone(), path: part.path.clone(), nodes: part.nodes.clone() })
+        .unwrap_or_else(|| NativePart { id: id.into(), path, nodes: BTreeMap::new() })
 }
 
 pub(crate) fn prepare(package: &mut Package, original: &NativeDeck, deck: &Deck, main: &str) -> Result<Topology> {
@@ -294,11 +294,11 @@ pub(crate) fn read_auxiliary(package: &Package, main: &str, warnings: &mut Vec<S
         let targets = relationship_targets(package, main, kind)?;
         if targets.len() > 1 { warnings.push(format!("Multiple {kind} parts retained; auxiliary editing unavailable")); continue; }
         if let Some(path) = targets.values().next() {
-            let (name, background, elements, binding) = crate::native::read_part(package, path, kind.into(), scale, &[], warnings, None, (width, height))?;
+            let (name, background, elements, _) = crate::native::read_part(package, path, kind.into(), scale, &[], warnings, None, (width, height))?;
             let themes = relationship_targets(package, path, "theme")?;
             if themes.len() != 1 { warnings.push(format!("{kind} theme unavailable; part retained")); continue; }
             let theme = crate::native::read_theme(package, themes.values().next().unwrap())?;
-            *target = Some(crate::model::AuxiliaryMaster { name, background: background.unwrap_or_else(|| format!("@{}", binding.color_map.resolve("bg1"))), elements, theme });
+            *target = Some(crate::model::AuxiliaryMaster { name, background: background.unwrap_or_else(|| format!("@{}", crate::native::part_color_map(package, path).resolve("bg1"))), elements, theme });
         }
     }
     Ok(Some(design))
@@ -342,7 +342,7 @@ pub(crate) fn patch_auxiliary(package: &mut Package, original: &NativeDeck, deck
             let before = root.children().find(|node| node.is_element() && !["sldMasterIdLst", "notesMasterIdLst"].contains(&node.tag_name().name()));
             insert_child(&xml, root, &format!("<p:{list} xmlns:p=\"{P}\" xmlns:r=\"{R}\"><p:{kind}Id r:id=\"{id}\"/></p:{list}>"), before, &mut edits)?;
             package.replace_part(main, apply(xml, edits)?)?;
-            let binding = NativePart { path, id: kind.into(), nodes: BTreeMap::new(), color_map: Default::default() };
+            let binding = NativePart { path, id: kind.into(), nodes: BTreeMap::new() };
             crate::native_save::patch_part(package, &binding, &[], &next.elements, &next.theme, None, None, scale)?;
             binding
         };

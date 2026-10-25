@@ -64,24 +64,20 @@ fn clone_slide(package: &mut Package, original: &NativePart, path: &str, id: &st
         edits.push((attribute.range_value(), quick_xml::escape::escape(&format!("/{target}")).into_owned()));
     }
     package.add_part(relations_path(path), apply(xml, edits)?)?;
-    Ok(NativePart { path: path.into(), id: id.into(), nodes: original.nodes.clone(), color_map: original.color_map })
+    Ok(NativePart { path: path.into(), id: id.into(), nodes: original.nodes.clone() })
 }
 
 fn insert_slide(package: &mut Package, layouts: &[NativePart], deck: &Deck, slide: &Slide, path: &str, main: &str, scale: (f64, f64)) -> Result<NativePart> {
     let design = deck.design.as_ref().ok_or_else(|| Error::Invalid("native design missing".into()))?;
     let layout_id = slide.layout_id.as_ref().unwrap_or(&design.layouts[0].id);
     let layout = layouts.iter().find(|layout| &layout.id == layout_id).ok_or_else(|| Error::Invalid("native layout missing".into()))?;
-    let mut blank = Slide { id: slide.id.clone(), elements: Vec::new(), layout_id: None, native_source_id: None, review: None, ..slide.clone() };
-    if !blank.inherit_background {
-        if let Some(slot) = blank.background.strip_prefix('@') {
-            blank.background = format!("@{}", layout.color_map.encode(slot).ok_or_else(|| Error::Unsupported("native color map cannot represent the requested background color slot".into()))?);
-        }
-    }
+    let _scope = crate::native::part_color_map(package, &layout.path).enter();
+    let blank = Slide { id: slide.id.clone(), elements: Vec::new(), layout_id: None, native_source_id: None, review: None, ..slide.clone() };
     let generated = Package::open(crate::pptx::export_pptx(&Deck { slides: vec![blank], design: None, ..deck.clone() })?)?;
-    let xml = generated.text("ppt/slides/slide1.xml")?.to_owned(); let parsed = parse(&xml)?;
+    let xml = remap_resources(generated.text("ppt/slides/slide1.xml")?.to_owned(), &BTreeMap::new())?; let parsed = parse(&xml)?;
     let tree = child(parsed.root_element(), P, "cSld").and_then(|node| child(node, P, "spTree")).ok_or_else(|| Error::Invalid("generated slide tree".into()))?;
     let ids: BTreeMap<_, _> = element_list(&slide.elements).into_iter().enumerate().map(|(index, element)| (element.bounds().0, index + 2)).collect();
-    let binding = NativePart { path: path.into(), id: slide.id.clone(), nodes: ids.iter().map(|(id, numeric)| ((*id).into(), numeric.to_string())).collect(), color_map: layout.color_map };
+    let binding = NativePart { path: path.into(), id: slide.id.clone(), nodes: ids.iter().map(|(id, numeric)| ((*id).into(), numeric.to_string())).collect() };
     let mut relationships = format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"rIdLayout\" Type=\"{R}/slideLayout\" Target=\"/{}\"/>", layout.path);
     if let Some(master) = relationship_targets(package, main, "notesMaster")?.into_values().next() {
         let notes = path.replace("/slides/", "/notesSlides/");
@@ -94,7 +90,7 @@ fn insert_slide(package: &mut Package, layouts: &[NativePart], deck: &Deck, slid
     package.add_part(relations_path(path), relationships.into_bytes())?;
     let resources = resource_changes(package, &binding, &[], &slide.elements, &ids)?;
     let mut elements = String::new();
-    for element in &slide.elements { elements.push_str(&binding.color_map.scope(|| remap_resources(scaled_element(element, &ids, &design.theme, scale)?, &resources))?); }
+    for element in &slide.elements { elements.push_str(&remap_resources(scaled_element(element, &ids, &design.theme, scale)?, &resources)?); }
     let mut edits = Vec::new(); insert_child(&xml, tree, &elements, None, &mut edits)?;
     package.add_part(path.into(), apply(xml, edits)?)?;
     Ok(binding)
@@ -137,7 +133,7 @@ fn remove_deleted(package: &mut Package, original: &NativeDeck, deck: &Deck, mai
 pub(crate) fn prepare(package: &mut Package, original: &NativeDeck, deck: &Deck, main: &str, scale: (f64, f64), layouts: &[NativePart]) -> Result<Vec<NativePart>> {
     if original.deck.slides.iter().map(|slide| &slide.id).eq(deck.slides.iter().map(|slide| &slide.id)) {
         if deck.slides.iter().any(|slide| slide.native_source_id.is_some()) { return Err(Error::Unsupported("existing native slide cannot change its source".into())); }
-        return Ok(original.slides.clone());
+        return original.slides.iter().map(|part| Ok(NativePart { path: part.path.clone(), id: part.id.clone(), nodes: part.nodes.clone() })).collect();
     }
     let xml = package.text(main)?.to_owned(); let presentation = parse(&xml)?;
     if presentation.descendants().any(|node| ["sectionLst", "custShowLst"].contains(&node.tag_name().name())) { return Err(Error::Unsupported("native sections/custom slide shows must be removed in PowerPoint before changing slide structure".into())); }
@@ -153,7 +149,7 @@ pub(crate) fn prepare(package: &mut Package, original: &NativeDeck, deck: &Deck,
             let relation = resolved.iter().find(|(_, path)| *path == &binding.path).map(|(id, _)| id).ok_or_else(|| Error::Invalid("slide relation missing".into()))?;
             let entry = list.children().find(|node| node.attribute((R, "id")) == Some(relation)).ok_or_else(|| Error::Invalid("slide list relation missing".into()))?;
             entries.push_str(&xml[entry.range()]);
-            bindings.push(binding.clone());
+            bindings.push(NativePart { path: binding.path.clone(), id: binding.id.clone(), nodes: binding.nodes.clone() });
             continue;
         }
         let path = loop { let candidate = format!("ppt/slides/aislide-added-{counter}.xml"); counter += 1; if !package.part_names().contains(candidate.as_str()) && !package.part_names().contains(candidate.replace("/slides/", "/notesSlides/").as_str()) { break candidate; } };

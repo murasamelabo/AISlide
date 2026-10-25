@@ -326,9 +326,7 @@ pub(crate) fn read(node: Node<'_, '_>) -> Result<Option<VisualStyle>> {
 
 pub(crate) fn signature(node: Node<'_, '_>, references: bool) -> serde_json::Value {
     let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| {
-        let value = if references && attribute.namespace() == Some(crate::native::R) && attribute.name() == "embed" { "resource" }
-        else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::color_slot(attribute.value()) }
-        else { attribute.value() };
+        let value = if references && attribute.namespace() == Some(crate::native::R) && attribute.name() == "embed" { "resource" } else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::color_slot(attribute.value()) } else { attribute.value() };
         (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), value)
     }).collect();
     let children: Vec<_> = node.children().filter(|node| node.is_element()).map(|node| signature(node, references)).collect();
@@ -337,7 +335,7 @@ pub(crate) fn signature(node: Node<'_, '_>, references: bool) -> serde_json::Val
 
 fn equivalent(parent: Node<'_, '_>, expected: Node<'_, '_>, names: &[&str], references: bool) -> Result<()> {
     let selected = |parent: Node<'_, '_>| parent.children().filter(|node| node.tag_name().namespace() == Some(A) && names.contains(&node.tag_name().name())).map(|node| signature(node, references)).collect::<Vec<_>>();
-    if selected(parent) != crate::design::ColorMap::default().scope(|| selected(expected)) { return Err(Error::Unsupported(format!("native {} contains unrepresented formatting; replacement is refused", names.join("/")))); }
+    if selected(parent) != selected(expected) { return Err(Error::Unsupported(format!("native {} contains unrepresented formatting; replacement is refused", names.join("/")))); }
     Ok(())
 }
 

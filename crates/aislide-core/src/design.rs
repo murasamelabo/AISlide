@@ -7,54 +7,36 @@ pub const COLOR_MAP_KEYS: [&str; 12] = ["bg1", "tx1", "bg2", "tx2", "accent1", "
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ColorMap([&'static str; 12]);
-
-thread_local! {
-    static ACTIVE_COLOR_MAP: std::cell::Cell<ColorMap> = std::cell::Cell::new(ColorMap::default());
-}
-
-struct ColorMapGuard(ColorMap);
-impl Drop for ColorMapGuard {
-    fn drop(&mut self) { ACTIVE_COLOR_MAP.with(|active| active.set(self.0)); }
-}
+thread_local! { static ACTIVE_COLOR_MAP: std::cell::Cell<ColorMap> = std::cell::Cell::new(ColorMap::default()); }
+pub(crate) struct ColorMapGuard(ColorMap);
+impl Drop for ColorMapGuard { fn drop(&mut self) { ACTIVE_COLOR_MAP.with(|active| active.set(self.0)); } }
 
 impl Default for ColorMap {
-    fn default() -> Self {
-        Self(["lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"])
-    }
+    fn default() -> Self { Self(["lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"]) }
 }
 
 impl ColorMap {
-    pub(crate) fn current() -> Self {
-        ACTIVE_COLOR_MAP.with(std::cell::Cell::get)
-    }
-
+    pub(crate) fn current() -> Self { ACTIVE_COLOR_MAP.with(std::cell::Cell::get) }
+    pub(crate) fn enter(self) -> ColorMapGuard { ColorMapGuard(ACTIVE_COLOR_MAP.with(|active| active.replace(self))) }
     pub(crate) fn scope<R>(self, run: impl FnOnce() -> R) -> R {
-        let previous = ACTIVE_COLOR_MAP.with(|active| active.replace(self));
-        let _guard = ColorMapGuard(previous);
+        let _guard = self.enter();
         run()
     }
-
     pub(crate) fn resolve<'a>(&self, value: &'a str) -> &'a str {
         COLOR_MAP_KEYS.iter().position(|key| *key == value).map_or(value, |index| self.0[index])
     }
-
     pub(crate) fn set(&mut self, name: &str, value: &str) -> bool {
-        let Some(index) = COLOR_MAP_KEYS.iter().position(|key| *key == name) else { return false };
-        let Some(slot) = COLOR_KEYS.iter().copied().find(|key| *key == value) else { return false };
-        self.0[index] = slot;
-        true
+        let (Some(index), Some(slot)) = (COLOR_MAP_KEYS.iter().position(|key| *key == name), COLOR_KEYS.iter().copied().find(|key| *key == value)) else { return false };
+        self.0[index] = slot; true
     }
-
     pub(crate) fn encode<'a>(&self, slot: &'a str) -> Option<&'a str> {
         let slot = Self::default().resolve(slot);
-        if self.resolve(slot) == slot { return Some(slot); }
-        COLOR_MAP_KEYS.iter().copied().find(|key| self.resolve(key) == slot)
+        if *self == Self::default() && self.resolve(slot) == slot { return Some(slot); }
+        COLOR_MAP_KEYS.iter().copied().find(|key| self.resolve(key) == slot).or_else(|| (self.resolve(slot) == slot).then_some(slot))
     }
 }
 
-pub(crate) fn color_slot(value: &str) -> &str {
-    ColorMap::current().resolve(value)
-}
+pub(crate) fn color_slot(value: &str) -> &str { ColorMap::current().resolve(value) }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
