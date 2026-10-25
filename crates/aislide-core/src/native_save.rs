@@ -1341,20 +1341,14 @@ fn rebase_slide_color_map(package: &mut Package, binding: &NativePart, elements:
     if tree.descendants().filter(|n| is_shape(*n)).any(|n| properties(n).and_then(|p| p.attribute("id")).is_some_and(|id| !projected.contains(id) && n.descendants().any(|s| s.has_tag_name((A, "schemeClr")) && !s.ancestors().take_while(|a| *a != n).any(|a| is_shape(a)) && s.attribute("val").is_some_and(|v| new_map.resolve(v) != old_map.resolve(v))))) {
         return Err(Error::Unsupported("slide layout change would alter unmodeled native scheme colors".into()));
     }
-    for kind in ["chart", "chartEx"] {
-        for chart_path in crate::pptx::relationship_targets(package, &binding.path, kind)?.into_values() {
-            if parse(package.text(&chart_path)?)?.descendants().any(|n| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| new_map.resolve(v) != old_map.resolve(v))) {
-                return Err(Error::Unsupported("slide layout change would alter native chart scheme colors".into()));
-            }
-        }
+    if ["chart", "chartEx"].into_iter().flat_map(|k| crate::pptx::relationship_targets(package, &binding.path, k).ok().into_iter().flat_map(|t| t.into_values())).any(|p| package.text(&p).ok().and_then(|t| parse(t).ok()).is_some_and(|d| d.descendants().any(|n| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| new_map.resolve(v) != old_map.resolve(v))))) {
+        return Err(Error::Unsupported("slide layout change would alter native chart scheme colors".into()));
     }
     let mut edits = Vec::new();
-    for scheme in common.descendants().filter(|node| node.has_tag_name((A, "schemeClr"))) {
-        if let Some(attr) = scheme.attributes().find(|a| a.namespace().is_none() && a.name() == "val") {
-            let old_slot = old_map.resolve(attr.value());
-            if new_map.resolve(attr.value()) != old_slot {
-                edits.push((attr.range_value(), new_map.encode(old_slot).ok_or_else(|| Error::Unsupported("target layout color map cannot represent an existing slide scheme color".into()))?.into()));
-            }
+    for attr in common.descendants().filter(|n| n.has_tag_name((A, "schemeClr"))).filter_map(|n| n.attributes().find(|a| a.namespace().is_none() && a.name() == "val")) {
+        let old_slot = old_map.resolve(attr.value());
+        if new_map.resolve(attr.value()) != old_slot {
+            edits.push((attr.range_value(), new_map.encode(old_slot).ok_or_else(|| Error::Unsupported("target layout color map cannot represent an existing slide scheme color".into()))?.into()));
         }
     }
     if !edits.is_empty() { package.replace_part(&binding.path, apply(xml, edits)?)?; }

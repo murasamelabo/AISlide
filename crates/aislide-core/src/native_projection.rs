@@ -99,34 +99,25 @@ fn part(package: &Package, binding: &NativePart, elements: &[Element], design: b
 
 fn build(package: &Package, source: &NativeDeck) -> Result<ProjectionIndex> {
     let mut index = ProjectionIndex::default();
-    let master_docs = source.masters.iter().map(|b| Ok((b.id.as_str(), (crate::pptx::parse(package.text(&b.path)?)?, native::part_color_map(package, &b.path))))).collect::<Result<BTreeMap<_, _>>>()?;
-    let layout_docs = source.layouts.iter().map(|b| Ok((b.id.as_str(), (crate::pptx::parse(package.text(&b.path)?)?, native::part_color_map(package, &b.path))))).collect::<Result<BTreeMap<_, _>>>()?;
+    let docs = source.masters.iter().chain(&source.layouts).map(|b| Ok((b.id.as_str(), (b.path.as_str(), crate::pptx::parse(package.text(&b.path)?)?, native::part_color_map(package, &b.path))))).collect::<Result<BTreeMap<_, _>>>()?;
     for binding in &source.slides {
         let slide = source.deck.slides.iter().find(|slide| slide.id == binding.id)
             .ok_or_else(|| Error::Invalid("native projection slide missing".into()))?;
-        let slide_map = native::part_color_map(package, &binding.path);
-        let mut unsupported_color = false;
-        if let Some(design) = &source.deck.design {
-            if let Some(layout) = slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|l| &l.id == id)).or_else(|| design.layouts.first()) {
-                if let (Some(lb), Some((lx, lm))) = (source.layouts.iter().find(|e| e.id == layout.id), layout_docs.get(layout.id.as_str())) {
-                    unsupported_color |= native::has_remapped_nonplaceholder_scheme_color(package, &lb.path, lx.root_element(), *lm, slide_map);
-                    if !slide.hide_master_graphics && !matches!(lx.root_element().attribute("showMasterSp"), Some("0" | "false")) {
-                        if let (Some(mb), Some((mx, mm))) = (source.masters.iter().find(|e| e.id == layout.master_id), master_docs.get(layout.master_id.as_str())) {
-                            unsupported_color |= native::has_remapped_nonplaceholder_scheme_color(package, &mb.path, mx.root_element(), *mm, slide_map);
-                        }
-                    }
-                }
-            }
-        }
+        let sm = native::part_color_map(package, &binding.path);
+        let unsupported_color = source.deck.design.as_ref().and_then(|d| slide.layout_id.as_ref().and_then(|id| d.layouts.iter().find(|l| &l.id == id)).or_else(|| d.layouts.first())).is_some_and(|l| {
+            docs.get(l.id.as_str()).is_some_and(|(lp, lx, lm)| native::has_remapped_nonplaceholder_scheme_color(package, lp, lx.root_element(), *lm, sm)
+                || (!slide.hide_master_graphics && !matches!(lx.root_element().attribute("showMasterSp"), Some("0" | "false"))
+                    && docs.get(l.master_id.as_str()).is_some_and(|(mp, mx, mm)| native::has_remapped_nonplaceholder_scheme_color(package, mp, mx.root_element(), *mm, sm))))
+        });
         index.slides.insert(binding.id.clone(), part(package, binding, &slide.elements, false, unsupported_color)?);
     }
     if let Some(design) = &source.deck.design {
         for binding in &source.layouts {
             let layout = design.layouts.iter().find(|layout| layout.id == binding.id)
                 .ok_or_else(|| Error::Invalid("native projection layout missing".into()))?;
-            let (lx, lm) = layout_docs.get(binding.id.as_str()).ok_or_else(|| Error::Invalid("native projection layout XML missing".into()))?;
+            let (_, lx, lm) = docs.get(binding.id.as_str()).ok_or_else(|| Error::Invalid("native projection layout XML missing".into()))?;
             let unsupported_color = !matches!(lx.root_element().attribute("showMasterSp"), Some("0" | "false"))
-                && source.masters.iter().find(|e| e.id == layout.master_id).zip(master_docs.get(layout.master_id.as_str())).is_some_and(|(mb, (mx, mm))| native::has_remapped_nonplaceholder_scheme_color(package, &mb.path, mx.root_element(), *mm, *lm));
+                && docs.get(layout.master_id.as_str()).is_some_and(|(mp, mx, mm)| native::has_remapped_nonplaceholder_scheme_color(package, mp, mx.root_element(), *mm, *lm));
             index.layouts.insert(binding.id.clone(), part(package, binding, &layout.elements, true, unsupported_color)?);
         }
         for binding in &source.masters {
