@@ -800,7 +800,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
             bodies.into_iter().map(body_text).collect::<Vec<_>>().join("\n")
         } else { String::new() };
         let review = crate::review::read_slide(package, &binding, &elements)?;
-        slides.push(Slide { id, title: name, background: background.clone().unwrap_or_else(|| format!("@{}", slide_map.resolve("bg1"))), elements, notes, notes_paragraphs, layout_id: Some(layout.id.clone()), inherit_background: background.is_none(), hide_master_graphics: matches!(xml.root_element().attribute("showMasterSp"), Some("0" | "false")), native_source_id: None, review });
+        slides.push(Slide { id, title: name, background: background.clone().unwrap_or_else(|| "@lt1".into()), elements, notes, notes_paragraphs, layout_id: Some(layout.id.clone()), inherit_background: background.is_none(), hide_master_graphics: xml.root_element().attribute("showMasterSp") == Some("0"), native_source_id: None, review });
         slide_parts.push(binding);
     }
     let title = package.parts().iter().filter(|(path, _)| path.starts_with("docProps/") && path.ends_with(".xml")).find_map(|(_, value)| std::str::from_utf8(value).ok().and_then(|value| parse(value).ok()).and_then(|document| document.descendants().find(|node| node.has_tag_name(("http://purl.org/dc/elements/1.1/", "title"))).and_then(|node| node.text()).map(str::to_owned)))
