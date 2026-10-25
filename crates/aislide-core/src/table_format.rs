@@ -278,12 +278,12 @@ fn native_flags(cell: roxmltree::Node<'_, '_>) -> Result<(usize,usize,bool,bool)
     Ok((span("gridSpan")?,span("rowSpan")?,flag("hMerge")?,flag("vMerge")?))
 }
 
-fn native_fill(node: roxmltree::Node<'_, '_>, color_map: crate::design::ColorMap) -> Option<String> {
+fn native_fill(node: roxmltree::Node<'_, '_>) -> Option<String> {
     use crate::native::{child,A};
     if child(node,A,"noFill").is_some() { return Some("none".into()); }
     let fill = child(node,A,"solidFill")?;
     if let Some(color) = child(fill,A,"srgbClr").and_then(|node| node.attribute("val")) { return Some(color.into()); }
-    child(fill,A,"schemeClr").and_then(|node| node.attribute("val")).map(|value| format!("@{}", color_map.resolve(value)))
+    child(fill,A,"schemeClr").and_then(|node| node.attribute("val")).map(|value| format!("@{}", crate::design::color_slot(value)))
 }
 
 fn style_difference(mut style: RunStyle, base: &RunStyle) -> RunStyle {
@@ -291,7 +291,7 @@ fn style_difference(mut style: RunStyle, base: &RunStyle) -> RunStyle {
     omit!(bold,italic,underline,font_size,color,font_family,baseline,highlight,language,alternative_language); style
 }
 
-pub(crate) fn read_native(table: roxmltree::Node<'_, '_>, width: f64, height: f64, color_map: crate::design::ColorMap) -> Result<(Vec<Vec<String>>,f64,TableFormat)> {
+pub(crate) fn read_native(table: roxmltree::Node<'_, '_>, width: f64, height: f64) -> Result<(Vec<Vec<String>>,f64,TableFormat)> {
     use crate::native::{child,A,body_text};
     let native_rows: Vec<_> = table.children().filter(|node| node.has_tag_name((A,"tr"))).collect();
     let grid = child(table,A,"tblGrid").ok_or_else(|| Error::Invalid("native table grid missing".into()))?;
@@ -327,16 +327,16 @@ pub(crate) fn read_native(table: roxmltree::Node<'_, '_>, width: f64, height: f6
         if native_flags(*cell)? != merge_flags(&format,row,column) { return Err(Error::Invalid("inconsistent native table merge grid".into())); }
         let mut style = CellStyle::default();
         if let Some(properties) = child(*cell,A,"tcPr") {
-            style.fill = native_fill(properties, color_map).filter(|fill| fill != default_fill(row));
+            style.fill = native_fill(properties).filter(|fill| fill != default_fill(row));
             let padding = CellPadding {left:native_number(properties,"marL",91440.0)? / 9525.0,right:native_number(properties,"marR",91440.0)? / 9525.0,top:native_number(properties,"marT",45720.0)? / 9525.0,bottom:native_number(properties,"marB",45720.0)? / 9525.0};
             if [padding.left,padding.right,padding.top,padding.bottom].iter().any(|value| (*value - 6.0).abs() > 0.0001) { style.padding = Some(padding); }
             style.vertical = match properties.attribute("anchor").unwrap_or("t") {"t"=>None,"ctr"=>Some(VerticalAlign::Middle),"b"=>Some(VerticalAlign::Bottom),_=>return Err(Error::Unsupported("table vertical alignment".into()))};
-            let outlines = ["lnL","lnR","lnT","lnB"].iter().map(|tag| child(properties,A,tag).map(|line| -> Result<_> { Ok(CellOutline {color:native_fill(line, color_map).filter(|color| color != "none").unwrap_or_else(|| "@dk1".into()),width:if child(line,A,"noFill").is_some() {0.0} else {native_number(line,"w",9525.0)? / 9525.0}}) }).transpose()).collect::<Result<Vec<_>>>()?;
+            let outlines = ["lnL","lnR","lnT","lnB"].iter().map(|tag| child(properties,A,tag).map(|line| -> Result<_> { Ok(CellOutline {color:native_fill(line).filter(|color| color != "none").unwrap_or_else(|| "@dk1".into()),width:if child(line,A,"noFill").is_some() {0.0} else {native_number(line,"w",9525.0)? / 9525.0}}) }).transpose()).collect::<Result<Vec<_>>>()?;
             if outlines.iter().all(|outline| outline.is_some() && *outline == outlines[0]) { style.outline = outlines[0].clone(); }
         }
         if let Some(body) = child(*cell,A,"txBody") {
             let base = RunStyle::frame(size,default_color(row),row == 0,&TextFormat::default());
-            if let Ok(mut paragraphs) = crate::native::read_rich_paragraphs_with_map(body,&base,&TextFormat::default(),4000,color_map) {
+            if let Ok(mut paragraphs) = crate::native::read_rich_paragraphs(body,&base,&TextFormat::default()) {
                 for paragraph in &mut paragraphs {
                     if paragraph.alignment == Some(crate::model::TextAlign::Left) { paragraph.alignment = None; }
                     if paragraph.bullet == Some(crate::model::Bullet::None) { paragraph.bullet = None; }
@@ -374,9 +374,9 @@ fn native_fragment(xml: &str, node: roxmltree::Node<'_, '_>) -> Result<String> {
     value.insert_str(position,&declarations); Ok(value)
 }
 
-pub(crate) fn patch_paragraphs(xml: &str, body: roxmltree::Node<'_, '_>, generated: &str, next_body: roxmltree::Node<'_, '_>, color_map: crate::design::ColorMap, edits: &mut Vec<(std::ops::Range<usize>,String)>) -> Result<()> {
+pub(crate) fn patch_paragraphs(xml: &str, body: roxmltree::Node<'_, '_>, generated: &str, next_body: roxmltree::Node<'_, '_>, edits: &mut Vec<(std::ops::Range<usize>,String)>) -> Result<()> {
     use crate::native::{child,A};
-    crate::native::read_rich_paragraphs_with_map(body,&RunStyle::default(),&TextFormat::default(),4000,color_map)?;
+    crate::native::read_rich_paragraphs(body,&RunStyle::default(),&TextFormat::default())?;
     let original: Vec<_> = body.children().filter(|node| node.has_tag_name((A,"p"))).collect();
     let next: Vec<_> = next_body.children().filter(|node| node.has_tag_name((A,"p"))).collect();
     for (index,paragraph) in original.iter().enumerate() {

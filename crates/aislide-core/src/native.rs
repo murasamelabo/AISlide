@@ -66,28 +66,26 @@ fn custom_route_points(geometry: Node<'_, '_>) -> Result<Vec<[f64; 2]>> {
     Ok(points)
 }
 
-fn color(node: Node<'_, '_>, default: &str, color_map: crate::design::ColorMap) -> String {
+fn color(node: Node<'_, '_>, default: &str) -> String {
     let Some(fill) = child(node, A, "solidFill") else { return default.into() };
     if let Some(rgb) = child(fill, A, "srgbClr").and_then(|node| node.attribute("val")) { return rgb.into(); }
     if let Some(rgb) = child(fill, A, "sysClr").and_then(|node| node.attribute("lastClr")) { return rgb.into(); }
     if let Some(slot) = child(fill, A, "schemeClr").and_then(|node| node.attribute("val")) {
-        let slot = color_map.resolve(slot);
+        let slot = crate::design::color_slot(slot);
         if crate::design::COLOR_KEYS.contains(&slot) { return format!("@{slot}"); }
     }
     default.into()
 }
 
 pub(crate) fn background(node: Node<'_, '_>, color_map: crate::design::ColorMap) -> Option<String> {
-    child(node, P, "cSld").and_then(|node| child(node, P, "bg")).and_then(|node| child(node, P, "bgPr"))
-        .map(|node| color(node, &format!("@{}", color_map.resolve("bg1")), color_map))
+    color_map.scope(|| child(node, P, "cSld").and_then(|node| child(node, P, "bg")).and_then(|node| child(node, P, "bgPr"))
+        .map(|node| color(node, &format!("@{}", crate::design::color_slot("bg1")))))
 }
 
 pub(crate) fn apply_color_map_node(map: &mut crate::design::ColorMap, node: Node<'_, '_>) -> bool {
-    if node.children().any(|child| child.is_element()) { return false; }
+    if node.children().any(|child| child.is_element()) || node.attributes().count() != crate::design::COLOR_MAP_KEYS.len() { return false; }
     let mut next = *map;
-    for attribute in node.attributes() {
-        if attribute.namespace().is_some() || !next.set(attribute.name(), attribute.value()) { return false; }
-    }
+    if !crate::design::COLOR_MAP_KEYS.iter().all(|key| node.attribute(*key).is_some_and(|value| next.set(key, value))) { return false; }
     *map = next;
     true
 }
@@ -139,14 +137,14 @@ pub(crate) fn has_remapped_nonplaceholder_scheme_color(root: Node<'_, '_>, owner
 }
 
 pub(crate) fn color_mapping_warning(path: &str) -> String {
-    format!("Custom native color mapping in {path} is preserved in the PPTX but not resolved in AISlide's projection. Preview colors and color-based diagnostics may differ from PowerPoint; inspect the unchanged source in Office before changing backgrounds, text or contrast.")
+    format!("Custom native color mapping in {path} is preserved in the PPTX, but unmodeled color-map extensions or shared ancestor artwork remapped by a descendant override cannot be fully resolved in AISlide's projection. Preview colors and color-based diagnostics may differ from PowerPoint; inspect the unchanged source in Office before changing backgrounds, text or contrast.")
 }
 
-fn shape_fill(node: Node<'_, '_>, color_map: crate::design::ColorMap) -> String {
+fn shape_fill(node: Node<'_, '_>) -> String {
     if let Some(stop) = child(node, A, "gradFill").and_then(|node| child(node, A, "gsLst")).and_then(|node| child(node, A, "gs")) {
-        if let Ok((color, _)) = crate::visual::read_color(stop, color_map) { return color; }
+        if let Ok((color, _)) = crate::visual::read_color(stop) { return color; }
     }
-    if child(node, A, "noFill").is_some() { "none".into() } else { color(node, &format!("@{}", color_map.resolve("bg1")), color_map) }
+    if child(node, A, "noFill").is_some() { "none".into() } else { color(node, &format!("@{}", crate::design::color_slot("bg1"))) }
 }
 
 pub(crate) fn placeholder(node: Node<'_, '_>) -> Option<Placeholder> {
@@ -190,9 +188,8 @@ pub(crate) fn hyperlink_targets(package: &Package, part: &str) -> Result<BTreeMa
     Ok(targets)
 }
 
-fn text_format(package: &Package, part: &str, body: Node<'_, '_>, template: Option<&Element>, mapped_template: Option<&Element>, color_map: crate::design::ColorMap) -> Result<(f64, String, bool, TextFormat)> {
-    let default_shade = format!("@{}", color_map.resolve("tx1"));
-    let (mut size, mut shade, mut bold, mut format) = match mapped_template.or(template) { Some(Element::Text { font_size, color, bold, format, .. }) => (*font_size, color.clone(), *bold, format.clone()), _ => (24.0, default_shade, false, TextFormat::default()) };
+fn text_format(package: &Package, part: &str, body: Node<'_, '_>, template: Option<&Element>) -> Result<(f64, String, bool, TextFormat)> {
+    let (mut size, mut shade, mut bold, mut format) = match template { Some(Element::Text { font_size, color, bold, format, .. }) => (*font_size, color.clone(), *bold, format.clone()), _ => (24.0, format!("@{}", crate::design::color_slot("tx1")), false, TextFormat::default()) };
     let inherited_style = crate::rich_text::RunStyle::frame(size, &shade, bold, &format);
     let inherited_format = format.clone(); format.paragraphs.clear();
     let list = child(body, A, "lstStyle").and_then(|node| child(node, A, "lvl1pPr"));
@@ -218,7 +215,7 @@ fn text_format(package: &Package, part: &str, body: Node<'_, '_>, template: Opti
     let first_paragraph = child(body, A, "p");
     let single_run = body.descendants().filter(|node| node.has_tag_name((A, "r")) || node.has_tag_name((A, "fld"))).count() == 1;
     let first_run = body.descendants().find(|node| node.has_tag_name((A, "rPr")));
-    let paragraphs = read_rich_paragraphs_with_map(body, &inherited_style, &inherited_format, 4000, color_map);
+    let paragraphs = read_rich_paragraphs(body, &inherited_style, &inherited_format);
     let uniform_runs = paragraphs.as_ref().ok().is_some_and(|paragraphs| {
         let mut runs = paragraphs.iter().flat_map(|paragraph| &paragraph.runs);
         runs.next().is_some_and(|first| runs.all(|run| run.style.same_frame_style(&first.style)))
@@ -226,7 +223,7 @@ fn text_format(package: &Package, part: &str, body: Node<'_, '_>, template: Opti
     let run = (single_run || uniform_runs).then_some(first_run).flatten();
     for node in [run, first_paragraph.and_then(|node| child(node, A, "endParaRPr")), list.and_then(|node| child(node, A, "defRPr")), paragraph.and_then(|node| child(node, A, "defRPr"))].into_iter().flatten() {
         size = number(node, "sz", size * 75.0) / 75.0;
-        shade = color(node, &shade, color_map);
+        shade = color(node, &shade);
         if let Some(value) = node.attribute("b") { bold = value == "1" || value == "true"; }
         if let Some(value) = node.attribute("i") { format.italic = value == "1" || value == "true"; }
         if let Some(value) = node.attribute("u") { format.underline = value != "none"; }
@@ -263,7 +260,7 @@ fn rich_number<T: std::str::FromStr>(node: Node<'_, '_>, name: &str) -> Result<O
     node.attribute(name).map(|value| value.parse().map_err(|_| Error::Unsupported(format!("unrepresentable text {name}")))).transpose()
 }
 
-fn rich_run_style(node: Node<'_, '_>, style: &mut crate::rich_text::RunStyle, color_map: crate::design::ColorMap) -> Result<()> {
+fn rich_run_style(node: Node<'_, '_>, style: &mut crate::rich_text::RunStyle) -> Result<()> {
     for (name, target) in [("b", &mut style.bold), ("i", &mut style.italic)] {
         if let Some(value) = node.attribute(name) { *target = Some(match value { "1" | "true" => true, "0" | "false" => false, _ => return Err(Error::Unsupported("native text boolean".into())) }); }
     }
@@ -272,14 +269,10 @@ fn rich_run_style(node: Node<'_, '_>, style: &mut crate::rich_text::RunStyle, co
     if let Some(baseline) = rich_number(node, "baseline")? { style.baseline = Some(baseline); }
     if let Some(language) = node.attribute("lang") { style.language = Some(language.into()); }
     if let Some(language) = node.attribute("altLang") { style.alternative_language = Some(language.into()); }
-    if child(node, A, "solidFill").is_some() { style.color = Some(color(node, &format!("@{}", color_map.resolve("tx1")), color_map)); }
+    if child(node, A, "solidFill").is_some() { style.color = Some(color(node, &format!("@{}", crate::design::color_slot("tx1")))); }
     if let Some(highlight) = child(node, A, "highlight") {
         style.highlight = Some(if let Some(rgb) = child(highlight, A, "srgbClr").and_then(|node| node.attribute("val")) { rgb.into() }
-            else if let Some(slot) = child(highlight, A, "schemeClr").and_then(|node| node.attribute("val")) {
-                let slot = color_map.resolve(slot);
-                if !crate::design::COLOR_KEYS.contains(&slot) { return Err(Error::Unsupported("native highlight color".into())); }
-                format!("@{slot}")
-            }
+            else if let Some(slot) = child(highlight, A, "schemeClr").and_then(|node| node.attribute("val")) { format!("@{}", crate::design::color_slot(slot)) }
             else { return Err(Error::Unsupported("native highlight color".into())); });
     }
     if let Some(family) = child(node, A, "latin").and_then(|node| node.attribute("typeface")) { style.font_family = Some(match family { "+mj-lt" => "@major", "+mn-lt" => "@minor", value => value }.into()); }
@@ -312,11 +305,11 @@ fn rich_paragraph_style(node: Node<'_, '_>, paragraph: &mut crate::rich_text::Ri
     Ok(())
 }
 
-pub(crate) fn read_rich_paragraphs_with_limit(body: Node<'_, '_>, inherited_style: &crate::rich_text::RunStyle, inherited_format: &TextFormat, limit: usize) -> Result<Vec<crate::rich_text::RichParagraph>> {
-    read_rich_paragraphs_with_map(body, inherited_style, inherited_format, limit, crate::design::ColorMap::default())
+pub(crate) fn read_rich_paragraphs(body: Node<'_, '_>, inherited_style: &crate::rich_text::RunStyle, inherited_format: &TextFormat) -> Result<Vec<crate::rich_text::RichParagraph>> {
+    read_rich_paragraphs_with_limit(body, inherited_style, inherited_format, 4000)
 }
 
-pub(crate) fn read_rich_paragraphs_with_map(body: Node<'_, '_>, inherited_style: &crate::rich_text::RunStyle, inherited_format: &TextFormat, limit: usize, color_map: crate::design::ColorMap) -> Result<Vec<crate::rich_text::RichParagraph>> {
+pub(crate) fn read_rich_paragraphs_with_limit(body: Node<'_, '_>, inherited_style: &crate::rich_text::RunStyle, inherited_format: &TextFormat, limit: usize) -> Result<Vec<crate::rich_text::RichParagraph>> {
     use crate::rich_text::{RichParagraph, RichRun};
     if body.descendants().any(|node| node.has_tag_name((A, "br"))) { return Err(Error::Unsupported("soft breaks are preserved as native XML".into())); }
     let mut result = Vec::new();
@@ -330,16 +323,16 @@ pub(crate) fn read_rich_paragraphs_with_map(body: Node<'_, '_>, inherited_style:
         let mut style = inherited_style.clone();
         for properties in [list, properties].into_iter().flatten() {
             rich_paragraph_style(properties, &mut value)?;
-            if let Some(default) = child(properties, A, "defRPr") { rich_run_style(default, &mut style, color_map)?; }
+            if let Some(default) = child(properties, A, "defRPr") { rich_run_style(default, &mut style)?; }
         }
         for run in paragraph.children().filter(|node| node.has_tag_name((A, "r")) || node.has_tag_name((A, "fld"))) {
             let mut resolved = style.clone();
-            if let Some(properties) = child(run, A, "rPr") { rich_run_style(properties, &mut resolved, color_map)?; }
+            if let Some(properties) = child(run, A, "rPr") { rich_run_style(properties, &mut resolved)?; }
             let text = run.children().filter(|node| node.has_tag_name((A, "t"))).filter_map(|node| node.text()).collect();
             value.runs.push(RichRun { text, style: resolved, field: crate::fields::read_field(run)? });
         }
         if value.runs.is_empty() {
-            if let Some(end) = child(paragraph, A, "endParaRPr") { rich_run_style(end, &mut style, color_map)?; }
+            if let Some(end) = child(paragraph, A, "endParaRPr") { rich_run_style(end, &mut style)?; }
             value.runs.push(RichRun { text: String::new(), style, field: None });
         }
         result.push(value);
@@ -361,21 +354,21 @@ fn names(tree: Node<'_, '_>, aliases: Option<&crate::provenance::Identity>) -> R
     Ok(result)
 }
 
-fn read_chart(package: &Package, part: &str, node: Node<'_, '_>, id: String, bounds: [f64; 4], color_map: crate::design::ColorMap) -> Result<Element> {
+fn read_chart(package: &Package, part: &str, node: Node<'_, '_>, id: String, bounds: [f64; 4]) -> Result<Element> {
     let extended = node.descendants().any(|node| node.has_tag_name((crate::chart_extended::NS, "chart")));
     let namespace = if extended { crate::chart_extended::NS } else { C };
     let relationship = node.descendants().find(|node| node.has_tag_name((namespace, "chart"))).and_then(|node| node.attribute((R, "id"))).ok_or_else(|| Error::Unsupported("chart reference missing".into()))?;
     let targets = relationship_targets(package, part, if extended { "chartEx" } else { "chart" })?;
     let path = targets.get(relationship).ok_or_else(|| Error::Invalid("chart target missing".into()))?;
     let document = parse(package.text(path)?)?;
-    let (kind, categories, series, options) = crate::charts::read(&document, |node, default| color(node, default, color_map))?;
+    let (kind, categories, series, options) = crate::charts::read(&document, color)?;
     let [x, y, width, height] = bounds;
     Ok(Element::Chart { id, x, y, width, height, kind, categories, series, options })
 }
 
-fn read_element(package: &Package, part: &str, node: Node<'_, '_>, scale: (f64, f64), ids: &BTreeMap<String, String>, templates: &[Element], mapped_templates: Option<&[Element]>, depth: usize, color_map: crate::design::ColorMap) -> Result<Element> {
-    let mut element = read_element_base(package, part, node, scale, ids, templates, mapped_templates, depth, color_map)?;
-    let mut visual = crate::visual::read(node, color_map)?;
+fn read_element(package: &Package, part: &str, node: Node<'_, '_>, scale: (f64, f64), ids: &BTreeMap<String, String>, templates: &[Element], depth: usize) -> Result<Element> {
+    let mut element = read_element_base(package, part, node, scale, ids, templates, depth)?;
+    let mut visual = crate::visual::read(node)?;
     if matches!(element, Element::Shape { .. }) {
         if let Some(style) = &mut visual { style.rotation = None; }
         if visual.as_ref() == Some(&crate::visual::VisualStyle::default()) { visual = None; }
@@ -388,13 +381,12 @@ fn read_element(package: &Package, part: &str, node: Node<'_, '_>, scale: (f64, 
     Ok(element)
 }
 
-fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (f64, f64), ids: &BTreeMap<String, String>, templates: &[Element], mapped_templates: Option<&[Element]>, depth: usize, color_map: crate::design::ColorMap) -> Result<Element> {
+fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (f64, f64), ids: &BTreeMap<String, String>, templates: &[Element], depth: usize) -> Result<Element> {
     if depth > 8 { return Err(Error::Limit("group nesting > 8".into())); }
     let numeric = properties(node).and_then(|node| node.attribute("id")).ok_or_else(|| Error::Invalid("shape identity".into()))?;
     let id = ids.get(numeric).ok_or_else(|| Error::Invalid("shape identity map".into()))?.clone();
     let ph = placeholder(node);
     let template = ph.as_ref().and_then(|ph| templates.iter().find(|element| matches!(element, Element::Text { format, .. } if format.placeholder.as_ref() == Some(ph))));
-    let mapped_template = ph.as_ref().and_then(|ph| mapped_templates?.iter().find(|element| matches!(element, Element::Text { format, .. } if format.placeholder.as_ref() == Some(ph))));
     let fallback = template.map(|element| { let (_, x, y, width, height) = element.bounds(); [x, y, width, height] });
     let xfrm = transform(node);
     if node.has_tag_name((P, "graphicFrame")) && xfrm.is_some_and(|transform| number(transform, "rot", 0.0) != 0.0 || matches!(transform.attribute("flipH"), Some("1" | "true"))) { return Err(Error::Unsupported("flipped or rotated native frame".into())); }
@@ -406,7 +398,7 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
         let origin_x = frame_coordinate(offset, "x")? / 9525.0; let origin_y = frame_coordinate(offset, "y")? / 9525.0;
         if !origin_x.is_finite() || !origin_y.is_finite() || origin_x.abs() > 1e6 || origin_y.abs() > 1e6 { return Err(Error::Unsupported("group child origin exceeds supported range".into())); }
         let extent = child(transform, A, "chExt").ok_or_else(|| Error::Unsupported("group child extent".into()))?;
-        let mut children = node.children().filter(|node| is_shape(*node)).map(|node| read_element(package, part, node, (1.0 / 9525.0, 1.0 / 9525.0), ids, &[], None, depth + 1, color_map)).collect::<Result<Vec<_>>>()?;
+        let mut children = node.children().filter(|node| is_shape(*node)).map(|node| read_element(package, part, node, (1.0 / 9525.0, 1.0 / 9525.0), ids, &[], depth + 1)).collect::<Result<Vec<_>>>()?;
         for element in &mut children {
             let (x,y) = match element {
                 Element::Text {x,y,..} | Element::Rect {x,y,..} | Element::Polygon {x,y,..} | Element::Shape {x,y,..} | Element::Picture {x,y,..} | Element::Group {x,y,..} | Element::Connector {x,y,..} | Element::Table {x,y,..} | Element::Chart {x,y,..} => (x,y),
@@ -470,15 +462,15 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
             }
         }
         let routing = points.map(|points| crate::model::ConnectorRouting { points, custom, start_arrow: line.and_then(|node| child(node, A, "headEnd")).is_some_and(|node| node.attribute("type") == Some("triangle")), dashed: line.and_then(|node| child(node, A, "prstDash")).is_some_and(|node| node.attribute("val") == Some("dash")) });
-        return Ok(Element::Connector { visual: None, id, x, y, width, height, color: line.map_or_else(|| "@dk2".into(), |node| color(node, "@dk2", color_map)), stroke_width: line.map_or(1.0, |node| number(node, "w", 9525.0) / 9525.0), arrow: line.and_then(|node| child(node, A, "tailEnd")).is_some_and(|node| node.attribute("type").is_some_and(|value| value != "none")), flip_v: routing.is_none() && flip_v, start: connection("stCxn"), end: connection("endCxn"), routing });
+        return Ok(Element::Connector { visual: None, id, x, y, width, height, color: line.map_or_else(|| "@dk2".into(), |node| color(node, "@dk2")), stroke_width: line.map_or(1.0, |node| number(node, "w", 9525.0) / 9525.0), arrow: line.and_then(|node| child(node, A, "tailEnd")).is_some_and(|node| node.attribute("type").is_some_and(|value| value != "none")), flip_v: routing.is_none() && flip_v, start: connection("stCxn"), end: connection("endCxn"), routing });
     }
     if node.has_tag_name((P, "graphicFrame")) {
-        if node.descendants().any(|node| node.has_tag_name((crate::chart_extended::NS, "chart"))) { return read_chart(package, part, node, id, bounds, color_map); }
+        if node.descendants().any(|node| node.has_tag_name((crate::chart_extended::NS, "chart"))) { return read_chart(package, part, node, id, bounds); }
         if let Some(table) = node.descendants().find(|node| node.has_tag_name((A, "tbl"))) {
-            let (rows, font_size, format) = crate::table_format::read_native(table, width, height, color_map)?;
+            let (rows, font_size, format) = crate::table_format::read_native(table, width, height)?;
             return Ok(Element::Table { id, x, y, width, height, rows, font_size, format });
         }
-        return read_chart(package, part, node, id, bounds, color_map);
+        return read_chart(package, part, node, id, bounds);
     }
     let properties = child(node, P, "spPr");
     let body = child(node, P, "txBody");
@@ -495,7 +487,7 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
         let line = child(properties, A, "ln");
         let end = |prefix: &str| Some(Connection { element_id: ids.get(route.attribute(prefix)?)?.clone(), site: route.attribute(format!("{prefix}Site").as_str())?.parse().ok()? });
         let routing = crate::model::ConnectorRouting { points, custom: true, start_arrow: line.and_then(|node| child(node, A, "headEnd")).is_some_and(|node| node.attribute("type").is_some_and(|value| value != "none")), dashed: line.and_then(|node| child(node, A, "prstDash")).is_some_and(|node| node.attribute("val") == Some("dash")) };
-        return Ok(Element::Connector { visual: None, id, x, y, width, height, color: line.map_or_else(|| "@dk2".into(), |node| color(node, "@dk2", color_map)), stroke_width: line.map_or(1.0, |node| number(node, "w", 9525.0) / 9525.0), arrow: line.and_then(|node| child(node, A, "tailEnd")).is_some_and(|node| node.attribute("type").is_some_and(|value| value != "none")), flip_v: false, start: end("start"), end: end("end"), routing: Some(routing) });
+        return Ok(Element::Connector { visual: None, id, x, y, width, height, color: line.map_or_else(|| "@dk2".into(), |node| color(node, "@dk2")), stroke_width: line.map_or(1.0, |node| number(node, "w", 9525.0) / 9525.0), arrow: line.and_then(|node| child(node, A, "tailEnd")).is_some_and(|node| node.attribute("type").is_some_and(|value| value != "none")), flip_v: false, start: end("start"), end: end("end"), routing: Some(routing) });
     }
     let connection_geometry = properties.and_then(|node| child(node, A, "custGeom")).map(crate::vector::read_connection_geometry).transpose()?.flatten();
     let preset = connection_geometry.as_ref().map(|(preset, _, _)| preset.as_str()).or_else(|| properties.and_then(|node| child(node, A, "prstGeom")).and_then(|node| node.attribute("prst"))).unwrap_or("rect");
@@ -505,7 +497,7 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
         if crate::vector::native_requires_override(geometry) {
             if body.is_some() { return Err(Error::Unsupported("custom path text body".into())); }
             let path = crate::vector::read_path(geometry)?;
-            return Ok(Element::Polygon { visual: None, id, x, y, width, height, points: path.points(), fill: properties.map(|node| shape_fill(node, color_map)).unwrap_or_else(|| "none".into()), stroke: line.map_or_else(|| format!("@{}", color_map.resolve("tx1")), |node| color(node, &format!("@{}", color_map.resolve("tx1")), color_map)), stroke_width: line.filter(|node| child(*node,A,"noFill").is_none()).map_or(0.0,|node| number(node,"w",9525.0)/9525.0) });
+            return Ok(Element::Polygon { visual: None, id, x, y, width, height, points: path.points(), fill: properties.map(shape_fill).unwrap_or_else(|| "none".into()), stroke: line.map_or_else(|| "@dk1".into(), |node| color(node,"@dk1")), stroke_width: line.filter(|node| child(*node,A,"noFill").is_none()).map_or(0.0,|node| number(node,"w",9525.0)/9525.0) });
         }
         let paths: Vec<_> = child(geometry, A, "pathLst").into_iter().flat_map(|node| node.children()).filter(|node| node.has_tag_name((A, "path"))).collect();
         if paths.len() != 1 || body.is_some() { return Err(Error::Unsupported("complex custom geometry".into())); }
@@ -520,13 +512,13 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
             let coordinate = |name: &str| point.attribute(name).and_then(|value| value.parse::<f64>().ok()).ok_or_else(|| Error::Unsupported("formula custom geometry".into()));
             points.push([coordinate("x")? / path_width, coordinate("y")? / path_height]);
         }
-        return Ok(Element::Polygon { visual: None, id, x, y, width, height, points, fill: properties.map(|node| shape_fill(node, color_map)).unwrap_or_else(|| "none".into()), stroke: line.map_or_else(|| format!("@{}", color_map.resolve("tx1")), |node| color(node, &format!("@{}", color_map.resolve("tx1")), color_map)), stroke_width: line.filter(|node| child(*node, A, "noFill").is_none()).map_or(0.0, |node| number(node, "w", 9525.0) / 9525.0) });
+        return Ok(Element::Polygon { visual: None, id, x, y, width, height, points, fill: properties.map(shape_fill).unwrap_or_else(|| "none".into()), stroke: line.map_or_else(|| "@dk1".into(), |node| color(node, "@dk1")), stroke_width: line.filter(|node| child(*node, A, "noFill").is_none()).map_or(0.0, |node| number(node, "w", 9525.0) / 9525.0) });
     }
     let tx_box = child(node, P, "nvSpPr").and_then(|node| child(node, P, "cNvSpPr")).and_then(|node| node.attribute("txBox")) == Some("1");
     if body.is_some() || ph.is_some() {
         let body = body.ok_or_else(|| Error::Unsupported("placeholder text body missing".into()))?;
         let text = body_text(body);
-        let (font_size, shade, bold, mut format) = text_format(package, part, body, template, mapped_template, color_map)?;
+        let (font_size, shade, bold, mut format) = text_format(package, part, body, template)?;
         format.placeholder = ph;
         if (tx_box || format.placeholder.is_some() || (!filled && preset == "rect" && connection_geometry.is_none())) && format.padding.as_ref() == Some(&crate::model::TextPadding::default()) {
             format.padding = None;
@@ -543,10 +535,10 @@ fn read_element_base(package: &Package, part: &str, node: Node<'_, '_>, scale: (
         if tx_box || format.placeholder.is_some() || (!filled && preset == "rect" && connection_geometry.is_none()) {
             return Ok(Element::Text { visual: None, id, x, y, width, height, text, font_size, color: shade, bold, format });
         }
-        return Ok(Element::Shape { visual: None, id, x, y, width, height, preset: preset.into(), fill: properties.map(|node| shape_fill(node, color_map)).unwrap_or_else(|| format!("@{}", color_map.resolve("bg1"))), stroke: line.map_or_else(|| format!("@{}", color_map.resolve("tx1")), |node| color(node, &format!("@{}", color_map.resolve("tx1")), color_map)), stroke_width: line.filter(|node| child(*node, A, "noFill").is_none()).map_or(0.0, |node| number(node, "w", 9525.0) / 9525.0), rotation: xfrm.map_or(0.0, |node| number(node, "rot", 0.0) / 60000.0), text, font_size, color: shade, bold, format });
+        return Ok(Element::Shape { visual: None, id, x, y, width, height, preset: preset.into(), fill: properties.map(shape_fill).unwrap_or_else(|| "@lt1".into()), stroke: line.map_or_else(|| "@dk1".into(), |node| color(node, "@dk1")), stroke_width: line.filter(|node| child(*node, A, "noFill").is_none()).map_or(0.0, |node| number(node, "w", 9525.0) / 9525.0), rotation: xfrm.map_or(0.0, |node| number(node, "rot", 0.0) / 60000.0), text, font_size, color: shade, bold, format });
     }
-    if preset != "rect" || connection_geometry.is_some() { return Ok(Element::Shape { visual: None, id, x, y, width, height, preset: preset.into(), fill: properties.map(|node| shape_fill(node, color_map)).unwrap_or_else(|| format!("@{}", color_map.resolve("bg1"))), stroke: line.map_or_else(|| format!("@{}", color_map.resolve("tx1")), |node| color(node, &format!("@{}", color_map.resolve("tx1")), color_map)), stroke_width: line.map_or(0.0, |node| number(node, "w", 0.0) / 9525.0), rotation: xfrm.map_or(0.0, |node| number(node, "rot", 0.0) / 60000.0), text: String::new(), font_size: 24.0, color: format!("@{}", color_map.resolve("tx1")), bold: false, format: TextFormat::default() }); }
-    Ok(Element::Rect { visual: None, id, x, y, width, height, fill: properties.map(|node| shape_fill(node, color_map)).unwrap_or_else(|| format!("@{}", color_map.resolve("bg1"))) })
+    if preset != "rect" || connection_geometry.is_some() { return Ok(Element::Shape { visual: None, id, x, y, width, height, preset: preset.into(), fill: properties.map(shape_fill).unwrap_or_else(|| "@lt1".into()), stroke: line.map_or_else(|| "@dk1".into(), |node| color(node, "@dk1")), stroke_width: line.map_or(0.0, |node| number(node, "w", 0.0) / 9525.0), rotation: xfrm.map_or(0.0, |node| number(node, "rot", 0.0) / 60000.0), text: String::new(), font_size: 24.0, color: "@dk1".into(), bold: false, format: TextFormat::default() }); }
+    Ok(Element::Rect { visual: None, id, x, y, width, height, fill: properties.map(shape_fill).unwrap_or_else(|| "@lt1".into()) })
 }
 
 struct NativeFrameProjection { edges: [f64; 4], read_only: bool }
@@ -606,12 +598,12 @@ fn normalize_native_frame(element: &mut Element, node: Node<'_, '_>, canvas: (u3
 }
 
 pub(crate) fn read_part(package: &Package, path: &str, id: String, scale: (f64, f64), templates: &[Element], warnings: &mut Vec<String>, metadata: Option<&crate::provenance::Metadata>, canvas: (u32, u32)) -> Result<(String, Option<String>, Vec<Element>, NativePart)> {
-    read_part_with_map(package, path, id, scale, templates, None, crate::design::ColorMap::default(), warnings, metadata, canvas)
+    read_part_with_map(package, path, id, scale, templates, crate::design::ColorMap::default(), true, warnings, metadata, canvas)
 }
 
-pub(crate) fn read_part_with_map(package: &Package, path: &str, id: String, scale: (f64, f64), templates: &[Element], mapped_templates: Option<&[Element]>, parent_map: crate::design::ColorMap, warnings: &mut Vec<String>, metadata: Option<&crate::provenance::Metadata>, canvas: (u32, u32)) -> Result<(String, Option<String>, Vec<Element>, NativePart)> {
+pub(crate) fn read_part_with_map(package: &Package, path: &str, id: String, scale: (f64, f64), templates: &[Element], parent_map: crate::design::ColorMap, apply_part_map: bool, warnings: &mut Vec<String>, metadata: Option<&crate::provenance::Metadata>, canvas: (u32, u32)) -> Result<(String, Option<String>, Vec<Element>, NativePart)> {
     let document = parse(package.text(path)?)?;
-    let (color_map, unsupported) = resolve_color_map(document.root_element(), parent_map);
+    let (color_map, unsupported) = if apply_part_map { resolve_color_map(document.root_element(), parent_map) } else { (parent_map, false) };
     if unsupported { warnings.push(color_mapping_warning(path)); }
     let common = child(document.root_element(), P, "cSld").ok_or_else(|| Error::Invalid("native common slide data missing".into()))?;
     let tree = child(common, P, "spTree").ok_or_else(|| Error::Invalid("native shape tree missing".into()))?;
@@ -625,7 +617,7 @@ pub(crate) fn read_part_with_map(package: &Package, path: &str, id: String, scal
         } else { node };
         let element_id = properties(node).and_then(|node| node.attribute("id")).and_then(|numeric| ids.get(numeric)).map(String::as_str).unwrap_or("unknown");
         let context = format!("{scope} {id}, {path}, element {element_id}");
-        let result = if is_shape(node) { read_element(package, path, node, scale, &ids, templates, mapped_templates, 0, color_map) } else { Err(Error::Unsupported(node.tag_name().name().into())) };
+        let result = if is_shape(node) { color_map.scope(|| read_element(package, path, node, scale, &ids, templates, 0)) } else { Err(Error::Unsupported(node.tag_name().name().into())) };
         match result {
             Ok(mut element) => {
                 if !document.root_element().has_tag_name((P, "sld")) { if let Element::Text { format, .. } = &mut element { format.inherit_layout = false; } }
@@ -730,9 +722,9 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
                 warnings.push(color_mapping_warning(layout_path));
             }
             let mapped_master = if layout_map != binding.color_map && !elements.is_empty() {
-                Some(read_part_with_map(package, path, master_id.clone(), scale, &[], None, layout_map, &mut Vec::new(), metadata.as_ref(), canvas)?.2)
+                Some(read_part_with_map(package, path, master_id.clone(), scale, &[], layout_map, false, &mut Vec::new(), metadata.as_ref(), canvas)?.2)
             } else { None };
-            let (name, background, elements, layout_binding) = read_part_with_map(package, layout_path, id.clone(), scale, mapped_master.as_deref().unwrap_or(&elements), None, binding.color_map, &mut warnings, metadata.as_ref(), canvas)?;
+            let (name, background, elements, layout_binding) = read_part_with_map(package, layout_path, id.clone(), scale, mapped_master.as_deref().unwrap_or(&elements), binding.color_map, true, &mut warnings, metadata.as_ref(), canvas)?;
             let background = background.or_else(|| {
                 (layout_binding.color_map != binding.color_map)
                     .then(|| self::background(master_xml.root_element(), layout_binding.color_map).unwrap_or_else(|| format!("@{}", layout_binding.color_map.resolve("bg1"))))
@@ -759,7 +751,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
         let layout_xml = parse(package.text(&layout_binding.path)?)?;
         let master_xml = parse(package.text(&master_binding.path)?)?;
         let (slide_map, _) = resolve_color_map(xml.root_element(), layout_binding.color_map);
-        let hide_master_graphics = xml.root_element().attribute("showMasterSp") == Some("0");
+        let hide_master_graphics = matches!(xml.root_element().attribute("showMasterSp"), Some("0" | "false"));
         if has_remapped_nonplaceholder_scheme_color(layout_xml.root_element(), layout_binding.color_map, slide_map)
             || (!hide_master_graphics && !matches!(layout_xml.root_element().attribute("showMasterSp"), Some("0" | "false"))
                 && has_remapped_nonplaceholder_scheme_color(master_xml.root_element(), master_binding.color_map, slide_map))
@@ -768,11 +760,20 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
         }
         let mapped_layout = if slide_map != layout_binding.color_map && !layout.elements.is_empty() {
             let mapped_master = if slide_map != master_binding.color_map && !master.elements.is_empty() {
-                Some(read_part_with_map(package, &master_binding.path, master.id.clone(), scale, &[], None, slide_map, &mut Vec::new(), metadata.as_ref(), canvas)?.2)
+                Some(read_part_with_map(package, &master_binding.path, master.id.clone(), scale, &[], slide_map, false, &mut Vec::new(), metadata.as_ref(), canvas)?.2)
             } else { None };
-            Some(read_part_with_map(package, &layout_binding.path, layout.id.clone(), scale, mapped_master.as_deref().unwrap_or(&master.elements), None, slide_map, &mut Vec::new(), metadata.as_ref(), canvas)?.2)
+            Some(read_part_with_map(package, &layout_binding.path, layout.id.clone(), scale, mapped_master.as_deref().unwrap_or(&master.elements), slide_map, false, &mut Vec::new(), metadata.as_ref(), canvas)?.2)
         } else { None };
-        let (name, background, elements, binding) = read_part_with_map(package, path, id.clone(), scale, &layout.elements, mapped_layout.as_deref(), layout_binding.color_map, &mut warnings, metadata.as_ref(), canvas)?;
+        let (name, background, mut elements, binding) = read_part_with_map(package, path, id.clone(), scale, mapped_layout.as_deref().unwrap_or(&layout.elements), layout_binding.color_map, true, &mut warnings, metadata.as_ref(), canvas)?;
+        if mapped_layout.is_some() {
+            for element in &mut elements {
+                if let Element::Text { color, format, .. } = element {
+                    if format.inherit_layout && !layout.elements.iter().any(| entry| matches!(entry, Element::Text { color: other_color, format: other_format, .. } if other_format.placeholder == format.placeholder && other_color == color)) {
+                        format.inherit_layout = false;
+                    }
+                }
+            }
+        }
         let layout_effective_bg = layout.background.as_deref().unwrap_or(&master.background);
         let background = background.or_else(|| {
             (binding.color_map != layout_binding.color_map)
@@ -785,7 +786,10 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
         let mut notes_paragraphs = Vec::new();
         let notes = if let Some(path) = note_targets.values().next() {
             let document = parse(package.text(path)?)?;
-            let (notes_map, _) = resolve_color_map(document.root_element(), crate::design::ColorMap::default());
+            let notes_master_map = relationship_targets(package, path, "notesMaster")?.into_values().next()
+                .and_then(|master_path| package.text(&master_path).ok().and_then(|text| parse(text).ok()).map(|master_doc| resolve_color_map(master_doc.root_element(), crate::design::ColorMap::default()).0))
+                .unwrap_or_default();
+            let (notes_map, _) = resolve_color_map(document.root_element(), notes_master_map);
             let bodies: Vec<_> = document.descendants().filter(|node| node.has_tag_name((P, "sp")) && placeholder(*node).is_some_and(|ph| ph.kind == PlaceholderKind::Body)).filter_map(|node| child(node, P, "txBody")).collect();
             if note_targets.len() == 1 && bodies.len() == 1 {
                 let body = bodies[0];
@@ -802,7 +806,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
                     || node.has_tag_name((A, "spcBef")) || node.has_tag_name((A, "spcAft"))
                     || has_text && node.has_tag_name((A, "spcPts"))
                     || node.has_tag_name((A, "spcPct")) && node.attribute("val") != Some("115000"));
-                if rich { match read_rich_paragraphs_with_map(body, &Default::default(), &Default::default(), 8000, notes_map) { Ok(value) => notes_paragraphs = value, Err(error) => warnings.push(format!("{path}: rich notes retained ({error})")) } }
+                if rich { match notes_map.scope(|| read_rich_paragraphs_with_limit(body, &Default::default(), &Default::default(), 8000)) { Ok(value) => notes_paragraphs = value, Err(error) => warnings.push(format!("{path}: rich notes retained ({error})")) } }
             }
             bodies.into_iter().map(body_text).collect::<Vec<_>>().join("\n")
         } else { String::new() };
@@ -836,7 +840,7 @@ fn prepare_clipped_projection_edits(package: &Package, binding: &NativePart, bef
         if unchanged { continue; }
         let numeric = binding.nodes.get(&id).ok_or_else(|| Error::Invalid("native clipped projection identity missing".into()))?;
         let node = xml.descendants().find(|node| is_shape(*node) && properties(*node).and_then(|node| node.attribute("id")) == Some(numeric.as_str())).ok_or_else(|| Error::Invalid("native clipped projection node missing".into()))?;
-        let native = read_element(package, &binding.path, node, scale, &ids, &[], None, 0, binding.color_map)?;
+        let native = binding.color_map.scope(|| read_element(package, &binding.path, node, scale, &ids, &[], 0))?;
         let mut projected = native.clone();
         if normalize_native_frame(&mut projected, node, canvas)?.is_none() { continue; }
         if candidates.is_empty() || candidates.iter().any(|candidate| candidate.is_none_or(|new| new.visual().is_some_and(|style| locked && style.locked || hidden && style.hidden))) { return Err(Error::Unsupported(format!("{}: normalized native projection {id} is locked or hidden; explicitly unlock/unhide before editing or removing it", binding.path))); }

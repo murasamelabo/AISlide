@@ -1,4 +1,4 @@
-﻿use crate::{model::{Deck, Slide, element_list}, native::{P, R, REL, NativeDeck, NativePart, child, relations_path}, native_save::{apply, insert_child, scaled_element, resource_changes, remap_resources_with_map}, package::Package, pptx::{parse, relationship_targets, resolve}, Error, Result};
+﻿use crate::{model::{Deck, Slide, element_list}, native::{P, R, REL, NativeDeck, NativePart, child, relations_path}, native_save::{apply, insert_child, scaled_element, resource_changes, remap_resources}, package::Package, pptx::{parse, relationship_targets, resolve}, Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn add_type(package: &mut Package, path: &str, kind: &str) -> Result<()> {
@@ -94,7 +94,7 @@ fn insert_slide(package: &mut Package, layouts: &[NativePart], deck: &Deck, slid
     package.add_part(relations_path(path), relationships.into_bytes())?;
     let resources = resource_changes(package, &binding, &[], &slide.elements, &ids)?;
     let mut elements = String::new();
-    for element in &slide.elements { elements.push_str(&remap_resources_with_map(scaled_element(element, &ids, &design.theme, scale)?, &resources, binding.color_map)?); }
+    for element in &slide.elements { elements.push_str(&binding.color_map.scope(|| remap_resources(scaled_element(element, &ids, &design.theme, scale)?, &resources))?); }
     let mut edits = Vec::new(); insert_child(&xml, tree, &elements, None, &mut edits)?;
     package.add_part(path.into(), apply(xml, edits)?)?;
     Ok(binding)

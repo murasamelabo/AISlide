@@ -38,10 +38,11 @@ fn issue32_color_maps_and_overrides_resolve_across_templates_previews_and_contra
     ];
     let initial = change(&base, initial_deck).document;
     let mut package = Package::open(save(&initial)).unwrap();
+    let master_bg_xml = package.text("ppt/slideMasters/slideMaster1.xml").unwrap().replace("val=\"lt1\"", "val=\"bg1\"");
+    package.replace_part("ppt/slideMasters/slideMaster1.xml", master_bg_xml.into_bytes()).unwrap();
     let layout_path = "ppt/slideLayouts/slideLayout1.xml";
     let mut layout_xml = package.text(layout_path).unwrap().to_owned();
     layout_xml = layout_xml
-        .replace("<p:cSld name=\"Blank\">", "<p:cSld name=\"Blank\"><p:bg><p:bgPr><a:solidFill><a:schemeClr val=\"bg1\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>")
         .replace("val=\"dk1\"", "val=\"tx1\"")
         .replace("val=\"lt1\"", "val=\"bg1\"")
         .replace("val=\"lt2\"", "val=\"bg2\"")
@@ -112,6 +113,20 @@ fn issue32_color_maps_and_overrides_resolve_across_templates_previews_and_contra
     let catalog = aislide_core::execute_request(json!({"op":"inspect_master_source","kind":"potx","base64":STANDARD.encode(&potx_bytes)})).unwrap();
     assert_eq!(catalog["masters"][0]["importable"], true, "{catalog}");
     assert_eq!(catalog["slides"][0]["importable"], true, "{catalog}");
+    for (mode, ids, prefix) in [("masters", json!([catalog["masters"][0]["id"]]), "imp-m"), ("slides", json!([catalog["slides"][0]["id"]]), "imp-s")] {
+        let import_input = json!({"kind":"potx","base64":STANDARD.encode(&potx_bytes),"source_sha256":catalog["source_sha256"],"mode":mode,"ids":ids,"prefix":prefix,"name":"Imported"});
+        let import_preview = aislide_core::execute_request(json!({"op":"preview_master_import","document":base,"expected_revision":base.revision,"expected_hash":base.hash,"input":import_input})).unwrap();
+        let imported = aislide_core::execute_request(json!({"op":"import_masters","document":base,"expected_revision":base.revision,"expected_hash":base.hash,"input":import_input,"expected_candidate_hash":import_preview["candidate_hash"]})).unwrap()["document"].clone();
+        let imported_doc: Document = serde_json::from_value(imported).unwrap();
+        let imported_design = imported_doc.deck.design.as_ref().unwrap();
+        if mode == "masters" {
+            let imported_layout = imported_design.layouts.iter().find(|l| l.id == "imp-m-l1").unwrap();
+            assert_eq!(imported_layout.background.as_deref(), Some("@dk1"));
+        } else {
+            let imported_master = imported_design.masters.iter().find(|m| m.id == "imp-s-m1").unwrap();
+            assert_eq!(imported_master.background, "@dk1");
+        }
+    }
 
     let mut edited_deck = document.deck.clone();
     if let aislide_core::model::Element::Text { color, .. } = &mut edited_deck.slides[0].elements[0] { *color = "@accent2".into(); }
@@ -139,6 +154,50 @@ fn issue32_color_maps_and_overrides_resolve_across_templates_previews_and_contra
     let hierarchy = open(hierarchy_package.save().unwrap());
     assert_eq!(hierarchy.deck.design.as_ref().unwrap().masters[0].background, "@dk1");
     assert_eq!(hierarchy.deck.slides[0].background, "@lt2");
+
+    // Inherited placeholder colors: master placeholder has tx1, layout placeholder has no explicit fill,
+    // layout overrideClrMapping maps bg1->dk1 and tx1->lt1, and slide overrideClrMapping maps bg1->lt2 and tx1->accent1.
+    let mut ph_deck = base.deck.clone();
+    let title_ph: aislide_core::model::Element = serde_json::from_value(json!({
+        "type":"text","id":"ph-title","x":64,"y":80,"width":1152,"height":120,"text":"Master title","font_size":42,"color":"@dk1","bold":true,
+        "format":{"font_family":"@major","placeholder":{"kind":"title","index":0}}
+    })).unwrap();
+    ph_deck.design.as_mut().unwrap().masters[0].elements = vec![title_ph.clone()];
+    ph_deck.design.as_mut().unwrap().layouts[0].elements = vec![title_ph];
+    ph_deck.slides[0].inherit_background = true;
+    ph_deck.slides[0].elements = vec![serde_json::from_value(json!({
+        "type":"text","id":"slide-title","x":64,"y":80,"width":1152,"height":120,"text":"Slide title","font_size":42,"color":"@dk1","bold":true,
+        "format":{"font_family":"@major","placeholder":{"kind":"title","index":0},"inherit_layout":true}
+    })).unwrap()];
+    let ph_doc = change(&base, ph_deck).document;
+    let mut ph_pkg = Package::open(save(&ph_doc)).unwrap();
+    let master_ph_xml = ph_pkg.text("ppt/slideMasters/slideMaster1.xml").unwrap()
+        .replace("val=\"lt1\"", "val=\"bg1\"")
+        .replace("val=\"dk1\"", "val=\"tx1\"");
+    ph_pkg.replace_part("ppt/slideMasters/slideMaster1.xml", master_ph_xml.into_bytes()).unwrap();
+    let layout_ph_xml = ph_pkg.text(layout_path).unwrap()
+        .replace("<a:solidFill><a:schemeClr val=\"dk1\"/></a:solidFill>", "")
+        .replace("</p:cSld>", &format!("</p:cSld><p:clrMapOvr xmlns:p=\"{P}\"><a:overrideClrMapping xmlns:a=\"{A}\" bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr>"));
+    ph_pkg.replace_part(layout_path, layout_ph_xml.into_bytes()).unwrap();
+    let slide_ph_base = ph_pkg.text("ppt/slides/slide1.xml").unwrap()
+        .replace("<a:solidFill><a:schemeClr val=\"dk1\"/></a:solidFill>", "");
+    ph_pkg.replace_part("ppt/slides/slide1.xml", slide_ph_base.clone().into_bytes()).unwrap();
+    let ph_opened = open(ph_pkg.save().unwrap());
+    let ph_layout = &ph_opened.deck.design.as_ref().unwrap().layouts[0];
+    assert_eq!(ph_layout.background.as_deref(), Some("@dk1"));
+    assert_eq!(serde_json::to_value(&ph_layout.elements[0]).unwrap()["color"], "@lt1");
+    assert_eq!(serde_json::to_value(&ph_opened.deck.slides[0].elements[0]).unwrap()["color"], "@lt1");
+
+    // Both layout and slide have overrideClrMapping.
+    let slide_override_xml = slide_ph_base.replace(
+        "<a:masterClrMapping/>",
+        &format!("<a:overrideClrMapping xmlns:a=\"{A}\" bg1=\"lt2\" tx1=\"accent1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/>"),
+    );
+    ph_pkg.replace_part("ppt/slides/slide1.xml", slide_override_xml.into_bytes()).unwrap();
+    let both_overridden = open(ph_pkg.save().unwrap());
+    assert_eq!(both_overridden.deck.slides[0].background, "@lt2");
+    assert!(!both_overridden.deck.slides[0].inherit_background);
+    assert_eq!(serde_json::to_value(&both_overridden.deck.slides[0].elements[0]).unwrap()["color"], "@accent1");
 }
 
 #[test]

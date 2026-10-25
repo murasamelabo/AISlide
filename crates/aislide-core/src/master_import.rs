@@ -41,33 +41,22 @@ fn load(kind: SourceKind, encoded: &str, profile: crate::limits::CapacityProfile
     let scale = (dimensions.0 as f64 / f64::from(native.deck.width), dimensions.1 as f64 / f64::from(native.deck.height));
     let mut shell = native.deck.clone();
     shell.embedded_fonts.clear(); shell.auxiliary_design = None;
-    for (slide, binding) in shell.slides.iter_mut().zip(&native.slides) {
-        slide.elements.clear(); slide.notes.clear(); slide.notes_paragraphs.clear(); slide.review = None;
-        let parsed = crate::pptx::parse(package.text(&binding.path)?)?;
-        if crate::native::child(parsed.root_element(), crate::native::P, "cSld").and_then(|node| crate::native::child(node, crate::native::P, "bg")).is_none() {
-            slide.inherit_background = true;
-        }
-    }
+    for slide in &mut shell.slides { slide.elements.clear(); slide.notes.clear(); slide.notes_paragraphs.clear(); slide.review = None; }
     if let Some(design) = &mut shell.design {
         for master in &mut design.masters { master.elements.clear(); }
-        for (layout, binding) in design.layouts.iter_mut().zip(&native.layouts) {
-            layout.elements.clear();
-            let parsed = crate::pptx::parse(package.text(&binding.path)?)?;
-            if crate::native::child(parsed.root_element(), crate::native::P, "cSld").and_then(|node| crate::native::child(node, crate::native::P, "bg")).is_none() {
-                layout.background = None;
-            }
-        }
+        for layout in &mut design.layouts { layout.elements.clear(); }
     }
     let generated = Package::open(crate::pptx::export_pptx(&shell)?)?;
     Ok(Source { package, generated, native, hash, scale })
 }
 
-fn xml_value(node: roxmltree::Node<'_, '_>, shell: bool, color_map: crate::design::ColorMap) -> Option<Value> {
+fn xml_value(node: roxmltree::Node<'_, '_>, shell: bool, ignore_synthesized_bg: bool, color_map: crate::design::ColorMap) -> Option<Value> {
     use crate::native::{A, P, R};
     if shell && crate::native::is_shape(node) { return None; }
+    if shell && ignore_synthesized_bg && node.has_tag_name((P, "bg")) { return None; }
     if shell && node.has_tag_name((P, "clrMapOvr")) && !crate::native::unsupported_color_mapping(node.parent().unwrap_or(node)) { return None; }
     let attributes: BTreeMap<_, _> = if shell && node.has_tag_name((P, "clrMap")) && crate::native::apply_color_map_node(&mut crate::design::ColorMap::default(), node) {
-        crate::design::COLOR_MAP_KEYS.into_iter().map(|key| (format!(":{key}"), crate::design::color_slot(key))).collect()
+        crate::design::COLOR_MAP_KEYS.into_iter().map(|key| (format!(":{key}"), crate::design::ColorMap::default().resolve(key))).collect()
     } else {
         node.attributes().filter(|attribute| {
             !(shell && (node.has_tag_name((P, "sldLayoutId")) && attribute.name() == "id" && (attribute.namespace().is_none() || attribute.namespace() == Some(R))
@@ -78,7 +67,7 @@ fn xml_value(node: roxmltree::Node<'_, '_>, shell: bool, color_map: crate::desig
         }).collect()
     };
     let children: Vec<_> = node.children().filter_map(|child| {
-        if child.is_element() { xml_value(child, shell, color_map) }
+        if child.is_element() { xml_value(child, shell, ignore_synthesized_bg, color_map) }
         else if child.is_text() && !child.text().unwrap_or("").trim().is_empty() { Some(json!(child.text())) }
         else { None }
     }).collect();
@@ -92,10 +81,12 @@ fn expected_part(source: &Source, part: &NativePart) -> Result<String> {
     Err(Error::Invalid("source part binding missing".into()))
 }
 
-fn check_part(source: &Source, part: &NativePart, elements: &[Element], theme: &crate::design::Theme) -> Result<()> {
+fn check_part(source: &Source, part: &NativePart, elements: &[Element], theme: &crate::design::Theme, parent_color_map: Option<crate::design::ColorMap>) -> Result<()> {
     let xml = crate::pptx::parse(source.package.text(&part.path)?)?;
     let expected = crate::pptx::parse(source.generated.text(&expected_part(source, part)?)?)?;
-    if xml_value(xml.root_element(), true, part.color_map) != xml_value(expected.root_element(), true, crate::design::ColorMap::default()) {
+    let has_source_bg = crate::native::child(xml.root_element(), crate::native::P, "cSld").and_then(|node| crate::native::child(node, crate::native::P, "bg")).is_some();
+    let ignore_synthesized_bg = !has_source_bg && parent_color_map.is_some_and(|parent_map| part.color_map != parent_map);
+    if xml_value(xml.root_element(), true, false, part.color_map) != xml_value(expected.root_element(), true, ignore_synthesized_bg, crate::design::ColorMap::default()) {
         return Err(Error::Unsupported("source background, master text styles or XML extensions cannot be preserved by editable master import".into()));
     }
     let tree = crate::native::child(xml.root_element(), crate::native::P, "cSld")
@@ -129,11 +120,11 @@ fn check_master(source: &Source, id: &str) -> Result<()> {
     let actual_theme = crate::pptx::parse(source.package.text(theme_path)?)?;
     let expected_theme = Package::open(crate::templates::export_thmx(theme)?)?;
     let expected_theme = crate::pptx::parse(expected_theme.text("theme/theme/theme1.xml")?)?;
-    if xml_value(actual_theme.root_element(), false, crate::design::ColorMap::default()) != xml_value(expected_theme.root_element(), false, crate::design::ColorMap::default()) {
+    if xml_value(actual_theme.root_element(), false, false, crate::design::ColorMap::default()) != xml_value(expected_theme.root_element(), false, false, crate::design::ColorMap::default()) {
         return Err(Error::Unsupported("source theme effects or extensions are not represented by editable master import".into()));
     }
     let master_xml = crate::pptx::parse(source.package.text(&part.path)?)?;
-    check_part(source, part, &master.elements, theme)?;
+    check_part(source, part, &master.elements, theme, None)?;
     for layout in design.layouts.iter().filter(|layout| layout.master_id == id) {
         let layout_part = source.native.layouts.iter().find(|part| part.id == layout.id).ok_or_else(|| Error::Invalid("source layout binding missing".into()))?;
         let layout_xml = crate::pptx::parse(source.package.text(&layout_part.path)?)?;
@@ -142,7 +133,7 @@ fn check_master(source: &Source, id: &str) -> Result<()> {
         {
             return Err(Error::Unsupported("source layout color map remaps shared master artwork".into()));
         }
-        check_part(source, layout_part, &layout.elements, theme)?;
+        check_part(source, layout_part, &layout.elements, theme, Some(part.color_map))?;
     }
     Ok(())
 }
@@ -164,7 +155,7 @@ fn check_slide(source: &Source, id: &str) -> Result<()> {
     {
         return Err(Error::Unsupported("source slide color map remaps shared layout or master artwork".into()));
     }
-    check_part(source, part, &slide.elements, crate::design::master_theme(design, &layout.master_id))?;
+    check_part(source, part, &slide.elements, crate::design::master_theme(design, &layout.master_id), Some(layout_part.color_map))?;
     let master = design.masters.iter().find(|master| master.id == layout.master_id).ok_or_else(|| Error::Invalid("source master missing".into()))?;
     sample_elements(slide, master, layout)?;
     Ok(())

@@ -29,21 +29,21 @@ pub(crate) fn check_copy_element(package: &Package, binding: &NativePart, elemen
     let node = parsed.descendants().find(|node| is_shape(*node) && properties(*node).and_then(|node| node.attribute("id")) == Some(numeric)).ok_or_else(|| Error::Invalid("native element missing".into()))?;
     let ids = binding.nodes.iter().map(|(id, numeric)| Ok((id.as_str(), numeric.parse::<usize>().map_err(|_| Error::Invalid("native shape identity".into()))?))).collect::<Result<BTreeMap<_, _>>>()?;
     let generated = scaled_element(element, &ids, theme, scale)?;
-    fn copy_value(node: Node<'_, '_>, color_map: crate::design::ColorMap) -> serde_json::Value {
+    fn copy_value(node: Node<'_, '_>) -> serde_json::Value {
         let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| {
             let value = if attribute.namespace() == Some(crate::native::R) { "resource" }
-            else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { color_map.resolve(attribute.value()) }
+            else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::color_slot(attribute.value()) }
             else { attribute.value() };
             (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), value)
         }).collect();
         let children: Vec<_> = node.children().filter_map(|node| {
-            if node.is_element() { Some(copy_value(node, color_map)) }
+            if node.is_element() { Some(copy_value(node)) }
             else if node.is_text() && !node.text().unwrap_or("").trim().is_empty() { Some(serde_json::json!(node.text())) }
             else { None }
         }).collect();
         serde_json::json!({"namespace":node.tag_name().namespace(),"name":node.tag_name().name(),"attributes":attributes,"children":children})
     }
-    if copy_value(node, binding.color_map) != copy_value(parse(&generated)?.root_element(), crate::design::ColorMap::default()) { return Err(Error::Unsupported("native object has formatting not represented by an individual copy; duplicate its slide instead".into())); }
+    if binding.color_map.scope(|| copy_value(node)) != copy_value(parse(&generated)?.root_element()) { return Err(Error::Unsupported("native object has formatting not represented by an individual copy; duplicate its slide instead".into())); }
     for descendant in crate::model::element_list(std::slice::from_ref(element)) {
         if let Element::Text { id, format, .. } | Element::Shape { id, format, .. } = descendant {
             let numeric = binding.nodes.get(id).ok_or_else(|| Error::Invalid("native text identity missing".into()))?;
@@ -65,18 +65,18 @@ pub(crate) fn check_copy_element(package: &Package, binding: &NativePart, elemen
 }
 
 fn xml_value(node: Node<'_, '_>) -> serde_json::Value {
-    xml_value_with_options(node, false, crate::design::ColorMap::default())
+    xml_value_with_hyperlinks(node, false)
 }
 
-fn xml_value_with_options(node: Node<'_, '_>, normalize_links: bool, color_map: crate::design::ColorMap) -> serde_json::Value {
+fn xml_value_with_hyperlinks(node: Node<'_, '_>, normalize_links: bool) -> serde_json::Value {
     let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| {
         let value = if normalize_links && node.has_tag_name((A, "hlinkClick")) && attribute.namespace() == Some(crate::native::R) && attribute.name() == "id" { "hyperlink" }
-        else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { color_map.resolve(attribute.value()) }
+        else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::color_slot(attribute.value()) }
         else { attribute.value() };
         (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), value)
     }).collect();
     let children: Vec<_> = node.children().filter_map(|node| {
-        if node.is_element() { Some(xml_value_with_options(node, normalize_links, color_map)) }
+        if node.is_element() { Some(xml_value_with_hyperlinks(node, normalize_links)) }
         else if node.is_text() && !node.text().unwrap_or("").trim().is_empty() { Some(serde_json::json!(node.text())) }
         else { None }
     }).collect();
@@ -107,14 +107,14 @@ pub(crate) fn chart_is_representable(package: &Package, binding: &NativePart, id
             if package.part_names().contains(relations_path(style_path).as_str()) { return Ok(false); }
             let actual = parse(package.text(style_path)?)?;
             let expected = parse(std::str::from_utf8(&bytes).map_err(|_| Error::Invalid("chartEx style encoding".into()))?)?;
-            if xml_value(actual.root_element()) != xml_value(expected.root_element()) { return Ok(false); }
+            if binding.color_map.scope(|| xml_value(actual.root_element())) != crate::design::ColorMap::default().scope(|| xml_value(expected.root_element())) { return Ok(false); }
         }
         if crate::pptx::relationship_targets(package, path, "package")?.len() != 1 { return Ok(false); }
     }
     let actual = parse(package.text(path)?)?;
     let expected = crate::charts::chart(kind, categories, series, options);
     let expected = parse(std::str::from_utf8(&expected).map_err(|_| Error::Invalid("chart XML encoding".into()))?)?;
-    if xml_value_with_options(actual.root_element(), false, binding.color_map) != xml_value(expected.root_element()) {
+    if binding.color_map.scope(|| xml_value(actual.root_element())) != crate::design::ColorMap::default().scope(|| xml_value(expected.root_element())) {
         use crate::model::chart_format::{automatic_label_position, LabelPosition};
         let legacy = if kind == crate::model::ChartKind::Sunburst {
             crate::chart_extended::legacy_sunburst_chart(categories, series, options)
@@ -123,7 +123,7 @@ pub(crate) fn chart_is_representable(package: &Package, binding: &NativePart, id
             crate::charts::legacy_label_position_chart(kind, categories, series, options)
         };
         let legacy = parse(std::str::from_utf8(&legacy).map_err(|_| Error::Invalid("chart XML encoding".into()))?)?;
-        if xml_value_with_options(actual.root_element(), false, binding.color_map) != xml_value(legacy.root_element()) { return Ok(false); }
+        if binding.color_map.scope(|| xml_value(actual.root_element())) != crate::design::ColorMap::default().scope(|| xml_value(legacy.root_element())) { return Ok(false); }
     }
     let Some(relation) = actual.descendants().find(|node| node.has_tag_name((namespace, "externalData"))).and_then(|node| node.attribute((crate::native::R, "id"))) else { return Ok(false); };
     let targets = crate::pptx::relationship_targets(package, path, "package")?;
@@ -134,11 +134,8 @@ pub(crate) fn chart_is_representable(package: &Package, binding: &NativePart, id
 }
 
 pub(crate) fn remap_resources(xml: String, mapping: &BTreeMap<String, String>) -> Result<String> {
-    remap_resources_with_map(xml, mapping, crate::design::ColorMap::default())
-}
-
-pub(crate) fn remap_resources_with_map(xml: String, mapping: &BTreeMap<String, String>, color_map: crate::design::ColorMap) -> Result<String> {
     let document = parse(&xml)?; let mut edits = Vec::new();
+    let color_map = crate::design::ColorMap::current();
     let remap_colors = crate::design::COLOR_KEYS.iter().any(|slot| color_map.resolve(slot) != *slot);
     for node in document.descendants() {
         for attribute in node.attributes() {
@@ -197,7 +194,12 @@ pub(crate) fn resource_changes(package: &mut Package, binding: &NativePart, befo
     if chart_number > u32::MAX as usize - 2048 || picture_number > u32::MAX as usize - 2048 { return Err(Error::Limit("native resource IDs exhausted".into())); }
     let mut parts = BTreeMap::new(); let mut types = Vec::new();
     let relationships = crate::pptx::resource_parts(&mut parts, &resources, &mut chart_number, &mut picture_number, &mut types, Some(ids), &mut crate::pptx::MediaResources::new())?;
-    for (path, data) in parts { package.add_part(path, data)?; }
+    for (path, data) in parts {
+        let data = if path.starts_with("ppt/charts/") && path.ends_with(".xml") {
+            remap_resources(String::from_utf8(data).map_err(|_| Error::Invalid("chart XML encoding".into()))?, &BTreeMap::new())?.into_bytes()
+        } else { data };
+        package.add_part(path, data)?;
+    }
     let relation_path = relations_path(&binding.path);
     let xml = if package.part_names().contains(relation_path.as_str()) { package.text(&relation_path)?.to_owned() } else { format!("<Relationships xmlns=\"{}\"/>", crate::native::REL) };
     let parsed = parse(&xml)?;
@@ -361,7 +363,7 @@ fn uniform_hyperlinks(body: Node<'_, '_>, targets: &BTreeMap<String, String>) ->
     true
 }
 
-fn supports_style(body: Node<'_, '_>, hyperlinks: &BTreeMap<String, String>, color_map: crate::design::ColorMap) -> bool {
+fn supports_style(body: Node<'_, '_>, hyperlinks: &BTreeMap<String, String>) -> bool {
     if !plain_paragraphs(body) || !uniform_hyperlinks(body, hyperlinks) { return false; }
     let allowed = ["txBody", "bodyPr", "noAutofit", "lstStyle", "lvl1pPr", "p", "pPr", "lnSpc", "spcPct", "buNone", "buChar", "buAutoNum", "r", "rPr", "defRPr", "endParaRPr", "t", "solidFill", "srgbClr", "schemeClr", "latin", "ea", "cs", "hlinkClick"];
     if body.descendants().filter(|node| node.is_element()).any(|node| !allowed.contains(&node.tag_name().name())) { return false; }
@@ -382,7 +384,7 @@ fn supports_style(body: Node<'_, '_>, hyperlinks: &BTreeMap<String, String>, col
     runs.windows(2).all(|pair| {
         let left: BTreeMap<_, _> = pair[0].attributes().filter(|attr| attr.name() != "lang").map(|attr| ((attr.namespace(), attr.name()), attr.value())).collect();
         let right: BTreeMap<_, _> = pair[1].attributes().filter(|attr| attr.name() != "lang").map(|attr| ((attr.namespace(), attr.name()), attr.value())).collect();
-        left == right && pair[0].children().filter(|node| node.is_element()).map(|node| xml_value_with_options(node, true, color_map)).eq(pair[1].children().filter(|node| node.is_element()).map(|node| xml_value_with_options(node, true, color_map)))
+        left == right && pair[0].children().filter(|node| node.is_element()).map(|node| xml_value_with_hyperlinks(node, true)).eq(pair[1].children().filter(|node| node.is_element()).map(|node| xml_value_with_hyperlinks(node, true)))
     })
 }
 
@@ -447,9 +449,9 @@ pub(crate) fn check_rich_text(package: &Package, binding: &NativePart, id: &str)
     Ok(())
 }
 
-fn replace_rich_paragraphs(xml: &str, body: Node<'_, '_>, generated: &str, next_body: Node<'_, '_>, unchanged: &[bool], hyperlinks: &BTreeMap<String, String>, color_map: crate::design::ColorMap, edits: &mut Edits) -> Result<()> {
+fn replace_rich_paragraphs(xml: &str, body: Node<'_, '_>, generated: &str, next_body: Node<'_, '_>, unchanged: &[bool], hyperlinks: &BTreeMap<String, String>, edits: &mut Edits) -> Result<()> {
     validate_rich_style(body, hyperlinks)?;
-    crate::native::read_rich_paragraphs_with_map(body, &crate::rich_text::RunStyle::default(), &crate::model::TextFormat::default(), 4000, color_map)?;
+    crate::native::read_rich_paragraphs(body, &crate::rich_text::RunStyle::default(), &crate::model::TextFormat::default())?;
     let original: Vec<_> = body.children().filter(|node| node.has_tag_name((A, "p"))).collect();
     let next: Vec<_> = next_body.children().filter(|node| node.has_tag_name((A, "p"))).collect();
     for (index, paragraph) in original.iter().enumerate() {
@@ -516,7 +518,7 @@ fn text_padding_changes(xml: &str, body: Node<'_, '_>, element: &Element, edits:
     Ok(())
 }
 
-fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '_>, previous: Node<'_, '_>, old: &Element, new: &Element, hyperlinks: &BTreeMap<String, String>, color_map: crate::design::ColorMap, edits: &mut Edits) -> Result<()> {
+fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '_>, previous: Node<'_, '_>, old: &Element, new: &Element, hyperlinks: &BTreeMap<String, String>, edits: &mut Edits) -> Result<()> {
     crate::rich_text::validate_element(new)?;
     let (old_text, old_size, old_color, old_bold, old_format) = match old { Element::Text { text, font_size, color, bold, format, .. } | Element::Shape { text, font_size, color, bold, format, .. } => (text, font_size, color, bold, format), _ => return Ok(()) };
     let (text, size, color, bold, format) = match new { Element::Text { text, font_size, color, bold, format, .. } | Element::Shape { text, font_size, color, bold, format, .. } => (text, font_size, color, bold, format), _ => return Err(Error::Unsupported("native object type change".into())) };
@@ -539,7 +541,7 @@ fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '
         }
         let next_body = child(next, P, "txBody").ok_or_else(|| Error::Invalid("generated text body missing".into()))?;
         let unchanged: Vec<_> = old_format.paragraphs.iter().enumerate().map(|(index, paragraph)| old_format.hyperlink == format.hyperlink && format.paragraphs.get(index) == Some(paragraph)).collect();
-        replace_rich_paragraphs(xml, body, generated, next_body, &unchanged, hyperlinks, color_map, edits)?;
+        replace_rich_paragraphs(xml, body, generated, next_body, &unchanged, hyperlinks, edits)?;
         if padding_changed { text_padding_changes(xml, body, new, edits)?; }
         if old_format.vertical != format.vertical {
             let properties = child(body, A, "bodyPr").ok_or_else(|| Error::Unsupported("native body properties missing".into()))?;
@@ -549,7 +551,7 @@ fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '
     }
     if style_changed && !(old_format.inherit_layout && format.inherit_layout) {
         let expected = child(previous, P, "txBody").ok_or_else(|| Error::Invalid("previous text body missing".into()))?;
-        if !supports_style(body, hyperlinks, color_map) || xml_value_with_options(body, true, color_map) != xml_value_with_options(expected, true, crate::design::ColorMap::default()) { return Err(Error::Unsupported("complex native text formatting is preserved; only its supported text/geometry fields are writable".into())); }
+        if !supports_style(body, hyperlinks) || xml_value_with_hyperlinks(body, true) != crate::design::ColorMap::default().scope(|| xml_value_with_hyperlinks(expected, true)) { return Err(Error::Unsupported("complex native text formatting is preserved; only its supported text/geometry fields are writable".into())); }
         let next_body = child(next, P, "txBody").ok_or_else(|| Error::Invalid("generated text body".into()))?;
         edits.push((body.range(), fragment(generated, next_body)));
     } else {
@@ -562,7 +564,7 @@ fn text_changes(xml: &str, node: Node<'_, '_>, generated: &str, next: Node<'_, '
 fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, ids: &BTreeMap<&str, usize>, theme: &crate::design::Theme, binding: &NativePart, resources: &PartResources, scale: (f64, f64), edits: &mut Edits) -> Result<()> {
     if equal(old, new)? { return Ok(()); }
     if std::mem::discriminant(old) != std::mem::discriminant(new) { return Err(Error::Unsupported("native shape type replacement".into())); }
-    let generated = remap_resources_with_map(scaled_element(new, ids, theme, scale)?, &resources.mapping, binding.color_map)?;
+    let generated = remap_resources(scaled_element(new, ids, theme, scale)?, &resources.mapping)?;
     // Earlier exports kept custom routes in p:cxnSp, which PowerPoint cannot open; an edited route is rewritten as the marked freeform.
     if matches!(new, Element::Connector { routing: Some(route), .. } if route.custom) && node.has_tag_name((P, "cxnSp")) {
         edits.push((node.range(), generated));
@@ -581,11 +583,11 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
     let old_bounds = old.bounds(); let new_bounds = new.bounds();
     if old_bounds != new_bounds || matches!((old, new), (Element::Text { format: old, .. }, Element::Text { format: new, .. }) if old.inherit_layout != new.inherit_layout)
         || matches!((old, new), (Element::Shape { rotation: old, .. }, Element::Shape { rotation: new, .. }) if old != new) { geometry(xml, node, &generated, next, old, new, scale, edits)?; }
-    text_changes(xml, node, &generated, next, previous, old, new, &resources.hyperlinks, binding.color_map, edits).map_err(|error| match error {
+    text_changes(xml, node, &generated, next, previous, old, new, &resources.hyperlinks, edits).map_err(|error| match error {
         Error::Unsupported(message) => Error::Unsupported(format!("slide_id {}, element {}: {message}", binding.id, new.bounds().0)),
         error => error,
     })?;
-    crate::visual::patch(xml, node, &generated, next, previous, old, new, binding.color_map, edits)?;
+    crate::visual::patch(xml, node, &generated, next, previous, old, new, edits)?;
     match (old, new) {
         (Element::Group { children: old, view_width, view_height, .. }, Element::Group { children: new, view_width: next_width, view_height: next_height, .. }) => {
             if view_width != next_width || view_height != next_height { return Err(Error::Unsupported("changing a native group coordinate system".into())); }
@@ -596,7 +598,7 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
             let expected = previous.descendants().find(|node| node.has_tag_name((A, "tbl"))).ok_or_else(|| Error::Invalid("previous table missing".into()))?;
             let generated_table = next.descendants().find(|node| node.has_tag_name((A, "tbl"))).ok_or_else(|| Error::Invalid("generated table missing".into()))?;
             if rows.len() != next_rows.len() || rows[0].len() != next_rows[0].len() {
-                if xml_value_with_options(table, false, binding.color_map) != xml_value(expected) { return Err(Error::Unsupported("custom native table formatting is preserved; structural replacement is not safely representable".into())); }
+                if xml_value(table) != crate::design::ColorMap::default().scope(|| xml_value(expected)) { return Err(Error::Unsupported("custom native table formatting is preserved; structural replacement is not safely representable".into())); }
                 edits.push((table.range(), fragment(&generated, generated_table)));
             } else {
                 fn cells<'node, 'input>(table: Node<'node, 'input>) -> Vec<Node<'node, 'input>> { table.children().filter(|node| node.has_tag_name((A,"tr"))).flat_map(|row| row.children().filter(|cell| cell.has_tag_name((A,"tc")))).collect() }
@@ -613,7 +615,7 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
                         validate_rich_style(body, &resources.hyperlinks).map_err(|error| Error::Unsupported(format!("slide_id {}, element {}, cell ({row}, {column}): {error}", binding.id, new.bounds().0)))?;
                         if body.descendants().any(|node| node.has_tag_name((A,"hlinkClick")) || node.has_tag_name((A,"hlinkMouseOver"))) { return Err(Error::Unsupported("native cell hyperlinks are preserved; text style replacement is unsupported".into())); }
                         let next_body = child(next_cell,A,"txBody").ok_or_else(|| Error::Invalid("generated table text missing".into()))?;
-                        crate::table_format::patch_paragraphs(xml,body,&generated,next_body,binding.color_map,edits)?;
+                        crate::table_format::patch_paragraphs(xml,body,&generated,next_body,edits)?;
                     } else if before != after { replace_text(xml,body,after,edits)?; }
                     if format.merges != next_format.merges {
                         let before_flags = crate::table_format::merge_flags(format,row,column);
@@ -645,7 +647,7 @@ fn patch_element(xml: &str, node: Node<'_, '_>, old: &Element, new: &Element, id
                         for (changed,names) in [(old_style.outline != style.outline,&["lnL","lnR","lnT","lnB"][..]),(old_style.fill != style.fill,&["noFill","solidFill","gradFill","blipFill","pattFill","grpFill"][..])] {
                             if changed {
                                 for name in names {
-                                    if child(properties,A,name).map(|node| xml_value_with_options(node, false, binding.color_map)) != child(previous_properties,A,name).map(xml_value) { return Err(Error::Unsupported("custom native cell fill or outline is preserved; replacement is not safely representable".into())); }
+                                    if child(properties,A,name).map(xml_value) != crate::design::ColorMap::default().scope(|| child(previous_properties,A,name).map(xml_value)) { return Err(Error::Unsupported("custom native cell fill or outline is preserved; replacement is not safely representable".into())); }
                                 }
                                 for name in names { merge_child(xml,properties,&generated,next_properties,A,name,&order,&mut property_edits)?; }
                             }
@@ -836,7 +838,7 @@ impl NativeSelection<'_, '_, '_> {
                 insert_child(&shell, parsed.root_element(), &content, None, &mut edits)?;
                 return String::from_utf8(apply(shell, edits)?).map_err(|_| Error::Invalid("native group encoding".into()));
             }
-            return remap_resources_with_map(scaled_element(element, self.ids, self.theme, scale)?, &self.resources.mapping, self.binding.color_map);
+            return remap_resources(scaled_element(element, self.ids, self.theme, scale)?, &self.resources.mapping);
         };
         let mut edits = Vec::new();
         if let (Element::Group { children: before, view_width, view_height, .. }, Element::Group { children: after, view_width: next_width, view_height: next_height, .. }) = (old, element) {
@@ -997,7 +999,7 @@ fn patch_elements(xml: &str, tree: Node<'_, '_>, before: &[Element], after: &[El
                 patch_element(xml, node, old, next, ids, theme, binding, resources, scale, &mut local)?;
                 fragments.push(edited_fragment(xml, node, local)?);
             } else {
-                fragments.push(remap_resources_with_map(scaled_element(next, ids, theme, scale)?, &resources.mapping, binding.color_map)?);
+                fragments.push(remap_resources(scaled_element(next, ids, theme, scale)?, &resources.mapping)?);
             }
         }
         let mut fragments = fragments.into_iter();
@@ -1018,7 +1020,7 @@ fn patch_elements(xml: &str, tree: Node<'_, '_>, before: &[Element], after: &[El
     }
     let mut inserted = String::new();
     for element in after.iter().filter(|element| !before.iter().any(|old| old.bounds().0 == element.bounds().0)) {
-        inserted.push_str(&remap_resources_with_map(scaled_element(element, ids, theme, scale)?, &resources.mapping, binding.color_map)?);
+        inserted.push_str(&remap_resources(scaled_element(element, ids, theme, scale)?, &resources.mapping)?);
     }
     if !inserted.is_empty() { insert_child(xml, tree, &inserted, child(tree, P, "extLst"), edits)?; }
     Ok(())
@@ -1045,7 +1047,7 @@ pub(crate) fn patch_part(package: &mut Package, binding: &NativePart, before: &[
             if let Some(old) = old { edits.push((old.range(), generated)); } else { insert_child(&xml, common, &generated, Some(tree), &mut edits)?; }
         } else if let Some(old) = old { edits.push((old.range(), String::new())); }
     }
-    patch_elements(&xml, tree, before, after, &ids, theme, binding, &resources, scale, &mut edits)?;
+    binding.color_map.scope(|| patch_elements(&xml, tree, before, after, &ids, theme, binding, &resources, scale, &mut edits))?;
     if !edits.is_empty() { package.replace_part(&binding.path, apply(xml, edits)?)?; }
     Ok(())
 }

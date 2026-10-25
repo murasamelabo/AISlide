@@ -5,8 +5,17 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const COLOR_KEYS: [&str; 12] = ["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
 pub const COLOR_MAP_KEYS: [&str; 12] = ["bg1", "tx1", "bg2", "tx2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ColorMap([&'static str; 12]);
+
+thread_local! {
+    static ACTIVE_COLOR_MAP: std::cell::Cell<ColorMap> = std::cell::Cell::new(ColorMap::default());
+}
+
+struct ColorMapGuard(ColorMap);
+impl Drop for ColorMapGuard {
+    fn drop(&mut self) { ACTIVE_COLOR_MAP.with(|active| active.set(self.0)); }
+}
 
 impl Default for ColorMap {
     fn default() -> Self {
@@ -15,6 +24,16 @@ impl Default for ColorMap {
 }
 
 impl ColorMap {
+    pub(crate) fn current() -> Self {
+        ACTIVE_COLOR_MAP.with(std::cell::Cell::get)
+    }
+
+    pub(crate) fn scope<R>(self, run: impl FnOnce() -> R) -> R {
+        let previous = ACTIVE_COLOR_MAP.with(|active| active.replace(self));
+        let _guard = ColorMapGuard(previous);
+        run()
+    }
+
     pub(crate) fn resolve<'a>(&self, value: &'a str) -> &'a str {
         COLOR_MAP_KEYS.iter().position(|key| *key == value).map_or(value, |index| self.0[index])
     }
@@ -27,13 +46,14 @@ impl ColorMap {
     }
 
     pub(crate) fn encode<'a>(&self, slot: &'a str) -> Option<&'a str> {
+        let slot = Self::default().resolve(slot);
         if self.resolve(slot) == slot { return Some(slot); }
         COLOR_MAP_KEYS.iter().copied().find(|key| self.resolve(key) == slot)
     }
 }
 
 pub(crate) fn color_slot(value: &str) -> &str {
-    ColorMap::default().resolve(value)
+    ColorMap::current().resolve(value)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
