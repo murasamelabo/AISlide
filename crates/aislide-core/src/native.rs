@@ -125,20 +125,24 @@ pub(crate) fn part_color_map(package: &Package, path: &str) -> crate::design::Co
     step(package, path, None, 0)
 }
 
-fn has_remapped_shapes(package: &Package, path: &str, root: Node<'_, '_>, owner_map: crate::design::ColorMap, child_map: crate::design::ColorMap) -> bool {
-    if owner_map == child_map { return false; }
-    let Some(tree) = child(root, P, "cSld").and_then(|node| child(node, P, "spTree")) else { return false };
+fn remaps(n: Node<'_, '_>, a: crate::design::ColorMap, b: crate::design::ColorMap) -> bool {
+    n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| b.resolve(v) != a.resolve(v))
+}
+
+fn has_remapped_shapes(package: &Package, path: &str, root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
+    if om == cm { return false; }
+    let Some(tree) = child(root, P, "cSld").and_then(|n| child(n, P, "spTree")) else { return false };
     for c in tree.children().filter(|n| n.is_element()).map(|n| crate::interactive::office::static_fallback(n).unwrap_or(n)) {
         for n in c.descendants().filter(|n| is_shape(*n) && placeholder(*n).is_none() && !n.ancestors().filter(|a| is_shape(*a)).any(|a| properties(a).is_some_and(|p| matches!(p.attribute("hidden"), Some("1" | "true"))))) {
-            if n.descendants().any(|d| d.has_tag_name((A, "schemeClr")) && !d.ancestors().take_while(|a| *a != n).any(|a| is_shape(a)) && d.attribute("val").is_some_and(|v| child_map.resolve(v) != owner_map.resolve(v))) { return true; }
+            if n.descendants().any(|d| remaps(d, om, cm) && !d.ancestors().take_while(|a| *a != n).any(|a| is_shape(a))) { return true; }
         }
     }
     ["chart", "chartEx"].into_iter().flat_map(|k| relationship_targets(package, path, k).ok().into_iter().flat_map(|t| t.into_values()))
-        .any(|p| package.text(&p).ok().and_then(|t| parse(t).ok()).is_some_and(|d| d.descendants().any(|n| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| child_map.resolve(v) != owner_map.resolve(v)))))
+        .any(|p| package.text(&p).ok().and_then(|t| parse(t).ok()).is_some_and(|d| d.descendants().any(|n| remaps(n, om, cm))))
 }
 
-fn has_remapped_non_solid_bg(root: Node<'_, '_>, owner_map: crate::design::ColorMap, child_map: crate::design::ColorMap) -> bool {
-    owner_map != child_map && has_non_solid_bg(root) && child(root, P, "cSld").and_then(|n| child(n, P, "bg")).is_some_and(|bg| bg.descendants().any(|n| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| child_map.resolve(v) != owner_map.resolve(v))))
+fn has_remapped_non_solid_bg(root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
+    om != cm && has_non_solid_bg(root) && child(root, P, "cSld").and_then(|n| child(n, P, "bg")).is_some_and(|bg| bg.descendants().any(|n| remaps(n, om, cm)))
 }
 
 pub(crate) fn layout_remaps_master_artwork(package: &Package, lp: &str, mp: &str) -> bool {
@@ -813,6 +817,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
 
 fn prepare_clipped_projection_edits(package: &Package, binding: &NativePart, before: &mut [Element], after: &[&[Element]], scale: (f64, f64), canvas: (u32, u32)) -> Result<()> {
     if after.is_empty() || !before.iter().any(|element| element.visual().is_some_and(|style| style.locked || style.hidden)) { return Ok(()); }
+    let _scope = part_color_map(package, &binding.path).enter();
     let xml = parse(package.text(&binding.path)?)?;
     let ids = binding.nodes.iter().map(|(id, numeric)| (numeric.clone(), id.clone())).collect();
     for old in before {
@@ -825,7 +830,7 @@ fn prepare_clipped_projection_edits(package: &Package, binding: &NativePart, bef
         if unchanged { continue; }
         let numeric = binding.nodes.get(&id).ok_or_else(|| Error::Invalid("native clipped projection identity missing".into()))?;
         let node = xml.descendants().find(|node| is_shape(*node) && properties(*node).and_then(|node| node.attribute("id")) == Some(numeric.as_str())).ok_or_else(|| Error::Invalid("native clipped projection node missing".into()))?;
-        let native = part_color_map(package, &binding.path).scope(|| read_element(package, &binding.path, node, scale, &ids, &[], 0))?;
+        let native = read_element(package, &binding.path, node, scale, &ids, &[], 0)?;
         let mut projected = native.clone();
         if normalize_native_frame(&mut projected, node, canvas)?.is_none() { continue; }
         if candidates.is_empty() || candidates.iter().any(|candidate| candidate.is_none_or(|new| new.visual().is_some_and(|style| locked && style.locked || hidden && style.hidden))) { return Err(Error::Unsupported(format!("{}: normalized native projection {id} is locked or hidden; explicitly unlock/unhide before editing or removing it", binding.path))); }

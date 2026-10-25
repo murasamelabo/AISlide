@@ -127,4 +127,6 @@ On 2026-09-18, cached external representatives `WithMaster.pptx` and
 `templatePPTWithOnlyOneText.pptx` did not match the pinned corpus hashes; the
 latter had a CFB signature. They were not used, overwritten, decrypted or
 redownloaded. External representative-template qualification remains pending;
-synthetic native tests do not establish arbitrary-template compatibility.
+synthetic native tests do not establish arbitrary-template compatibility. Master
+`p:clrMap` and layout/slide/notes `p:clrMapOvr` (`a:overrideClrMapping`) resolve
+the 12 color-map keys across native projection and edits (see [API](../api.md)).

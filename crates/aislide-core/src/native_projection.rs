@@ -102,7 +102,7 @@ fn build(package: &Package, source: &NativeDeck) -> Result<ProjectionIndex> {
     for binding in &source.slides {
         let slide = source.deck.slides.iter().find(|slide| slide.id == binding.id)
             .ok_or_else(|| Error::Invalid("native projection slide missing".into()))?;
-        let unsupported_color = source.deck.design.as_ref().and_then(|d| slide.layout_id.as_ref().and_then(|id| d.layouts.iter().find(|l| &l.id == id)).or_else(|| d.layouts.first())).is_some_and(|l| {
+        let unsupported_color = source.deck.design.as_ref().and_then(|d| slide.layout_id.as_ref().and_then(|id| d.layouts.iter().find(|l| &l.id == id))).is_some_and(|l| {
             source.layouts.iter().find(|e| e.id == l.id).zip(source.masters.iter().find(|e| e.id == l.master_id)).is_some_and(|(lb, mb)| native::slide_remaps_ancestor_artwork(package, &binding.path, &lb.path, &mb.path))
         });
         index.slides.insert(binding.id.clone(), part(package, binding, &slide.elements, false, unsupported_color)?);

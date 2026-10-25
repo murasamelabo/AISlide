@@ -50,9 +50,10 @@ fn load(kind: SourceKind, encoded: &str, profile: crate::limits::CapacityProfile
     Ok(Source { package, generated, native, hash, scale })
 }
 
-fn xml_value(node: roxmltree::Node<'_, '_>, shell: bool, ignore_synthesized_bg: bool) -> Option<Value> {
+fn xml_value(node: roxmltree::Node<'_, '_>, shell: bool) -> Option<Value> { xml_value_bg(node, shell, false) }
+fn xml_value_bg(node: roxmltree::Node<'_, '_>, shell: bool, ignore_bg: bool) -> Option<Value> {
     use crate::native::{A, P, R};
-    if shell && (crate::native::is_shape(node) || ignore_synthesized_bg && node.has_tag_name((P, "bg")) || node.has_tag_name((P, "clrMapOvr")) && !crate::native::unsupported_color_mapping(node.parent().unwrap_or(node))) { return None; }
+    if shell && (crate::native::is_shape(node) || ignore_bg && node.has_tag_name((P, "bg")) || node.has_tag_name((P, "clrMapOvr")) && !crate::native::unsupported_color_mapping(node.parent().unwrap_or(node))) { return None; }
     let attributes: BTreeMap<_, _> = if shell && node.has_tag_name((P, "clrMap")) && crate::native::apply_color_map_node(&mut crate::design::ColorMap::default(), node) {
         crate::design::COLOR_MAP_KEYS.into_iter().map(|key| (format!(":{key}"), crate::design::ColorMap::default().resolve(key))).collect()
     } else {
@@ -62,7 +63,7 @@ fn xml_value(node: roxmltree::Node<'_, '_>, shell: bool, ignore_synthesized_bg: 
         }).map(|attribute| (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::color_slot(attribute.value()) } else { attribute.value() })).collect()
     };
     let children: Vec<_> = node.children().filter_map(|child| {
-        if child.is_element() { xml_value(child, shell, ignore_synthesized_bg) }
+        if child.is_element() { xml_value_bg(child, shell, ignore_bg) }
         else if child.is_text() && !child.text().unwrap_or("").trim().is_empty() { Some(json!(child.text())) }
         else { None }
     }).collect();
@@ -80,8 +81,8 @@ fn check_part(source: &Source, part: &NativePart, elements: &[Element], theme: &
     let xml = crate::pptx::parse(source.package.text(&part.path)?)?;
     let expected = crate::pptx::parse(source.generated.text(&expected_part(source, part)?)?)?;
     let part_map = crate::native::part_color_map(&source.package, &part.path);
-    let ignore_synthesized_bg = crate::native::child(xml.root_element(), crate::native::P, "cSld").and_then(|node| crate::native::child(node, crate::native::P, "bg")).is_none() && parent_color_map.is_some_and(|parent_map| part_map != parent_map);
-    if part_map.scope(|| xml_value(xml.root_element(), true, false)) != crate::design::ColorMap::default().scope(|| xml_value(expected.root_element(), true, ignore_synthesized_bg)) {
+    let ignore_bg = crate::native::child(xml.root_element(), crate::native::P, "cSld").and_then(|node| crate::native::child(node, crate::native::P, "bg")).is_none() && parent_color_map.is_some_and(|parent_map| part_map != parent_map);
+    if part_map.scope(|| xml_value(xml.root_element(), true)) != crate::design::ColorMap::default().scope(|| xml_value_bg(expected.root_element(), true, ignore_bg)) {
         return Err(Error::Unsupported("source background, master text styles or XML extensions cannot be preserved by editable master import".into()));
     }
     let tree = crate::native::child(xml.root_element(), crate::native::P, "cSld")
@@ -115,7 +116,7 @@ fn check_master(source: &Source, id: &str) -> Result<()> {
     let actual_theme = crate::pptx::parse(source.package.text(theme_path)?)?;
     let expected_theme = Package::open(crate::templates::export_thmx(theme)?)?;
     let expected_theme = crate::pptx::parse(expected_theme.text("theme/theme/theme1.xml")?)?;
-    if xml_value(actual_theme.root_element(), false, false) != xml_value(expected_theme.root_element(), false, false) {
+    if xml_value(actual_theme.root_element(), false) != xml_value(expected_theme.root_element(), false) {
         return Err(Error::Unsupported("source theme effects or extensions are not represented by editable master import".into()));
     }
     let master_map = crate::native::part_color_map(&source.package, &part.path);

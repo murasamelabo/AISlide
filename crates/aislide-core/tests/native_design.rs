@@ -36,7 +36,7 @@ fn issue32_custom_color_maps_warn_in_native_and_template_diagnostics_without_rew
             let value = parsed.descendants().find(|node| node.has_tag_name((P, "clrMap"))).unwrap().attribute_node("bg1").unwrap();
             (value.range(), "bg1=\"dk1\" custom=\"dk1\"".to_owned())
         } else {
-            package.replace_part("ppt/slideMasters/slideMaster1.xml", package.text("ppt/slideMasters/slideMaster1.xml").unwrap().replace("val=\"dk1\"", "val=\"tx1\"").into_bytes()).unwrap();
+            let sm = "ppt/slideMasters/slideMaster1.xml"; package.replace_part(sm, package.text(sm).unwrap().replace("val=\"dk1\"", "val=\"tx1\"").into_bytes()).unwrap();
             let end = parsed.descendants().find(|node| node.has_tag_name((P, "cSld"))).unwrap().range().end;
             let range = parsed.descendants().find(|node| node.has_tag_name((P, "clrMapOvr"))).map(|node| node.range()).unwrap_or(end..end);
             (range, format!("<p:clrMapOvr xmlns:p=\"{P}\"><a:overrideClrMapping xmlns:a=\"{A}\" bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr>"))
@@ -77,6 +77,7 @@ fn issue32_color_maps_and_overrides_resolve_across_templates_previews_and_contra
     d0.design.as_mut().unwrap().layouts[0].elements = vec![txt("t1", "@dk1"), el(json!({"type":"shape","id":"s1","x":80,"y":240,"width":240,"height":90,"preset":"roundRect","fill":"@lt2","stroke":"@dk2","stroke_width":2,"rotation":0,"text":"T","font_size":20,"color":"@dk1","bold":true})), el(json!({"type":"table","id":"g1","x":80,"y":360,"width":500,"height":160,"rows":[["H","V"],["I","42"]],"font_size":18,"format":{"cells":[{"row":1,"column":0,"style":{"fill":"@lt1","text_style":{"color":"@dk1"}}}]}}))];
     d0.slides[0].inherit_background = false; d0.slides[0].notes = "N0".into(); d0.slides[0].elements = vec![txt("sc", "@dk1")];
     let (sm, lp, s1, ns, ovr_l) = ("ppt/slideMasters/slideMaster1.xml", "ppt/slideLayouts/slideLayout1.xml", "ppt/slides/slide1.xml", "ppt/notesSlides/notesSlide1.xml", format!("</p:cSld><p:clrMapOvr xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\">{}</p:clrMapOvr>", ovr("dk1", "lt1")));
+    let (sf_bg, gr_bg) = ("<a:solidFill><a:schemeClr val=\"bg1\"/></a:solidFill>", "<a:gradFill><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"bg1\"/></a:gs></a:gsLst></a:gradFill>");
     let mut pkg = Package::open(save(&change(&base, d0).document)).unwrap();
     rep(&mut pkg, "ppt/notesMasters/notesMaster1.xml", &[("bg1=\"lt1\" tx1=\"dk1\"", "bg1=\"dk1\" tx1=\"lt1\""), ("accent1=\"accent1\" accent2=\"accent2\"", "accent1=\"accent2\" accent2=\"accent1\"")]);
     rep(&mut pkg, ns, &[("srgbClr val=\"202525\"", "schemeClr val=\"tx1\"")]);
@@ -113,64 +114,56 @@ fn issue32_color_maps_and_overrides_resolve_across_templates_previews_and_contra
     let add_x = exp_i.text(exp_i.parts().keys().find(|n| n.starts_with("ppt/slides/aislide-added-")).unwrap()).unwrap();
     assert!(exp_i.text(lp).unwrap().contains("overrideClrMapping") && add_x.contains("masterClrMapping") && add_x.contains("val=\"dk1\"") && add_x.contains("val=\"lt1\""));
     let re_i = open(ins_b);
-    assert_eq!((&re_i.deck.slides[1].background, &val(&re_i.deck.slides[1].elements)[0]["color"]), (&"@dk1".to_string(), &json!("@lt1")));
+    assert_eq!((re_i.deck.slides[1].background.as_str(), &val(&re_i.deck.slides[1].elements)[0]["color"]), ("@dk1", &json!("@lt1")));
     let mut cd = re_i.deck.clone();
     if let Element::Chart { series, .. } = &mut cd.slides[1].elements[1] { series[0].values = vec![15.0, 25.0]; }
     assert_eq!(val(&open(save(&change(&re_i, cd).document)).deck.slides[1].elements)[1]["series"][0]["values"], json!([15.0, 25.0]));
     let cat = req(json!({"op":"inspect_master_source","kind":"potx","base64":STANDARD.encode(&potx)}));
-    assert_eq!((&cat["masters"][0]["importable"], &cat["slides"][0]["importable"]), (&json!(true), &json!(true)));
-    for (mode, id, pfx) in [("masters", &cat["masters"][0]["id"], "imp-m"), ("slides", &cat["slides"][0]["id"], "imp-s")] {
+    for (mode, id, pfx) in [("masters", &cat["masters"][0]["id"], "m"), ("slides", &cat["slides"][0]["id"], "s")] {
         let inp = json!({"kind":"potx","base64":STANDARD.encode(&potx),"source_sha256":cat["source_sha256"],"mode":mode,"ids":[id],"prefix":pfx,"name":"I"});
         let prev = req(json!({"op":"preview_master_import","document":base,"expected_revision":base.revision,"expected_hash":base.hash,"input":inp}));
         let imp: Document = serde_json::from_value(req(json!({"op":"import_masters","document":base,"expected_revision":base.revision,"expected_hash":base.hash,"input":inp,"expected_candidate_hash":prev["candidate_hash"]}))["document"].clone()).unwrap();
         let d = imp.deck.design.as_ref().unwrap();
-        if mode == "masters" { assert_eq!(d.layouts.iter().find(|l| l.id == "imp-m-l1").unwrap().background.as_deref(), Some("@dk1")); } else { assert_eq!(d.masters.iter().find(|m| m.id == "imp-s-m1").unwrap().background, "@dk1"); }
+        if mode == "masters" { assert_eq!(d.layouts[4].background.as_deref(), Some("@dk1")); } else { assert_eq!(d.masters[1].background, "@dk1"); }
     }
-    assert_eq!(doc.deck.slides[0].notes_paragraphs[0].runs[0].style.color.as_deref(), Some("@lt1"));
+    assert_eq!((doc.deck.slides[0].notes_paragraphs[0].runs[0].style.color.as_deref(), cat["masters"][0]["importable"].as_bool(), cat["slides"][0]["importable"].as_bool()), (Some("@lt1"), Some(true), Some(true)));
     let mut ed = doc.deck.clone();
-    ed.slides[0].notes = "N1".into(); ed.slides[0].notes_paragraphs[0].runs[0].text = "N1".into(); ed.slides[0].notes_paragraphs[0].runs[0].style.color = Some("@accent1".into());
+    ed.slides[0].notes = "N1".into(); let r0 = &mut ed.slides[0].notes_paragraphs[0].runs[0]; r0.text = "N1".into(); r0.style.color = Some("@accent1".into());
     if let Element::Text { color, .. } = &mut ed.slides[0].elements[0] { *color = "@accent1".into(); }
     let ed_b = save(&change(&doc, ed).document);
     let (ed_p, ed_o) = (Package::open(ed_b.clone()).unwrap(), open(ed_b));
     assert!(ed_p.text(s1).unwrap().contains("val=\"accent2\"") && ed_p.text(ns).unwrap().contains("val=\"accent2\"") && ed_o.deck.slides[0].notes_paragraphs[0].runs[0].style.color.as_deref() == Some("@accent1") && val(&ed_o.deck.slides[0].elements)[0]["color"] == "@accent1");
     let mut gp = Package::open(bytes.clone()).unwrap();
-    rep(&mut gp, s1, &[("<a:solidFill><a:schemeClr val=\"bg1\"/></a:solidFill>", "<a:gradFill><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"dk1\"/></a:gs></a:gsLst></a:gradFill>")]);
-    rep(&mut gp, "ppt/slideLayouts/_rels/slideLayout1.xml.rels", &[("../slideMasters/slideMaster1.xml", "../slideLayouts/slideLayout1.xml")]);
-    let g_doc = open(gp.save().unwrap());
-    let mut g_ed = g_doc.deck.clone();
-    g_ed.design.as_mut().unwrap().masters[0].background = "@lt2".into();
+    rep(&mut gp, s1, &[(sf_bg, gr_bg)]); rep(&mut gp, "ppt/slideLayouts/_rels/slideLayout1.xml.rels", &[("../slideMasters/slideMaster1.xml", "../slideLayouts/slideLayout1.xml")]);
+    let g_doc = open(gp.save().unwrap()); let mut g_ed = g_doc.deck.clone(); g_ed.design.as_mut().unwrap().masters[0].background = "@lt2".into();
     let g_s = save(&change(&g_doc, g_ed).document);
     assert!(open(g_s.clone()).deck.design.as_ref().unwrap().layouts[0].background.as_deref() == Some("@dk1") && Package::open(g_s).unwrap().text(s1).unwrap().contains("<a:gradFill>"));
     let re_ass = open(save(&change(&doc, assign(doc.deck.clone(), "slide-1", "title-content", true).unwrap()).document));
-    assert_eq!((re_ass.deck.slides[0].inherit_background, &serde_json::to_value(re_ass.deck.slides[0].elements.iter().find(|e| e.bounds().0 == "sc").unwrap()).unwrap()["color"]), (true, &json!("@lt1")));
+    assert_eq!((re_ass.deck.slides[0].inherit_background, &val(&re_ass.deck.slides[0].elements)[0]["color"]), (true, &json!("@lt1")));
     let mut hp = Package::open(save(&source())).unwrap();
     rep(&mut hp, sm, &[("val=\"lt1\"", "val=\"bg1\""), ("bg1=\"lt1\" tx1=\"dk1\"", "bg1=\"dk1\" tx1=\"lt1\"")]);
     rep(&mut hp, s1, &[("<p:sld ", "<p:sld showMasterSp=\"false\" "), ("<p:bg><p:bgPr><a:solidFill><a:schemeClr val=\"lt1\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>", ""), ("<a:masterClrMapping/>", &ovr("lt2", "dk2"))]);
     let hr = open(hp.save().unwrap());
-    assert_eq!((&hr.deck.design.as_ref().unwrap().masters[0].background, &hr.deck.slides[0].background, hr.deck.slides[0].inherit_background, hr.deck.slides[0].hide_master_graphics), (&"@dk1".to_string(), &"@lt2".to_string(), false, true));
-    let mut hr_m = hr.deck.clone();
-    hr_m.design.as_mut().unwrap().masters[0].background = "@accent3".into();
-    let mut hr_re = assign(hr.deck.clone(), "slide-1", "title-content", false).unwrap();
-    hr_re.slides[0].inherit_background = false;
-    assert_eq!((&open(save(&change(&hr, hr_m).document)).deck.slides[0].background, &open(save(&change(&hr, hr_re).document)).deck.slides[0].background), (&"@lt2".to_string(), &"@lt2".to_string()));
-    rep(&mut hp, sm, &[("<a:solidFill><a:schemeClr val=\"bg1\"/></a:solidFill>", "<a:gradFill><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"bg1\"/></a:gs></a:gsLst></a:gradFill>")]);
+    assert_eq!((hr.deck.design.as_ref().unwrap().masters[0].background.as_str(), hr.deck.slides[0].background.as_str(), hr.deck.slides[0].inherit_background, hr.deck.slides[0].hide_master_graphics), ("@dk1", "@lt2", false, true));
+    let (mut hr_m, mut hr_re) = (hr.deck.clone(), assign(hr.deck.clone(), "slide-1", "title-content", false).unwrap());
+    hr_m.design.as_mut().unwrap().masters[0].background = "@accent3".into(); hr_re.slides[0].inherit_background = false;
+    assert_eq!((open(save(&change(&hr, hr_m).document)).deck.slides[0].background.as_str(), open(save(&change(&hr, hr_re).document)).deck.slides[0].background.as_str()), ("@lt2", "@lt2"));
+    rep(&mut hp, sm, &[(sf_bg, gr_bg)]);
     assert!(req(json!({"op":"preview_presentation","document":open(hp.save().unwrap()),"options":{"page_indices":[0]}}))["warnings"].as_array().unwrap().iter().any(|w| w["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED"));
     let mut ph_d = base.deck.clone();
-    let t_ph = |id, inh| el(json!({"type":"text","id":id,"x":64,"y":80,"width":1152,"height":120,"text":"M","font_size":42,"color":"@dk1","bold":true,"format":{"font_family":"@major","placeholder":{"kind":"title","index":0},"inherit_layout":inh}}));
-    ph_d.design.as_mut().unwrap().masters[0].elements = vec![t_ph("pt", false)];
-    ph_d.design.as_mut().unwrap().layouts[0].elements = vec![t_ph("pt", false)];
+    let t_ph = |id, inh| el(json!({"type":"text","id":id,"x":64,"y":80,"width":1152,"height":120,"text":"M","font_size":42,"color":"@dk1","bold":true,"format":{"placeholder":{"kind":"title","index":0},"inherit_layout":inh}}));
+    ph_d.design.as_mut().unwrap().masters[0].elements = vec![t_ph("pt", false)]; ph_d.design.as_mut().unwrap().layouts[0].elements = vec![t_ph("pt", false)];
     ph_d.slides[0].inherit_background = true; ph_d.slides[0].elements = vec![t_ph("st", true)];
-    let mut ph_pkg = Package::open(save(&change(&base, ph_d).document)).unwrap();
+    let (dk_sf, mut ph_pkg) = ("<a:solidFill><a:schemeClr val=\"dk1\"/></a:solidFill>", Package::open(save(&change(&base, ph_d).document)).unwrap());
     rep(&mut ph_pkg, sm, &[("val=\"lt1\"", "val=\"bg1\""), ("val=\"dk1\"", "val=\"tx1\"")]);
-    rep(&mut ph_pkg, lp, &[("<a:solidFill><a:schemeClr val=\"dk1\"/></a:solidFill>", ""), ("</p:cSld>", &ovr_l)]);
-    rep(&mut ph_pkg, s1, &[("<a:solidFill><a:schemeClr val=\"dk1\"/></a:solidFill>", "")]);
+    rep(&mut ph_pkg, lp, &[(dk_sf, ""), ("</p:cSld>", &ovr_l)]); rep(&mut ph_pkg, s1, &[(dk_sf, "")]);
     let ph_op = open(ph_pkg.save().unwrap());
     let ph_l = &ph_op.deck.design.as_ref().unwrap().layouts[0];
     assert_eq!((ph_l.background.as_deref(), ph_op.deck.slides[0].inherit_background, &val(&ph_l.elements)[0]["color"], &val(&ph_op.deck.slides[0].elements)[0]["color"], &req(json!({"op":"inspect_master_source","kind":"potx","base64":STANDARD.encode(to_potx(ph_pkg.save().unwrap()))}))["masters"][0]["importable"]), (Some("@dk1"), true, &json!("@lt1"), &json!("@lt1"), &json!(false)));
     rep(&mut ph_pkg, s1, &[("<a:masterClrMapping/>", &ovr("lt2", "accent1"))]);
     let both_b = ph_pkg.save().unwrap();
     let both = open(both_b.clone());
-    assert_eq!((save(&both), &both.deck.slides[0].background, both.deck.slides[0].inherit_background, &val(&both.deck.slides[0].elements)[0]["color"]), (both_b, &"@lt2".to_string(), false, &json!("@accent1")));
+    assert_eq!((save(&both), both.deck.slides[0].background.as_str(), both.deck.slides[0].inherit_background, &val(&both.deck.slides[0].elements)[0]["color"]), (both_b, "@lt2", false, &json!("@accent1")));
 }
 
 #[test]
