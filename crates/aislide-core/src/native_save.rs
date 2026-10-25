@@ -108,8 +108,7 @@ pub(crate) fn chart_is_representable(package: &Package, binding: &NativePart, id
     let actual = parse(package.text(path)?)?;
     let expected = crate::charts::chart(kind, categories, series, options);
     let expected = parse(std::str::from_utf8(&expected).map_err(|_| Error::Invalid("chart XML encoding".into()))?)?;
-    let actual_val = crate::native::part_color_map(package, &binding.path).scope(|| xml_value(actual.root_element()));
-    if actual_val != crate::design::ColorMap::default().scope(|| xml_value(expected.root_element())) {
+    if crate::native::part_color_map(package, &binding.path).scope(|| xml_value(actual.root_element())) != crate::design::ColorMap::default().scope(|| xml_value(expected.root_element())) {
         use crate::model::chart_format::{automatic_label_position, LabelPosition};
         let legacy = if kind == crate::model::ChartKind::Sunburst {
             crate::chart_extended::legacy_sunburst_chart(categories, series, options)
@@ -118,7 +117,7 @@ pub(crate) fn chart_is_representable(package: &Package, binding: &NativePart, id
             crate::charts::legacy_label_position_chart(kind, categories, series, options)
         };
         let legacy = parse(std::str::from_utf8(&legacy).map_err(|_| Error::Invalid("chart XML encoding".into()))?)?;
-        if actual_val != crate::design::ColorMap::default().scope(|| xml_value(legacy.root_element())) { return Ok(false); }
+        if xml_value(actual.root_element()) != xml_value(legacy.root_element()) { return Ok(false); }
     }
     let Some(relation) = actual.descendants().find(|node| node.has_tag_name((namespace, "externalData"))).and_then(|node| node.attribute((crate::native::R, "id"))) else { return Ok(false); };
     let targets = crate::pptx::relationship_targets(package, path, "package")?;
@@ -149,6 +148,7 @@ pub(crate) fn encode_scheme_colors(xml: String, color_map: crate::design::ColorM
     String::from_utf8(apply(xml, edits)?).map_err(|_| Error::Invalid("resource XML is not UTF-8".into()))
 }
 
+/// Generates element XML encoded under the active part's `ColorMap::enter` scope.
 pub(crate) fn scaled_element(element: &Element, ids: &BTreeMap<&str, usize>, theme: &crate::design::Theme, scale: (f64, f64)) -> Result<String> {
     let xml = encode_scheme_colors(crate::pptx::element_xml(element, ids[element.bounds().0], ids, theme), crate::design::ColorMap::current())?;
     if scale == (9525.0, 9525.0) { return Ok(xml); }

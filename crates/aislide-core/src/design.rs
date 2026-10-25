@@ -36,6 +36,7 @@ impl ColorMap {
     }
 }
 
+/// Resolves an XML `schemeClr`/`bg1`/`tx1` key under the active `ColorMap::enter` scope.
 pub(crate) fn color_slot(value: &str) -> &str { ColorMap::current().resolve(value) }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
