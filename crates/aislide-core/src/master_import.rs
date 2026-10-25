@@ -80,7 +80,7 @@ fn check_part(source: &Source, part: &NativePart, elements: &[Element], theme: &
     let xml = crate::pptx::parse(source.package.text(&part.path)?)?;
     let expected = crate::pptx::parse(source.generated.text(&expected_part(source, part)?)?)?;
     let part_map = crate::native::part_color_map(&source.package, &part.path);
-    let ignore_synthesized_bg = crate::native::child(xml.root_element(), crate::native::P, "cSld").and_then(|node| crate::native::child(node, crate::native::P, "bg")).is_none() && parent_color_map.is_some_and(|parent_map| part_map != parent_map);
+    let ignore_synthesized_bg = crate::native::child(xml.root_element(), crate::native::P, "cSld").and_then(|node| crate::native::child(node, crate::native::P, "bg")).is_none() && parent_color_map.is_none_or(|parent_map| part_map != parent_map);
     if part_map.scope(|| xml_value(xml.root_element(), true, false)) != xml_value(expected.root_element(), true, ignore_synthesized_bg) {
         return Err(Error::Unsupported("source background, master text styles or XML extensions cannot be preserved by editable master import".into()));
     }
@@ -143,8 +143,7 @@ fn check_slide(source: &Source, id: &str) -> Result<()> {
     let mp = source.native.masters.iter().find(|p| p.id == layout.master_id).ok_or_else(|| Error::Invalid("source master binding missing".into()))?;
     let (lx, mx) = (crate::pptx::parse(source.package.text(&lp.path)?)?, crate::pptx::parse(source.package.text(&mp.path)?)?);
     let (sm, lm, mm) = (crate::native::part_color_map(&source.package, &part.path), crate::native::part_color_map(&source.package, &lp.path), crate::native::part_color_map(&source.package, &mp.path));
-    if crate::native::has_remapped_nonplaceholder_scheme_color(&source.package, &lp.path, lx.root_element(), lm, sm)
-        || (!slide.hide_master_graphics && !matches!(lx.root_element().attribute("showMasterSp"), Some("0" | "false")) && crate::native::has_remapped_nonplaceholder_scheme_color(&source.package, &mp.path, mx.root_element(), mm, sm)) {
+    if crate::native::slide_remaps_ancestor_artwork(&source.package, &lp.path, lx.root_element(), lm, &mp.path, mx.root_element(), mm, sm, slide.hide_master_graphics) {
         return Err(Error::Unsupported("source slide color map remaps shared layout or master artwork".into()));
     }
     check_part(source, part, &slide.elements, crate::design::master_theme(design, &layout.master_id), Some(lm))?;

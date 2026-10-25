@@ -10,7 +10,6 @@ pub struct SlideReview {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")] pub table_headers: BTreeMap<String, TableHeaders>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")] pub accessibility: BTreeMap<String, ElementAccessibility>,
     #[serde(skip_serializing_if = "Vec::is_empty")] pub reading_order: Vec<String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")] pub unverified_background: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -305,18 +304,10 @@ pub fn check_accessibility(deck: &crate::model::Deck) -> AccessibilityReport {
                 }
                 Element::Text { text, color, font_size, bold, format, .. } | Element::Shape { text, color, font_size, bold, format, .. } if !text.trim().is_empty() => {
                     let (_, left, top, width, height) = element.bounds();
-                    let own_fill = matches!(element, Element::Shape { fill, .. } if fill != "none");
-                    let layout = deck.design.as_ref().and_then(|design| slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)));
-                    let master = layout.and_then(|layout| deck.design.as_ref()?.masters.iter().find(|master| master.id == layout.master_id));
-                    let inherited_overlap = !own_fill && slide.inherit_background && layout.into_iter().flat_map(|layout| &layout.elements)
-                        .chain(master.filter(|_| !slide.hide_master_graphics).into_iter().flat_map(|master| &master.elements))
-                        .filter(|other| !matches!(other, Element::Text { format, .. } if format.placeholder.is_some()))
-                        .any(|other| { let (other_id, other_left, other_top, other_width, other_height) = other.bounds(); other_id != id && left < other_left + other_width && other_left < left + width && top < other_top + other_height && other_top < top + height });
-                    let unverified_bg = slide.inherit_background && slide.review.as_ref().is_some_and(|r| r.unverified_background);
-                    let simple = element.visual().is_none() && (own_fill || ((!slide.inherit_background || deck.design.is_some()) && !unverified_bg)) && !inherited_overlap && !format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.style.highlight.as_deref().is_some_and(|value| value != "none") || run.style.baseline.is_some_and(|value| value != 0)) && slide.elements.iter().any(|candidate| candidate.bounds().0 == id)
+                    let simple = element.visual().is_none() && !slide.inherit_background && !format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.style.highlight.as_deref().is_some_and(|value| value != "none") || run.style.baseline.is_some_and(|value| value != 0)) && slide.elements.iter().any(|candidate| candidate.bounds().0 == id)
                         && !slide.elements.iter().any(|other| { let (other_id, other_left, other_top, other_width, other_height) = other.bounds(); other_id != id && left < other_left + other_width && other_left < left + width && top < other_top + other_height && other_top < top + height });
                     if !simple { issue("contrast_background_unverified", Some(id), "unsupported", None, None); continue; }
-                    let background = match element { Element::Shape { fill, .. } if fill != "none" => resolve(fill), _ => resolve(crate::design::slide_background(slide, deck.design.as_ref())) };
+                    let background = match element { Element::Shape { fill, .. } if fill != "none" => resolve(fill), _ => resolve(&slide.background) };
                     let mut check = |color: &str, size: f64, bold: bool| {
                         let required = if size >= 24.0 || (bold && size >= 56.0 / 3.0) { 3.0 } else { 4.5 };
                         match contrast_ratio(&resolve(color), &background) { Ok(ratio) if ratio < required => issue("text_contrast_low", Some(id), "finding", Some(ratio), Some(required)), Err(_) => issue("contrast_color_unverified", Some(id), "unsupported", None, None), _ => {} }
