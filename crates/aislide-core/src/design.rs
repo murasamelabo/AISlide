@@ -16,8 +16,9 @@ impl Default for ColorMap {
 }
 
 impl ColorMap {
-    pub(crate) fn current() -> Self { ACTIVE_COLOR_MAP.with(|active| active.get().0) }
-    pub(crate) fn is_scoped() -> bool { ACTIVE_COLOR_MAP.with(|active| active.get().1 > 0) }
+    pub(crate) fn scoped() -> Result<Self> {
+        ACTIVE_COLOR_MAP.with(|a| (a.get().1 > 0).then_some(a.get().0).ok_or_else(|| Error::Invalid("color map scope missing".into())))
+    }
     pub(crate) fn enter(self) -> ColorMapGuard { ColorMapGuard(ACTIVE_COLOR_MAP.with(|active| { let prev = active.get(); active.set((self, prev.1 + 1)); prev })) }
     pub(crate) fn scope<R>(self, run: impl FnOnce() -> R) -> R {
         let _guard = self.enter();
@@ -39,7 +40,7 @@ impl ColorMap {
 }
 
 /// Resolves a raw XML `schemeClr`/`bg1`/`tx1` attribute under the active `ColorMap::enter` scope.
-pub(crate) fn color_slot(value: &str) -> &str { ColorMap::current().resolve(value) }
+pub(crate) fn color_slot(value: &str) -> &str { ACTIVE_COLOR_MAP.with(|a| a.get().0.resolve(value)) }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

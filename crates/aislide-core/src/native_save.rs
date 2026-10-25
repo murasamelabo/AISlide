@@ -150,8 +150,7 @@ pub(crate) fn encode_scheme_colors(xml: String, color_map: crate::design::ColorM
 
 /// Generates element XML encoded under the active part's `ColorMap::enter` scope.
 pub(crate) fn scaled_element(element: &Element, ids: &BTreeMap<&str, usize>, theme: &crate::design::Theme, scale: (f64, f64)) -> Result<String> {
-    debug_assert!(crate::design::ColorMap::is_scoped());
-    let xml = encode_scheme_colors(crate::pptx::element_xml(element, ids[element.bounds().0], ids, theme), crate::design::ColorMap::current())?;
+    let xml = encode_scheme_colors(crate::pptx::element_xml(element, ids[element.bounds().0], ids, theme), crate::design::ColorMap::scoped()?)?;
     if scale == (9525.0, 9525.0) { return Ok(xml); }
     let document = parse(&xml)?; let root = document.root_element();
     let transform = child(root, P, "xfrm").or_else(|| child(root, P, if matches!(element, Element::Group { .. }) { "grpSpPr" } else { "spPr" }).and_then(|node| child(node, A, "xfrm")));
@@ -1127,7 +1126,7 @@ fn add_notes_relation(package: &mut Package, source: &str, kind: &str, target: &
 fn notes_template(slide: &crate::model::Slide, deck: &Deck) -> Result<Package> {
     let blank = crate::model::Slide { elements: Vec::new(), layout_id: None, native_source_id: None, review: None, ..slide.clone() };
     let mut pkg = Package::open(crate::pptx::export_pptx(&Deck { slides: vec![blank], design: None, ..deck.clone() })?)?;
-    if let Ok(xml) = pkg.text("ppt/notesSlides/notesSlide1.xml").map(str::to_owned) { pkg.replace_part("ppt/notesSlides/notesSlide1.xml", encode_scheme_colors(xml, crate::design::ColorMap::current())?.into_bytes())?; }
+    if let Ok(xml) = pkg.text("ppt/notesSlides/notesSlide1.xml").map(str::to_owned) { pkg.replace_part("ppt/notesSlides/notesSlide1.xml", encode_scheme_colors(xml, crate::design::ColorMap::scoped().unwrap_or_default())?.into_bytes())?; }
     Ok(pkg)
 }
 
