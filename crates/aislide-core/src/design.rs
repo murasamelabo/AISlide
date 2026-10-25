@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const COLOR_KEYS: [&str; 12] = ["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
-pub const COLOR_MAP_KEYS: [&str; 12] = ["bg1", "tx1", "bg2", "tx2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
+pub(crate) const COLOR_MAP_KEYS: [&str; 12] = ["bg1", "tx1", "bg2", "tx2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ColorMap([&'static str; 12]);
