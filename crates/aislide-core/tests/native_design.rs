@@ -128,10 +128,11 @@ fn issue32_color_maps_and_overrides_resolve() {
     let mut hp = Package::open(save(&source())).unwrap();
     rep(&mut hp, sm, &[("val=\"lt1\"", "val=\"bg1\""), ("bg1=\"lt1\" tx1=\"dk1\"", "bg1=\"dk1\" tx1=\"lt1\"")]);
     rep(&mut hp, s1, &[("<a:masterClrMapping/>", &ovr("dk1", "lt1"))]);
-    let ha = open(hp.save().unwrap()); let mut ha_i = ha.deck.clone(); ha_i.slides[0].inherit_background = true;
-    let ha_b = save(&change(&ha, ha_i.clone()).document); assert!(open(ha_b.clone()).deck.slides[0].inherit_background);
+    let mut ha = open(hp.save().unwrap()); ha.deck.slides[0].inherit_background = true;
+    let ha_b = save(&change(&open(hp.save().unwrap()), ha.deck).document); assert!(open(ha_b.clone()).deck.slides[0].inherit_background);
     hp = Package::open(ha_b).unwrap(); rep(&mut hp, sm, &[("val=\"bg1\"", "val=\"accent1\"")]);
-    assert!(fail_d(&open(hp.save().unwrap()), ha_i).contains("inherited background"));
+    let ha2 = open(hp.save().unwrap()); ha = ha2.clone(); ha.deck.slides[0].inherit_background = true;
+    assert!(fail_d(&ha2, ha.deck).contains("inherited background"));
     rep(&mut hp, sm, &[("val=\"accent1\"", "val=\"bg1\"")]); rep(&mut hp, s1, &[("<p:sld ", "<p:sld showMasterSp=\"0\" "), (&ovr("dk1", "lt1"), &ovr("lt2", "dk2"))]);
     let hr = open(hp.save().unwrap());
     assert_eq!((hr.deck.design.as_ref().unwrap().masters[0].background.as_str(), hr.deck.slides[0].background.as_str(), hr.deck.slides[0].inherit_background, hr.deck.slides[0].hide_master_graphics), ("@dk1", "@lt2", false, true));
