@@ -7,9 +7,10 @@ pub(crate) const COLOR_MAP_KEYS: [&str; 12] = ["bg1", "tx1", "bg2", "tx2", "acce
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ColorMap([&'static str; 12]);
-thread_local! { static ACTIVE_COLOR_MAP: std::cell::Cell<(ColorMap, usize)> = std::cell::Cell::new((ColorMap::default(), 0)); }
-pub(crate) struct ColorMapGuard((ColorMap, usize));
-impl Drop for ColorMapGuard { fn drop(&mut self) { ACTIVE_COLOR_MAP.with(|active| active.set(self.0)); } }
+thread_local! { static ACTIVE_COLOR_MAP: std::cell::Cell<(ColorMap, usize)> = Default::default(); }
+#[must_use]
+pub(crate) struct ColorMapGuard((ColorMap, usize), std::marker::PhantomData<*const ()>);
+impl Drop for ColorMapGuard { fn drop(&mut self) { ACTIVE_COLOR_MAP.with(|a| { debug_assert_eq!(a.get().1, self.0.1 + 1); a.set(self.0); }); } }
 
 impl Default for ColorMap {
     fn default() -> Self { Self(["lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"]) }
@@ -19,7 +20,8 @@ impl ColorMap {
     pub(crate) fn scoped() -> Result<Self> {
         ACTIVE_COLOR_MAP.with(|a| (a.get().1 > 0).then_some(a.get().0).ok_or_else(|| Error::Invalid("color map scope missing".into())))
     }
-    pub(crate) fn enter(self) -> ColorMapGuard { ColorMapGuard(ACTIVE_COLOR_MAP.with(|active| { let prev = active.get(); active.set((self, prev.1 + 1)); prev })) }
+    #[must_use]
+    pub(crate) fn enter(self) -> ColorMapGuard { ColorMapGuard(ACTIVE_COLOR_MAP.with(|a| { let p = a.get(); a.set((self, p.1 + 1)); p }), std::marker::PhantomData) }
     pub(crate) fn scope<R>(self, run: impl FnOnce() -> R) -> R {
         let _guard = self.enter();
         run()
@@ -39,7 +41,7 @@ impl ColorMap {
     }
 }
 
-/// Resolves a raw XML `schemeClr`/`bg1`/`tx1` attribute under the active `ColorMap::enter` scope (or `ColorMap::default()` for unmapped/generated XML).
+/// Resolves a raw XML `schemeClr`/`bg1`/`tx1` attribute under the active `ColorMap::enter` scope.
 pub(crate) fn color_slot(value: &str) -> &str { ACTIVE_COLOR_MAP.with(|a| a.get().0.resolve(value)) }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
