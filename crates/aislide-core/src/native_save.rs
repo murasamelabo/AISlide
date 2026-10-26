@@ -196,7 +196,7 @@ pub(crate) fn resource_changes(package: &mut Package, binding: &NativePart, befo
     let relationships = crate::pptx::resource_parts(&mut parts, &resources, &mut chart_number, &mut picture_number, &mut types, Some(ids), &mut crate::pptx::MediaResources::new())?;
     let part_map = crate::native::part_color_map(package, &binding.path);
     for (path, data) in parts {
-        let data = if path.starts_with("ppt/charts/") && path.ends_with(".xml") { encode_scheme_colors(String::from_utf8(data).map_err(|_| Error::Invalid("chart XML encoding".into()))?, part_map)?.into_bytes() } else { data };
+        let data = if path.starts_with("ppt/charts/chart") && path.ends_with(".xml") { encode_scheme_colors(String::from_utf8(data).map_err(|_| Error::Invalid("chart XML encoding".into()))?, part_map)?.into_bytes() } else { data };
         package.add_part(path, data)?;
     }
     let relation_path = relations_path(&binding.path);
