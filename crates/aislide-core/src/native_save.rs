@@ -194,7 +194,7 @@ pub(crate) fn resource_changes(package: &mut Package, binding: &NativePart, befo
     if chart_number > u32::MAX as usize - 2048 || picture_number > u32::MAX as usize - 2048 { return Err(Error::Limit("native resource IDs exhausted".into())); }
     let mut parts = BTreeMap::new(); let mut types = Vec::new();
     let relationships = crate::pptx::resource_parts(&mut parts, &resources, &mut chart_number, &mut picture_number, &mut types, Some(ids), &mut crate::pptx::MediaResources::new())?;
-    let part_map = crate::native::try_part_color_map(package, &binding.path)?;
+    let part_map = crate::design::ColorMap::scoped().or_else(|_| crate::native::try_part_color_map(package, &binding.path))?;
     for (path, data) in parts {
         let data = if path.starts_with("ppt/charts/chart") && path.ends_with(".xml") { encode_scheme_colors(String::from_utf8(data).map_err(|_| Error::Invalid("chart XML encoding".into()))?, part_map)?.into_bytes() } else { data };
         package.add_part(path, data)?;
