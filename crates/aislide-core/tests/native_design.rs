@@ -82,14 +82,14 @@ fn issue32_color_maps_and_overrides_resolve() {
     let (doc, potx) = (open(bytes.clone()), to_potx(bytes.clone()));
     assert_eq!(save(&doc), bytes);
     let t_doc = load_potx("t".into(), potx.clone()).unwrap();
+    let has_w = |d: &Document, op, k| req(json!({"op":op,"document":d,"options":{"page_indices":[0]}}))[k].as_array().unwrap().iter().any(|w| w["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED");
     for c in [&doc, &t_doc] {
         let (layout, sj) = (&c.deck.design.as_ref().unwrap().layouts[0], val(&c.deck.slides[0].elements));
         let lj = val(&layout.elements); let cells = lj[2]["format"]["cells"].as_array().unwrap();
         let (c0, c1) = (&cells[0]["style"]["text_style"]["color"], &cells[2]["style"]);
         assert_eq!((layout.background.as_deref(), c.deck.slides[0].background.as_str(), &lj[0]["color"], &lj[1]["fill"], &lj[1]["stroke"], &lj[1]["color"], c0, &c1["fill"], &c1["text_style"]["color"], &sj[0]["color"]), (Some("@dk1"), "@dk1", &json!("@lt1"), &json!("@dk2"), &json!("@lt2"), &json!("@lt1"), &json!("@dk1"), &json!("@dk1"), &json!("@lt1"), &json!("@lt1")));
         let svg = aislide_core::render::render_slide_svg(&c.deck, 0, false).unwrap().svg;
-        assert!(svg.contains("fill=\"#202525\"") && svg.contains("fill=\"#FFFFFF\""));
-        for (op, k) in [("preview_presentation", "warnings"), ("preflight_presentation", "findings")] { assert!(!req(json!({"op":op,"document":c,"options":{"page_indices":[0]}}))[k].as_array().unwrap().iter().any(|w| w["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED")); }
+        assert!(svg.contains("fill=\"#202525\"") && svg.contains("fill=\"#FFFFFF\"") && !has_w(c, "preview_presentation", "warnings") && !has_w(c, "preflight_presentation", "findings"));
         assert!(!a11y(&c.deck).issues.iter().any(|i| i.element_id.as_deref() == Some("sc") && ["text_contrast_low", "contrast_background_unverified"].contains(&i.code.as_str())));
     }
     let mut low = t_doc.deck.clone(); if let Element::Text { color, .. } = &mut low.slides[0].elements[0] { *color = "@dk1".into(); }
@@ -140,9 +140,9 @@ fn issue32_color_maps_and_overrides_resolve() {
     let (mut hr_m, mut hr_re) = (hr.deck.clone(), assign(hr.deck.clone(), "slide-1", "title-content", false).unwrap());
     assert!(fail_d(&hr, hr_re.clone()).contains("inherited background"));
     hr_m.design.as_mut().unwrap().masters[0].background = "@accent3".into(); hr_re.slides[0].inherit_background = false;
-    assert_eq!((open(save(&change(&hr, hr_m).document)).deck.slides[0].background.as_str(), open(save(&change(&hr, hr_re).document)).deck.slides[0].background.as_str()), ("@lt2", "@lt2"));
-    rep(&mut hp, sm, &[(sf_bg, gr_bg)]);
-    assert!(req(json!({"op":"preview_presentation","document":open(hp.save().unwrap()),"options":{"page_indices":[0]}}))["warnings"].as_array().unwrap().iter().any(|w| w["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED"));
+    assert_eq!((open(save(&change(&hr, hr_m.clone()).document)).deck.slides[0].background.as_str(), open(save(&change(&hr, hr_re).document)).deck.slides[0].background.as_str()), ("@lt2", "@lt2"));
+    rep(&mut hp, sm, &[(sf_bg, gr_bg)]); assert!(has_w(&open(hp.save().unwrap()), "preview_presentation", "warnings"));
+    rep(&mut hp, sm, &[("bg1=\"dk1\" ", "")]); assert!(fail_d(&open(hp.save().unwrap()), hr_m).contains("hierarchy"));
     let (mut ph_d, t_ph) = (base.deck.clone(), |id, inh| el(json!({"type":"text","id":id,"x":64,"y":80,"width":1152,"height":120,"text":"M","font_size":42,"color":"@dk1","bold":true,"format":{"placeholder":{"kind":"title","index":0},"inherit_layout":inh}})));
     ph_d.design.as_mut().unwrap().masters[0].elements = vec![t_ph("pt", false)]; ph_d.design.as_mut().unwrap().layouts[0].elements = vec![t_ph("pt", false)];
     ph_d.slides[0].inherit_background = true; ph_d.slides[0].elements = vec![t_ph("st", true)];
