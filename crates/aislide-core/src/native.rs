@@ -107,6 +107,8 @@ pub(crate) fn resolve_color_map(root: Node<'_, '_>, parent: crate::design::Color
 
 pub(crate) fn unsupported_color_mapping(root: Node<'_, '_>) -> bool { resolve_color_map(root, crate::design::ColorMap::default()).1 }
 
+pub(crate) fn doc<'a>(pkg: &'a Package, p: &str) -> Option<roxmltree::Document<'a>> { parse(pkg.text(p).ok()?).ok() }
+
 fn parent_part(pkg: &Package, path: &str, tag: Option<&str>, top: bool) -> Option<(String, &'static str)> {
     let rel = |src: &str, kind| relationship_targets(pkg, src, kind).ok()?.into_values().next();
     match tag {
@@ -120,17 +122,21 @@ fn parent_part(pkg: &Package, path: &str, tag: Option<&str>, top: bool) -> Optio
 pub(crate) fn part_color_map(package: &Package, path: &str) -> crate::design::ColorMap {
     fn step(pkg: &Package, path: &str, expected: Option<&str>, depth: u8) -> crate::design::ColorMap {
         if depth > 2 { return Default::default(); }
-        let doc = pkg.text(path).ok().and_then(|xml| parse(xml).ok());
-        let tag = doc.as_ref().map(|d| d.root_element().tag_name().name());
+        let d = doc(pkg, path);
+        let tag = d.as_ref().map(|d| d.root_element().tag_name().name());
         if expected.is_some_and(|exp| tag != Some(exp)) { return Default::default(); }
         let parent = parent_part(pkg, path, tag, expected.is_none()).map_or_else(Default::default, |(t, exp)| step(pkg, &t, Some(exp), depth + 1));
-        doc.map_or(parent, |doc| resolve_color_map(doc.root_element(), parent).0)
+        d.map_or(parent, |d| resolve_color_map(d.root_element(), parent).0)
     }
     step(package, path, None, 0)
 }
 
 fn remaps(n: Node<'_, '_>, a: crate::design::ColorMap, b: crate::design::ColorMap) -> bool {
     n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| b.resolve(v) != a.resolve(v))
+}
+
+pub(crate) fn has_remapped_owned(pkg: &Package, path: &str, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
+    doc(pkg, &relations_path(path)).is_some_and(|d| d.root_element().children().filter(|n| n.attribute("Type").is_some_and(|t| t.contains("chart") || t.contains("diagram"))).filter_map(|n| crate::pptx::resolve(path, n.attribute("Target")?).ok()).any(|p| doc(pkg, &p).is_some_and(|d| d.descendants().any(|n| remaps(n, om, cm)))))
 }
 
 fn has_remapped_shapes(package: &Package, path: &str, root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
@@ -141,8 +147,7 @@ fn has_remapped_shapes(package: &Package, path: &str, root: Node<'_, '_>, om: cr
             if n.descendants().any(|d| remaps(d, om, cm) && !d.ancestors().take_while(|a| *a != n).any(|a| is_shape(a))) { return true; }
         }
     }
-    ["chart", "chartEx"].into_iter().flat_map(|k| relationship_targets(package, path, k).ok().into_iter().flat_map(|t| t.into_values()))
-        .any(|p| package.text(&p).ok().and_then(|t| parse(t).ok()).is_some_and(|d| d.descendants().any(|n| remaps(n, om, cm))))
+    has_remapped_owned(package, path, om, cm)
 }
 
 fn has_remapped_non_solid_bg(root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
@@ -150,13 +155,13 @@ fn has_remapped_non_solid_bg(root: Node<'_, '_>, om: crate::design::ColorMap, cm
 }
 
 pub(crate) fn layout_remaps_master_artwork(package: &Package, lp: &str, mp: &str) -> bool {
-    let (Some(lx), Some(mx)) = (package.text(lp).ok().and_then(|t| parse(t).ok()), package.text(mp).ok().and_then(|t| parse(t).ok())) else { return false };
+    let (Some(lx), Some(mx)) = (doc(package, lp), doc(package, mp)) else { return false };
     let (lx, mx, lm, mm) = (lx.root_element(), mx.root_element(), part_color_map(package, lp), part_color_map(package, mp));
     (child(lx, P, "cSld").and_then(|n| child(n, P, "bg")).is_none() && has_remapped_non_solid_bg(mx, mm, lm)) || (!matches!(lx.attribute("showMasterSp"), Some("0" | "false")) && has_remapped_shapes(package, mp, mx, mm, lm))
 }
 
 pub(crate) fn slide_remaps_ancestor_artwork(package: &Package, sp: &str, lp: &str, mp: &str) -> bool {
-    let (Some(sx), Some(lx), Some(mx)) = (package.text(sp).ok().and_then(|t| parse(t).ok()), package.text(lp).ok().and_then(|t| parse(t).ok()), package.text(mp).ok().and_then(|t| parse(t).ok())) else { return false };
+    let (Some(sx), Some(lx), Some(mx)) = (doc(package, sp), doc(package, lp), doc(package, mp)) else { return false };
     let (sx, lx, mx, sm, lm, mm) = (sx.root_element(), lx.root_element(), mx.root_element(), part_color_map(package, sp), part_color_map(package, lp), part_color_map(package, mp));
     let bg = child(sx, P, "cSld").and_then(|n| child(n, P, "bg")).is_none() && if child(lx, P, "cSld").and_then(|n| child(n, P, "bg")).is_some() { has_remapped_non_solid_bg(lx, lm, sm) } else { has_remapped_non_solid_bg(mx, mm, sm) };
     bg || has_remapped_shapes(package, lp, lx, lm, sm) || (!matches!(sx.attribute("showMasterSp"), Some("0" | "false")) && !matches!(lx.attribute("showMasterSp"), Some("0" | "false")) && has_remapped_shapes(package, mp, mx, mm, sm))
@@ -167,10 +172,10 @@ pub(crate) fn color_mapping_warning(path: &str) -> String {
 }
 
 pub(crate) fn synthesized_bg(pkg: &Package, path: &str) -> Option<String> {
-    let (p1, e1) = parent_part(pkg, path, Some(parse(pkg.text(path).ok()?).ok()?.root_element().tag_name().name()), true)?;
+    let (p1, e1) = parent_part(pkg, path, Some(doc(pkg, path)?.root_element().tag_name().name()), true)?;
     let (cm, pm) = (part_color_map(pkg, path), part_color_map(pkg, &p1));
     if cm == pm { return None; }
-    let anc: Vec<_> = [Some((p1.clone(), e1)), (e1 == "sldLayout").then(|| parent_part(pkg, &p1, Some(e1), false)).flatten()].into_iter().flatten().filter_map(|(p, e)| parse(pkg.text(&p).ok()?).ok().filter(|d| d.root_element().tag_name().name() == e)).collect();
+    let anc: Vec<_> = [Some((p1.clone(), e1)), (e1 == "sldLayout").then(|| parent_part(pkg, &p1, Some(e1), false)).flatten()].into_iter().flatten().filter_map(|(p, e)| doc(pkg, &p).filter(|d| d.root_element().tag_name().name() == e)).collect();
     let src = anc.iter().map(roxmltree::Document::root_element).find(|r| child(*r, P, "cSld").and_then(|n| child(n, P, "bg")).is_some());
     let eval = |m: crate::design::ColorMap| src.and_then(|r| m.scope(|| background(r))).unwrap_or_else(|| format!("@{}", m.resolve("bg1")));
     (!src.is_some_and(has_non_solid_bg)).then(|| eval(cm)).filter(|cb| cb != &eval(pm))

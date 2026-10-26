@@ -122,7 +122,8 @@ fn issue32_color_maps_and_overrides_resolve() {
     let fail_d = |d: &Document, v: aislide_core::model::Deck| document::transact(d, Transaction { expected_revision: d.revision, expected_hash: d.hash.clone(), operations: serde_json::from_value(json!([{"op":"replace","path":"/deck","value":v}])).unwrap() }).err().unwrap().to_string();
     let fail = |d: &Document, s, l| fail_d(d, assign(d.deck.clone(), s, l, true).unwrap());
     let mut clr_l = doc.deck.clone(); clr_l.design.as_mut().unwrap().layouts[0].background = None;
-    assert!(open(g_s.clone()).deck.design.as_ref().unwrap().layouts[0].background.as_deref() == Some("@dk1") && Package::open(g_s).unwrap().text(s1).unwrap().contains("<a:gradFill>") && fail_d(&doc, clr_l).contains("inherited background") && fail(&re_i, "s2", "title-content").contains("unmodeled") && fail(&g_doc, "slide-1", "title-content").contains("cannot represent"));
+    rep(&mut gp, s1, &[("</p:sld>", "<p:timing><a:schemeClr val=\"accent1\"/></p:timing></p:sld>")]);
+    assert!(open(g_s.clone()).deck.design.as_ref().unwrap().layouts[0].background.as_deref() == Some("@dk1") && Package::open(g_s).unwrap().text(s1).unwrap().contains("<a:gradFill>") && fail_d(&doc, clr_l).contains("inherited background") && fail(&re_i, "s2", "title-content").contains("unmodeled") && fail(&open(gp.save().unwrap()), "slide-1", "two-columns").contains("unmodeled") && fail(&g_doc, "slide-1", "title-content").contains("cannot represent"));
     let re_ass = open(save(&change(&doc, assign(doc.deck.clone(), "slide-1", "title-content", true).unwrap()).document));
     assert_eq!((re_ass.deck.slides[0].inherit_background, &val(&re_ass.deck.slides[0].elements)[0]["color"]), (true, &json!("@lt1")));
     let mut hp = Package::open(save(&source())).unwrap();

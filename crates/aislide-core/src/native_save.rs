@@ -1352,7 +1352,7 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
 }
 
 fn has_explicit_bg(package: &Package, path: &str) -> bool {
-    package.text(path).ok().and_then(|t| parse(t).ok()).is_some_and(|d| child(d.root_element(), P, "cSld").and_then(|c| child(c, P, "bg")).is_some())
+    crate::native::doc(package, path).is_some_and(|d| child(d.root_element(), P, "cSld").and_then(|c| child(c, P, "bg")).is_some())
 }
 
 fn rebase_slide_color_map(package: &mut Package, binding: &NativePart, elements: &[Element], new_parent_map: crate::design::ColorMap) -> Result<()> {
@@ -1361,11 +1361,11 @@ fn rebase_slide_color_map(package: &mut Package, binding: &NativePart, elements:
     let (new_map, _) = crate::native::resolve_color_map(parsed.root_element(), new_parent_map);
     if new_map == old_map { return Ok(()); }
     let common = child(parsed.root_element(), P, "cSld").ok_or_else(|| Error::Invalid("common slide data missing".into()))?;
-    let tree = child(common, P, "spTree").ok_or_else(|| Error::Invalid("shape tree missing".into()))?;
     let projected: BTreeSet<_> = crate::model::element_list(elements).into_iter().filter_map(|e| binding.nodes.get(e.bounds().0).map(String::as_str)).collect();
     let changed = |n: Node<'_, '_>| n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| new_map.resolve(v) != old_map.resolve(v));
-    if tree.descendants().filter(|n| is_shape(*n)).any(|n| properties(n).and_then(|p| p.attribute("id")).is_some_and(|id| !projected.contains(id) && n.descendants().any(|s| changed(s) && !s.ancestors().take_while(|a| *a != n).any(|a| is_shape(a))))) || ["chart", "chartEx"].into_iter().flat_map(|k| crate::pptx::relationship_targets(package, &binding.path, k).ok().into_iter().flat_map(|t| t.into_values())).any(|p| package.text(&p).ok().and_then(|t| parse(t).ok()).is_some_and(|d| d.descendants().any(changed))) {
-        return Err(Error::Unsupported("slide layout change would alter unmodeled or chart native scheme colors".into()));
+    let modeled = |s: Node<'_, '_>| s.ancestors().any(|a| a.has_tag_name((P, "bg"))) || s.ancestors().find(|a| is_shape(*a)).and_then(properties).and_then(|p| p.attribute("id")).is_some_and(|id| projected.contains(id));
+    if parsed.root_element().descendants().any(|s| changed(s) && !modeled(s)) || crate::native::has_remapped_owned(package, &binding.path, old_map, new_map) {
+        return Err(Error::Unsupported("slide layout change would alter unmodeled native scheme colors".into()));
     }
     let mut edits = Vec::new();
     for attr in common.descendants().filter(|n| n.has_tag_name((A, "schemeClr"))).filter_map(|n| n.attributes().find(|a| a.namespace().is_none() && a.name() == "val")) {
