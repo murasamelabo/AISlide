@@ -107,19 +107,23 @@ pub(crate) fn resolve_color_map(root: Node<'_, '_>, parent: crate::design::Color
 
 pub(crate) fn unsupported_color_mapping(root: Node<'_, '_>) -> bool { resolve_color_map(root, crate::design::ColorMap::default()).1 }
 
+fn parent_part(pkg: &Package, path: &str, tag: Option<&str>, top: bool) -> Option<(String, &'static str)> {
+    let rel = |src: &str, kind| relationship_targets(pkg, src, kind).ok()?.into_values().next();
+    match tag {
+        Some("sld") | None if top && (tag == Some("sld") || path.starts_with("ppt/slides/")) => Some((rel(path, "slideLayout")?, "sldLayout")),
+        Some("sldLayout") => Some((rel("", "officeDocument").and_then(|main| relationship_targets(pkg, &main, "slideMaster").ok()).and_then(|ms| ms.into_values().find(|m| relationship_targets(pkg, m, "slideLayout").ok().is_some_and(|l| l.values().any(|p| p == path)))).or_else(|| rel(path, "slideMaster"))?, "sldMaster")),
+        Some("notes") => Some((rel(path, "notesMaster")?, "notesMaster")),
+        _ => None,
+    }
+}
+
 pub(crate) fn part_color_map(package: &Package, path: &str) -> crate::design::ColorMap {
     fn step(pkg: &Package, path: &str, expected: Option<&str>, depth: u8) -> crate::design::ColorMap {
         if depth > 2 { return Default::default(); }
         let doc = pkg.text(path).ok().and_then(|xml| parse(xml).ok());
         let tag = doc.as_ref().map(|d| d.root_element().tag_name().name());
         if expected.is_some_and(|exp| tag != Some(exp)) { return Default::default(); }
-        let rel = |src: &str, kind| relationship_targets(pkg, src, kind).ok()?.into_values().next();
-        let parent = match tag {
-            Some("sld") | None if expected.is_none() && (tag == Some("sld") || path.starts_with("ppt/slides/")) => rel(path, "slideLayout").map_or_else(Default::default, |t| step(pkg, &t, Some("sldLayout"), depth + 1)),
-            Some("sldLayout") => rel("", "officeDocument").and_then(|main| relationship_targets(pkg, &main, "slideMaster").ok()).and_then(|ms| ms.into_values().find(|m| relationship_targets(pkg, m, "slideLayout").ok().is_some_and(|l| l.values().any(|p| p == path)))).or_else(|| rel(path, "slideMaster")).map_or_else(Default::default, |t| step(pkg, &t, Some("sldMaster"), depth + 1)),
-            Some("notes") => rel(path, "notesMaster").map_or_else(Default::default, |t| step(pkg, &t, Some("notesMaster"), depth + 1)),
-            _ => Default::default(),
-        };
+        let parent = parent_part(pkg, path, tag, expected.is_none()).map_or_else(Default::default, |(t, exp)| step(pkg, &t, Some(exp), depth + 1));
         doc.map_or(parent, |doc| resolve_color_map(doc.root_element(), parent).0)
     }
     step(package, path, None, 0)
@@ -162,9 +166,14 @@ pub(crate) fn color_mapping_warning(path: &str) -> String {
     format!("Custom native color mapping in {path} is preserved in the PPTX, but unmodeled color-map extensions or shared ancestor artwork remapped by a descendant override cannot be fully resolved in AISlide's projection. Preview colors and color-based diagnostics may differ from PowerPoint; inspect the unchanged source in Office before changing backgrounds, text or contrast.")
 }
 
-pub(crate) fn synthesized_bg(cm: crate::design::ColorMap, pm: crate::design::ColorMap, parents: &[Node<'_, '_>], parent_bg: &str) -> Option<String> {
-    let src = parents.iter().copied().find(|r| child(*r, P, "cSld").and_then(|n| child(n, P, "bg")).is_some());
-    (cm != pm && !src.is_some_and(has_non_solid_bg)).then(|| src.and_then(|r| cm.scope(|| background(r))).unwrap_or_else(|| format!("@{}", cm.resolve("bg1")))).filter(|b| b != parent_bg)
+pub(crate) fn synthesized_bg(pkg: &Package, path: &str) -> Option<String> {
+    let (p1, e1) = parent_part(pkg, path, Some(parse(pkg.text(path).ok()?).ok()?.root_element().tag_name().name()), true)?;
+    let (cm, pm) = (part_color_map(pkg, path), part_color_map(pkg, &p1));
+    if cm == pm { return None; }
+    let anc: Vec<_> = [Some((p1.clone(), e1)), (e1 == "sldLayout").then(|| parent_part(pkg, &p1, Some(e1), false)).flatten()].into_iter().flatten().filter_map(|(p, e)| parse(pkg.text(&p).ok()?).ok().filter(|d| d.root_element().tag_name().name() == e)).collect();
+    let src = anc.iter().map(roxmltree::Document::root_element).find(|r| child(*r, P, "cSld").and_then(|n| child(n, P, "bg")).is_some());
+    let eval = |m: crate::design::ColorMap| src.and_then(|r| m.scope(|| background(r))).unwrap_or_else(|| format!("@{}", m.resolve("bg1")));
+    (!src.is_some_and(has_non_solid_bg)).then(|| eval(cm)).filter(|cb| cb != &eval(pm))
 }
 
 fn shape_fill(node: Node<'_, '_>) -> String {
@@ -747,7 +756,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
             if layout_remaps_master_artwork(package, layout_path, path) { warnings.push(color_mapping_warning(layout_path)); }
             let mapped_master = (layout_map != master_map && !elements.is_empty()).then(|| read_part_with_map(package, path, master_id.clone(), scale, &[], layout_map, false, &mut Vec::new(), metadata.as_ref(), canvas).map(|part| part.2)).transpose()?;
             let (name, background, elements, layout_binding) = read_part_with_map(package, layout_path, id.clone(), scale, mapped_master.as_deref().unwrap_or(&elements), master_map, true, &mut warnings, metadata.as_ref(), canvas)?;
-            let background = background.or_else(|| synthesized_bg(layout_map, master_map, &[master_xml.root_element()], &master_background));
+            let background = background.or_else(|| synthesized_bg(package, layout_path));
             layouts.push(SlideLayout { id, name, master_id: master_id.clone(), source_id: Some(layout_path.clone()), background, elements }); layout_parts.push(layout_binding);
         }
         masters.push(Master { id: master_id, name, background: master_background, elements, theme: override_theme }); master_parts.push(binding);
@@ -764,8 +773,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
         let (master, master_binding) = (&design.masters[master_index], &master_parts[master_index]);
         let id = identity(path, format!("slide-{}", index + 1));
         let xml = parse(package.text(path)?)?;
-        let (layout_doc, master_doc) = (parse(package.text(&layout_binding.path)?)?, parse(package.text(&master_binding.path)?)?);
-        let (layout_xml, master_xml, layout_map, master_map) = (layout_doc.root_element(), master_doc.root_element(), part_color_map(package, &layout_binding.path), part_color_map(package, &master_binding.path));
+        let (layout_map, master_map) = (part_color_map(package, &layout_binding.path), part_color_map(package, &master_binding.path));
         let (slide_map, _) = resolve_color_map(xml.root_element(), layout_map);
         if slide_remaps_ancestor_artwork(package, path, &layout_binding.path, &master_binding.path) { warnings.push(color_mapping_warning(path)); }
         let mapped_layout = (slide_map != layout_map && !layout.elements.is_empty()).then(|| {
@@ -776,7 +784,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
         if mapped_layout.is_some() {
             for e in &mut elements { if let Element::Text { color, format, .. } = e { if format.inherit_layout && !layout.elements.iter().any(|o| matches!(o, Element::Text { color: c, format: f, .. } if f.placeholder == format.placeholder && c == color)) { format.inherit_layout = false; } } }
         }
-        let background = background.or_else(|| synthesized_bg(slide_map, layout_map, &[layout_xml, master_xml], layout.background.as_deref().unwrap_or(&master.background)));
+        let background = background.or_else(|| synthesized_bg(package, path));
         let note_targets = relationship_targets(package, path, "notesSlide")?;
         let mut notes_paragraphs = Vec::new();
         let notes = if let Some(path) = note_targets.values().next() {

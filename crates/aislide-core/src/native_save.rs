@@ -1043,7 +1043,7 @@ pub(crate) fn patch_part(package: &mut Package, binding: &NativePart, before: &[
             let generated = crate::pptx::xml("p:bg", |writer| { writer.start_element("p:bgPr"); crate::pptx::color(writer, shade); crate::pptx::empty(writer, "a:effectLst", &[]); writer.end_element(); });
             let generated = encode_scheme_colors(String::from_utf8(generated).map_err(|_| Error::Invalid("background XML".into()))?, part_map)?;
             if let Some(old) = old { edits.push((old.range(), generated)); } else { insert_child(&xml, common, &generated, Some(tree), &mut edits)?; }
-        } else if crate::pptx::relationship_targets(package, &binding.path, if document.root_element().has_tag_name((P, "sld")) { "slideLayout" } else { "slideMaster" })?.into_values().next().is_some_and(|p| part_map.resolve("bg1") != crate::native::part_color_map(package, &p).resolve("bg1")) {
+        } else if crate::native::synthesized_bg(package, &binding.path).is_some() {
             return Err(Error::Unsupported("native color map override remaps the inherited background; specify an explicit background color".into()));
         } else if let Some(old) = old { edits.push((old.range(), String::new())); }
     }
