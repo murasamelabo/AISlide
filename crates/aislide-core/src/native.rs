@@ -144,7 +144,7 @@ fn remaps(n: Node<'_, '_>, a: crate::design::ColorMap, b: crate::design::ColorMa
 }
 
 pub(crate) fn has_remapped_owned(pkg: &Package, path: &str, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
-    doc(pkg, &relations_path(path)).is_some_and(|d| d.root_element().children().filter(|n| n.attribute("TargetMode") != Some("External") && n.attribute("Type").is_some_and(|t| t.contains("chart") || t.contains("diagram"))).filter_map(|n| crate::pptx::resolve(path, n.attribute("Target")?).ok()).any(|p| doc(pkg, &p).is_some_and(|d| d.descendants().any(|n| remaps(n, om, cm)))))
+    doc(pkg, &relations_path(path)).is_some_and(|d| d.root_element().children().filter(|n| n.attribute("TargetMode") != Some("External") && n.attribute("Type").is_some_and(|t| t.contains("chart") || t.contains("diagram"))).filter_map(|n| crate::pptx::resolve(path, n.attribute("Target")?).ok()).any(|p| doc(pkg, &p).is_some_and(|d| d.descendants().any(|n| n.tag_name().name() == "clrMapOvr" || remaps(n, om, cm)))))
 }
 
 fn has_remapped_shapes(package: &Package, path: &str, root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
