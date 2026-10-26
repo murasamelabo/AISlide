@@ -129,7 +129,10 @@ fn issue32_color_maps_and_overrides_resolve() {
     assert_eq!((re_ass.deck.slides[0].inherit_background, &val(&re_ass.deck.slides[0].elements)[0]["color"]), (true, &json!("@lt1")));
     let mut hp = Package::open(save(&source())).unwrap();
     rep(&mut hp, sm, &[("val=\"lt1\"", "val=\"bg1\""), ("bg1=\"lt1\" tx1=\"dk1\"", "bg1=\"dk1\" tx1=\"lt1\"")]);
-    rep(&mut hp, s1, &[("<p:sld ", "<p:sld showMasterSp=\"0\" "), ("<p:bg><p:bgPr><a:solidFill><a:schemeClr val=\"lt1\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>", ""), ("<a:masterClrMapping/>", &ovr("lt2", "dk2"))]);
+    rep(&mut hp, s1, &[("<a:masterClrMapping/>", &ovr("dk1", "lt1"))]);
+    let ha = open(hp.save().unwrap()); let mut ha_i = ha.deck.clone(); ha_i.slides[0].inherit_background = true;
+    assert!(open(save(&change(&ha, ha_i).document)).deck.slides[0].inherit_background);
+    rep(&mut hp, s1, &[("<p:sld ", "<p:sld showMasterSp=\"0\" "), ("<p:bg><p:bgPr><a:solidFill><a:schemeClr val=\"lt1\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>", ""), (&ovr("dk1", "lt1"), &ovr("lt2", "dk2"))]);
     let hr = open(hp.save().unwrap());
     assert_eq!((hr.deck.design.as_ref().unwrap().masters[0].background.as_str(), hr.deck.slides[0].background.as_str(), hr.deck.slides[0].inherit_background, hr.deck.slides[0].hide_master_graphics), ("@dk1", "@lt2", false, true));
     let (mut hr_m, mut hr_re) = (hr.deck.clone(), assign(hr.deck.clone(), "slide-1", "title-content", false).unwrap());

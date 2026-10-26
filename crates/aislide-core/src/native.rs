@@ -162,6 +162,11 @@ pub(crate) fn color_mapping_warning(path: &str) -> String {
     format!("Custom native color mapping in {path} is preserved in the PPTX, but unmodeled color-map extensions or shared ancestor artwork remapped by a descendant override cannot be fully resolved in AISlide's projection. Preview colors and color-based diagnostics may differ from PowerPoint; inspect the unchanged source in Office before changing backgrounds, text or contrast.")
 }
 
+pub(crate) fn synthesized_bg(cm: crate::design::ColorMap, pm: crate::design::ColorMap, parents: &[Node<'_, '_>], parent_bg: &str) -> Option<String> {
+    let src = parents.iter().copied().find(|r| child(*r, P, "cSld").and_then(|n| child(n, P, "bg")).is_some());
+    (cm != pm && !src.is_some_and(has_non_solid_bg)).then(|| src.and_then(|r| cm.scope(|| background(r))).unwrap_or_else(|| format!("@{}", cm.resolve("bg1")))).filter(|b| b != parent_bg)
+}
+
 fn shape_fill(node: Node<'_, '_>) -> String {
     if let Some(stop) = child(node, A, "gradFill").and_then(|node| child(node, A, "gsLst")).and_then(|node| child(node, A, "gs")) {
         if let Ok((color, _)) = crate::visual::read_color(stop) { return color; }
@@ -742,7 +747,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
             if layout_remaps_master_artwork(package, layout_path, path) { warnings.push(color_mapping_warning(layout_path)); }
             let mapped_master = (layout_map != master_map && !elements.is_empty()).then(|| read_part_with_map(package, path, master_id.clone(), scale, &[], layout_map, false, &mut Vec::new(), metadata.as_ref(), canvas).map(|part| part.2)).transpose()?;
             let (name, background, elements, layout_binding) = read_part_with_map(package, layout_path, id.clone(), scale, mapped_master.as_deref().unwrap_or(&elements), master_map, true, &mut warnings, metadata.as_ref(), canvas)?;
-            let background = background.or_else(|| (layout_map != master_map && !has_non_solid_bg(master_xml.root_element())).then(|| layout_map.scope(|| self::background(master_xml.root_element())).unwrap_or_else(|| format!("@{}", layout_map.resolve("bg1")))).filter(|inherited| inherited != &master_background));
+            let background = background.or_else(|| synthesized_bg(layout_map, master_map, &[master_xml.root_element()], &master_background));
             layouts.push(SlideLayout { id, name, master_id: master_id.clone(), source_id: Some(layout_path.clone()), background, elements }); layout_parts.push(layout_binding);
         }
         masters.push(Master { id: master_id, name, background: master_background, elements, theme: override_theme }); master_parts.push(binding);
@@ -771,9 +776,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
         if mapped_layout.is_some() {
             for e in &mut elements { if let Element::Text { color, format, .. } = e { if format.inherit_layout && !layout.elements.iter().any(|o| matches!(o, Element::Text { color: c, format: f, .. } if f.placeholder == format.placeholder && c == color)) { format.inherit_layout = false; } } }
         }
-        let layout_effective_bg = layout.background.as_deref().unwrap_or(&master.background);
-        let non_solid_parent = [layout_xml, master_xml].into_iter().find(|r| child(*r, P, "cSld").and_then(|n| child(n, P, "bg")).is_some()).is_some_and(has_non_solid_bg);
-        let background = background.or_else(|| (slide_map != layout_map && !non_solid_parent).then(|| slide_map.scope(|| self::background(layout_xml).or_else(|| self::background(master_xml))).unwrap_or_else(|| format!("@{}", slide_map.resolve("bg1")))).filter(|inherited| inherited != layout_effective_bg));
+        let background = background.or_else(|| synthesized_bg(slide_map, layout_map, &[layout_xml, master_xml], layout.background.as_deref().unwrap_or(&master.background)));
         let note_targets = relationship_targets(package, path, "notesSlide")?;
         let mut notes_paragraphs = Vec::new();
         let notes = if let Some(path) = note_targets.values().next() {

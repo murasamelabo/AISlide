@@ -1043,11 +1043,9 @@ pub(crate) fn patch_part(package: &mut Package, binding: &NativePart, before: &[
             let generated = crate::pptx::xml("p:bg", |writer| { writer.start_element("p:bgPr"); crate::pptx::color(writer, shade); crate::pptx::empty(writer, "a:effectLst", &[]); writer.end_element(); });
             let generated = encode_scheme_colors(String::from_utf8(generated).map_err(|_| Error::Invalid("background XML".into()))?, part_map)?;
             if let Some(old) = old { edits.push((old.range(), generated)); } else { insert_child(&xml, common, &generated, Some(tree), &mut edits)?; }
-        } else if let Some(old) = old.filter(|_| child(document.root_element(), P, "clrMapOvr").and_then(|n| child(n, A, "overrideClrMapping")).is_none()) {
-            edits.push((old.range(), String::new()));
-        } else {
+        } else if crate::pptx::relationship_targets(package, &binding.path, if document.root_element().has_tag_name((P, "sld")) { "slideLayout" } else { "slideMaster" })?.into_values().next().is_some_and(|p| part_map.resolve("bg1") != crate::native::part_color_map(package, &p).resolve("bg1")) {
             return Err(Error::Unsupported("native color map override remaps the inherited background; specify an explicit background color".into()));
-        }
+        } else if let Some(old) = old { edits.push((old.range(), String::new())); }
     }
     patch_elements(&xml, tree, before, after, &ids, theme, binding, &resources, scale, &mut edits)?;
     if !edits.is_empty() { package.replace_part(&binding.path, apply(xml, edits)?)?; }
@@ -1340,7 +1338,7 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
             notes_map.scope(|| patch_notes(package, main, &binding.path, after, deck))?;
         }
         let parent_bg_changed = after.layout_id.as_ref().and_then(|id| old.layouts.iter().find(|l| &l.id == id).zip(design.layouts.iter().find(|l| &l.id == id))).is_some_and(|(bl, al)| bl.background != al.background || old.masters.iter().find(|m| m.id == al.master_id).zip(design.masters.iter().find(|m| m.id == al.master_id)).is_some_and(|(bm, am)| bm.background != am.background));
-        let background = if after.inherit_background { (!before.inherit_background).then_some(None) } else { (before.background != after.background || before.inherit_background || (!has_explicit_bg(package, &binding.path) && (before.layout_id != after.layout_id || parent_bg_changed))).then_some(Some(after.background.as_str())) };
+        let background = (before.background != after.background || before.inherit_background != after.inherit_background || (!after.inherit_background && !has_explicit_bg(package, &binding.path) && (before.layout_id != after.layout_id || parent_bg_changed))).then_some(if after.inherit_background { None } else { Some(after.background.as_str()) });
         patch_part(package, binding, &before.elements, &after.elements, crate::design::slide_theme(after, Some(design)).unwrap_or(&design.theme), (before.title != after.title).then_some(after.title.as_str()), background, scale)?;
         if before.hide_master_graphics != after.hide_master_graphics {
             let xml = package.text(&binding.path)?.to_owned(); let document = parse(&xml)?; let mut edits = Vec::new(); set_attribute(&xml, document.root_element(), "showMasterSp", if after.hide_master_graphics { "0" } else { "1" }, &mut edits)?; package.replace_part(&binding.path, apply(xml, edits)?)?;
