@@ -81,7 +81,7 @@ fn check_part(source: &Source, part: &NativePart, elements: &[Element], theme: &
     let xml = crate::pptx::parse(source.package.text(&part.path)?)?;
     let expected = crate::pptx::parse(source.generated.text(&expected_part(source, part)?)?)?;
     let part_map = crate::native::part_color_map(&source.package, &part.path);
-    let ignore_bg = crate::native::child(xml.root_element(), crate::native::P, "cSld").and_then(|node| crate::native::child(node, crate::native::P, "bg")).is_none() && parent_color_map.is_some_and(|parent_map| part_map != parent_map);
+    let ignore_bg = crate::native::bg_node(xml.root_element()).is_none() && parent_color_map.is_some_and(|parent_map| part_map != parent_map);
     if part_map.scope(|| xml_value(xml.root_element(), true)) != crate::design::ColorMap::default().scope(|| xml_value_bg(expected.root_element(), true, ignore_bg)) {
         return Err(Error::Unsupported("source background, master text styles or XML extensions cannot be preserved by editable master import".into()));
     }

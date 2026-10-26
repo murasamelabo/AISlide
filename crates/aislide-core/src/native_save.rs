@@ -194,7 +194,7 @@ pub(crate) fn resource_changes(package: &mut Package, binding: &NativePart, befo
     if chart_number > u32::MAX as usize - 2048 || picture_number > u32::MAX as usize - 2048 { return Err(Error::Limit("native resource IDs exhausted".into())); }
     let mut parts = BTreeMap::new(); let mut types = Vec::new();
     let relationships = crate::pptx::resource_parts(&mut parts, &resources, &mut chart_number, &mut picture_number, &mut types, Some(ids), &mut crate::pptx::MediaResources::new())?;
-    let part_map = crate::native::part_color_map(package, &binding.path);
+    let part_map = crate::native::try_part_color_map(package, &binding.path)?;
     for (path, data) in parts {
         let data = if path.starts_with("ppt/charts/chart") && path.ends_with(".xml") { encode_scheme_colors(String::from_utf8(data).map_err(|_| Error::Invalid("chart XML encoding".into()))?, part_map)?.into_bytes() } else { data };
         package.add_part(path, data)?;
@@ -1035,7 +1035,7 @@ pub(crate) fn patch_part(package: &mut Package, binding: &NativePart, before: &[
     let resources = PartResources { mapping: resource_changes(package, binding, before, after, &ids)?, hyperlinks: crate::native::hyperlink_targets(package, &binding.path)? };
     let mut edits = Vec::new();
     if let Some(name) = name { set_attribute(&xml, common, "name", name, &mut edits)?; }
-    let part_map = crate::native::part_color_map(package, &binding.path);
+    let part_map = crate::native::try_part_color_map(package, &binding.path)?;
     let _scope = part_map.enter();
     if let Some(background) = background {
         let old = child(common, P, "bg");
@@ -1328,13 +1328,13 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
         let Some(before) = original.deck.slides.iter().find(|slide| slide.id == source) else { continue };
         if before.layout_id != after.layout_id {
             let path = after.layout_id.as_ref().or_else(|| design.layouts.first().map(|layout| &layout.id)).and_then(|id| topology.layouts.iter().find(|part| &part.id == id)).map(|part| &part.path).ok_or_else(|| Error::Unsupported("native slide layout missing".into()))?;
-            rebase_slide_color_map(package, binding, &before.elements, crate::native::part_color_map(package, path))?;
+            rebase_slide_color_map(package, binding, &before.elements, crate::native::try_part_color_map(package, path)?)?;
             let relation_path = relations_path(&binding.path); let xml = package.text(&relation_path)?.to_owned(); let document = parse(&xml)?;
             let relation = document.root_element().children().find(|node| node.attribute("Type") == Some(format!("{}/slideLayout", crate::native::R).as_str())).ok_or_else(|| Error::Invalid("slide layout relationship missing".into()))?;
             let mut edits = Vec::new(); set_attribute(&xml, relation, "Target", &format!("/{path}"), &mut edits)?; package.replace_part(&relation_path, apply(xml, edits)?)?;
         }
         if before.notes != after.notes || before.notes_paragraphs != after.notes_paragraphs {
-            let notes_map = crate::pptx::relationship_targets(package, &binding.path, "notesSlide")?.into_values().next().or_else(|| crate::pptx::relationship_targets(package, main, "notesMaster").ok()?.into_values().next()).map_or_else(Default::default, |p| crate::native::part_color_map(package, &p));
+            let notes_map = crate::pptx::relationship_targets(package, &binding.path, "notesSlide")?.into_values().next().or_else(|| crate::pptx::relationship_targets(package, main, "notesMaster").ok()?.into_values().next()).map(|p| crate::native::try_part_color_map(package, &p)).transpose()?.unwrap_or_default();
             notes_map.scope(|| patch_notes(package, main, &binding.path, after, deck))?;
         }
         let parent_bg_changed = after.layout_id.as_ref().and_then(|id| old.layouts.iter().find(|l| &l.id == id).zip(design.layouts.iter().find(|l| &l.id == id))).is_some_and(|(bl, al)| bl.background != al.background || old.masters.iter().find(|m| m.id == al.master_id).zip(design.masters.iter().find(|m| m.id == al.master_id)).is_some_and(|(bm, am)| bm.background != am.background));
@@ -1352,11 +1352,11 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
 }
 
 fn has_explicit_bg(package: &Package, path: &str) -> bool {
-    crate::native::doc(package, path).is_some_and(|d| child(d.root_element(), P, "cSld").and_then(|c| child(c, P, "bg")).is_some())
+    crate::native::doc(package, path).is_some_and(|d| crate::native::bg_node(d.root_element()).is_some())
 }
 
 fn rebase_slide_color_map(package: &mut Package, binding: &NativePart, elements: &[Element], new_parent_map: crate::design::ColorMap) -> Result<()> {
-    let old_map = crate::native::part_color_map(package, &binding.path);
+    let old_map = crate::native::try_part_color_map(package, &binding.path)?;
     let xml = package.text(&binding.path)?.to_owned(); let parsed = parse(&xml)?;
     let (new_map, _) = crate::native::resolve_color_map(parsed.root_element(), new_parent_map);
     if new_map == old_map { return Ok(()); }
