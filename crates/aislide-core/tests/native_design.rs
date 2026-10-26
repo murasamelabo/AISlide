@@ -79,7 +79,7 @@ fn issue32_color_maps_and_overrides_resolve() {
     rep(&mut pkg, s1, &[("val=\"lt1\"", "val=\"bg1\""), ("val=\"dk1\"", "val=\"tx1\"")]);
     let (bytes, opened) = { let b = pkg.save().unwrap(); (b.clone(), document::open_presentation("p".into(), b).unwrap()) };
     assert!(!opened["warnings"].as_array().unwrap().iter().any(|w| w.as_str().is_some_and(|m| m.contains("Custom native color mapping"))));
-    let (doc, potx): (Document, _) = (el(opened["document"].clone()), to_potx(bytes.clone()));
+    let (doc, potx) = (open(bytes.clone()), to_potx(bytes.clone()));
     assert_eq!(save(&doc), bytes);
     let t_doc = load_potx("t".into(), potx.clone()).unwrap();
     for c in [&doc, &t_doc] {
@@ -104,12 +104,10 @@ fn issue32_color_maps_and_overrides_resolve() {
     let cd_b = save(&change(&re_i, cd).document);
     assert!(Package::open(cd_b.clone()).unwrap().text("ppt/charts/chart2.xml").unwrap().contains("val=\"accent2\"") && val(&open(cd_b).deck.slides[1].elements)[1]["series"][0] == json!({"name":"R","values":[15.0,25.0],"color":"@accent1"}));
     let cat = req(json!({"op":"inspect_master_source","kind":"potx","base64":b64(&potx)}));
-    for (mode, id, pfx) in [("masters", &cat["masters"][0]["id"], "m"), ("slides", &cat["slides"][0]["id"], "s")] {
+    for (mode, id, pfx, k, idx) in [("masters", &cat["masters"][0]["id"], "m", "layouts", 4), ("slides", &cat["slides"][0]["id"], "s", "masters", 1)] {
         let inp = json!({"kind":"potx","base64":b64(&potx),"source_sha256":cat["source_sha256"],"mode":mode,"ids":[id],"prefix":pfx,"name":"I"});
         let prev = req(json!({"op":"preview_master_import","document":base,"expected_revision":base.revision,"expected_hash":base.hash,"input":inp}));
-        let imp: Document = el(req(json!({"op":"import_masters","document":base,"expected_revision":base.revision,"expected_hash":base.hash,"input":inp,"expected_candidate_hash":prev["candidate_hash"]}))["document"].clone());
-        let d = imp.deck.design.as_ref().unwrap();
-        if mode == "masters" { assert_eq!(d.layouts[4].background.as_deref(), Some("@dk1")); } else { assert_eq!(d.masters[1].background, "@dk1"); }
+        assert_eq!(req(json!({"op":"import_masters","document":base,"expected_revision":base.revision,"expected_hash":base.hash,"input":inp,"expected_candidate_hash":prev["candidate_hash"]}))["document"]["deck"]["design"][k][idx]["background"], "@dk1");
     }
     assert_eq!((doc.deck.slides[0].notes_paragraphs[0].runs[0].style.color.as_deref(), cat["masters"][0]["importable"].as_bool(), cat["slides"][0]["importable"].as_bool()), (Some("@lt1"), Some(true), Some(true)));
     let mut ed = doc.deck.clone();
@@ -121,7 +119,7 @@ fn issue32_color_maps_and_overrides_resolve() {
     rep(&mut gp, "ppt/slideLayouts/slideLayout2.xml", &[("</p:cSld>", &ovr_l.replace("accent2=\"accent1\"", "accent2=\"accent2\""))]);
     let g_doc = open(gp.save().unwrap()); let mut g_ed = g_doc.deck.clone(); g_ed.design.as_mut().unwrap().masters[0].background = "@lt2".into();
     let g_s = save(&change(&g_doc, g_ed).document);
-    let fail_d = |d: &Document, v: aislide_core::model::Deck| document::transact(d, Transaction { expected_revision: d.revision, expected_hash: d.hash.clone(), operations: el(json!([{"op":"replace","path":"/deck","value":v}])) }).err().unwrap().to_string();
+    let fail_d = |d: &Document, v: aislide_core::model::Deck| aislide_core::execute_request(json!({"op":"transact","document":d,"transaction":{"expected_revision":d.revision,"expected_hash":d.hash,"operations":[{"op":"replace","path":"/deck","value":v}]}})).unwrap_err().to_string();
     let fail = |d: &Document, s, l| fail_d(d, assign(d.deck.clone(), s, l, true).unwrap());
     let mut clr_l = doc.deck.clone(); clr_l.design.as_mut().unwrap().layouts[0].background = None;
     assert!(open(g_s.clone()).deck.design.as_ref().unwrap().layouts[0].background.as_deref() == Some("@dk1") && Package::open(g_s).unwrap().text(s1).unwrap().contains("<a:gradFill>") && fail_d(&doc, clr_l).contains("inherited background") && fail(&re_i, "s2", "title-content").contains("unmodeled") && fail(&g_doc, "slide-1", "title-content").contains("cannot represent"));

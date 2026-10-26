@@ -40,7 +40,7 @@ impl ColorMap {
 }
 
 /// Resolves a raw XML `schemeClr`/`bg1`/`tx1` attribute under the active `ColorMap::enter` scope.
-pub(crate) fn color_slot(value: &str) -> &str { ACTIVE_COLOR_MAP.with(|a| a.get().0.resolve(value)) }
+pub(crate) fn color_slot(value: &str) -> &str { ACTIVE_COLOR_MAP.with(|a| { debug_assert!(a.get().1 > 0); a.get().0.resolve(value) }) }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
