@@ -119,7 +119,7 @@ fn issue32_color_maps_and_overrides_resolve() {
     rep(&mut gp, "ppt/slideLayouts/slideLayout2.xml", &[("</p:cSld>", &ovr_l.replace("accent2=\"accent1\"", "accent2=\"accent2\""))]);
     let g_doc = open(gp.save().unwrap()); let mut g_ed = g_doc.deck.clone(); g_ed.design.as_mut().unwrap().masters[0].background = "@lt2".into();
     let g_s = save(&change(&g_doc, g_ed).document);
-    let fail_d = |d: &Document, v: aislide_core::model::Deck| aislide_core::execute_request(json!({"op":"transact","document":d,"transaction":{"expected_revision":d.revision,"expected_hash":d.hash,"operations":[{"op":"replace","path":"/deck","value":v}]}})).unwrap_err().to_string();
+    let fail_d = |d: &Document, v: aislide_core::model::Deck| document::transact(d, Transaction { expected_revision: d.revision, expected_hash: d.hash.clone(), operations: serde_json::from_value(json!([{"op":"replace","path":"/deck","value":v}])).unwrap() }).err().unwrap().to_string();
     let fail = |d: &Document, s, l| fail_d(d, assign(d.deck.clone(), s, l, true).unwrap());
     let mut clr_l = doc.deck.clone(); clr_l.design.as_mut().unwrap().layouts[0].background = None;
     assert!(open(g_s.clone()).deck.design.as_ref().unwrap().layouts[0].background.as_deref() == Some("@dk1") && Package::open(g_s).unwrap().text(s1).unwrap().contains("<a:gradFill>") && fail_d(&doc, clr_l).contains("inherited background") && fail(&re_i, "s2", "title-content").contains("unmodeled") && fail(&g_doc, "slide-1", "title-content").contains("cannot represent"));
