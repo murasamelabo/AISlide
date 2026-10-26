@@ -1035,7 +1035,7 @@ pub(crate) fn patch_part(package: &mut Package, binding: &NativePart, before: &[
     let resources = PartResources { mapping: resource_changes(package, binding, before, after, &ids)?, hyperlinks: crate::native::hyperlink_targets(package, &binding.path)? };
     let mut edits = Vec::new();
     if let Some(name) = name { set_attribute(&xml, common, "name", name, &mut edits)?; }
-    let _scope = (background.is_some() || !equal(before, after)?).then(|| crate::native::try_part_color_map(package, &binding.path)).transpose()?.unwrap_or_default().enter();
+    let _scope = (background.is_some() || !equal(&before, &after)?).then(|| crate::native::try_part_color_map(package, &binding.path)).transpose()?.unwrap_or_default().enter();
     if let Some(background) = background {
         let old = child(common, P, "bg");
         if let Some(shade) = background {
