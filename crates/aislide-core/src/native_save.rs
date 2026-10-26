@@ -142,7 +142,7 @@ pub(crate) fn encode_scheme_colors(xml: String, color_map: crate::design::ColorM
     for attribute in document.descendants().filter(|n| n.has_tag_name((A, "schemeClr"))).filter_map(|n| n.attributes().find(|a| a.namespace().is_none() && a.name() == "val")) {
         let slot = crate::design::ColorMap::default().resolve(attribute.value());
         if !crate::design::COLOR_KEYS.contains(&slot) { continue; }
-        let encoded = color_map.encode(slot).ok_or_else(|| Error::Unsupported("native color map cannot represent the requested theme color slot".into()))?;
+        let encoded = color_map.encode(slot).ok_or_else(|| Error::Unsupported("native color map cannot represent theme color slot".into()))?;
         if encoded != attribute.value() { edits.push((attribute.range_value(), encoded.into())); }
     }
     if edits.is_empty() { return Ok(xml); }
@@ -1035,16 +1035,15 @@ pub(crate) fn patch_part(package: &mut Package, binding: &NativePart, before: &[
     let resources = PartResources { mapping: resource_changes(package, binding, before, after, &ids)?, hyperlinks: crate::native::hyperlink_targets(package, &binding.path)? };
     let mut edits = Vec::new();
     if let Some(name) = name { set_attribute(&xml, common, "name", name, &mut edits)?; }
-    let part_map = crate::native::try_part_color_map(package, &binding.path)?;
-    let _scope = part_map.enter();
+    let _scope = (background.is_some() || !equal(before, after)?).then(|| crate::native::try_part_color_map(package, &binding.path)).transpose()?.unwrap_or_default().enter();
     if let Some(background) = background {
         let old = child(common, P, "bg");
         if let Some(shade) = background {
             let generated = crate::pptx::xml("p:bg", |writer| { writer.start_element("p:bgPr"); crate::pptx::color(writer, shade); crate::pptx::empty(writer, "a:effectLst", &[]); writer.end_element(); });
-            let generated = encode_scheme_colors(String::from_utf8(generated).map_err(|_| Error::Invalid("background XML".into()))?, part_map)?;
+            let generated = encode_scheme_colors(String::from_utf8(generated).map_err(|_| Error::Invalid("background XML".into()))?, crate::design::ColorMap::scoped()?)?;
             if let Some(old) = old { edits.push((old.range(), generated)); } else { insert_child(&xml, common, &generated, Some(tree), &mut edits)?; }
         } else if crate::native::synthesized_bg(package, &binding.path).is_some() {
-            return Err(Error::Unsupported("native color map override remaps the inherited background; specify an explicit background color".into()));
+            return Err(Error::Unsupported("native color map override remaps the inherited background".into()));
         } else if let Some(old) = old { edits.push((old.range(), String::new())); }
     }
     patch_elements(&xml, tree, before, after, &ids, theme, binding, &resources, scale, &mut edits)?;
@@ -1370,7 +1369,7 @@ fn rebase_slide_color_map(package: &mut Package, binding: &NativePart, elements:
     let mut edits = Vec::new();
     for attr in common.descendants().filter(|n| n.has_tag_name((A, "schemeClr"))).filter_map(|n| n.attributes().find(|a| a.namespace().is_none() && a.name() == "val")) {
         let old_slot = old_map.resolve(attr.value());
-        if new_map.resolve(attr.value()) != old_slot { edits.push((attr.range_value(), new_map.encode(old_slot).ok_or_else(|| Error::Unsupported("target layout color map cannot represent an existing slide scheme color".into()))?.into())); }
+        if new_map.resolve(attr.value()) != old_slot { edits.push((attr.range_value(), new_map.encode(old_slot).ok_or_else(|| Error::Unsupported("target layout color map cannot represent slide scheme color".into()))?.into())); }
     }
     if !edits.is_empty() { package.replace_part(&binding.path, apply(xml, edits)?)?; }
     Ok(())

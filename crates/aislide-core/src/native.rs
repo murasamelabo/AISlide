@@ -148,14 +148,7 @@ pub(crate) fn has_remapped_owned(pkg: &Package, path: &str, om: crate::design::C
 }
 
 fn has_remapped_shapes(package: &Package, path: &str, root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
-    if om == cm { return false; }
-    let Some(tree) = child(root, P, "cSld").and_then(|n| child(n, P, "spTree")) else { return false };
-    for c in tree.children().filter(|n| n.is_element()).map(|n| crate::interactive::office::static_fallback(n).unwrap_or(n)) {
-        for n in c.descendants().filter(|n| is_shape(*n) && placeholder(*n).is_none() && !n.ancestors().filter(|a| is_shape(*a)).any(|a| properties(a).is_some_and(|p| matches!(p.attribute("hidden"), Some("1" | "true"))))) {
-            if n.descendants().any(|d| remaps(d, om, cm) && !d.ancestors().take_while(|a| *a != n).any(|a| is_shape(a))) { return true; }
-        }
-    }
-    has_remapped_owned(package, path, om, cm)
+    om != cm && (child(root, P, "cSld").and_then(|n| child(n, P, "spTree")).is_some_and(|tree| tree.children().filter(|n| n.is_element()).map(|n| crate::interactive::office::static_fallback(n).unwrap_or(n)).any(|c| c.descendants().filter(|n| is_shape(*n) && placeholder(*n).is_none() && !n.ancestors().filter(|a| is_shape(*a)).any(|a| properties(a).is_some_and(|p| matches!(p.attribute("hidden"), Some("1" | "true"))))).any(|n| n.descendants().any(|d| remaps(d, om, cm) && !d.ancestors().take_while(|a| *a != n).any(|a| is_shape(a)))))) || has_remapped_owned(package, path, om, cm))
 }
 
 fn has_remapped_non_solid_bg(root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
@@ -171,14 +164,14 @@ pub(crate) fn layout_remaps_master_artwork(package: &Package, lp: &str, mp: &str
 }
 
 pub(crate) fn slide_remaps_ancestor_artwork(package: &Package, sp: &str, lp: &str, mp: &str) -> bool {
-    let (Some(sx), Some(lx), Some(mx)) = (doc(package, sp), doc(package, mp), doc(package, lp)) else { return true };
-    let (sx, mx, lx, sm, lm, mm) = (sx.root_element(), lx.root_element(), mx.root_element(), part_color_map(package, sp), part_color_map(package, lp), part_color_map(package, mp));
+    let (Some(sx), Some(lx), Some(mx)) = (doc(package, sp), doc(package, lp), doc(package, mp)) else { return true };
+    let (sx, lx, mx, sm, lm, mm) = (sx.root_element(), lx.root_element(), mx.root_element(), part_color_map(package, sp), part_color_map(package, lp), part_color_map(package, mp));
     let bg = bg_node(sx).is_none() && if bg_node(lx).is_some() { has_remapped_non_solid_bg(lx, lm, sm) } else { has_remapped_non_solid_bg(mx, mm, sm) };
     bg || has_remapped_shapes(package, lp, lx, lm, sm) || (show_master(sx) && show_master(lx) && has_remapped_shapes(package, mp, mx, mm, sm))
 }
 
 pub(crate) fn color_mapping_warning(path: &str) -> String {
-    format!("Custom native color mapping in {path} is preserved in the PPTX, but unmodeled color-map extensions or shared ancestor artwork remapped by a descendant override cannot be fully resolved in AISlide's projection. Preview colors and color-based diagnostics may differ from PowerPoint; inspect the unchanged source in Office before changing backgrounds, text or contrast.")
+    format!("Custom native color mapping in {path} is preserved in PPTX, but unmodeled color-map extensions or remapped ancestor artwork cannot be resolved in AISlide; preview colors and diagnostics may differ from PowerPoint.")
 }
 
 pub(crate) fn synthesized_bg(pkg: &Package, path: &str) -> Option<String> {

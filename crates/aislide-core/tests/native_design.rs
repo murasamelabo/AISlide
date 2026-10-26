@@ -142,7 +142,8 @@ fn issue32_color_maps_and_overrides_resolve() {
     hr_m.design.as_mut().unwrap().masters[0].background = "@accent3".into(); hr_re.slides[0].inherit_background = false;
     assert_eq!((open(save(&change(&hr, hr_m.clone()).document)).deck.slides[0].background.as_str(), open(save(&change(&hr, hr_re).document)).deck.slides[0].background.as_str()), ("@lt2", "@lt2"));
     rep(&mut hp, sm, &[(sf_bg, gr_bg)]); assert!(has_w(&open(hp.save().unwrap()), "preview_presentation", "warnings"));
-    rep(&mut hp, sm, &[("bg1=\"dk1\" ", "")]); assert!(fail_d(&open(hp.save().unwrap()), hr_m).contains("hierarchy"));
+    rep(&mut hp, sm, &[("bg1=\"dk1\" ", "")]); let u = open(hp.save().unwrap()); let mut ut = u.deck.clone(); ut.slides[0].title = "X".into();
+    assert_eq!((open(save(&change(&u, ut).document)).deck.slides[0].title.as_str(), fail_d(&u, hr_m).contains("hierarchy")), ("X", true));
     let (mut ph_d, t_ph) = (base.deck.clone(), |id, inh| el(json!({"type":"text","id":id,"x":64,"y":80,"width":1152,"height":120,"text":"M","font_size":42,"color":"@dk1","bold":true,"format":{"placeholder":{"kind":"title","index":0},"inherit_layout":inh}})));
     ph_d.design.as_mut().unwrap().masters[0].elements = vec![t_ph("pt", false)]; ph_d.design.as_mut().unwrap().layouts[0].elements = vec![t_ph("pt", false)];
     ph_d.slides[0].inherit_background = true; ph_d.slides[0].elements = vec![t_ph("st", true)];
