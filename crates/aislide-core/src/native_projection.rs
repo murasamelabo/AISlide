@@ -67,7 +67,7 @@ fn store(hash: String, index: ProjectionIndex) -> Result<Arc<ProjectionIndex>> {
     Ok(index)
 }
 
-fn part(package: &Package, binding: &NativePart, elements: &[Element], design: bool, unsupported_color_mapping: bool) -> Result<ProjectionPart> {
+fn part(package: &Package, binding: &NativePart, elements: &[Element], design: bool) -> Result<ProjectionPart> {
     let parsed = crate::pptx::parse(package.text(&binding.path)?)?;
     let root = parsed.root_element();
     let tree = native::child(root, P, "cSld").and_then(|node| native::child(node, P, "spTree"))
@@ -93,7 +93,7 @@ fn part(package: &Package, binding: &NativePart, elements: &[Element], design: b
     Ok(ProjectionPart {
         path: binding.path.clone(), missing: missing.into_iter().collect(),
         hide_master_graphics: matches!(root.attribute("showMasterSp"), Some("0" | "false")),
-        unsupported_color_mapping: native::unsupported_color_mapping(root) || unsupported_color_mapping,
+        unsupported_color_mapping: native::part_color_map_unsupported(package, &binding.path),
     })
 }
 
@@ -102,22 +102,18 @@ fn build(package: &Package, source: &NativeDeck) -> Result<ProjectionIndex> {
     for binding in &source.slides {
         let slide = source.deck.slides.iter().find(|slide| slide.id == binding.id)
             .ok_or_else(|| Error::Invalid("native projection slide missing".into()))?;
-        let unsupported_color = source.deck.design.as_ref().and_then(|d| slide.layout_id.as_ref().and_then(|id| d.layouts.iter().find(|l| &l.id == id))).is_some_and(|l| {
-            source.layouts.iter().find(|e| e.id == l.id).zip(source.masters.iter().find(|e| e.id == l.master_id)).is_some_and(|(lb, mb)| native::slide_remaps_ancestor_artwork(package, &binding.path, &lb.path, &mb.path))
-        });
-        index.slides.insert(binding.id.clone(), part(package, binding, &slide.elements, false, unsupported_color)?);
+        index.slides.insert(binding.id.clone(), part(package, binding, &slide.elements, false)?);
     }
     if let Some(design) = &source.deck.design {
         for binding in &source.layouts {
             let layout = design.layouts.iter().find(|layout| layout.id == binding.id)
                 .ok_or_else(|| Error::Invalid("native projection layout missing".into()))?;
-            let unsupported_color = source.masters.iter().find(|e| e.id == layout.master_id).is_some_and(|mb| native::layout_remaps_master_artwork(package, &binding.path, &mb.path));
-            index.layouts.insert(binding.id.clone(), part(package, binding, &layout.elements, true, unsupported_color)?);
+            index.layouts.insert(binding.id.clone(), part(package, binding, &layout.elements, true)?);
         }
         for binding in &source.masters {
             let master = design.masters.iter().find(|master| master.id == binding.id)
                 .ok_or_else(|| Error::Invalid("native projection master missing".into()))?;
-            index.masters.insert(binding.id.clone(), part(package, binding, &master.elements, true, false)?);
+            index.masters.insert(binding.id.clone(), part(package, binding, &master.elements, true)?);
         }
     }
     Ok(index)

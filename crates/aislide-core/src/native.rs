@@ -80,6 +80,7 @@ pub(crate) fn bg_node<'a>(r: Node<'a, '_>) -> Option<Node<'a, 'a>> { child(r, P,
 
 fn background(node: Node<'_, '_>) -> Option<String> {
     bg_node(node).and_then(|node| child(node, P, "bgPr")).map(|node| color(node, &format!("@{}", crate::design::color_slot("bg1"))))
+        .or_else(|| matches!(node.tag_name().name(), "sldMaster" | "notesMaster" | "handoutMaster").then(|| format!("@{}", crate::design::color_slot("bg1"))))
 }
 
 fn has_non_solid_bg(root: Node<'_, '_>) -> bool {
@@ -92,6 +93,7 @@ pub(crate) fn apply_color_map_node(map: &mut crate::design::ColorMap, node: Node
     *map = next; !node.children().any(|child| child.is_element())
 }
 
+/// Resolves `p:clrMap` / `p:clrMapOvr` against `parent` (ECMA-376-1 §19.3.1.6, §20.1.6.6: layout inherits master, slide inherits layout).
 pub(crate) fn resolve_color_map(root: Node<'_, '_>, parent: crate::design::ColorMap) -> (crate::design::ColorMap, bool) {
     let (mut map, mut unsupported) = (parent, false);
     if let Some(node) = child(root, P, "clrMap") { if !apply_color_map_node(&mut map, node) { unsupported = true; } }
@@ -115,7 +117,11 @@ fn parent_part(pkg: &Package, path: &str, tag: &str) -> Option<(String, &'static
     let rel = |src: &str, kind| relationship_targets(pkg, src, kind).ok()?.into_values().next();
     match tag {
         "sld" => Some((rel(path, "slideLayout")?, "sldLayout")),
-        "sldLayout" => Some((rel("", "officeDocument").and_then(|main| relationship_targets(pkg, &main, "slideMaster").ok()).and_then(|ms| ms.into_values().find(|m| relationship_targets(pkg, m, "slideLayout").ok().is_some_and(|l| l.values().any(|p| p == path)))).or_else(|| rel(path, "slideMaster"))?, "sldMaster")),
+        "sldLayout" => {
+            let from_main = rel("", "officeDocument").and_then(|main| relationship_targets(pkg, &main, "slideMaster").ok())
+                .and_then(|ms| ms.into_values().find(|m| relationship_targets(pkg, m, "slideLayout").ok().is_some_and(|l| l.values().any(|p| p == path))));
+            Some((from_main.or_else(|| rel(path, "slideMaster"))?, "sldMaster"))
+        }
         "notes" => Some((rel(path, "notesMaster")?, "notesMaster")),
         _ => None,
     }
@@ -144,11 +150,21 @@ fn remaps(n: Node<'_, '_>, a: crate::design::ColorMap, b: crate::design::ColorMa
 }
 
 pub(crate) fn has_remapped_owned(pkg: &Package, path: &str, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
-    doc(pkg, &relations_path(path)).is_some_and(|d| d.root_element().children().filter(|n| n.attribute("TargetMode") != Some("External") && n.attribute("Type").is_some_and(|t| t.contains("chart") || t.contains("diagram"))).filter_map(|n| crate::pptx::resolve(path, n.attribute("Target")?).ok()).any(|p| doc(pkg, &p).is_some_and(|d| d.descendants().any(|n| n.tag_name().name() == "clrMapOvr" || remaps(n, om, cm)))))
+    doc(pkg, &relations_path(path)).is_some_and(|d| {
+        d.root_element().children()
+            .filter(|n| n.attribute("TargetMode") != Some("External") && n.attribute("Type").and_then(|t| t.rsplit_once('/')).is_some_and(|(_, k)| matches!(k, "chart" | "chartEx") || k.starts_with("diagram")))
+            .filter_map(|n| crate::pptx::resolve(path, n.attribute("Target")?).ok())
+            .any(|p| doc(pkg, &p).is_some_and(|d| d.descendants().any(|n| n.tag_name().name() == "clrMapOvr" || remaps(n, om, cm))))
+    })
 }
 
 fn has_remapped_shapes(package: &Package, path: &str, root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
-    om != cm && (child(root, P, "cSld").and_then(|n| child(n, P, "spTree")).is_some_and(|tree| tree.children().filter(|n| n.is_element()).map(|n| crate::interactive::office::static_fallback(n).unwrap_or(n)).any(|c| c.descendants().filter(|n| is_shape(*n) && placeholder(*n).is_none() && !n.ancestors().filter(|a| is_shape(*a)).any(|a| properties(a).is_some_and(|p| matches!(p.attribute("hidden"), Some("1" | "true"))))).any(|n| n.descendants().any(|d| remaps(d, om, cm) && !d.ancestors().take_while(|a| *a != n).any(|a| is_shape(a)))))) || has_remapped_owned(package, path, om, cm))
+    let visible_non_ph = |n: Node<'_, '_>| is_shape(n) && placeholder(n).is_none() && !n.ancestors().filter(|a| is_shape(*a)).any(|a| properties(a).is_some_and(|p| matches!(p.attribute("hidden"), Some("1" | "true"))));
+    let tree_remapped = child(root, P, "cSld").and_then(|n| child(n, P, "spTree")).is_some_and(|tree| {
+        tree.children().filter(|n| n.is_element()).map(|n| crate::interactive::office::static_fallback(n).unwrap_or(n))
+            .any(|c| c.descendants().filter(|n| visible_non_ph(*n)).any(|n| n.descendants().any(|d| remaps(d, om, cm) && !d.ancestors().take_while(|a| *a != n).any(|a| is_shape(a)))))
+    });
+    om != cm && (tree_remapped || has_remapped_owned(package, path, om, cm))
 }
 
 fn has_remapped_non_solid_bg(root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
@@ -168,6 +184,17 @@ pub(crate) fn slide_remaps_ancestor_artwork(package: &Package, sp: &str, lp: &st
     let (sx, lx, mx, sm, lm, mm) = (sx.root_element(), lx.root_element(), mx.root_element(), part_color_map(package, sp), part_color_map(package, lp), part_color_map(package, mp));
     let bg = bg_node(sx).is_none() && if bg_node(lx).is_some() { has_remapped_non_solid_bg(lx, lm, sm) } else { has_remapped_non_solid_bg(mx, mm, sm) };
     bg || has_remapped_shapes(package, lp, lx, lm, sm) || (show_master(sx) && show_master(lx) && has_remapped_shapes(package, mp, mx, mm, sm))
+}
+
+pub(crate) fn part_color_map_unsupported(pkg: &Package, path: &str) -> bool {
+    let Some(d) = doc(pkg, path) else { return true };
+    if unsupported_color_mapping(d.root_element()) { return true; }
+    match d.root_element().tag_name().name() {
+        "sldLayout" => parent_part(pkg, path, "sldLayout").is_none_or(|(mp, _)| layout_remaps_master_artwork(pkg, path, &mp)),
+        "sld" => parent_part(pkg, path, "sld").and_then(|(lp, _)| parent_part(pkg, &lp, "sldLayout").map(|(mp, _)| (lp, mp))).is_none_or(|(lp, mp)| slide_remaps_ancestor_artwork(pkg, path, &lp, &mp)),
+        "notes" => try_part_color_map(pkg, path).is_err(),
+        _ => false,
+    }
 }
 
 pub(crate) fn color_mapping_warning(path: &str) -> String {
@@ -642,14 +669,29 @@ fn normalize_native_frame(element: &mut Element, node: Node<'_, '_>, canvas: (u3
 }
 
 pub(crate) fn read_part(package: &Package, path: &str, id: String, scale: (f64, f64), templates: &[Element], warnings: &mut Vec<String>, metadata: Option<&crate::provenance::Metadata>, canvas: (u32, u32)) -> Result<(String, Option<String>, Vec<Element>, NativePart)> {
-    read_part_with_map(package, path, id, scale, templates, crate::design::ColorMap::default(), true, warnings, metadata, canvas)
+    let tag = doc(package, path).map(|d| d.root_element().tag_name().name().to_owned()).unwrap_or_default();
+    let color_map = part_color_map(package, path);
+    if part_color_map_unsupported(package, path) { warnings.push(color_mapping_warning(path)); }
+    let mapped = match (!templates.is_empty(), parent_part(package, path, &tag)) {
+        (true, Some((p1, e1))) if part_color_map(package, &p1) != color_map => {
+            let m_el = if e1 == "sldLayout" {
+                let (mp, _) = parent_part(package, &p1, e1).ok_or_else(|| Error::Invalid("slide master missing".into()))?;
+                read_part_with_map(package, &mp, String::new(), scale, &[], color_map, &mut Vec::new(), metadata, canvas)?.2
+            } else { Vec::new() };
+            Some(read_part_with_map(package, &p1, String::new(), scale, &m_el, color_map, &mut Vec::new(), metadata, canvas)?.2)
+        }
+        _ => None,
+    };
+    let (name, bg, mut elements, binding) = read_part_with_map(package, path, id, scale, mapped.as_deref().unwrap_or(templates), color_map, warnings, metadata, canvas)?;
+    if mapped.is_some() {
+        for e in &mut elements { if let Element::Text { color, format, .. } = e { if format.inherit_layout && !templates.iter().any(|o| matches!(o, Element::Text { color: c, format: f, .. } if f.placeholder == format.placeholder && c == color)) { format.inherit_layout = false; } } }
+    }
+    Ok((name, bg.or_else(|| synthesized_bg(package, path)), elements, binding))
 }
 
-pub(crate) fn read_part_with_map(package: &Package, path: &str, id: String, scale: (f64, f64), templates: &[Element], parent_map: crate::design::ColorMap, apply_part_map: bool, warnings: &mut Vec<String>, metadata: Option<&crate::provenance::Metadata>, canvas: (u32, u32)) -> Result<(String, Option<String>, Vec<Element>, NativePart)> {
+fn read_part_with_map(package: &Package, path: &str, id: String, scale: (f64, f64), templates: &[Element], color_map: crate::design::ColorMap, warnings: &mut Vec<String>, metadata: Option<&crate::provenance::Metadata>, canvas: (u32, u32)) -> Result<(String, Option<String>, Vec<Element>, NativePart)> {
     let document = parse(package.text(path)?)?;
-    let (color_map, unsupported) = if apply_part_map { resolve_color_map(document.root_element(), parent_map) } else { (parent_map, false) };
     let _scope = color_map.enter();
-    if unsupported { warnings.push(color_mapping_warning(path)); }
     let common = child(document.root_element(), P, "cSld").ok_or_else(|| Error::Invalid("native common slide data missing".into()))?;
     let tree = child(common, P, "spTree").ok_or_else(|| Error::Invalid("native shape tree missing".into()))?;
     let ids = names(tree, metadata.and_then(|metadata| metadata.identities.iter().find(|identity| identity.part == path)))?;
@@ -753,21 +795,15 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
         if theme.is_none() { theme = Some(current_theme.clone()); }
         let override_theme = if crate::canonical::bytes(&theme)? != crate::canonical::bytes(&Some(&current_theme))? { Some(current_theme) } else { None };
         let master_xml = parse(package.text(path)?)?;
-        let master_map = part_color_map(package, path);
-        let master_background = background.unwrap_or_else(|| format!("@{}", master_map.resolve("bg1")));
         let layout_list = child(master_xml.root_element(), P, "sldLayoutIdLst").ok_or_else(|| Error::Unsupported("master layout list missing".into()))?;
         let targets = relationship_targets(package, path, "slideLayout")?;
         for layout in layout_list.children().filter(|node| node.has_tag_name((P, "sldLayoutId"))) {
-            let layout_path = layout.attribute((R, "id")).and_then(|id| targets.get(id)).ok_or_else(|| Error::Invalid("layout relationship missing".into()))?;
-            let id = identity(layout_path, format!("layout-{}", layouts.len() + 1));
-            let layout_map = part_color_map(package, layout_path);
-            if layout_remaps_master_artwork(package, layout_path, path) { warnings.push(color_mapping_warning(layout_path)); }
-            let mapped_master = (layout_map != master_map && !elements.is_empty()).then(|| read_part_with_map(package, path, master_id.clone(), scale, &[], layout_map, false, &mut Vec::new(), metadata.as_ref(), canvas).map(|part| part.2)).transpose()?;
-            let (name, background, elements, layout_binding) = read_part_with_map(package, layout_path, id.clone(), scale, mapped_master.as_deref().unwrap_or(&elements), master_map, true, &mut warnings, metadata.as_ref(), canvas)?;
-            let background = background.or_else(|| synthesized_bg(package, layout_path));
-            layouts.push(SlideLayout { id, name, master_id: master_id.clone(), source_id: Some(layout_path.clone()), background, elements }); layout_parts.push(layout_binding);
+            let path = layout.attribute((R, "id")).and_then(|id| targets.get(id)).ok_or_else(|| Error::Invalid("layout relationship missing".into()))?;
+            let id = identity(path, format!("layout-{}", layouts.len() + 1));
+            let (name, background, elements, binding) = read_part(package, path, id.clone(), scale, &elements, &mut warnings, metadata.as_ref(), canvas)?;
+            layouts.push(SlideLayout { id, name, master_id: master_id.clone(), source_id: Some(path.clone()), background, elements }); layout_parts.push(binding);
         }
-        masters.push(Master { id: master_id, name, background: master_background, elements, theme: override_theme }); master_parts.push(binding);
+        masters.push(Master { id: master_id, name, background: background.unwrap_or_else(|| "@lt1".into()), elements, theme: override_theme }); master_parts.push(binding);
     }
     if let Some(identities) = &design_identities { identities.order(&master_parts, &mut layouts, &mut layout_parts)?; }
     let design = Design { theme: theme.unwrap_or_default(), masters, layouts };
@@ -775,28 +811,15 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
     let mut slides = Vec::new(); let mut slide_parts = Vec::new();
     for (index, path) in paths.iter().enumerate() {
         let targets = relationship_targets(package, path, "slideLayout")?;
-        let layout_index = targets.values().next().and_then(|path| layout_parts.iter().position(|entry| &entry.path == path)).ok_or_else(|| Error::Unsupported("slide layout unavailable".into()))?;
-        let (layout, layout_binding) = (&design.layouts[layout_index], &layout_parts[layout_index]);
-        let master_index = design.masters.iter().position(|master| master.id == layout.master_id).ok_or_else(|| Error::Invalid("slide master missing".into()))?;
-        let (master, master_binding) = (&design.masters[master_index], &master_parts[master_index]);
+        let layout = targets.values().next().and_then(|path| layout_parts.iter().position(|entry| &entry.path == path)).map(|position| &design.layouts[position]).ok_or_else(|| Error::Unsupported("slide layout unavailable".into()))?;
         let id = identity(path, format!("slide-{}", index + 1));
+        let (name, background, elements, binding) = read_part(package, path, id.clone(), scale, &layout.elements, &mut warnings, metadata.as_ref(), canvas)?;
         let xml = parse(package.text(path)?)?;
-        let (layout_map, master_map) = (part_color_map(package, &layout_binding.path), part_color_map(package, &master_binding.path));
-        let (slide_map, _) = resolve_color_map(xml.root_element(), layout_map);
-        if slide_remaps_ancestor_artwork(package, path, &layout_binding.path, &master_binding.path) { warnings.push(color_mapping_warning(path)); }
-        let mapped_layout = (slide_map != layout_map && !layout.elements.is_empty()).then(|| {
-            let mm = (slide_map != master_map && !master.elements.is_empty()).then(|| read_part_with_map(package, &master_binding.path, master.id.clone(), scale, &[], slide_map, false, &mut Vec::new(), metadata.as_ref(), canvas).map(|p| p.2)).transpose()?;
-            read_part_with_map(package, &layout_binding.path, layout.id.clone(), scale, mm.as_deref().unwrap_or(&master.elements), slide_map, false, &mut Vec::new(), metadata.as_ref(), canvas).map(|p| p.2)
-        }).transpose()?;
-        let (name, background, mut elements, binding) = read_part_with_map(package, path, id.clone(), scale, mapped_layout.as_deref().unwrap_or(&layout.elements), layout_map, true, &mut warnings, metadata.as_ref(), canvas)?;
-        if mapped_layout.is_some() {
-            for e in &mut elements { if let Element::Text { color, format, .. } = e { if format.inherit_layout && !layout.elements.iter().any(|o| matches!(o, Element::Text { color: c, format: f, .. } if f.placeholder == format.placeholder && c == color)) { format.inherit_layout = false; } } }
-        }
-        let background = background.or_else(|| synthesized_bg(package, path));
         let note_targets = relationship_targets(package, path, "notesSlide")?;
         let mut notes_paragraphs = Vec::new();
         let notes = if let Some(path) = note_targets.values().next() {
             let document = parse(package.text(path)?)?;
+            if part_color_map_unsupported(package, path) { warnings.push(color_mapping_warning(path)); }
             let _notes_scope = part_color_map(package, path).enter();
             let bodies: Vec<_> = document.descendants().filter(|node| node.has_tag_name((P, "sp")) && placeholder(*node).is_some_and(|ph| ph.kind == PlaceholderKind::Body)).filter_map(|node| child(node, P, "txBody")).collect();
             if note_targets.len() == 1 && bodies.len() == 1 {

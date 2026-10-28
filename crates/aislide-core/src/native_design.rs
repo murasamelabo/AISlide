@@ -298,7 +298,7 @@ pub(crate) fn read_auxiliary(package: &Package, main: &str, warnings: &mut Vec<S
             let themes = relationship_targets(package, path, "theme")?;
             if themes.len() != 1 { warnings.push(format!("{kind} theme unavailable; part retained")); continue; }
             let theme = crate::native::read_theme(package, themes.values().next().unwrap())?;
-            *target = Some(crate::model::AuxiliaryMaster { name, background: background.unwrap_or_else(|| format!("@{}", crate::native::part_color_map(package, path).resolve("bg1"))), elements, theme });
+            *target = Some(crate::model::AuxiliaryMaster { name, background: background.unwrap_or_else(|| "@lt1".into()), elements, theme });
         }
     }
     Ok(Some(design))
