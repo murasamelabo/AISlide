@@ -50,8 +50,8 @@ let activeMutation = false;
 const handle = z.string().uuid();
 const shortText = z.string().max(120);
 const detailSchema = z.enum(['summary', 'full']).describe('Response detail level; defaults to summary across all tool profiles.').optional();
-const querySearchDescription = ' query matches all whitespace-separated terms in any order (case-insensitive; non-spaced languages match as substrings).';
-const catalogPage = { query: z.string().max(160).describe('Whitespace-separated terms (case-insensitive AND match in any order; non-spaced languages match as substrings).').optional(), offset: z.number().int().min(0).max(2048).optional(), limit: z.number().int().min(1).max(50).optional(), detail: detailSchema };
+const querySearchDescription = ' query splits on whitespace and matches items containing all terms as case-insensitive substrings in any order.';
+const catalogPage = { query: z.string().max(160).describe('Whitespace-separated terms matched as case-insensitive substrings in any order.').optional(), offset: z.number().int().min(0).max(2048).optional(), limit: z.number().int().min(1).max(50).optional(), detail: detailSchema };
 const fontBase64 = z.string().max(Math.ceil(FONT_LIMITS.face_bytes / 3) * 4);
 const capacityProfileSchema = z.enum(['legacy', 'standard', 'large']);
 const archiveBase64 = z.string().max(Math.ceil(CAPACITY_PROFILES.large.archive_bytes / 3) * 4);
@@ -694,7 +694,7 @@ function register(name, description, inputSchema, readOnly, action) {
 			const message = error instanceof Error ? error.message : 'Operation failed';
 			const text = message === 'Document is busy'
 				? `${message}; wait for the current call to finish and submit requests sequentially. Inspect the current revision/hash before retrying a planned edit.`
-				: ['preview_presentation', 'finalize_presentation'].includes(name) && message.includes('requires 1-8 unique existing page indices')
+				: ['preview_presentation', 'finalize_presentation'].includes(name) && input?.detail === 'full' && input?.options?.page_indices == null && message.includes('requires 1-8 unique existing page indices')
 					? `${message}; omit detail or set detail:"summary" for the first 8 pages, or pass options.page_indices`
 					: message;
 			return timedResponse({ isError: true, content: [{ type: 'text', text }] }, timing);
@@ -1130,14 +1130,23 @@ register('part_catalog', 'Search 143 original presets including five typed inter
 			const catalog = await client.layoutPatterns({ signal });
 			const patternHaystack = pattern => [pattern.id, pattern.name, pattern.ratio, pattern.use_when, pattern.avoid_when, ...pattern.relationships].join(' ');
 			const candidates = catalog.patterns.filter(pattern => !relationship || pattern.relationships.includes(relationship));
-			const { matching, diagnostics } = filterByQueryTerms(candidates, query, patternHaystack);
 			const start = offset ?? 0, count = limit ?? 12, full = !compactResponse(detail);
 			if (part_preset !== undefined) {
 				const ranking = await client.rankLayoutPatterns({ part: part_preset, ...(canvas ? { canvas } : {}), ...(part_title ? { part_title } : {}) }, { signal });
-				const matchedIds = new Set(matching.map(pattern => pattern.id));
-				const ranked = ranking.patterns.filter(entry => matchedIds.has(entry.pattern_id));
+				const byId = new Map(candidates.map(pattern => [pattern.id, pattern]));
+				const rankedCandidates = ranking.patterns.filter(entry => byId.has(entry.pattern_id));
+				const { matching: ranked, diagnostics } = filterByQueryTerms(
+					rankedCandidates,
+					query,
+					entry => patternHaystack(byId.get(entry.pattern_id)),
+					entry => {
+						const pattern = byId.get(entry.pattern_id);
+						return { id: pattern.id, name: pattern.name };
+					},
+				);
 				return { version: catalog.version, part: ranking.part, total: ranked.length, patterns: ranked.slice(start, start + count), next_offset: start + count < ranked.length ? start + count : null, guidance: catalog.guidance, ...diagnostics };
 			}
+			const { matching, diagnostics } = filterByQueryTerms(candidates, query, patternHaystack);
 			if (part_title !== undefined) throw new Error('part_title requires part_preset');
 			const patterns = matching.slice(start, start + count).map(pattern => full ? pattern : { id: pattern.id, name: pattern.name, ratio: pattern.ratio, relationships: pattern.relationships, use_when: pattern.use_when, avoid_when: pattern.avoid_when });
 			return { version: catalog.version, total: matching.length, patterns, next_offset: start + count < matching.length ? start + count : null, guidance: catalog.guidance, ...(full ? { tokens: catalog.tokens } : {}), ...diagnostics };

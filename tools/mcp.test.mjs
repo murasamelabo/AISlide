@@ -123,12 +123,16 @@ test('issue51 full tool-profile defaults detail to summary, omits filtered part_
         if (request.op === 'create_presentation') return { version: 1, id: request.id, revision: 0, hash: 'a'.repeat(64), sources: [], bindings: [], parts: [], deck: { version: 1, title: request.title, width: 1280, height: 720, slides } };
         if (request.op === 'preview_presentation') {
           const selected = request.options?.page_indices ?? slides.map((_, index) => index);
-          if (selected.length > 8) throw new Error('Invalid input: preview requires 1-8 unique existing page indices; select a smaller batch with options.page_indices');
+          if (selected.length === 0 || selected.length > 8 || new Set(selected).size !== selected.length || selected.some(index => index < 0 || index >= slides.length)) {
+            throw new Error('Invalid input: preview requires 1-8 unique existing page indices; select a smaller batch with options.page_indices');
+          }
           return { revision: 0, hash: request.document.hash, pages: selected.map(page_index => ({ page_index, slide_id: `slide-${page_index + 1}`, image_index: 0 })), images: [{ base64: 'aW1hZ2U=', mime_type: `image/${request.options?.format ?? 'png'}`, width: 10, height: 10, byte_length: 5, sha256: 'b'.repeat(64) }], warnings: [], office_visual_parity: false };
         }
         if (request.op === 'prepare_delivery') {
           const selected = request.options?.page_indices ?? slides.map((_, index) => index);
-          if (selected.length > 8) throw new Error('Invalid input: delivery visual selection requires 1-8 unique existing page indices (use options.page_indices); PPTX always contains the whole deck');
+          if (selected.length === 0 || selected.length > 8 || new Set(selected).size !== selected.length || selected.some(index => index < 0 || index >= slides.length)) {
+            throw new Error('Invalid input: delivery visual selection requires 1-8 unique existing page indices (use options.page_indices); PPTX always contains the whole deck');
+          }
           return {
             revision: 0, hash: request.document.hash,
             files: [{ kind: 'pptx', suffix: '.pptx', mime_type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', page_indices: slides.map((_, index) => index), byte_length: pptxBytes.length, sha256: pptxSha, base64: pptxBytes.toString('base64') }],
@@ -150,14 +154,35 @@ test('issue51 full tool-profile defaults detail to summary, omits filtered part_
       const previewError = await previewTool.callback(previewTool.config.inputSchema.parse({ deck_id, detail: 'full', include_images: false }), { signal: new AbortController().signal });
       assert.equal(previewError.isError, true);
       assert.match(previewError.content[0].text, /options\.page_indices/);
-      assert.match(previewError.content[0].text, /detail/);
+      assert.match(previewError.content[0].text, /omit detail or set detail:"summary"/);
 
       const finalizeTool = registrations.get('finalize_presentation');
       const finalizeError = await finalizeTool.callback(finalizeTool.config.inputSchema.parse({ deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), name: 'bundle-full', detail: 'full', include_images: false }), { signal: new AbortController().signal });
       assert.equal(finalizeError.isError, true);
       assert.match(finalizeError.content[0].text, /options\.page_indices/);
-      assert.match(finalizeError.content[0].text, /detail/);
+      assert.match(finalizeError.content[0].text, /omit detail or set detail:"summary"/);
       assert.match(finalizeError.content[0].text, /PPTX always contains the whole deck/);
+
+      for (const badArgs of [
+        { deck_id, detail: 'full', options: { page_indices: [0, 0] }, include_images: false },
+        { deck_id, detail: 'full', options: { page_indices: [99] }, include_images: false },
+        { deck_id, detail: 'summary', options: { page_indices: [0, 0] }, include_images: false },
+        { deck_id, detail: 'summary', options: { page_indices: [99] }, include_images: false },
+      ]) {
+        const badPreview = await previewTool.callback(previewTool.config.inputSchema.parse(badArgs), { signal: new AbortController().signal });
+        assert.equal(badPreview.isError, true);
+        assert.match(badPreview.content[0].text, /options\.page_indices/);
+        assert.doesNotMatch(badPreview.content[0].text, /detail:"summary"|omit detail/);
+      }
+      for (const badArgs of [
+        { deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), name: 'bundle-dup', detail: 'full', options: { page_indices: [0, 0] }, include_images: false },
+        { deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), name: 'bundle-range', detail: 'summary', options: { page_indices: [99] }, include_images: false },
+      ]) {
+        const badFinalize = await finalizeTool.callback(finalizeTool.config.inputSchema.parse(badArgs), { signal: new AbortController().signal });
+        assert.equal(badFinalize.isError, true);
+        assert.match(badFinalize.content[0].text, /options\.page_indices/);
+        assert.doesNotMatch(badFinalize.content[0].text, /detail:"summary"|omit detail/);
+      }
 
       const defaultCatalog = await call('part_catalog', { query: 'vertical rail', limit: 5 });
       assert.equal(defaultCatalog.schema, undefined);
@@ -192,6 +217,7 @@ test('issue52 catalog and tool search queries match all whitespace-separated ter
       if (request.op === 'part_catalog') return { version: 1, presets, schema: { marker: 'FULL_SCHEMA' }, style: 'Synthetic', default_bounds: {} };
       if (request.op === 'architecture_icons') return { version: 1, release: 'synthetic', configured: true, message: 'Ready', providers: ['azure'], icons };
       if (request.op === 'layout_patterns') return { version: 1, patterns, guidance: ['Use frames unchanged'], tokens: {} };
+      if (request.op === 'rank_layout_patterns') return { part: { preset: request.part, sensitivity: 'strict' }, patterns: [{ pattern_id: 'split/1-1', fit: 'stretch', distortion: 0, area_used: 0.8 }] };
       throw new Error(`Unexpected request: ${request.op}`);
     };
 
@@ -237,6 +263,18 @@ test('issue52 catalog and tool search queries match all whitespace-separated ter
     assert.equal(zeroPatterns.match_mode, 'all_terms');
     assert.deepEqual(zeroPatterns.unmatched_terms, ['zzzz']);
     assert.deepEqual(zeroPatterns.partial_matches[0], { id: 'split/1-1', name: 'Balanced two-column split', matched_terms: ['contrast'] });
+
+    const zeroRankedPatterns = await call('layout_patterns', { part_preset: 'cycle/balanced', query: 'sequence', detail: 'summary' });
+    assert.equal(zeroRankedPatterns.total, 0);
+    assert.equal(zeroRankedPatterns.match_mode, 'all_terms');
+    assert.deepEqual(zeroRankedPatterns.unmatched_terms, ['sequence']);
+    assert.deepEqual(zeroRankedPatterns.partial_matches, []);
+
+    const zeroRankedPartial = await call('layout_patterns', { part_preset: 'cycle/balanced', query: 'contrast zzzz', detail: 'summary' });
+    assert.equal(zeroRankedPartial.total, 0);
+    assert.equal(zeroRankedPartial.match_mode, 'all_terms');
+    assert.deepEqual(zeroRankedPartial.unmatched_terms, ['zzzz']);
+    assert.deepEqual(zeroRankedPartial.partial_matches, [{ id: 'split/1-1', name: 'Balanced two-column split', matched_terms: ['contrast'] }]);
 
     const zeroTools = await call('discover_tools', { query: 'part_catalog zzzz' });
     assert.equal(zeroTools.total, 0);
@@ -4025,7 +4063,8 @@ test('MCP generates, edits and saves with the GUI closed', async () => {
 });
 
 test('MCP validate_deck omits the validated deck unless detail is full', async () => {
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-validate-mcp-'));
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'aislide-validate-test', version: '1.0.0' });
   const raw = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
@@ -4040,6 +4079,7 @@ test('MCP validate_deck omits the validated deck unless detail is full', async (
     const compiled = JSON.parse(await raw('compile_report', { report: JSON.parse(await raw('sample_report')) }));
     assert.equal(compiled.slides, 12);
     const deck_id = compiled.deck_id;
+    const summary12 = JSON.parse(await raw('get_deck_summary', { deck_id, limit: 1 }));
 
     const defaultText = await raw('validate_deck', { deck_id });
     const summaryText = await raw('validate_deck', { deck_id, detail: 'summary' });
@@ -4058,7 +4098,38 @@ test('MCP validate_deck omits the validated deck unless detail is full', async (
 
     const invalid = await client.callTool({ name: 'validate_deck', arguments: { deck_id, detail: 'everything' } });
     assert.equal(invalid.isError, true, 'an unknown detail value is rejected');
+
+    const fullPreview12 = await client.callTool({ name: 'preview_presentation', arguments: { deck_id, detail: 'full', include_images: false } });
+    assert.equal(fullPreview12.isError, true);
+    assert.match(fullPreview12.content[0].text, /options\.page_indices/);
+    assert.match(fullPreview12.content[0].text, /omit detail or set detail:"summary"/);
+
+    const fullFinalize12 = await client.callTool({ name: 'finalize_presentation', arguments: { deck_id, expected_revision: summary12.revision, expected_hash: summary12.hash, name: 'full12', detail: 'full', include_images: false } });
+    assert.equal(fullFinalize12.isError, true);
+    assert.match(fullFinalize12.content[0].text, /options\.page_indices/);
+    assert.match(fullFinalize12.content[0].text, /PPTX always contains the whole deck/);
+    assert.match(fullFinalize12.content[0].text, /omit detail or set detail:"summary"/);
+
+    for (const badPreviewArgs of [
+      { deck_id, detail: 'full', options: { page_indices: [0, 0] }, include_images: false },
+      { deck_id, detail: 'summary', options: { page_indices: [99] }, include_images: false },
+    ]) {
+      const badPreview = await client.callTool({ name: 'preview_presentation', arguments: badPreviewArgs });
+      assert.equal(badPreview.isError, true);
+      assert.match(badPreview.content[0].text, /options\.page_indices/);
+      assert.doesNotMatch(badPreview.content[0].text, /detail:"summary"|omit detail/);
+    }
+    for (const badFinalizeArgs of [
+      { deck_id, expected_revision: summary12.revision, expected_hash: summary12.hash, name: 'bad-dup', detail: 'full', options: { page_indices: [0, 0] }, include_images: false },
+      { deck_id, expected_revision: summary12.revision, expected_hash: summary12.hash, name: 'bad-range', detail: 'summary', options: { page_indices: [99] }, include_images: false },
+    ]) {
+      const badFinalize = await client.callTool({ name: 'finalize_presentation', arguments: badFinalizeArgs });
+      assert.equal(badFinalize.isError, true);
+      assert.match(badFinalize.content[0].text, /options\.page_indices/);
+      assert.doesNotMatch(badFinalize.content[0].text, /detail:"summary"|omit detail/);
+    }
   } finally {
     await client.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
