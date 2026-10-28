@@ -1355,7 +1355,7 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
         }
     }
     crate::native_design::remove_deleted(package, original, &topology)?;
-    crate::review::save_end(package, original, deck, &bindings)?;
+    crate::design::ColorMap::default().scope(|| crate::review::save_end(package, original, deck, &bindings))?;
     crate::fonts::write_native(package, main, &original.deck.embedded_fonts, deck)?;
     crate::review::remove_unused_hyperlinks(package)?;
     package.save()
