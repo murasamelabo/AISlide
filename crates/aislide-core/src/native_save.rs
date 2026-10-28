@@ -141,9 +141,9 @@ pub(crate) fn encode_scheme_colors(xml: String, color_map: Result<crate::design:
     if color_map.as_ref().is_ok_and(|m| *m == crate::design::ColorMap::default()) { return Ok(xml); }
     let document = parse(&xml)?; let mut edits = Vec::new();
     for attr in document.descendants().filter(|n| n.has_tag_name((A, "schemeClr"))).filter_map(|n| n.attributes().find(|a| a.namespace().is_none() && a.name() == "val")) {
-        let cm = color_map.as_ref().map_err(|_| Error::Unsupported("native color map hierarchy".into()))?;
         let slot = crate::design::ColorMap::default().resolve(attr.value());
         if !crate::design::COLOR_KEYS.contains(&slot) { continue; }
+        let cm = color_map.as_ref().map_err(|_| Error::Unsupported("native color map hierarchy".into()))?;
         let enc = cm.encode(slot).ok_or_else(|| Error::Unsupported("native color map cannot represent theme color slot".into()))?;
         if enc != attr.value() { edits.push((attr.range_value(), enc.into())); }
     }

@@ -89,8 +89,8 @@ fn has_non_solid_bg(root: Node<'_, '_>) -> bool {
 
 pub(crate) fn apply_color_map_node(map: &mut crate::design::ColorMap, node: Node<'_, '_>) -> bool {
     let mut next = *map;
-    if node.attributes().count() != crate::design::COLOR_MAP_KEYS.len() || !crate::design::COLOR_MAP_KEYS.iter().all(|key| node.attribute(*key).is_some_and(|value| next.set(key, value))) { return false; }
-    *map = next; !node.children().any(|child| child.is_element())
+    if node.children().any(|c| c.is_element()) || node.attributes().count() != crate::design::COLOR_MAP_KEYS.len() || !crate::design::COLOR_MAP_KEYS.iter().all(|k| node.attribute(*k).is_some_and(|v| next.set(k, v))) { return false; }
+    *map = next; true
 }
 
 pub(crate) fn resolve_color_map(root: Node<'_, '_>, parent: crate::design::ColorMap) -> (crate::design::ColorMap, bool) {

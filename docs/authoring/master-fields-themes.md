@@ -128,7 +128,7 @@ On 2026-09-18, cached external representatives `WithMaster.pptx` and
 latter had a CFB signature. They were not used, overwritten, decrypted or
 redownloaded. External representative-template qualification remains pending;
 synthetic native tests do not establish arbitrary-template compatibility. Master
-`p:clrMap` and layout/slide/notes `p:clrMapOvr` (`a:overrideClrMapping` and AISlide's `a:masterClrMapping` `sld -> sldLayout -> sldMaster` inheritance rule; Office template parity remains pending) resolve
+`p:clrMap` and layout/slide/notes `p:clrMapOvr` (`a:overrideClrMapping` and ECMA-376-1 §19.3.1.6 `a:masterClrMapping`) resolve
 the 12 color-map keys across native projection and edits, warning on unmodeled
 extensions or remapped artwork and failing closed when writing scheme-colored
 (`@slot`) backgrounds, elements, charts or rich notes under an unresolvable
