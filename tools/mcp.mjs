@@ -561,6 +561,19 @@ function previewSelection(total, options) {
 	return options?.page_indices ?? Array.from({ length: Math.min(total, 8) }, (_unused, index) => index);
 }
 
+const PAGE_SELECTION_ERROR_FRAGMENT = 'requires 1-8 unique existing page indices';
+
+async function withFullDetailPageGuidance(detail, options, total, operation) {
+	try {
+		return await operation();
+	} catch (error) {
+		if (!compactResponse(detail) && options?.page_indices == null && total > 8 && error instanceof Error && error.message.includes(PAGE_SELECTION_ERROR_FRAGMENT)) {
+			throw new Error(`${error.message}; omit detail or set detail:"summary" for the first 8 pages, or pass options.page_indices`, { cause: error });
+		}
+		throw error;
+	}
+}
+
 function retainedImages(images) {
 	const retained = assets.retainMany(images.map(image => {
 		if (!['image/png', 'image/jpeg'].includes(image.mime_type)) throw new Error('Expected a core-prepared PNG/JPEG');
@@ -694,9 +707,7 @@ function register(name, description, inputSchema, readOnly, action) {
 			const message = error instanceof Error ? error.message : 'Operation failed';
 			const text = message === 'Document is busy'
 				? `${message}; wait for the current call to finish and submit requests sequentially. Inspect the current revision/hash before retrying a planned edit.`
-				: ['preview_presentation', 'finalize_presentation'].includes(name) && input?.detail === 'full' && input?.options?.page_indices == null && message.includes('requires 1-8 unique existing page indices')
-					? `${message}; omit detail or set detail:"summary" for the first 8 pages, or pass options.page_indices`
-					: message;
+				: message;
 			return timedResponse({ isError: true, content: [{ type: 'text', text }] }, timing);
 		} finally { stopProgress?.(); if (!readOnly) activeMutation = false; }
 	});
@@ -897,7 +908,7 @@ register('preview_presentation', 'Read selected pages as actual MCP PNG/JPEG ima
 	const state = getDeck(deck_id);
 	const total = state.getSummary({ limit: 0 }).slide_count;
 	if (compactResponse(detail)) options = { max_dimension: 640, layout: 'contact_sheet', format: 'jpeg', max_output_bytes: 384 * 1024, ...options, page_indices: previewSelection(total, options) };
-	const result = await state.previewPresentation(options, { signal });
+	const result = await withFullDetailPageGuidance(detail, options, total, () => state.previewPresentation(options, { signal }));
 	return previewResult({ deck_id, ...result, ...(compactResponse(detail) ? { page_scope: { total, selected: result.pages.length, unselected: total - result.pages.length } } : {}) }, include_images);
 });
 register('preflight_presentation', 'Read bounded visual diagnostics for 1-8 selected pages: renderer clipping/glyph/font warnings, transformed off-slide frames, text overlap, connector-label interference, rounded-container corner and padding heuristics, small text and density. Template-owned SMALL_TEXT and FONT_FALLBACK are informational, deduplicated with affected-page coverage; include_inherited:false omits inherited-only findings. Verified managed graph badge/own-edge pairs are excluded; hand-made, changed or other-edge crossings remain reportable. Generic chart parity notices are summarized once per page as info; specific chart limits remain warnings. Returns IDs, scopes, bounds, evidence and repair suggestions. No automatic edits, external fetch, factual verification, Office parity or accessibility certification. Backgrounds are not text collisions; attached connector endpoints are excluded. Run check_accessibility separately.', { deck_id: handle, options: z.object({ page_indices: previewOptions.shape.page_indices, min_font_size: z.number().min(8).max(48).optional(), include_inherited: z.boolean().describe('Default true. False omits inherited-only template findings; slide-owned diagnostics and slide/template interactions remain actionable.').optional() }).strict().optional() }, true, async ({ deck_id, options }, signal) => {
@@ -912,7 +923,7 @@ register('finalize_presentation', 'Publish a delivery from the exact revision/ha
 	const state = getDeck(deck_id);
 	const total = state.getSummary({ limit: 0 }).slide_count;
 	if (compactResponse(detail)) options = { max_dimension: 640, ...options, page_indices: previewSelection(total, options) };
-	const result = await state.prepareDelivery(options, { expectedRevision: expected_revision, expectedHash: expected_hash, signal });
+	const result = await withFullDetailPageGuidance(detail, options, total, () => state.prepareDelivery(options, { expectedRevision: expected_revision, expectedHash: expected_hash, signal }));
 	if (signal.aborted) throw new Error('Operation cancelled');
 	if (state.revision !== expected_revision || state.document.hash !== expected_hash) throw new Error('Delivery base changed; inspect the current deck before exporting');
 	const items = result.files.map(file => {

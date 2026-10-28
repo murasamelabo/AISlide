@@ -208,6 +208,10 @@ test('issue52 catalog and tool search queries match all whitespace-separated ter
     const icons = [
       { id: 'azure/microsoft-sentinel', name: 'Azure Sentinel', provider: 'azure', categories: ['security', 'analytics'], aliases: ['microsoft sentinel', 'siem'] },
       { id: 'azure/key-vaults', name: 'Key Vaults', provider: 'azure', categories: ['security'], aliases: ['secrets'] },
+      { id: 'azure/defender', name: 'Defender for Cloud', provider: 'azure', categories: ['security'], aliases: ['cspm'] },
+      { id: 'azure/firewall', name: 'Azure Firewall', provider: 'azure', categories: ['security', 'networking'], aliases: ['fw'] },
+      { id: 'azure/bastion', name: 'Azure Bastion', provider: 'azure', categories: ['security'], aliases: ['jumpbox'] },
+      { id: 'azure/ddos', name: 'DDoS Protection', provider: 'azure', categories: ['security'], aliases: ['mitigation'] },
     ];
     const patterns = [
       { id: 'split/1-1', name: 'Balanced two-column split', ratio: '1:1', relationships: ['contrast', 'peers'], use_when: 'Compare two equal alternatives side by side', avoid_when: 'More than two peers' },
@@ -232,6 +236,8 @@ test('issue52 catalog and tool search queries match all whitespace-separated ter
     const blankQueryParts = await call('part_catalog', { query: '   ', detail: 'summary' });
     assert.equal(blankQueryParts.total, presets.length);
     assert.equal(blankQueryParts.match_mode, undefined);
+    const blankFullParts = await call('part_catalog', { query: '   ', detail: 'full' });
+    assert.deepEqual(blankFullParts.schema, { marker: 'FULL_SCHEMA' });
 
     const sentinelA = await call('architecture_icons', { provider: 'azure', query: 'security sentinel', detail: 'summary' });
     const sentinelB = await call('architecture_icons', { provider: 'azure', query: 'sentinel azure', detail: 'summary' });
@@ -252,11 +258,18 @@ test('issue52 catalog and tool search queries match all whitespace-separated ter
     assert.ok(zeroParts.partial_matches.length > 0 && zeroParts.partial_matches.length <= 5);
     assert.deepEqual(zeroParts.partial_matches[0], { id: 'vertical-flow/rail', name: 'Vertical rail steps', matched_terms: ['rail'] });
 
-    const zeroIcons = await call('architecture_icons', { provider: 'azure', query: 'security zzzz', detail: 'summary' });
+    const zeroIcons = await call('architecture_icons', { provider: 'azure', query: 'security sentinel zzzz', detail: 'summary' });
     assert.equal(zeroIcons.total, 0);
     assert.equal(zeroIcons.match_mode, 'all_terms');
     assert.deepEqual(zeroIcons.unmatched_terms, ['zzzz']);
-    assert.equal(zeroIcons.partial_matches.length, 2);
+    assert.equal(zeroIcons.partial_matches.length, 5);
+    assert.deepEqual(zeroIcons.partial_matches.map(entry => [entry.id, entry.matched_terms]), [
+      ['azure/microsoft-sentinel', ['security', 'sentinel']],
+      ['azure/key-vaults', ['security']],
+      ['azure/defender', ['security']],
+      ['azure/firewall', ['security']],
+      ['azure/bastion', ['security']],
+    ]);
 
     const zeroPatterns = await call('layout_patterns', { query: 'contrast zzzz', detail: 'summary' });
     assert.equal(zeroPatterns.total, 0);
@@ -4128,6 +4141,7 @@ test('MCP validate_deck omits the validated deck unless detail is full', async (
       assert.match(badFinalize.content[0].text, /options\.page_indices/);
       assert.doesNotMatch(badFinalize.content[0].text, /detail:"summary"|omit detail/);
     }
+    assert.deepEqual(await readdir(directory), []);
   } finally {
     await client.close();
     await rm(directory, { recursive: true, force: true });
