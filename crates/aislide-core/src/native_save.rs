@@ -1331,7 +1331,7 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
         let Some(before) = original.deck.slides.iter().find(|slide| slide.id == source) else { continue };
         if before.layout_id != after.layout_id {
             let path = after.layout_id.as_ref().or_else(|| design.layouts.first().map(|layout| &layout.id)).and_then(|id| topology.layouts.iter().find(|part| &part.id == id)).map(|part| &part.path).ok_or_else(|| Error::Unsupported("native slide layout missing".into()))?;
-            rebase_slide_color_map(package, binding, &before.elements, crate::native::try_part_color_map(package, path))?;
+            rebase_slide_color_map(package, binding, &before.elements, crate::native::try_part_color_map(package, path)?)?;
             let relation_path = relations_path(&binding.path); let xml = package.text(&relation_path)?.to_owned(); let document = parse(&xml)?;
             let relation = document.root_element().children().find(|node| node.attribute("Type") == Some(format!("{}/slideLayout", crate::native::R).as_str())).ok_or_else(|| Error::Invalid("slide layout relationship missing".into()))?;
             let mut edits = Vec::new(); set_attribute(&xml, relation, "Target", &format!("/{path}"), &mut edits)?; package.replace_part(&relation_path, apply(xml, edits)?)?;
@@ -1361,12 +1361,10 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
     package.save()
 }
 
-fn rebase_slide_color_map(package: &mut Package, binding: &NativePart, elements: &[Element], new_parent_map: Result<crate::design::ColorMap>) -> Result<()> {
+fn rebase_slide_color_map(package: &mut Package, binding: &NativePart, elements: &[Element], new_parent_map: crate::design::ColorMap) -> Result<()> {
+    let old_map = crate::native::try_part_color_map(package, &binding.path)?;
     let xml = package.text(&binding.path)?.to_owned(); let parsed = parse(&xml)?;
-    let (Ok(old_map), Ok(pm)) = (crate::native::try_part_color_map(package, &binding.path), new_parent_map) else {
-        return if parsed.root_element().descendants().any(|n| n.has_tag_name((A, "schemeClr"))) { Err(Error::Unsupported("native color map hierarchy".into())) } else { Ok(()) };
-    };
-    let (new_map, _) = crate::native::resolve_color_map(parsed.root_element(), pm);
+    let (new_map, _) = crate::native::resolve_color_map(parsed.root_element(), new_parent_map);
     if new_map == old_map { return Ok(()); }
     let common = child(parsed.root_element(), P, "cSld").ok_or_else(|| Error::Invalid("common slide data missing".into()))?;
     let proj: BTreeSet<_> = crate::model::element_list(elements).into_iter().filter_map(|e| binding.nodes.get(e.bounds().0).map(String::as_str)).collect();
