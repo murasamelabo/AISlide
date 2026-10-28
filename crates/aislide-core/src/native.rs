@@ -117,11 +117,7 @@ fn parent_part(pkg: &Package, path: &str, tag: &str) -> Option<(String, &'static
     let rel = |src: &str, kind| relationship_targets(pkg, src, kind).ok()?.into_values().next();
     match tag {
         "sld" => Some((rel(path, "slideLayout")?, "sldLayout")),
-        "sldLayout" => {
-            let from_main = rel("", "officeDocument").and_then(|main| relationship_targets(pkg, &main, "slideMaster").ok())
-                .and_then(|ms| ms.into_values().find(|m| relationship_targets(pkg, m, "slideLayout").ok().is_some_and(|l| l.values().any(|p| p == path))));
-            Some((from_main.or_else(|| rel(path, "slideMaster"))?, "sldMaster"))
-        }
+        "sldLayout" => Some((rel("", "officeDocument").and_then(|main| relationship_targets(pkg, &main, "slideMaster").ok()).and_then(|ms| ms.into_values().find(|m| relationship_targets(pkg, m, "slideLayout").ok().is_some_and(|l| l.values().any(|p| p == path)))).or_else(|| rel(path, "slideMaster"))?, "sldMaster")),
         "notes" => Some((rel(path, "notesMaster")?, "notesMaster")),
         _ => None,
     }
@@ -150,21 +146,13 @@ fn remaps(n: Node<'_, '_>, a: crate::design::ColorMap, b: crate::design::ColorMa
 }
 
 pub(crate) fn has_remapped_owned(pkg: &Package, path: &str, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
-    doc(pkg, &relations_path(path)).is_some_and(|d| {
-        d.root_element().children()
-            .filter(|n| n.attribute("TargetMode") != Some("External") && n.attribute("Type").and_then(|t| t.rsplit_once('/')).is_some_and(|(_, k)| matches!(k, "chart" | "chartEx") || k.starts_with("diagram")))
-            .filter_map(|n| crate::pptx::resolve(path, n.attribute("Target")?).ok())
-            .any(|p| doc(pkg, &p).is_some_and(|d| d.descendants().any(|n| n.tag_name().name() == "clrMapOvr" || remaps(n, om, cm))))
-    })
+    doc(pkg, &relations_path(path)).is_some_and(|d| d.root_element().children().filter(|n| n.attribute("TargetMode") != Some("External") && n.attribute("Type").and_then(|t| t.rsplit_once('/')).is_some_and(|(_, k)| matches!(k, "chart" | "chartEx") || k.starts_with("diagram"))).filter_map(|n| crate::pptx::resolve(path, n.attribute("Target")?).ok()).any(|p| doc(pkg, &p).is_some_and(|d| d.descendants().any(|n| n.tag_name().name() == "clrMapOvr" || remaps(n, om, cm)))))
 }
 
 fn has_remapped_shapes(package: &Package, path: &str, root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
-    let visible_non_ph = |n: Node<'_, '_>| is_shape(n) && placeholder(n).is_none() && !n.ancestors().filter(|a| is_shape(*a)).any(|a| properties(a).is_some_and(|p| matches!(p.attribute("hidden"), Some("1" | "true"))));
-    let tree_remapped = child(root, P, "cSld").and_then(|n| child(n, P, "spTree")).is_some_and(|tree| {
-        tree.children().filter(|n| n.is_element()).map(|n| crate::interactive::office::static_fallback(n).unwrap_or(n))
-            .any(|c| c.descendants().filter(|n| visible_non_ph(*n)).any(|n| n.descendants().any(|d| remaps(d, om, cm) && !d.ancestors().take_while(|a| *a != n).any(|a| is_shape(a)))))
-    });
-    om != cm && (tree_remapped || has_remapped_owned(package, path, om, cm))
+    let vis = |n: Node<'_, '_>| is_shape(n) && placeholder(n).is_none() && !n.ancestors().filter(|a| is_shape(*a)).any(|a| properties(a).is_some_and(|p| matches!(p.attribute("hidden"), Some("1" | "true"))));
+    let tree = child(root, P, "cSld").and_then(|n| child(n, P, "spTree")).is_some_and(|t| t.children().filter(|n| n.is_element()).map(|n| crate::interactive::office::static_fallback(n).unwrap_or(n)).any(|c| c.descendants().filter(|n| vis(*n)).any(|n| n.descendants().any(|d| remaps(d, om, cm) && !d.ancestors().take_while(|a| *a != n).any(|a| is_shape(a))))));
+    om != cm && (tree || has_remapped_owned(package, path, om, cm))
 }
 
 fn has_remapped_non_solid_bg(root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {

@@ -10,7 +10,7 @@ pub(crate) struct ColorMap([&'static str; 12]);
 thread_local! { static ACTIVE_COLOR_MAP: std::cell::Cell<(ColorMap, usize)> = Default::default(); }
 #[must_use]
 pub(crate) struct ColorMapGuard((ColorMap, usize), std::marker::PhantomData<*const ()>);
-impl Drop for ColorMapGuard { fn drop(&mut self) { ACTIVE_COLOR_MAP.with(|a| { debug_assert_eq!(a.get().1, self.0.1 + 1); a.set(self.0); }); } }
+impl Drop for ColorMapGuard { fn drop(&mut self) { ACTIVE_COLOR_MAP.with(|a| { if !std::thread::panicking() { debug_assert_eq!(a.get().1, self.0.1 + 1); } a.set(self.0); }); } }
 
 impl Default for ColorMap {
     fn default() -> Self { Self(["lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"]) }
@@ -18,7 +18,7 @@ impl Default for ColorMap {
 
 impl ColorMap {
     pub(crate) fn scoped() -> Result<Self> {
-        ACTIVE_COLOR_MAP.with(|a| (a.get().1 > 0).then_some(a.get().0).ok_or_else(|| Error::Unsupported("color map scope missing".into())))
+        ACTIVE_COLOR_MAP.with(|a| (a.get().1 > 0).then_some(a.get().0).ok_or_else(|| Error::Invalid("color map scope missing".into())))
     }
     #[must_use]
     pub(crate) fn enter(self) -> ColorMapGuard { ColorMapGuard(ACTIVE_COLOR_MAP.with(|a| { let p = a.get(); a.set((self, p.1 + 1)); p }), std::marker::PhantomData) }
