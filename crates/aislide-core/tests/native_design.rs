@@ -85,21 +85,18 @@ fn issue32_resolves_and_encodes_color_maps_across_parts() {
     use aislide_core::{model::{Element, Slide}, review::check_accessibility as a11y, templates::load_potx};
     let (_, bytes, potx) = issue32_fixture();
     assert!(!document::open_presentation("p".into(), bytes.clone()).unwrap()["warnings"].as_array().unwrap().iter().any(|w| w.as_str().is_some_and(|m| m.contains("Custom native color mapping"))));
-    let (doc, t_doc) = (open(bytes.clone()), load_potx("t".into(), potx).unwrap());
+    let (doc, td) = (open(bytes.clone()), load_potx("t".into(), potx).unwrap());
     assert_eq!(save(&doc), bytes);
     let (el, val) = (|v| serde_json::from_value(v).unwrap(), |v: &[Element]| serde_json::to_value(v).unwrap());
-    let has_w = |d: &Document, op, k| aislide_core::execute_request(json!({"op":op,"document":d,"options":{"page_indices":[0]}})).unwrap()[k].as_array().unwrap().iter().any(|w| w["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED");
-    for c in [&doc, &t_doc] {
-        let (layout, sj) = (&c.deck.design.as_ref().unwrap().layouts[0], val(&c.deck.slides[0].elements));
-        let lj = val(&layout.elements); let cells = lj[2]["format"]["cells"].as_array().unwrap();
-        assert_eq!((layout.background.as_deref(), c.deck.slides[0].background.as_str()), (Some("@dk1"), "@dk1"));
-        assert_eq!((&lj[0]["color"], &lj[1]["fill"], &lj[1]["stroke"], &lj[1]["color"], &sj[0]["color"]), (&json!("@lt1"), &json!("@dk2"), &json!("@lt2"), &json!("@lt1"), &json!("@lt1")));
-        assert_eq!((&cells[0]["style"]["text_style"]["color"], &cells[2]["style"]["fill"], &cells[2]["style"]["text_style"]["color"]), (&json!("@dk1"), &json!("@dk1"), &json!("@lt1")));
+    let hw = |d: &Document, op, k| aislide_core::execute_request(json!({"op":op,"document":d,"options":{"page_indices":[0]}})).unwrap()[k].as_array().unwrap().iter().any(|w| w["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED");
+    for c in [&doc, &td] {
+        let (l, sj) = (&c.deck.design.as_ref().unwrap().layouts[0], val(&c.deck.slides[0].elements));
+        let lj = val(&l.elements); let cs = lj[2]["format"]["cells"].as_array().unwrap();
+        assert_eq!((l.background.as_deref(), c.deck.slides[0].background.as_str(), &lj[0]["color"], &lj[1]["fill"], &lj[1]["stroke"], &lj[1]["color"], &sj[0]["color"], &cs[0]["style"]["text_style"]["color"], &cs[2]["style"]["fill"], &cs[2]["style"]["text_style"]["color"]), (Some("@dk1"), "@dk1", &json!("@lt1"), &json!("@dk2"), &json!("@lt2"), &json!("@lt1"), &json!("@lt1"), &json!("@dk1"), &json!("@dk1"), &json!("@lt1")));
         let svg = aislide_core::render::render_slide_svg(&c.deck, 0, false).unwrap().svg;
-        assert!(svg.contains("fill=\"#202525\"") && svg.contains("fill=\"#FFFFFF\"") && !has_w(c, "preview_presentation", "warnings") && !has_w(c, "preflight_presentation", "findings"));
-        assert!(!a11y(&c.deck).issues.iter().any(|i| i.element_id.as_deref() == Some("sc") && ["text_contrast_low", "contrast_background_unverified"].contains(&i.code.as_str())));
+        assert!(svg.contains("fill=\"#202525\"") && svg.contains("fill=\"#FFFFFF\"") && !hw(c, "preview_presentation", "warnings") && !hw(c, "preflight_presentation", "findings") && !a11y(&c.deck).issues.iter().any(|i| i.element_id.as_deref() == Some("sc") && ["text_contrast_low", "contrast_background_unverified"].contains(&i.code.as_str())));
     }
-    let mut low = t_doc.deck.clone(); if let Element::Text { color, .. } = &mut low.slides[0].elements[0] { *color = "@dk1".into(); }
+    let mut low = td.deck.clone(); if let Element::Text { color, .. } = &mut low.slides[0].elements[0] { *color = "@dk1".into(); }
     assert!(a11y(&low).issues.iter().any(|i| i.element_id.as_deref() == Some("sc") && i.code == "text_contrast_low" && i.contrast_ratio == Some(1.0)));
     assert_eq!(doc.deck.slides[0].notes_paragraphs[0].runs[0].style.color.as_deref(), Some("@lt1"));
     let mut np = Package::open(bytes).unwrap(); issue32_rep(&mut np, "ppt/notesMasters/notesMaster1.xml", &[("bg1=\"dk1\" ", "")]);
@@ -111,9 +108,9 @@ fn issue32_resolves_and_encodes_color_maps_across_parts() {
     issue32_rep(&mut hp, &hm, &[("bg1=\"lt1\" tx1=\"dk1\"", "bg1=\"dk1\" tx1=\"lt1\""), ("val=\"lt1\"", "val=\"bg1\""), ("val=\"dk1\"", "val=\"tx1\"")]);
     let ho = serde_json::to_value(&open(hp.save().unwrap()).deck).unwrap();
     assert_eq!((&ho["auxiliary_design"]["handout_master"]["background"], &ho["auxiliary_design"]["handout_master"]["elements"][0]["color"]), (&json!("@dk1"), &json!("@lt1")));
-    let mut ins = t_doc.deck.clone(); ins.slides[0].notes_paragraphs[0].runs[0].style.color = Some("@accent1".into());
+    let mut ins = td.deck.clone(); ins.slides[0].notes_paragraphs[0].runs[0].style.color = Some("@accent1".into());
     ins.slides.push(Slide { id: "s2".into(), title: "I".into(), background: "@dk1".into(), elements: vec![el(json!({"type":"text","id":"it","x":80,"y":80,"width":400,"height":60,"text":"T","font_size":24,"color":"@accent1","bold":false})), el(json!({"type":"chart","id":"ic","x":80,"y":180,"width":500,"height":300,"kind":"bar","categories":["Q1","Q2"],"series":[{"name":"R","values":[10.0,20.0],"color":"@accent1"}]}))], notes: "N0".into(), notes_paragraphs: ins.slides[0].notes_paragraphs.clone(), layout_id: Some("blank".into()), inherit_background: false, hide_master_graphics: false, native_source_id: None, review: None });
-    let ib = save(&change(&t_doc, ins).document); let ei = Package::open(ib.clone()).unwrap();
+    let ib = save(&change(&td, ins).document); let ei = Package::open(ib.clone()).unwrap();
     let ax = ei.text("ppt/slides/aislide-added-1.xml").unwrap();
     assert!(ei.text("ppt/slideLayouts/slideLayout1.xml").unwrap().contains("overrideClrMapping") && ["ppt/charts/chart1.xml", "ppt/notesSlides/aislide-added-1.xml"].into_iter().all(|p| ei.text(p).unwrap().contains("val=\"accent2\"")) && ax.contains("masterClrMapping") && ax.contains("val=\"dk1\"") && ax.contains("val=\"accent2\""));
     let ri = open(ib);
