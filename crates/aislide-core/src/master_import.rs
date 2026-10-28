@@ -60,7 +60,7 @@ fn xml_value_bg(node: roxmltree::Node<'_, '_>, shell: bool, ignore_bg: bool) -> 
         node.attributes().filter(|attribute| {
             !(shell && (node.has_tag_name((P, "sldLayoutId")) && attribute.name() == "id" && (attribute.namespace().is_none() || attribute.namespace() == Some(R))
                 || node.has_tag_name((P, "sldLayout")) && attribute.namespace().is_none() && ["type", "preserve"].contains(&attribute.name())))
-        }).map(|attribute| (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::color_slot(attribute.value()) } else { attribute.value() })).collect()
+        }).map(|attribute| (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), if shell && node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::color_slot(attribute.value()) } else { attribute.value() })).collect()
     };
     let children: Vec<_> = node.children().filter_map(|child| {
         if child.is_element() { xml_value_bg(child, shell, ignore_bg) }

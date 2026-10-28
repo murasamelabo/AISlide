@@ -28,8 +28,8 @@ pub(crate) fn check_copy_element(package: &Package, binding: &NativePart, elemen
     let xml = package.text(&binding.path)?; let parsed = parse(xml)?;
     let node = parsed.descendants().find(|node| is_shape(*node) && properties(*node).and_then(|node| node.attribute("id")) == Some(numeric)).ok_or_else(|| Error::Invalid("native element missing".into()))?;
     let ids = binding.nodes.iter().map(|(id, numeric)| Ok((id.as_str(), numeric.parse::<usize>().map_err(|_| Error::Invalid("native shape identity".into()))?))).collect::<Result<BTreeMap<_, _>>>()?;
-    let _s = crate::native::try_part_color_map(package, &binding.path).ok().map(crate::design::ColorMap::enter);
-    if _s.is_none() && node.descendants().any(|n| n.has_tag_name((A, "schemeClr"))) { return Err(Error::Unsupported("native color map hierarchy".into())); }
+    let _s = crate::native::enter_part_color_map(package, &binding.path);
+    if crate::design::ColorMap::scoped().is_err() && node.descendants().any(|n| n.has_tag_name((A, "schemeClr"))) { return Err(Error::Unsupported("native color map hierarchy".into())); }
     let generated = scaled_element(element, &ids, theme, scale)?;
     fn copy_value(node: Node<'_, '_>) -> serde_json::Value {
         let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), if attribute.namespace() == Some(crate::native::R) { "resource" } else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::color_slot(attribute.value()) } else { attribute.value() })).collect();
@@ -109,8 +109,8 @@ pub(crate) fn chart_is_representable(package: &Package, binding: &NativePart, id
     let actual = parse(package.text(path)?)?;
     let expected = crate::charts::chart(kind, categories, series, options);
     let expected = parse(std::str::from_utf8(&expected).map_err(|_| Error::Invalid("chart XML encoding".into()))?)?;
-    let cm = crate::native::try_part_color_map(package, &binding.path).ok();
-    if cm.is_none() && [actual.root_element(), expected.root_element()].into_iter().any(|r| r.descendants().any(|n| n.has_tag_name((A, "schemeClr")))) || cm.unwrap_or_default().scope(|| xml_value(actual.root_element())) != crate::design::ColorMap::default().scope(|| xml_value(expected.root_element())) {
+    let _s = crate::native::enter_part_color_map(package, &binding.path);
+    if (crate::design::ColorMap::scoped().is_err() && [actual.root_element(), expected.root_element()].into_iter().any(|r| r.descendants().any(|n| n.has_tag_name((A, "schemeClr"))))) || xml_value(actual.root_element()) != crate::design::ColorMap::default().scope(|| xml_value(expected.root_element())) {
         use crate::model::chart_format::{automatic_label_position, LabelPosition};
         let legacy = if kind == crate::model::ChartKind::Sunburst {
             crate::chart_extended::legacy_sunburst_chart(categories, series, options)
@@ -194,9 +194,8 @@ pub(crate) fn resource_changes(package: &mut Package, binding: &NativePart, befo
     if chart_number > u32::MAX as usize - 2048 || picture_number > u32::MAX as usize - 2048 { return Err(Error::Limit("native resource IDs exhausted".into())); }
     let mut parts = BTreeMap::new(); let mut types = Vec::new();
     let relationships = crate::pptx::resource_parts(&mut parts, &resources, &mut chart_number, &mut picture_number, &mut types, Some(ids), &mut crate::pptx::MediaResources::new())?;
-    let color_map = if package.part_names().contains(binding.path.as_str()) { crate::native::try_part_color_map(package, &binding.path) } else { crate::design::ColorMap::scoped() };
     for (path, data) in parts {
-        let data = if path.starts_with("ppt/charts/chart") && path.ends_with(".xml") { encode_scheme_colors(String::from_utf8(data).map_err(|_| Error::Invalid("chart XML encoding".into()))?, color_map.as_ref().copied().map_err(|_| Error::Unsupported("native color map hierarchy".into())))?.into_bytes() } else { data };
+        let data = if path.starts_with("ppt/charts/chart") && path.ends_with(".xml") { encode_scheme_colors(String::from_utf8(data).map_err(|_| Error::Invalid("chart XML encoding".into()))?, crate::design::ColorMap::scoped())?.into_bytes() } else { data };
         package.add_part(path, data)?;
     }
     let relation_path = relations_path(&binding.path);
@@ -422,7 +421,7 @@ fn validate_rich_style(body: Node<'_, '_>, hyperlinks: &BTreeMap<String, String>
             let name = child.tag_name().name();
             if !children.contains(&name) || (!matches!(name, "p" | "r" | "tab") && !seen.insert(name)) { return Err(rich_style_error(child, None)); }
         }
-        if node.has_tag_name((A, "schemeClr")) && !node.attribute("val").is_some_and(|value| crate::design::COLOR_KEYS.contains(&crate::design::color_slot(value))) { return Err(rich_style_error(node, Some("val"))); }
+        if node.has_tag_name((A, "schemeClr")) && !node.attribute("val").is_some_and(|value| crate::design::COLOR_KEYS.contains(&crate::design::ColorMap::default().resolve(value))) { return Err(rich_style_error(node, Some("val"))); }
         if matches!(node.tag_name().name(), "rPr" | "defRPr" | "endParaRPr") {
             if node.attribute("u").is_some_and(|value| !["none", "sng"].contains(&value)) { return Err(rich_style_error(node, Some("u"))); }
             let latin = child(node, A, "latin").and_then(|node| node.attribute("typeface"));
@@ -1032,8 +1031,7 @@ pub(crate) fn patch_part(package: &mut Package, binding: &NativePart, before: &[
     let mut maximum = binding.nodes.values().filter_map(|value| value.parse::<usize>().ok()).max().unwrap_or(1);
     let mut ids: BTreeMap<&str, usize> = binding.nodes.iter().map(|(id, value)| value.parse().map(|number| (id.as_str(), number)).map_err(|_| Error::Invalid("shape ID is not numeric".into()))).collect::<Result<_>>()?;
     for element in crate::model::element_list(after) { if !ids.contains_key(element.bounds().0) { maximum = maximum.checked_add(1).filter(|value| *value <= u32::MAX as usize).ok_or_else(|| Error::Limit("native shape IDs exhausted".into()))?; ids.insert(element.bounds().0, maximum); } }
-    let color_map = crate::native::try_part_color_map(package, &binding.path);
-    let _scope = color_map.as_ref().ok().copied().map(crate::design::ColorMap::enter);
+    let _scope = crate::native::enter_part_color_map(package, &binding.path);
     let resources = PartResources { mapping: resource_changes(package, binding, before, after, &ids)?, hyperlinks: crate::native::hyperlink_targets(package, &binding.path)? };
     let mut edits = Vec::new();
     if let Some(name) = name { set_attribute(&xml, common, "name", name, &mut edits)?; }
@@ -1041,7 +1039,7 @@ pub(crate) fn patch_part(package: &mut Package, binding: &NativePart, before: &[
         let old = child(common, P, "bg");
         if let Some(shade) = background {
             let generated = crate::pptx::xml("p:bg", |writer| { writer.start_element("p:bgPr"); crate::pptx::color(writer, shade); crate::pptx::empty(writer, "a:effectLst", &[]); writer.end_element(); });
-            let generated = encode_scheme_colors(String::from_utf8(generated).map_err(|_| Error::Invalid("background XML".into()))?, color_map)?;
+            let generated = encode_scheme_colors(String::from_utf8(generated).map_err(|_| Error::Invalid("background XML".into()))?, crate::design::ColorMap::scoped())?;
             if let Some(old) = old { edits.push((old.range(), generated)); } else { insert_child(&xml, common, &generated, Some(tree), &mut edits)?; }
         } else if crate::native::synthesized_bg(package, &binding.path).is_some() {
             return Err(Error::Unsupported("native color map override remaps the inherited background".into()));
@@ -1339,7 +1337,7 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
             let mut edits = Vec::new(); set_attribute(&xml, relation, "Target", &format!("/{path}"), &mut edits)?; package.replace_part(&relation_path, apply(xml, edits)?)?;
         }
         if before.notes != after.notes || before.notes_paragraphs != after.notes_paragraphs {
-            let _notes_scope = crate::pptx::relationship_targets(package, &binding.path, "notesSlide")?.into_values().next().or_else(|| crate::pptx::relationship_targets(package, main, "notesMaster").ok()?.into_values().next()).and_then(|p| crate::native::try_part_color_map(package, &p).ok()).map(crate::design::ColorMap::enter);
+            let _notes_scope = crate::pptx::relationship_targets(package, &binding.path, "notesSlide")?.into_values().next().or_else(|| crate::pptx::relationship_targets(package, main, "notesMaster").ok()?.into_values().next()).map_or_else(|| crate::design::ColorMap::default().enter(), |p| crate::native::enter_part_color_map(package, &p));
             patch_notes(package, main, &binding.path, after, deck)?;
         }
         let p_bg = after.layout_id.as_ref().and_then(|id| old.layouts.iter().find(|l| &l.id == id).zip(design.layouts.iter().find(|l| &l.id == id))).is_some_and(|(bl, al)| bl.background != al.background || old.masters.iter().find(|m| m.id == al.master_id).zip(design.masters.iter().find(|m| m.id == al.master_id)).is_some_and(|(bm, am)| bm.background != am.background));
@@ -1357,7 +1355,7 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
         }
     }
     crate::native_design::remove_deleted(package, original, &topology)?;
-    crate::review::save_end(package, original, deck, &bindings)?;
+    crate::design::ColorMap::default().scope(|| crate::review::save_end(package, original, deck, &bindings))?;
     crate::fonts::write_native(package, main, &original.deck.embedded_fonts, deck)?;
     crate::review::remove_unused_hyperlinks(package)?;
     package.save()

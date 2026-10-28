@@ -135,6 +135,7 @@ fn color_map_step(pkg: &Package, p: &str, exp: Option<&str>, depth: u8, strict: 
 
 pub(crate) fn try_part_color_map(pkg: &Package, path: &str) -> Result<crate::design::ColorMap> { color_map_step(pkg, path, None, 0, true).ok_or_else(|| Error::Unsupported("native color map hierarchy".into())) }
 pub(crate) fn part_color_map(pkg: &Package, path: &str) -> crate::design::ColorMap { color_map_step(pkg, path, None, 0, false).unwrap_or_default() }
+pub(crate) fn enter_part_color_map(pkg: &Package, path: &str) -> crate::design::ColorMapGuard { crate::design::ColorMap::enter_result(try_part_color_map(pkg, path), part_color_map(pkg, path)) }
 fn remaps(n: Node<'_, '_>, a: crate::design::ColorMap, b: crate::design::ColorMap) -> bool { n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| b.resolve(v) != a.resolve(v)) }
 
 pub(crate) fn has_remapped_owned(pkg: &Package, path: &str, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
@@ -794,6 +795,7 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
         let xml = parse(package.text(path)?)?;
         let note_targets = relationship_targets(package, path, "notesSlide")?;
         let mut notes_paragraphs = Vec::new();
+        let _s = crate::design::ColorMap::default().enter();
         let notes = if let Some(path) = note_targets.values().next() {
             let document = parse(package.text(path)?)?;
             if part_color_map_unsupported(package, path) { warnings.push(color_mapping_warning(path)); }

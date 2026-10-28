@@ -7,10 +7,10 @@ pub(crate) const COLOR_MAP_KEYS: [&str; 12] = ["bg1", "tx1", "bg2", "tx2", "acce
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ColorMap([&'static str; 12]);
-thread_local! { static ACTIVE_COLOR_MAP: std::cell::Cell<(ColorMap, usize)> = Default::default(); }
+thread_local! { static ACTIVE_COLOR_MAP: std::cell::Cell<(ColorMap, bool, usize)> = Default::default(); }
 #[must_use]
-pub(crate) struct ColorMapGuard((ColorMap, usize), std::marker::PhantomData<*const ()>);
-impl Drop for ColorMapGuard { fn drop(&mut self) { ACTIVE_COLOR_MAP.with(|a| { if !std::thread::panicking() { debug_assert_eq!(a.get().1, self.0.1 + 1); } a.set(self.0); }); } }
+pub(crate) struct ColorMapGuard((ColorMap, bool, usize), std::marker::PhantomData<*const ()>);
+impl Drop for ColorMapGuard { fn drop(&mut self) { ACTIVE_COLOR_MAP.with(|a| { if !std::thread::panicking() { assert_eq!(a.get().2, self.0.2 + 1); } a.set(self.0); }); } }
 
 impl Default for ColorMap {
     fn default() -> Self { Self(["lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"]) }
@@ -18,31 +18,25 @@ impl Default for ColorMap {
 
 impl ColorMap {
     pub(crate) fn scoped() -> Result<Self> {
-        ACTIVE_COLOR_MAP.with(|a| (a.get().1 > 0).then_some(a.get().0).ok_or_else(|| Error::Invalid("color map scope missing".into())))
+        ACTIVE_COLOR_MAP.with(|a| match a.get() { (m, true, d) if d > 0 => Ok(m), (_, false, d) if d > 0 => Err(Error::Unsupported("native color map hierarchy".into())), _ => Err(Error::Invalid("color map scope missing".into())) })
     }
     #[must_use]
-    pub(crate) fn enter(self) -> ColorMapGuard { ColorMapGuard(ACTIVE_COLOR_MAP.with(|a| { let p = a.get(); a.set((self, p.1 + 1)); p }), std::marker::PhantomData) }
-    pub(crate) fn scope<R>(self, run: impl FnOnce() -> R) -> R {
-        let _guard = self.enter();
-        run()
-    }
-    pub(crate) fn resolve<'a>(&self, value: &'a str) -> &'a str {
-        debug_assert!(!value.starts_with('@'));
-        COLOR_MAP_KEYS.iter().position(|key| *key == value).map_or(value, |index| self.0[index])
-    }
+    pub(crate) fn enter(self) -> ColorMapGuard { Self::enter_result(Ok(self), self) }
+    #[must_use]
+    pub(crate) fn enter_result(res: Result<Self>, fb: Self) -> ColorMapGuard { ColorMapGuard(ACTIVE_COLOR_MAP.with(|a| { let p = a.get(); a.set((res.as_ref().copied().unwrap_or(fb), res.is_ok(), p.2 + 1)); p }), std::marker::PhantomData) }
+    pub(crate) fn scope<R>(self, run: impl FnOnce() -> R) -> R { let _g = self.enter(); run() }
+    pub(crate) fn resolve<'a>(&self, v: &'a str) -> &'a str { debug_assert!(!v.starts_with('@')); COLOR_MAP_KEYS.iter().position(|k| *k == v).map_or(v, |i| self.0[i]) }
     pub(crate) fn set(&mut self, name: &str, value: &str) -> bool {
-        let (Some(index), Some(slot)) = (COLOR_MAP_KEYS.iter().position(|key| *key == name), COLOR_KEYS.iter().copied().find(|key| *key == value)) else { return false };
-        self.0[index] = slot; true
+        let (Some(i), Some(s)) = (COLOR_MAP_KEYS.iter().position(|k| *k == name), COLOR_KEYS.iter().copied().find(|k| *k == value)) else { return false };
+        self.0[i] = s; true
     }
     pub(crate) fn encode<'a>(&self, slot: &'a str) -> Option<&'a str> {
-        let slot = COLOR_KEYS.iter().copied().find(|key| *key == slot)?;
-        if self.resolve(slot) == slot { return Some(slot); }
-        COLOR_MAP_KEYS.iter().copied().find(|key| self.resolve(key) == slot)
+        let s = COLOR_KEYS.iter().copied().find(|k| *k == slot)?;
+        (self.resolve(s) == s).then_some(s).or_else(|| COLOR_MAP_KEYS.iter().copied().find(|k| self.resolve(k) == s))
     }
 }
 
-/// Resolves a raw XML `schemeClr`/`bg1`/`tx1` key under the active `ColorMap::enter` scope (or `Default` when unscoped).
-pub(crate) fn color_slot(value: &str) -> &str { ACTIVE_COLOR_MAP.with(|a| a.get().0.resolve(value)) }
+pub(crate) fn color_slot(value: &str) -> &str { ACTIVE_COLOR_MAP.with(|a| { debug_assert!(a.get().2 > 0); a.get().0.resolve(value) }) }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
