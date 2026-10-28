@@ -93,24 +93,22 @@ pub(crate) fn apply_color_map_node(map: &mut crate::design::ColorMap, node: Node
     *map = next; !node.children().any(|child| child.is_element())
 }
 
-/// Resolves `p:clrMap` / `p:clrMapOvr` against `parent` (ECMA-376-1 §19.3.1.6, §20.1.6.6: layout inherits master, slide inherits layout).
 pub(crate) fn resolve_color_map(root: Node<'_, '_>, parent: crate::design::ColorMap) -> (crate::design::ColorMap, bool) {
-    let (mut map, mut unsupported) = (parent, false);
-    if let Some(node) = child(root, P, "clrMap") { if !apply_color_map_node(&mut map, node) { unsupported = true; } }
+    let (mut map, mut u) = (parent, false);
+    if let Some(n) = child(root, P, "clrMap") { if !apply_color_map_node(&mut map, n) { u = true; } }
     if let Some(ovr) = child(root, P, "clrMapOvr") {
-        if ovr.attributes().len() != 0 { unsupported = true; }
-        match ovr.children().filter(|node| node.is_element()).collect::<Vec<_>>().as_slice() {
+        if ovr.attributes().len() != 0 { u = true; }
+        match ovr.children().filter(|n| n.is_element()).collect::<Vec<_>>().as_slice() {
             [] => {}
             [n] if n.has_tag_name((A, "masterClrMapping")) && n.attributes().len() == 0 && !n.children().any(|c| c.is_element()) => {}
-            [n] if n.has_tag_name((A, "overrideClrMapping")) => if !apply_color_map_node(&mut map, *n) { unsupported = true; },
-            _ => unsupported = true,
+            [n] if n.has_tag_name((A, "overrideClrMapping")) => if !apply_color_map_node(&mut map, *n) { u = true; },
+            _ => u = true,
         }
     }
-    (map, unsupported)
+    (map, u)
 }
 
-pub(crate) fn unsupported_color_mapping(root: Node<'_, '_>) -> bool { resolve_color_map(root, crate::design::ColorMap::default()).1 }
-
+pub(crate) fn unsupported_color_mapping(root: Node<'_, '_>) -> bool { resolve_color_map(root, Default::default()).1 }
 pub(crate) fn doc<'a>(pkg: &'a Package, p: &str) -> Option<roxmltree::Document<'a>> { parse(pkg.text(p).ok()?).ok() }
 
 fn parent_part(pkg: &Package, path: &str, tag: &str) -> Option<(String, &'static str)> {
@@ -135,15 +133,9 @@ fn color_map_step(pkg: &Package, p: &str, exp: Option<&str>, depth: u8, strict: 
     (!strict || !u).then_some(map)
 }
 
-pub(crate) fn try_part_color_map(pkg: &Package, path: &str) -> Result<crate::design::ColorMap> {
-    color_map_step(pkg, path, None, 0, true).ok_or_else(|| Error::Unsupported("native color map hierarchy".into()))
-}
-
+pub(crate) fn try_part_color_map(pkg: &Package, path: &str) -> Result<crate::design::ColorMap> { color_map_step(pkg, path, None, 0, true).ok_or_else(|| Error::Unsupported("native color map hierarchy".into())) }
 pub(crate) fn part_color_map(pkg: &Package, path: &str) -> crate::design::ColorMap { color_map_step(pkg, path, None, 0, false).unwrap_or_default() }
-
-fn remaps(n: Node<'_, '_>, a: crate::design::ColorMap, b: crate::design::ColorMap) -> bool {
-    n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| b.resolve(v) != a.resolve(v))
-}
+fn remaps(n: Node<'_, '_>, a: crate::design::ColorMap, b: crate::design::ColorMap) -> bool { n.has_tag_name((A, "schemeClr")) && n.attribute("val").is_some_and(|v| b.resolve(v) != a.resolve(v)) }
 
 pub(crate) fn has_remapped_owned(pkg: &Package, path: &str, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
     doc(pkg, &relations_path(path)).is_some_and(|d| d.root_element().children().filter(|n| n.attribute("TargetMode") != Some("External") && n.attribute("Type").and_then(|t| t.rsplit_once('/')).is_some_and(|(_, k)| matches!(k, "chart" | "chartEx") || k.starts_with("diagram"))).filter_map(|n| crate::pptx::resolve(path, n.attribute("Target")?).ok()).any(|p| doc(pkg, &p).is_some_and(|d| d.descendants().any(|n| n.tag_name().name() == "clrMapOvr" || remaps(n, om, cm)))))
@@ -155,10 +147,7 @@ fn has_remapped_shapes(package: &Package, path: &str, root: Node<'_, '_>, om: cr
     om != cm && (tree || has_remapped_owned(package, path, om, cm))
 }
 
-fn has_remapped_non_solid_bg(root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
-    om != cm && has_non_solid_bg(root) && bg_node(root).is_some_and(|bg| bg.descendants().any(|n| remaps(n, om, cm)))
-}
-
+fn has_remapped_non_solid_bg(root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool { om != cm && has_non_solid_bg(root) && bg_node(root).is_some_and(|bg| bg.descendants().any(|n| remaps(n, om, cm))) }
 fn show_master(r: Node<'_, '_>) -> bool { !matches!(r.attribute("showMasterSp"), Some("0" | "false")) }
 
 pub(crate) fn layout_remaps_master_artwork(package: &Package, lp: &str, mp: &str) -> bool {
