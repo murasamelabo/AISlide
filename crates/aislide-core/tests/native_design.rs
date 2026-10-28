@@ -147,7 +147,7 @@ fn issue32_synthesized_backgrounds_and_ancestor_edits_preserve_or_fail_closed() 
     issue32_rep(&mut hp, sm, &[("val=\"accent1\"", "val=\"bg1\"")]); issue32_rep(&mut hp, s1, &[("<p:sld ", "<p:sld showMasterSp=\"0\" "), (&issue32_ovr("dk1", "lt1"), &issue32_ovr("lt2", "dk2"))]);
     let hr = open(hp.save().unwrap()); let (mut hm, mut hre) = (hr.deck.clone(), assign(hr.deck.clone(), "slide-1", "title-content", false).unwrap());
     assert!(issue32_fail(&hr, hre.clone()).contains("inherited background"));
-    hm.design.as_mut().unwrap().masters[0].background = "@accent3".into(); hre.slides[0].inherit_background = false;
+    hm.design.as_mut().unwrap().masters[0].background = "@accent3".into(); hm.slides[0].layout_id = None; hre.slides[0].inherit_background = false;
     assert_eq!((open(save(&change(&hr, hm.clone()).document)).deck.slides[0].background.as_str(), open(save(&change(&hr, hre).document)).deck.slides[0].background.as_str()), ("@lt2", "@lt2"));
     issue32_rep(&mut hp, sm, &[(sf, gr)]);
     assert!(aislide_core::execute_request(json!({"op":"preview_presentation","document":open(hp.save().unwrap()),"options":{"page_indices":[0]}})).unwrap()["warnings"].as_array().unwrap().iter().any(|w| w["code"] == "NATIVE_COLOR_MAPPING_UNSUPPORTED"));

@@ -326,7 +326,7 @@ pub(crate) fn read(node: Node<'_, '_>) -> Result<Option<VisualStyle>> {
 
 pub(crate) fn signature(node: Node<'_, '_>, references: bool) -> serde_json::Value {
     let attributes: BTreeMap<_, _> = node.attributes().map(|attribute| {
-        let value = if references && attribute.namespace() == Some(crate::native::R) && attribute.name() == "embed" { "resource" } else if node.has_tag_name((A, "schemeClr")) && attribute.namespace().is_none() && attribute.name() == "val" { crate::design::color_slot(attribute.value()) } else { attribute.value() };
+        let value = if references && attribute.namespace() == Some(crate::native::R) && attribute.name() == "embed" { "resource" } else { attribute.value() };
         (format!("{}:{}", attribute.namespace().unwrap_or(""), attribute.name()), value)
     }).collect();
     let children: Vec<_> = node.children().filter(|node| node.is_element()).map(|node| signature(node, references)).collect();

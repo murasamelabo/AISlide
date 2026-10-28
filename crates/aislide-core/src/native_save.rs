@@ -109,8 +109,10 @@ pub(crate) fn chart_is_representable(package: &Package, binding: &NativePart, id
     let actual = parse(package.text(path)?)?;
     let expected = crate::charts::chart(kind, categories, series, options);
     let expected = parse(std::str::from_utf8(&expected).map_err(|_| Error::Invalid("chart XML encoding".into()))?)?;
-    let _s = crate::native::enter_part_color_map(package, &binding.path);
-    if (crate::design::ColorMap::scoped().is_err() && [actual.root_element(), expected.root_element()].into_iter().any(|r| r.descendants().any(|n| n.has_tag_name((A, "schemeClr"))))) || xml_value(actual.root_element()) != crate::design::ColorMap::default().scope(|| xml_value(expected.root_element())) {
+    let _s = crate::design::ColorMap::default().enter();
+    let act_val = || crate::native::part_color_map(package, &binding.path).scope(|| xml_value(actual.root_element()));
+    if crate::native::try_part_color_map(package, &binding.path).is_err() && [actual.root_element(), expected.root_element()].into_iter().any(|r| r.descendants().any(|n| n.has_tag_name((A, "schemeClr")))) { return Ok(false); }
+    if act_val() != xml_value(expected.root_element()) {
         use crate::model::chart_format::{automatic_label_position, LabelPosition};
         let legacy = if kind == crate::model::ChartKind::Sunburst {
             crate::chart_extended::legacy_sunburst_chart(categories, series, options)
@@ -119,7 +121,7 @@ pub(crate) fn chart_is_representable(package: &Package, binding: &NativePart, id
             crate::charts::legacy_label_position_chart(kind, categories, series, options)
         };
         let legacy = parse(std::str::from_utf8(&legacy).map_err(|_| Error::Invalid("chart XML encoding".into()))?)?;
-        if xml_value(actual.root_element()) != xml_value(legacy.root_element()) { return Ok(false); }
+        if act_val() != xml_value(legacy.root_element()) { return Ok(false); }
     }
     let Some(relation) = actual.descendants().find(|node| node.has_tag_name((namespace, "externalData"))).and_then(|node| node.attribute((crate::native::R, "id"))) else { return Ok(false); };
     let targets = crate::pptx::relationship_targets(package, path, "package")?;
@@ -1329,8 +1331,9 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
     for (after, binding) in deck.slides.iter().zip(&bindings) {
         let source = after.native_source_id.as_deref().unwrap_or(&after.id);
         let Some(before) = original.deck.slides.iter().find(|slide| slide.id == source) else { continue };
+        let lid = after.layout_id.as_ref().or_else(|| design.layouts.first().map(|l| &l.id));
         if before.layout_id != after.layout_id {
-            let path = after.layout_id.as_ref().or_else(|| design.layouts.first().map(|layout| &layout.id)).and_then(|id| topology.layouts.iter().find(|part| &part.id == id)).map(|part| &part.path).ok_or_else(|| Error::Unsupported("native slide layout missing".into()))?;
+            let path = lid.and_then(|id| topology.layouts.iter().find(|part| &part.id == id)).map(|part| &part.path).ok_or_else(|| Error::Unsupported("native slide layout missing".into()))?;
             rebase_slide_color_map(package, binding, &before.elements, crate::native::try_part_color_map(package, path)?)?;
             let relation_path = relations_path(&binding.path); let xml = package.text(&relation_path)?.to_owned(); let document = parse(&xml)?;
             let relation = document.root_element().children().find(|node| node.attribute("Type") == Some(format!("{}/slideLayout", crate::native::R).as_str())).ok_or_else(|| Error::Invalid("slide layout relationship missing".into()))?;
@@ -1340,13 +1343,13 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
             let _notes_scope = crate::pptx::relationship_targets(package, &binding.path, "notesSlide")?.into_values().next().or_else(|| crate::pptx::relationship_targets(package, main, "notesMaster").ok()?.into_values().next()).map_or_else(|| crate::design::ColorMap::default().enter(), |p| crate::native::enter_part_color_map(package, &p));
             patch_notes(package, main, &binding.path, after, deck)?;
         }
-        let p_bg = after.layout_id.as_ref().and_then(|id| old.layouts.iter().find(|l| &l.id == id).zip(design.layouts.iter().find(|l| &l.id == id))).is_some_and(|(bl, al)| bl.background != al.background || old.masters.iter().find(|m| m.id == al.master_id).zip(design.masters.iter().find(|m| m.id == al.master_id)).is_some_and(|(bm, am)| bm.background != am.background));
+        let p_bg = lid.and_then(|id| old.layouts.iter().find(|l| &l.id == id).zip(design.layouts.iter().find(|l| &l.id == id))).is_some_and(|(bl, al)| bl.background != al.background || old.masters.iter().find(|m| m.id == al.master_id).zip(design.masters.iter().find(|m| m.id == al.master_id)).is_some_and(|(bm, am)| bm.background != am.background));
         let background = (before.background != after.background || before.inherit_background != after.inherit_background || (!after.inherit_background && no_bg(package, &binding.path) && (before.layout_id != after.layout_id || p_bg))).then_some(if after.inherit_background { None } else { Some(after.background.as_str()) });
         patch_part(package, binding, &before.elements, &after.elements, crate::design::slide_theme(after, Some(design)).unwrap_or(&design.theme), (before.title != after.title).then_some(after.title.as_str()), background, scale)?;
         if before.hide_master_graphics != after.hide_master_graphics {
             let xml = package.text(&binding.path)?.to_owned(); let document = parse(&xml)?; let mut edits = Vec::new(); set_attribute(&xml, document.root_element(), "showMasterSp", if after.hide_master_graphics { "0" } else { "1" }, &mut edits)?; package.replace_part(&binding.path, apply(xml, edits)?)?;
         }
-        let anc_art = after.layout_id.as_ref().or_else(|| design.layouts.first().map(|l| &l.id)).and_then(|id| design.layouts.iter().find(|l| &l.id == id).zip(topology.layouts.iter().find(|l| &l.id == id))).is_some_and(|(al, lb)| {
+        let anc_art = lid.and_then(|id| design.layouts.iter().find(|l| &l.id == id).zip(topology.layouts.iter().find(|l| &l.id == id))).is_some_and(|(al, lb)| {
             let l_art = old.layouts.iter().find(|l| l.id == al.id).is_none_or(|bl| (&bl.master_id, &bl.background) != (&al.master_id, &al.background) || !equal(&bl.elements, &al.elements).unwrap_or(false));
             ((before.layout_id.as_ref(), before.inherit_background, before.hide_master_graphics) != (after.layout_id.as_ref(), after.inherit_background, after.hide_master_graphics) || l_art || m_art(&al.master_id)) && topology.masters.iter().find(|m| m.id == al.master_id).is_some_and(|mb| crate::native::slide_remaps_ancestor_artwork(package, &binding.path, &lb.path, &mb.path))
         });
