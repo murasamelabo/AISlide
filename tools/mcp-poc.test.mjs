@@ -261,7 +261,7 @@ test('MCP graph tools share native editing, revision guards and standalone PPTX'
   try {
     await client.connect(transport);
     const catalog = await call('graph_catalog');
-    const picture = await call('create_graph_icon', { alt: 'Application icon', mime_type: 'image/svg+xml', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#007a4d"/></svg>').toString('base64') });
+    const picture = await call('create_graph_icon', { alt: 'Application icon', mime_type: 'image/svg+xml', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#007a4d"/></svg>').toString('base64'), detail: 'full' });
     const spec = structuredClone(catalog.examples[2].spec);
     spec.nodes[1].icon = { base64: picture.base64, mime_type: picture.mime_type, alt: picture.alt };
     const created = await call('compile_report', { report: { title: 'Graph fixture', subtitle: '', period: '', source: 'Synthetic fixture', sections: [{ title: 'Architecture', layout: 'statement', body: [], rows: [], metrics: [] }] } });
@@ -319,7 +319,7 @@ test('MCP authoring tools insert objects and edit master theme with transactiona
     assert.equal(deck.design.theme.colors.accent1, design.theme.colors.accent1);
     const stale = await client.callTool({ name: 'assign_layout', arguments: { deck_id, expected_revision: 0, slide_id: 'slide-1', layout_id: 'blank' } });
     assert.equal(stale.isError, true);
-    const parts = await call('part_catalog'); assert.equal(parts.presets.length, 143);
+    const parts = await call('part_catalog', { detail: 'full' }); assert.equal(parts.presets.length, 143);
     const spec = parts.presets.find((preset) => preset.id === 'flow/balanced').example;
     await call('add_part', { deck_id, expected_revision: 6, slide_id: 'slide-1', id: 'mcp-part', spec });
     await call('update_part', { deck_id, expected_revision: 7, slide_id: 'slide-1', id: 'mcp-part', spec: { ...spec, title: 'MCP part update' } });
@@ -354,7 +354,7 @@ test('MCP saves and reopens one source-bound PPTX with native graphics and trans
     assert.equal((await call('get_document', { deck_id: result.deck_id })).deck.slides[0].elements[titleIndex].text, before.deck.slides[0].elements[titleIndex].text);
     await call('redo', { deck_id: result.deck_id });
     await call('add_diagram', { deck_id: result.deck_id, slide_id: 'slide-12', id: 'mcp-flow', steps: ['Ingest', 'Validate', 'Export'] });
-    const parts = await call('part_catalog');
+    const parts = await call('part_catalog', { detail: 'full' });
     const spec = parts.presets.find((preset) => preset.id === 'pyramid/balanced').example;
     await call('add_part', { deck_id: result.deck_id, expected_revision: 4, slide_id: 'slide-11', id: 'persisted-part', spec });
     await call('export_pptx', { deck_id: result.deck_id, filename: 'poc-proof.pptx' });
@@ -417,7 +417,7 @@ test('MCP review schema and local lifecycle preserve native visuals and explicit
     const { deck_id } = await call('create_presentation', { title: 'Synthetic review MCP' });
     let revision = 0;
     const mutate = async (name, input) => { const result = await call(name, { deck_id, expected_revision: revision, ...input }); revision = result.revision; return result; };
-    const picture = await call('create_asset', { id: 'vector', mime_type: 'image/svg+xml', size: 64, alt: 'Synthetic red square', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="red"/></svg>').toString('base64') });
+    const picture = await call('create_asset', { id: 'vector', mime_type: 'image/svg+xml', size: 64, alt: 'Synthetic red square', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="red"/></svg>').toString('base64'), detail: 'full' });
     assert.equal(typeof picture.svg, 'string');
     const deck = await call('get_deck', { deck_id });
     const text = { type: 'text', id: 'text', x: 40, y: 40, width: 800, height: 80, text: 'Alpha Beta', font_size: 24, color: '000000', bold: false };

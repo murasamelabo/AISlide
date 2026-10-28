@@ -214,7 +214,7 @@ pub fn preview_presentation(document: &crate::document::Document, options: &Prev
     if selected.is_empty() || selected.len() > 8 || selected.iter().any(|index| *index >= deck.slides.len())
         || selected.iter().collect::<BTreeSet<_>>().len() != selected.len()
     {
-        return Err(Error::Invalid("preview requires 1-8 unique existing page indices; select a smaller batch".into()));
+        return Err(Error::Invalid("preview requires 1-8 unique existing page indices; select a smaller batch with options.page_indices".into()));
     }
     if !(160..=1600).contains(&options.max_dimension) || options.max_output_bytes == 0 || options.max_output_bytes > 2 * 1024 * 1024 {
         return Err(Error::Limit("preview requires 160-1600 pixels and at most 2 MiB encoded images".into()));

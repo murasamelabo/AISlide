@@ -108,6 +108,144 @@ test('issue36 preflight schema exposes the inherited-only finding switch', async
   });
 });
 
+test('issue51 full tool-profile defaults detail to summary, omits filtered part_catalog schema and explains page_indices/detail on 9-page full requests', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-issue51-'));
+  try {
+    await feedbackMcpFixture(async ({ call, registrations, fixture }) => {
+      const slides = Array.from({ length: 9 }, (_, index) => ({ id: `slide-${index + 1}`, title: `Slide ${index + 1}`, background: 'FFFFFF', elements: [], notes: '' }));
+      const presets = [
+        { id: 'vertical-flow/rail', category: 'vertical-flow', category_name: 'Vertical flow', name: 'Vertical rail steps', use_when: 'Ordered stages', avoid_when: 'Unordered topics', example: { version: 1, preset: 'vertical-flow/rail' } },
+        ...Array.from({ length: 14 }, (_, index) => ({ id: `list/${index}`, category: 'list', category_name: 'List', name: `List ${index}`, use_when: 'Peers', avoid_when: 'Flows', example: { version: 1, preset: `list/${index}` } })),
+      ];
+      const pptxBytes = Buffer.from('PK\x03\x04synthetic');
+      const pptxSha = createHash('sha256').update(pptxBytes).digest('hex');
+      fixture.onRequest = async request => {
+        if (request.op === 'create_presentation') return { version: 1, id: request.id, revision: 0, hash: 'a'.repeat(64), sources: [], bindings: [], parts: [], deck: { version: 1, title: request.title, width: 1280, height: 720, slides } };
+        if (request.op === 'preview_presentation') {
+          const selected = request.options?.page_indices ?? slides.map((_, index) => index);
+          if (selected.length > 8) throw new Error('Invalid input: preview requires 1-8 unique existing page indices; select a smaller batch with options.page_indices');
+          return { revision: 0, hash: request.document.hash, pages: selected.map(page_index => ({ page_index, slide_id: `slide-${page_index + 1}`, image_index: 0 })), images: [{ base64: 'aW1hZ2U=', mime_type: `image/${request.options?.format ?? 'png'}`, width: 10, height: 10, byte_length: 5, sha256: 'b'.repeat(64) }], warnings: [], office_visual_parity: false };
+        }
+        if (request.op === 'prepare_delivery') {
+          const selected = request.options?.page_indices ?? slides.map((_, index) => index);
+          if (selected.length > 8) throw new Error('Invalid input: delivery visual selection requires 1-8 unique existing page indices (use options.page_indices); PPTX always contains the whole deck');
+          return {
+            revision: 0, hash: request.document.hash,
+            files: [{ kind: 'pptx', suffix: '.pptx', mime_type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', page_indices: slides.map((_, index) => index), byte_length: pptxBytes.length, sha256: pptxSha, base64: pptxBytes.toString('base64') }],
+            manifest: { format: 'aislide.delivery', version: 1, producer: { name: 'aislide', version: '0.1.0', engine: 'aislide-core', contract_version: 1 }, document: { id: request.document.id, revision: 0, hash: request.document.hash, title: 'repro', slide_count: 9 }, options: { page_indices: selected }, files: [], preview_pages: [], multi_file_atomic: false, checks: { preflight_page_indices: selected, static_render_page_indices: selected, office_visual_parity: false }, preflight: null, render_warnings: [], privacy: {}, limitations: [] },
+          };
+        }
+        if (request.op === 'part_catalog') return { version: 1, presets, schema: { marker: 'FULL_SCHEMA' }, style: 'Synthetic', default_bounds: {} };
+        throw new Error(`Unexpected request: ${request.op}`);
+      };
+      const { deck_id } = await call('create_presentation', { title: 'repro' });
+      const preview = await call('preview_presentation', { deck_id, include_images: false });
+      assert.deepEqual(preview.page_scope, { total: 9, selected: 8, unselected: 1 });
+      const finalizedDefault = await call('finalize_presentation', { deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), name: 'bundle-default', include_images: false });
+      assert.deepEqual(finalizedDefault.page_scope, { total: 9, selected: 8, unselected: 1 });
+      const finalizedOptions = await call('finalize_presentation', { deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), name: 'bundle-options', options: {}, include_images: false });
+      assert.deepEqual(finalizedOptions.page_scope, { total: 9, selected: 8, unselected: 1 });
+
+      const previewTool = registrations.get('preview_presentation');
+      const previewError = await previewTool.callback(previewTool.config.inputSchema.parse({ deck_id, detail: 'full', include_images: false }), { signal: new AbortController().signal });
+      assert.equal(previewError.isError, true);
+      assert.match(previewError.content[0].text, /options\.page_indices/);
+      assert.match(previewError.content[0].text, /detail/);
+
+      const finalizeTool = registrations.get('finalize_presentation');
+      const finalizeError = await finalizeTool.callback(finalizeTool.config.inputSchema.parse({ deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), name: 'bundle-full', detail: 'full', include_images: false }), { signal: new AbortController().signal });
+      assert.equal(finalizeError.isError, true);
+      assert.match(finalizeError.content[0].text, /options\.page_indices/);
+      assert.match(finalizeError.content[0].text, /detail/);
+      assert.match(finalizeError.content[0].text, /PPTX always contains the whole deck/);
+
+      const defaultCatalog = await call('part_catalog', { query: 'vertical rail', limit: 5 });
+      assert.equal(defaultCatalog.schema, undefined);
+      assert.equal(defaultCatalog.presets[0].example, undefined);
+      const filteredFullCatalog = await call('part_catalog', { query: 'vertical rail', detail: 'full' });
+      assert.equal(filteredFullCatalog.schema, undefined);
+      assert.ok(filteredFullCatalog.presets[0].example);
+      const unfilteredFullCatalog = await call('part_catalog', { detail: 'full' });
+      assert.deepEqual(unfilteredFullCatalog.schema, { marker: 'FULL_SCHEMA' });
+    }, ['--tool-profile', 'full', '--output-dir', directory]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('issue52 catalog and tool search queries match all whitespace-separated terms in any order and return zero-match diagnostics', async () => {
+  await feedbackMcpFixture(async ({ call, fixture }) => {
+    const presets = [
+      { id: 'vertical-flow/rail', category: 'vertical-flow', category_name: 'Vertical flow', name: 'Vertical rail steps', use_when: '2-5 ordered stages with one numbered vertical rail', avoid_when: 'Unordered topics', example: { version: 1, preset: 'vertical-flow/rail' } },
+      { id: 'list/icon-rows', category: 'list', category_name: 'List', name: 'Icon explanation rows', use_when: '2-6 stacked statements', avoid_when: 'Sequences with handoffs; use vertical-flow/rail instead', example: { version: 1, preset: 'list/icon-rows' } },
+      { id: 'flow/open-steps', category: 'flow', category_name: 'Flow', name: 'Open horizontal steps', use_when: '2-5 ordered stages', avoid_when: 'Branching processes', example: { version: 1, preset: 'flow/open-steps' } },
+    ];
+    const icons = [
+      { id: 'azure/microsoft-sentinel', name: 'Azure Sentinel', provider: 'azure', categories: ['security', 'analytics'], aliases: ['microsoft sentinel', 'siem'] },
+      { id: 'azure/key-vaults', name: 'Key Vaults', provider: 'azure', categories: ['security'], aliases: ['secrets'] },
+    ];
+    const patterns = [
+      { id: 'split/1-1', name: 'Balanced two-column split', ratio: '1:1', relationships: ['contrast', 'peers'], use_when: 'Compare two equal alternatives side by side', avoid_when: 'More than two peers' },
+      { id: 'sequence/steps-h', name: 'Horizontal step sequence', ratio: 'equal', relationships: ['sequence'], use_when: 'Ordered process steps', avoid_when: 'Unordered peers' },
+    ];
+    fixture.onRequest = async request => {
+      if (request.op === 'part_catalog') return { version: 1, presets, schema: { marker: 'FULL_SCHEMA' }, style: 'Synthetic', default_bounds: {} };
+      if (request.op === 'architecture_icons') return { version: 1, release: 'synthetic', configured: true, message: 'Ready', providers: ['azure'], icons };
+      if (request.op === 'layout_patterns') return { version: 1, patterns, guidance: ['Use frames unchanged'], tokens: {} };
+      throw new Error(`Unexpected request: ${request.op}`);
+    };
+
+    const reorderedParts = await call('part_catalog', { query: 'rail steps vertical flow', detail: 'summary', limit: 5 });
+    assert.equal(reorderedParts.total, 1);
+    assert.equal(reorderedParts.presets[0].id, 'vertical-flow/rail');
+    const verticalRailParts = await call('part_catalog', { query: 'vertical rail', detail: 'summary', limit: 5 });
+    const railParts = await call('part_catalog', { query: 'rail', detail: 'summary', limit: 5 });
+    assert.equal(verticalRailParts.total, 2);
+    assert.equal(verticalRailParts.total, railParts.total);
+    assert.equal((await call('part_catalog', { query: '  RAIL   STEPS ', detail: 'summary' })).total, 1);
+    const blankQueryParts = await call('part_catalog', { query: '   ', detail: 'summary' });
+    assert.equal(blankQueryParts.total, presets.length);
+    assert.equal(blankQueryParts.match_mode, undefined);
+
+    const sentinelA = await call('architecture_icons', { provider: 'azure', query: 'security sentinel', detail: 'summary' });
+    const sentinelB = await call('architecture_icons', { provider: 'azure', query: 'sentinel azure', detail: 'summary' });
+    assert.equal(sentinelA.total, 1);
+    assert.equal(sentinelA.icons[0].id, 'azure/microsoft-sentinel');
+    assert.deepEqual(sentinelA.icons, sentinelB.icons);
+
+    const patternsA = await call('layout_patterns', { query: 'contrast split', detail: 'summary' });
+    const patternsB = await call('layout_patterns', { query: 'split contrast', detail: 'summary' });
+    assert.equal(patternsA.total, 1);
+    assert.deepEqual(patternsA.patterns, patternsB.patterns);
+
+    const zeroParts = await call('part_catalog', { query: 'rail zzzz', detail: 'summary' });
+    assert.equal(zeroParts.total, 0);
+    assert.equal(zeroParts.match_mode, 'all_terms');
+    assert.deepEqual(zeroParts.terms, ['rail', 'zzzz']);
+    assert.deepEqual(zeroParts.unmatched_terms, ['zzzz']);
+    assert.ok(zeroParts.partial_matches.length > 0 && zeroParts.partial_matches.length <= 5);
+    assert.deepEqual(zeroParts.partial_matches[0], { id: 'vertical-flow/rail', name: 'Vertical rail steps', matched_terms: ['rail'] });
+
+    const zeroIcons = await call('architecture_icons', { provider: 'azure', query: 'security zzzz', detail: 'summary' });
+    assert.equal(zeroIcons.total, 0);
+    assert.equal(zeroIcons.match_mode, 'all_terms');
+    assert.deepEqual(zeroIcons.unmatched_terms, ['zzzz']);
+    assert.equal(zeroIcons.partial_matches.length, 2);
+
+    const zeroPatterns = await call('layout_patterns', { query: 'contrast zzzz', detail: 'summary' });
+    assert.equal(zeroPatterns.total, 0);
+    assert.equal(zeroPatterns.match_mode, 'all_terms');
+    assert.deepEqual(zeroPatterns.unmatched_terms, ['zzzz']);
+    assert.deepEqual(zeroPatterns.partial_matches[0], { id: 'split/1-1', name: 'Balanced two-column split', matched_terms: ['contrast'] });
+
+    const zeroTools = await call('discover_tools', { query: 'part_catalog zzzz' });
+    assert.equal(zeroTools.total, 0);
+    assert.equal(zeroTools.match_mode, 'all_terms');
+    assert.deepEqual(zeroTools.unmatched_terms, ['zzzz']);
+    assert.ok(zeroTools.partial_matches.some(entry => entry.name === 'part_catalog'));
+  }, ['--tool-profile', 'full', '--layout-patterns', 'on']);
+});
+
 test('recipe MCP discovers semantic candidates and uses strict bounded input schemas', async () => {
   await feedbackMcpFixture(async ({ registrations, call, fixture }) => {
     for (const name of ['recipe_catalog', 'recommend_recipes', 'preview_recipe', 'apply_recipe']) assert.ok(registrations.has(name), `Missing ${name}`);
@@ -1920,7 +2058,7 @@ test('MCP preview accepts bounded JPEG and overflow policy without losing metada
     const tool = registrations.get('preview_presentation');
     for (const format of ['png', 'jpeg']) {
       fixture.onRequest = async request => ({ revision: 0, hash: request.document.hash, requested_max_dimension: 1280, actual_max_dimension: 960, quality_reduced: true, pages: [], warnings: [{ code: 'PREVIEW_DOWNSCALED', page_index: 0, element_id: '', message: 'Synthetic reduced preview' }], images: [{ base64: 'aW1hZ2U=', mime_type: `image/${format}`, width: 960, height: 540, byte_length: 5, sha256: 'a'.repeat(64) }], office_visual_parity: false });
-      const input = { deck_id, options: { format, overflow: 'shrink', page_indices: [0] } };
+      const input = { deck_id, detail: 'full', options: { format, overflow: 'shrink', page_indices: [0] } };
       const result = await tool.callback(tool.config.inputSchema.parse(input), { signal: new AbortController().signal });
       assert.ok(!result.isError, JSON.stringify(result));
       assert.deepEqual(calls.at(-1).request.options, input.options);
@@ -2534,7 +2672,7 @@ test('managed batch MCP live 39 slides and 21 managed roots retain metadata thro
     await call('apply_transaction', { deck_id, expected_revision: blank.revision, operations: [{ op: 'add', path: '/sources/-', value: ingested.source }] });
     await call('close_source', { source_id: ingested.source_id });
     const before = await call('get_session_recovery', { deck_id });
-    const catalog = await call('part_catalog');
+    const catalog = await call('part_catalog', { detail: 'full' });
     const presetIds = [
       ...['matrix', 'contrast'].flatMap(category => ['balanced', 'focus', 'labeled'].map(variant => `${category}/${variant}`)),
       ...['list-horizontal', 'vertical-bar-graph', 'horizontal-bar-graph', 'line-graph', 'pie-chart', 'tree', 'flow', 'vertical-flow', 'cycle', 'before-after', 'layer'].map(category => `${category}/balanced`),
@@ -2696,7 +2834,7 @@ test('feedback MCP live typed batches and authored slide import preserve content
       assert.deepEqual(initial.past, []);
     }
     const slide_id = sourceInitial.document.deck.slides[0].id;
-    const picture = await call('create_asset', { id: 'pixel', mime_type: 'image/svg+xml', size: 40, alt: 'Synthetic square', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="red"/></svg>').toString('base64') });
+    const picture = await call('create_asset', { id: 'pixel', mime_type: 'image/svg+xml', size: 40, alt: 'Synthetic square', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="red"/></svg>').toString('base64'), detail: 'full' });
     assert.equal(Buffer.from(picture.base64, 'base64').subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
     const elements = [
       { type: 'text', id: 'text', x: 40, y: 40, width: 600, height: 140, text: 'One\nTwo', font_size: 28, color: '202525', bold: false, format: { paragraphs: [
@@ -3281,7 +3419,7 @@ test('MCP open list recommendations render native text and keep failed edits ato
   };
   try {
     await client.connect(transport);
-    const catalog = await call('part_catalog');
+    const catalog = await call('part_catalog', { detail: 'full' });
     assert.equal(catalog.presets.length, 143);
     for (const id of ['list/rows', 'list-horizontal/columns', 'list-enumeration/grid']) {
       const preset = catalog.presets.find(entry => entry.id === id);
@@ -3643,7 +3781,7 @@ test('P0 MCP previews return bounded images without changing documents or writin
     await call('edit_slides', { deck_id, expected_revision: 0, operations: [{ op: 'duplicate', slide_id: 'slide-1', id: 'second' }] });
     const before = await call('get_session_recovery', { deck_id });
     const options = { page_indices: [1, 0], max_dimension: 640, layout: 'contact_sheet' };
-    const result = await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options } });
+    const result = await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options, detail: 'full' } });
     assert.ok(!result.isError, JSON.stringify(result.content));
     const metadata = JSON.parse(result.content[0].text);
     assert.equal(metadata.revision, before.document.revision);
@@ -3660,7 +3798,7 @@ test('P0 MCP previews return bounded images without changing documents or writin
     assert.equal(decoded.height, metadata.images[0].height);
     assert.ok(decoded.width <= 640 && decoded.height <= 640);
     assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 4 * 1048576);
-    const plain = await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options, include_images: false } });
+    const plain = await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options, include_images: false, detail: 'full' } });
     assert.ok(!plain.isError, JSON.stringify(plain.content));
     assert.equal(plain.content.length, 1);
     for (const invalid of [
@@ -3669,7 +3807,7 @@ test('P0 MCP previews return bounded images without changing documents or writin
       { options: { ...options, page_indices: Array.from({ length: 9 }, (_, index) => index) } },
       { options: { ...options, max_dimension: 4096 } },
       { filename: '../preview.png' },
-    ]) assert.equal((await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options, ...invalid } })).isError, true);
+    ]) assert.equal((await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options, detail: 'full', ...invalid } })).isError, true);
     assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
     assert.deepEqual(await readdir(directory), []);
     const tools = (await client.listTools()).tools;

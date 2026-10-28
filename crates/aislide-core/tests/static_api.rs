@@ -340,6 +340,10 @@ fn delivery_preparation_bounds_selection_and_rejects_stale_or_unknown_options() 
         let mut invalid=request.clone();invalid["options"]=options;
         assert!(execute_request(invalid).is_err());
     }
+    let delivery_error = execute_request(json!({"op":"prepare_delivery","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"options":{}})).unwrap_err().to_string();
+    assert!(delivery_error.contains("options.page_indices") && delivery_error.contains("PPTX always contains the whole deck"), "{delivery_error}");
+    let preview_error = execute_request(json!({"op":"preview_presentation","document":document,"options":{}})).unwrap_err().to_string();
+    assert!(preview_error.contains("options.page_indices"), "{preview_error}");
     for (field,value) in [("expected_revision",json!(1)),("expected_hash",json!("0".repeat(64)))] {
         let mut invalid=request.clone();invalid[field]=value;assert!(execute_request(invalid).is_err());
     }
