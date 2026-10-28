@@ -1318,11 +1318,11 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
     let no_bg = |p: &Package, k: &str| !crate::native::doc(p, k).is_some_and(|d| crate::native::bg_node(d.root_element()).is_some());
     let m_art = |id: &str| old.masters.iter().find(|m| m.id == id).zip(design.masters.iter().find(|m| m.id == id)).is_none_or(|(bm, am)| bm.background != am.background || !equal(&bm.elements, &am.elements).unwrap_or(false));
     for (after, binding) in design.layouts.iter().zip(&topology.layouts) {
+        if (after.background.is_none() && crate::native::synthesized_bg(package, &binding.path).is_some()) || (m_art(&after.master_id) && topology.masters.iter().find(|m| m.id == after.master_id).is_some_and(|mb| crate::native::layout_remaps_master_artwork(package, &binding.path, &mb.path))) {
+            return Err(Error::Unsupported("native color map override remaps the inherited background or artwork".into()));
+        }
         if after.background.is_some() && no_bg(package, &binding.path) && old.masters.iter().find(|m| m.id == after.master_id).zip(design.masters.iter().find(|m| m.id == after.master_id)).is_some_and(|(bm, am)| bm.background != am.background) {
             patch_part(package, binding, &after.elements, &after.elements, crate::design::master_theme(design, &after.master_id), None, Some(after.background.as_deref()), scale)?;
-        }
-        if after.background.is_none() && crate::native::synthesized_bg(package, &binding.path).is_some() || m_art(&after.master_id) && topology.masters.iter().find(|m| m.id == after.master_id).is_some_and(|mb| crate::native::layout_remaps_master_artwork(package, &binding.path, &mb.path)) {
-            return Err(Error::Unsupported("native color map override remaps the inherited background or artwork".into()));
         }
     }
     let bindings = crate::native_slides::prepare(package, original, deck, main, scale, &topology.layouts)?;
@@ -1331,7 +1331,7 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
         let Some(before) = original.deck.slides.iter().find(|slide| slide.id == source) else { continue };
         if before.layout_id != after.layout_id {
             let path = after.layout_id.as_ref().or_else(|| design.layouts.first().map(|layout| &layout.id)).and_then(|id| topology.layouts.iter().find(|part| &part.id == id)).map(|part| &part.path).ok_or_else(|| Error::Unsupported("native slide layout missing".into()))?;
-            rebase_slide_color_map(package, binding, &before.elements, crate::native::try_part_color_map(package, path)?)?;
+            rebase_slide_color_map(package, binding, &before.elements, crate::native::try_part_color_map(package, path))?;
             let relation_path = relations_path(&binding.path); let xml = package.text(&relation_path)?.to_owned(); let document = parse(&xml)?;
             let relation = document.root_element().children().find(|node| node.attribute("Type") == Some(format!("{}/slideLayout", crate::native::R).as_str())).ok_or_else(|| Error::Invalid("slide layout relationship missing".into()))?;
             let mut edits = Vec::new(); set_attribute(&xml, relation, "Target", &format!("/{path}"), &mut edits)?; package.replace_part(&relation_path, apply(xml, edits)?)?;
@@ -1350,21 +1350,23 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
             let l_art = old.layouts.iter().find(|l| l.id == al.id).is_none_or(|bl| (&bl.master_id, &bl.background) != (&al.master_id, &al.background) || !equal(&bl.elements, &al.elements).unwrap_or(false));
             ((before.layout_id.as_ref(), before.inherit_background, before.hide_master_graphics) != (after.layout_id.as_ref(), after.inherit_background, after.hide_master_graphics) || l_art || m_art(&al.master_id)) && topology.masters.iter().find(|m| m.id == al.master_id).is_some_and(|mb| crate::native::slide_remaps_ancestor_artwork(package, &binding.path, &lb.path, &mb.path))
         });
-        if after.inherit_background && crate::native::synthesized_bg(package, &binding.path).is_some() || anc_art {
+        if (after.inherit_background && crate::native::synthesized_bg(package, &binding.path).is_some()) || anc_art {
             return Err(Error::Unsupported("native color map override remaps the inherited background or artwork".into()));
         }
     }
     crate::native_design::remove_deleted(package, original, &topology)?;
-    crate::design::ColorMap::default().scope(|| crate::review::save_end(package, original, deck, &bindings))?;
+    crate::review::save_end(package, original, deck, &bindings)?;
     crate::fonts::write_native(package, main, &original.deck.embedded_fonts, deck)?;
     crate::review::remove_unused_hyperlinks(package)?;
     package.save()
 }
 
-fn rebase_slide_color_map(package: &mut Package, binding: &NativePart, elements: &[Element], new_parent_map: crate::design::ColorMap) -> Result<()> {
-    let old_map = crate::native::try_part_color_map(package, &binding.path)?;
+fn rebase_slide_color_map(package: &mut Package, binding: &NativePart, elements: &[Element], new_parent_map: Result<crate::design::ColorMap>) -> Result<()> {
     let xml = package.text(&binding.path)?.to_owned(); let parsed = parse(&xml)?;
-    let (new_map, _) = crate::native::resolve_color_map(parsed.root_element(), new_parent_map);
+    let (Ok(old_map), Ok(pm)) = (crate::native::try_part_color_map(package, &binding.path), new_parent_map) else {
+        return if parsed.root_element().descendants().any(|n| n.has_tag_name((A, "schemeClr"))) { Err(Error::Unsupported("native color map hierarchy".into())) } else { Ok(()) };
+    };
+    let (new_map, _) = crate::native::resolve_color_map(parsed.root_element(), pm);
     if new_map == old_map { return Ok(()); }
     let common = child(parsed.root_element(), P, "cSld").ok_or_else(|| Error::Invalid("common slide data missing".into()))?;
     let proj: BTreeSet<_> = crate::model::element_list(elements).into_iter().filter_map(|e| binding.nodes.get(e.bounds().0).map(String::as_str)).collect();
@@ -1373,8 +1375,8 @@ fn rebase_slide_color_map(package: &mut Package, binding: &NativePart, elements:
     }
     let mut edits = Vec::new();
     for attr in common.descendants().filter(|n| n.has_tag_name((A, "schemeClr"))).filter_map(|n| n.attributes().find(|a| a.namespace().is_none() && a.name() == "val")) {
-        let old_slot = old_map.resolve(attr.value());
-        if new_map.resolve(attr.value()) != old_slot { edits.push((attr.range_value(), new_map.encode(old_slot).ok_or_else(|| Error::Unsupported("target layout color map cannot represent slide scheme color".into()))?.into())); }
+        let s = old_map.resolve(attr.value());
+        if new_map.resolve(attr.value()) != s { edits.push((attr.range_value(), new_map.encode(s).ok_or_else(|| Error::Unsupported("target layout color map cannot represent slide scheme color".into()))?.into())); }
     }
     if !edits.is_empty() { package.replace_part(&binding.path, apply(xml, edits)?)?; }
     Ok(())

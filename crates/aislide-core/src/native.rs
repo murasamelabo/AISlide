@@ -795,7 +795,6 @@ pub(crate) fn read(package: &Package) -> Result<NativeDeck> {
         let xml = parse(package.text(path)?)?;
         let note_targets = relationship_targets(package, path, "notesSlide")?;
         let mut notes_paragraphs = Vec::new();
-        let _s = crate::design::ColorMap::default().enter();
         let notes = if let Some(path) = note_targets.values().next() {
             let document = parse(package.text(path)?)?;
             if part_color_map_unsupported(package, path) { warnings.push(color_mapping_warning(path)); }

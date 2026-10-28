@@ -132,8 +132,8 @@ fn issue32_resolves_and_encodes_color_maps_across_parts() {
 #[test]
 fn issue32_synthesized_backgrounds_and_ancestor_edits_preserve_or_fail_closed() {
     use aislide_core::design::assign_layout_with_options as assign;
-    let doc = open(issue32_fixture().1); let mut cl = doc.deck.clone(); cl.design.as_mut().unwrap().layouts[0].background = None;
-    assert!(issue32_fail(&doc, cl).contains("inherited background"));
+    let raw = issue32_fixture().1; let doc = open(raw.clone()); let mut cl = doc.deck.clone(); cl.design.as_mut().unwrap().layouts[0].background = None;
+    assert!(issue32_fail(&doc, cl).contains("inherited background") && save(&doc) == raw);
     let (sm, s1, sf, gr) = ("ppt/slideMasters/slideMaster1.xml", "ppt/slides/slide1.xml", "<a:solidFill><a:schemeClr val=\"bg1\"/></a:solidFill>", "<a:gradFill><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"bg1\"/></a:gs></a:gsLst></a:gradFill>");
     let mut hp = Package::open(save(&source())).unwrap();
     issue32_rep(&mut hp, sm, &[("val=\"lt1\"", "val=\"bg1\""), ("bg1=\"lt1\" tx1=\"dk1\"", "bg1=\"dk1\" tx1=\"lt1\"")]);

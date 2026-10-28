@@ -10,7 +10,7 @@ pub(crate) struct ColorMap([&'static str; 12]);
 thread_local! { static ACTIVE_COLOR_MAP: std::cell::Cell<(ColorMap, bool, usize)> = Default::default(); }
 #[must_use]
 pub(crate) struct ColorMapGuard((ColorMap, bool, usize), std::marker::PhantomData<*const ()>);
-impl Drop for ColorMapGuard { fn drop(&mut self) { ACTIVE_COLOR_MAP.with(|a| { if !std::thread::panicking() { assert_eq!(a.get().2, self.0.2 + 1); } a.set(self.0); }); } }
+impl Drop for ColorMapGuard { fn drop(&mut self) { ACTIVE_COLOR_MAP.with(|a| { if !std::thread::panicking() { debug_assert_eq!(a.get().2, self.0.2 + 1); } a.set(self.0); }); } }
 
 impl Default for ColorMap {
     fn default() -> Self { Self(["lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"]) }
@@ -36,7 +36,7 @@ impl ColorMap {
     }
 }
 
-pub(crate) fn color_slot(value: &str) -> &str { ACTIVE_COLOR_MAP.with(|a| { debug_assert!(a.get().2 > 0); a.get().0.resolve(value) }) }
+pub(crate) fn color_slot(value: &str) -> &str { ACTIVE_COLOR_MAP.with(|a| a.get().0.resolve(value)) }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
