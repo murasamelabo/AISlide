@@ -36,7 +36,7 @@ fn issue32_custom_color_maps_warn_in_native_and_template_diagnostics_without_rew
         } else {
             let end = parsed.descendants().find(|node| node.has_tag_name((P, "cSld"))).unwrap().range().end;
             let range = parsed.descendants().find(|node| node.has_tag_name((P, "clrMapOvr"))).map(|node| node.range()).unwrap_or(end..end);
-            (range, format!("<p:clrMapOvr xmlns:p=\"{P}\"><a:overrideClrMapping xmlns:a=\"{A}\" bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"><a:extLst/></a:overrideClrMapping></p:clrMapOvr>"))
+            (range, issue32_ovr_tag("dk1", "lt1")[9..].replace("/>", &format!("><a:extLst xmlns:a=\"{A}\"/></a:overrideClrMapping>")))
         };
         xml.replace_range(range, &replacement);
         package.replace_part(path, xml.into_bytes()).unwrap();
@@ -102,7 +102,7 @@ fn issue32_resolves_and_encodes_color_maps_across_parts() {
     let mut np = Package::open(bytes).unwrap(); issue32_rep(&mut np, "ppt/notesMasters/notesMaster1.xml", &[("bg1=\"dk1\" ", "")]);
     assert!(document::open_presentation("nw".into(), np.save().unwrap()).unwrap()["warnings"].as_array().unwrap().iter().any(|w| w.as_str().is_some_and(|m| m.contains("notesSlide1.xml") && m.contains("Custom native color mapping"))));
     let mut av = serde_json::to_value(&doc.deck).unwrap();
-    av["auxiliary_design"]["handout_master"] = json!({"name":"H","background":"@lt1","theme":av["design"]["theme"],"elements":[{"type":"text","id":"ht","x":40,"y":40,"width":200,"height":40,"text":"H","font_size":20,"color":"@dk1","bold":false}]});
+    av["auxiliary_design"]["handout_master"] = json!({"name":"H","background":"@lt1","theme":av["design"]["theme"],"elements":low.slides[0].elements});
     let mut hp = Package::open(save(&change(&doc, serde_json::from_value(av).unwrap()).document)).unwrap();
     let hm = hp.parts().keys().find(|p| p.contains("handoutMaster") && p.ends_with(".xml")).unwrap().clone();
     issue32_rep(&mut hp, &hm, &[("bg1=\"lt1\" tx1=\"dk1\"", "bg1=\"dk1\" tx1=\"lt1\""), ("val=\"lt1\"", "val=\"bg1\""), ("val=\"dk1\"", "val=\"tx1\"")]);
@@ -186,6 +186,7 @@ fn issue32_layout_rebase_and_master_import_respect_color_maps() {
         let prv = req(json!({"op":"preview_master_import","document":base,"expected_revision":base.revision,"expected_hash":base.hash,"input":inp}));
         assert_eq!(req(json!({"op":"import_masters","document":base,"expected_revision":base.revision,"expected_hash":base.hash,"input":inp,"expected_candidate_hash":prv["candidate_hash"]}))["document"]["deck"]["design"][k][i]["background"], "@dk1");
     }
+    assert!(aislide_core::slide_import::import(&base, 0, &base.hash, &doc, &["slide-1".into()], "si", None).is_err() && open(save(&aislide_core::slide_import::import(&doc, 0, &doc.hash, &base, &["slide-1".into()], "si", None).unwrap().document)).deck.slides.len() == 2);
     let (mut pd, tp) = (base.deck.clone(), |id, inh| el(json!({"type":"text","id":id,"x":64,"y":80,"width":1152,"height":120,"text":"M","font_size":42,"color":"@dk1","bold":true,"format":{"placeholder":{"kind":"title","index":0},"inherit_layout":inh}})));
     pd.design.as_mut().unwrap().masters[0].elements = vec![tp("pt", false)]; pd.design.as_mut().unwrap().layouts[0].elements = vec![tp("pt", false)];
     pd.slides[0].inherit_background = true; pd.slides[0].elements = vec![tp("st", true)];

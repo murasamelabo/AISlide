@@ -145,8 +145,7 @@ pub(crate) fn encode_scheme_colors(xml: String, color_map: Result<crate::design:
     for attr in document.descendants().filter(|n| n.has_tag_name((A, "schemeClr"))).filter_map(|n| n.attributes().find(|a| a.namespace().is_none() && a.name() == "val")) {
         let slot = crate::design::ColorMap::default().resolve(attr.value());
         if !crate::design::COLOR_KEYS.contains(&slot) { continue; }
-        let cm = color_map.as_ref().map_err(|_| Error::Unsupported("native color map hierarchy".into()))?;
-        let enc = cm.encode(slot).ok_or_else(|| Error::Unsupported("native color map cannot represent theme color slot".into()))?;
+        let enc = match &color_map { Ok(m) => m, Err(Error::Invalid(m)) => return Err(Error::Invalid(m.clone())), Err(_) => return Err(Error::Unsupported("native color map hierarchy".into())) }.encode(slot).ok_or_else(|| Error::Unsupported("native color map cannot represent theme color slot".into()))?;
         if enc != attr.value() { edits.push((attr.range_value(), enc.into())); }
     }
     if edits.is_empty() { return Ok(xml); }
