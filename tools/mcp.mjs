@@ -49,8 +49,9 @@ const imageResult = Symbol('imageResult');
 let activeMutation = false;
 const handle = z.string().uuid();
 const shortText = z.string().max(120);
-const detailSchema = z.enum(['summary', 'full']).optional();
-const catalogPage = { query: z.string().max(160).optional(), offset: z.number().int().min(0).max(2048).optional(), limit: z.number().int().min(1).max(50).optional(), detail: detailSchema };
+const detailSchema = z.enum(['summary', 'full']).describe('Response detail level; defaults to summary across all tool profiles.').optional();
+const querySearchDescription = ' query splits on whitespace and matches items containing all terms as case-insensitive substrings in any order.';
+const catalogPage = { query: z.string().max(160).describe('Whitespace-separated terms matched as case-insensitive substrings in any order.').optional(), offset: z.number().int().min(0).max(2048).optional(), limit: z.number().int().min(1).max(50).optional(), detail: detailSchema };
 const fontBase64 = z.string().max(Math.ceil(FONT_LIMITS.face_bytes / 3) * 4);
 const capacityProfileSchema = z.enum(['legacy', 'standard', 'large']);
 const archiveBase64 = z.string().max(Math.ceil(CAPACITY_PROFILES.large.archive_bytes / 3) * 4);
@@ -531,10 +532,46 @@ function deckSummary(deck_id, options = { limit: 0 }) {
 	return { deck_id, ...getDeck(deck_id).getSummary(options), ...deckActivity.get(deck_id) };
 }
 
-function compactResponse(detail) { return detail === 'summary' || (detail !== 'full' && toolProfile === 'compact'); }
+function compactResponse(detail) { return detail !== 'full'; }
+
+function normalizeQueryTerms(query) {
+	return [...new Set((query ?? '').toLowerCase().split(/\s+/).filter(Boolean))];
+}
+
+function filterByQueryTerms(candidates, query, getHaystack, getSummary = item => ({ id: item.id ?? item.name, name: item.name })) {
+	const terms = normalizeQueryTerms(query);
+	if (!terms.length) return { matching: candidates, diagnostics: {} };
+	const scored = candidates.map(item => {
+		const haystack = getHaystack(item).toLowerCase();
+		const matched_terms = terms.filter(term => haystack.includes(term));
+		return { item, matched_terms };
+	});
+	const matching = scored.filter(entry => entry.matched_terms.length === terms.length).map(entry => entry.item);
+	if (matching.length) return { matching, diagnostics: {} };
+	const unmatched_terms = terms.filter(term => !scored.some(entry => entry.matched_terms.includes(term)));
+	const partial_matches = scored
+		.filter(entry => entry.matched_terms.length > 0)
+		.sort((left, right) => right.matched_terms.length - left.matched_terms.length)
+		.slice(0, 5)
+		.map(entry => ({ ...getSummary(entry.item), matched_terms: entry.matched_terms }));
+	return { matching: [], diagnostics: { match_mode: 'all_terms', terms, unmatched_terms, partial_matches } };
+}
 
 function previewSelection(total, options) {
 	return options?.page_indices ?? Array.from({ length: Math.min(total, 8) }, (_unused, index) => index);
+}
+
+const PAGE_SELECTION_ERROR_FRAGMENT = 'requires 1-8 unique existing page indices';
+
+async function withFullDetailPageGuidance(detail, options, total, operation) {
+	try {
+		return await operation();
+	} catch (error) {
+		if (!compactResponse(detail) && options?.page_indices == null && total > 8 && error instanceof Error && error.message.includes(PAGE_SELECTION_ERROR_FRAGMENT)) {
+			throw new Error(`${error.message}; omit detail or set detail:"summary" for the first 8 pages, or pass options.page_indices`, { cause: error });
+		}
+		throw error;
+	}
 }
 
 function retainedImages(images) {
@@ -668,15 +705,18 @@ function register(name, description, inputSchema, readOnly, action) {
 					retry: 'Inspect published paths and manifest hashes; do not overwrite or blindly retry the same name. Use a new name for another complete delivery.', multi_file_atomic: false }), isError: true }, timing);
 			}
 			const message = error instanceof Error ? error.message : 'Operation failed';
-			return timedResponse({ isError: true, content: [{ type: 'text', text: message === 'Document is busy' ? `${message}; wait for the current call to finish and submit requests sequentially. Inspect the current revision/hash before retrying a planned edit.` : message }] }, timing);
+			const text = message === 'Document is busy'
+				? `${message}; wait for the current call to finish and submit requests sequentially. Inspect the current revision/hash before retrying a planned edit.`
+				: message;
+			return timedResponse({ isError: true, content: [{ type: 'text', text }] }, timing);
 		} finally { stopProgress?.(); if (!readOnly) activeMutation = false; }
 	});
 }
 
-register('discover_tools', 'Search advanced AISlide tool names and concise descriptions without loading their schemas. Use get_tool_schema(name) to expose one tool. Profiles change discovery, not permissions; all existing named calls retain strict validation.', { query: z.string().max(160).optional(), offset: z.number().int().min(0).max(1024).optional(), limit: z.number().int().min(1).max(20).optional() }, true, async ({ query = '', offset = 0, limit = 10 }) => {
-	const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-	const matching = toolDefinitions.filter(tool => availableTool(tool) && terms.every(term => `${tool.name} ${tool.description}`.toLowerCase().includes(term)));
-	return { profile: toolProfile, total: matching.length, tools: matching.slice(offset, offset + limit).map(({ name, description, annotations }) => ({ name, description: description.slice(0, 180), read_only: annotations.readOnlyHint, loaded: loadedNow(name) })), next_offset: offset + limit < matching.length ? offset + limit : null };
+register('discover_tools', 'Search advanced AISlide tool names and concise descriptions without loading their schemas. Use get_tool_schema(name) to expose one tool. Profiles change discovery, not permissions; all existing named calls retain strict validation.' + querySearchDescription, { query: z.string().max(160).optional(), offset: z.number().int().min(0).max(1024).optional(), limit: z.number().int().min(1).max(20).optional() }, true, async ({ query = '', offset = 0, limit = 10 }) => {
+	const candidates = toolDefinitions.filter(tool => availableTool(tool));
+	const { matching, diagnostics } = filterByQueryTerms(candidates, query, tool => `${tool.name} ${tool.description}`, tool => ({ id: tool.name, name: tool.name }));
+	return { profile: toolProfile, total: matching.length, tools: matching.slice(offset, offset + limit).map(({ name, description, annotations }) => ({ name, description: description.slice(0, 180), read_only: annotations.readOnlyHint, loaded: loadedNow(name) })), next_offset: offset + limit < matching.length ? offset + limit : null, ...diagnostics };
 });
 register('get_tool_schema', 'Return one complete self-contained tool schema and expose it through tools/list. Use name=apply_operations for table/chart/group/managed-diagram details omitted from its initial schema. Compact mode retains four recent advanced detail requests, including this complete batch schema; notifications/tools/list_changed announces changes. Full mode retains all tools. No document or file changes.', { name: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/) }, true, async ({ name }) => {
 	const tool = toolDefinitions.find(definition => definition.name === name && availableTool(definition));
@@ -864,11 +904,11 @@ register('recover_presentation', 'Verify supplied recovery JSON and create a NEW
 	const id = randomUUID(); decks.set(id, state);
 	return { deck_id: id, revision: state.revision, hash: state.document.hash, slides: state.document.deck.slides.length };
 });
-register('preview_presentation', 'Read selected pages as actual MCP PNG/JPEG images with slide IDs, coordinates, revision/hash and warnings. Compact default: 640px JPEG contact sheet, 384KiB images, first 1-8 pages with page_scope showing unselected pages. detail=full restores core defaults (PNG, explicit selection for decks over eight pages). Explicit options override defaults; maximum 1600px, 2MiB encoded, 4MiB response. Only encoded-byte overflow shrinks at 75% then 56.25%, minimum 160px; selected pages are retained. quality_reduced and actual_max_dimension disclose reduction; overflow=error forbids shrink. include_images=false still renders; use get_deck_summary for metadata without rendering. No files, network or Undo changes; not Office parity.', { deck_id: handle, options: previewOptions.optional(), include_images: z.boolean().optional(), detail: detailSchema }, true, async ({ deck_id, options, include_images, detail }, signal) => {
+register('preview_presentation', 'Read selected pages as actual MCP PNG/JPEG images with slide IDs, coordinates, revision/hash and warnings. Compact default (detail="summary" in all profiles): 640px JPEG contact sheet, 384KiB images, first 1-8 pages with page_scope showing unselected pages. detail=full restores core defaults (PNG, explicit selection for decks over eight pages). Explicit options override defaults; maximum 1600px, 2MiB encoded, 4MiB response. Only encoded-byte overflow shrinks at 75% then 56.25%, minimum 160px; selected pages are retained. quality_reduced and actual_max_dimension disclose reduction; overflow=error forbids shrink. include_images=false still renders; use get_deck_summary for metadata without rendering. No files, network or Undo changes; not Office parity.', { deck_id: handle, options: previewOptions.optional(), include_images: z.boolean().optional(), detail: detailSchema }, true, async ({ deck_id, options, include_images, detail }, signal) => {
 	const state = getDeck(deck_id);
 	const total = state.getSummary({ limit: 0 }).slide_count;
 	if (compactResponse(detail)) options = { max_dimension: 640, layout: 'contact_sheet', format: 'jpeg', max_output_bytes: 384 * 1024, ...options, page_indices: previewSelection(total, options) };
-	const result = await state.previewPresentation(options, { signal });
+	const result = await withFullDetailPageGuidance(detail, options, total, () => state.previewPresentation(options, { signal }));
 	return previewResult({ deck_id, ...result, ...(compactResponse(detail) ? { page_scope: { total, selected: result.pages.length, unselected: total - result.pages.length } } : {}) }, include_images);
 });
 register('preflight_presentation', 'Read bounded visual diagnostics for 1-8 selected pages: renderer clipping/glyph/font warnings, transformed off-slide frames, text overlap, connector-label interference, rounded-container corner and padding heuristics, small text and density. Template-owned SMALL_TEXT and FONT_FALLBACK are informational, deduplicated with affected-page coverage; include_inherited:false omits inherited-only findings. Verified managed graph badge/own-edge pairs are excluded; hand-made, changed or other-edge crossings remain reportable. Generic chart parity notices are summarized once per page as info; specific chart limits remain warnings. Returns IDs, scopes, bounds, evidence and repair suggestions. No automatic edits, external fetch, factual verification, Office parity or accessibility certification. Backgrounds are not text collisions; attached connector endpoints are excluded. Run check_accessibility separately.', { deck_id: handle, options: z.object({ page_indices: previewOptions.shape.page_indices, min_font_size: z.number().min(8).max(48).optional(), include_inherited: z.boolean().describe('Default true. False omits inherited-only template findings; slide-owned diagnostics and slide/template interactions remain actionable.').optional() }).strict().optional() }, true, async ({ deck_id, options }, signal) => {
@@ -878,12 +918,12 @@ register('set_references', 'Explicitly arrange approved distribution references 
 	await getDeck(deck_id).setReferences(options, { expectedRevision: expected_revision, expectedHash: expected_hash, signal });
 	return { ...deckSummary(deck_id), publication: getDeck(deck_id).referencePublication };
 });
-register('finalize_presentation', 'Publish a delivery from the exact revision/hash in the approved output directory. Always includes the complete PPTX and manifest; optional PDF/PNG preview/diagnostics select at most eight zero-based pages. Compact default: 640px contact sheet and preflight for the first eight pages, with page_scope and manifest reporting coverage. detail=full restores core defaults. PDF/notes/source-report are off by default; notes/source_report explicitly export plaintext. All generation, byte budgets and destination names are checked before publication; manifest last. No overwrite, source mutation, automatic persistence, factual verification or Office parity guarantee. Partial failures report published paths; multi-file output is not crash-atomic. Returns one preview unless include_images=false.', { ...mutationInput, expected_hash: contentHash, name: deliveryName, options: deliveryOptions.optional(), include_images: z.boolean().optional(), detail: detailSchema }, false, async ({ deck_id, expected_revision, expected_hash, name, options, include_images, detail }, signal) => {
+register('finalize_presentation', 'Publish a delivery from the exact revision/hash in the approved output directory. Always includes the complete PPTX and manifest; optional PDF/PNG preview/diagnostics select at most eight zero-based pages. Compact default (detail="summary" in all profiles): 640px contact sheet and preflight for the first eight pages, with page_scope and manifest reporting coverage. detail=full restores core defaults. PDF/notes/source-report are off by default; notes/source_report explicitly export plaintext. All generation, byte budgets and destination names are checked before publication; manifest last. No overwrite, source mutation, automatic persistence, factual verification or Office parity guarantee. Partial failures report published paths; multi-file output is not crash-atomic. Returns one preview unless include_images=false.', { ...mutationInput, expected_hash: contentHash, name: deliveryName, options: deliveryOptions.optional(), include_images: z.boolean().optional(), detail: detailSchema }, false, async ({ deck_id, expected_revision, expected_hash, name, options, include_images, detail }, signal) => {
 	if (!outputDirectory) throw new Error('Saving requires --output-dir at server startup');
 	const state = getDeck(deck_id);
 	const total = state.getSummary({ limit: 0 }).slide_count;
 	if (compactResponse(detail)) options = { max_dimension: 640, ...options, page_indices: previewSelection(total, options) };
-	const result = await state.prepareDelivery(options, { expectedRevision: expected_revision, expectedHash: expected_hash, signal });
+	const result = await withFullDetailPageGuidance(detail, options, total, () => state.prepareDelivery(options, { expectedRevision: expected_revision, expectedHash: expected_hash, signal }));
 	if (signal.aborted) throw new Error('Operation cancelled');
 	if (state.revision !== expected_revision || state.document.hash !== expected_hash) throw new Error('Delivery base changed; inspect the current deck before exporting');
 	const items = result.files.map(file => {
@@ -987,13 +1027,14 @@ register('add_asset', 'Insert an SVG/PNG/JPEG asset in one undoable revision. SV
 	return { deck_id, revision: state.revision, element_id: input.id };
 });
 register('graph_catalog', 'List architecture diagram shapes, ports, routing styles, typed schemas, limits and editable examples. Does not create a document or contact a network.', {}, true, async (_input, signal) => client.graphCatalog({ signal }));
-register('architecture_icons', 'Search the fixed 1498-entry Azure/Entra, AWS and GCP catalog. Compact mode returns 20 entries per page with vendor notices/provenance; query/provider/offset/limit narrow results. detail=full without filters returns the full catalog. configured checks consent, not integrity or redistribution rights. No artwork, downloads, installation or external fetching.', { ...catalogPage, provider: z.enum(['azure', 'aws', 'gcp']).optional() }, true, async ({ query, provider, offset, limit, detail }, signal) => {
+register('architecture_icons', 'Search the fixed 1498-entry Azure/Entra, AWS and GCP catalog. Compact mode returns 20 entries per page with vendor notices/provenance; query/provider/offset/limit narrow results. detail=full without filters returns the full catalog. configured checks consent, not integrity or redistribution rights. No artwork, downloads, installation or external fetching.' + querySearchDescription, { ...catalogPage, provider: z.enum(['azure', 'aws', 'gcp']).optional() }, true, async ({ query, provider, offset, limit, detail }, signal) => {
 	const catalog = await client.architectureIcons({ signal });
-	if (!compactResponse(detail) && query === undefined && provider === undefined && offset === undefined && limit === undefined) return catalog;
-	const term = (query ?? '').toLowerCase();
-	const matching = catalog.icons.filter(icon => (!provider || icon.provider === provider) && [icon.id, icon.name, ...icon.categories, ...icon.aliases].join(' ').toLowerCase().includes(term));
+	const hasFilters = Boolean((query ?? '').trim()) || provider !== undefined || offset !== undefined || limit !== undefined;
+	if (!compactResponse(detail) && !hasFilters) return catalog;
+	const candidates = catalog.icons.filter(icon => !provider || icon.provider === provider);
+	const { matching, diagnostics } = filterByQueryTerms(candidates, query, icon => [icon.id, icon.name, ...icon.categories, ...icon.aliases].join(' '));
 	const start = offset ?? 0, count = limit ?? 20;
-	return { ...catalog, icons: matching.slice(start, start + count), total: matching.length, next_offset: start + count < matching.length ? start + count : null };
+	return { ...catalog, icons: matching.slice(start, start + count), total: matching.length, next_offset: start + count < matching.length ? start + count : null, ...diagnostics };
 });
 register('architecture_icon_assets', 'Read selected local catalog PNGs after consent, SHA-256 and raster checks. Compact mode returns reusable asset_id instead of base64 (up to 32 IDs and available registry capacity). detail=full returns original bytes for up to 60 distinct IDs, 4MiB per batch. No paths, downloads or transformations. Use asset_id/mime_type/alt for GraphIcon; strip id/width/height.', { ids: z.array(z.string().min(1).max(256)).min(1).max(60).refine(ids => new Set(ids).size === ids.length, 'Duplicate architecture icon IDs are not allowed'), detail: detailSchema }, true, async ({ ids, detail }, signal) => {
 	if (compactResponse(detail) && ids.length > 32) throw new Error('Compact icon batches allow at most 32 IDs; request a smaller batch or detail=full');
@@ -1078,38 +1119,48 @@ register('apply_recipe', 'Apply the exact previewed recipe to the same new empty
 	await state.applyRecipe(slide_id, { id, input, variant }, { expectedRevision: expected_revision, expectedHash: expected_hash, candidateHash: candidate_hash, signal });
 	return { deck_id, slide_id, variant, revision: state.revision, hash: state.document.hash, can_undo: state.canUndo, ...renderWarningMetadata(state) };
 });
-register('part_catalog', 'Search 143 original presets including five typed interactive prototypes. Compact default returns 12 concise entries, next_offset, recommended/use_when/avoid_when; preset_id returns one synthetic example. detail=full without filters returns all examples and the core schema. Prefer flow/open-steps or vertical-flow/rail for ordered explanations, flow/roadmap for categorical phases, list-horizontal/icon-columns for icon-led peers, fact-columns for supplied headline facts with qualifiers, and image-columns for fully contained evidence pictures. Use cards only when enclosing items serves the content. Existing technical briefing and 14 specialized business-analysis presets remain available. Legacy rendering is retained. No model calls, downloads or mutation.', { ...catalogPage, preset_id: z.string().min(1).max(100).optional() }, true, async ({ query, preset_id, offset, limit, detail }, signal) => {
+register('part_catalog', 'Search 143 original presets including five typed interactive prototypes. Compact default (detail="summary" in all profiles) returns 12 concise entries, next_offset, recommended/use_when/avoid_when; preset_id returns one synthetic example. detail=full without filters returns all examples and the core schema. Prefer flow/open-steps or vertical-flow/rail for ordered explanations, flow/roadmap for categorical phases, list-horizontal/icon-columns for icon-led peers, fact-columns for supplied headline facts with qualifiers, and image-columns for fully contained evidence pictures. Use cards only when enclosing items serves the content. Existing technical briefing and 14 specialized business-analysis presets remain available. Legacy rendering is retained. No model calls, downloads or mutation.' + querySearchDescription, { ...catalogPage, preset_id: z.string().min(1).max(100).optional() }, true, async ({ query, preset_id, offset, limit, detail }, signal) => {
 	const catalog = await client.partCatalog({ signal });
-	if (!compactResponse(detail) && query === undefined && preset_id === undefined && offset === undefined && limit === undefined) return catalog;
-	const term = (query ?? '').toLowerCase();
-	const matching = catalog.presets.filter(preset => (!preset_id || preset.id === preset_id) && [preset.id, preset.name, preset.category, preset.category_name, preset.use_when, preset.avoid_when].join(' ').toLowerCase().includes(term));
+	const hasFilters = Boolean((query ?? '').trim()) || preset_id !== undefined || offset !== undefined || limit !== undefined;
+	if (!compactResponse(detail) && !hasFilters) return catalog;
+	const candidates = catalog.presets.filter(preset => !preset_id || preset.id === preset_id);
+	const { matching, diagnostics } = filterByQueryTerms(candidates, query, preset => [preset.id, preset.name, preset.category, preset.category_name, preset.use_when, preset.avoid_when].join(' '));
 	const start = offset ?? 0, count = limit ?? 12;
 	const presets = matching.slice(start, start + count).map(({ example, ...preset }) => ({ ...preset, ...(!compactResponse(detail) || preset_id ? { example } : {}) }));
-	return { version: catalog.version, style: catalog.style, default_bounds: catalog.default_bounds, total: matching.length, presets, next_offset: start + count < matching.length ? start + count : null, ...(!compactResponse(detail) ? { schema: catalog.schema } : {}) };
+	return { version: catalog.version, style: catalog.style, default_bounds: catalog.default_bounds, total: matching.length, presets, next_offset: start + count < matching.length ? start + count : null, ...diagnostics };
 });
 {
 	const resolution = { deck_id: handle.optional(), canvas: z.object({ width: z.number().int().min(320).max(4096), height: z.number().int().min(320).max(4096) }).strict().optional(), body: frameSchema.optional(),
 		mirror: z.boolean().optional(), message_band: z.boolean().optional().describe('Add a 72px takeaway band below the pattern'), lead: z.boolean().optional().describe('Add a 56px lead-message slot directly under the title'), reference_band: z.boolean().optional().describe('End the default body at the reserved reference band'),
 		count: z.number().int().min(1).max(12).optional().describe('Item count for patterns with a count range'), body_size: z.number().min(12).max(40).optional() };
 	const partInput = { part_preset: z.string().min(1).max(100).optional().describe('part_catalog preset placed in the slot; ranks patterns by distortion-free area or adds per-slot part_fit'), part_title: z.boolean().optional().describe('The part keeps its title band (charts require it)') };
-	register('layout_patterns', 'Search 54 original slide-body layout patterns by information relationship (contrast, image-explanation, overview, peers, sequence, metric, options, screenshot and more), or pass pattern_id to resolve integer slot frames for the actual canvas (deck_id or canvas; 16:9 and 4:3 tokens). Resolution returns accepted content, approximate CJK capacity, fits, issues and fallback. With part_preset, search ranks patterns by how much of the body the part fills without distortion, and resolution adds part_fit {distortion, fit, area_used} to part slots; set PartSpec.layout.fit to stretch or contain when advised, but omit it for native frame-size rendering. Use frames unchanged as PartSpec.layout or element frames; follow the fallback when fits is false. Patterns allocate body regions only; they are deterministic guidance, not a visual-quality certification. No mutation.', { ...catalogPage, relationship: z.string().regex(/^[a-z][a-z-]{0,31}$/).optional(), pattern_id: z.string().min(1).max(64).optional(), ...resolution, ...partInput }, true, async ({ query, relationship, pattern_id, offset, limit, detail, deck_id, canvas, body, part_preset, part_title, ...options }, signal) => {
+	register('layout_patterns', 'Search 54 original slide-body layout patterns by information relationship (contrast, image-explanation, overview, peers, sequence, metric, options, screenshot and more), or pass pattern_id to resolve integer slot frames for the actual canvas (deck_id or canvas; 16:9 and 4:3 tokens). Resolution returns accepted content, approximate CJK capacity, fits, issues and fallback. With part_preset, search ranks patterns by how much of the body the part fills without distortion, and resolution adds part_fit {distortion, fit, area_used} to part slots; set PartSpec.layout.fit to stretch or contain when advised, but omit it for native frame-size rendering. Use frames unchanged as PartSpec.layout or element frames; follow the fallback when fits is false. Patterns allocate body regions only; they are deterministic guidance, not a visual-quality certification. No mutation.' + querySearchDescription, { ...catalogPage, relationship: z.string().regex(/^[a-z][a-z-]{0,31}$/).optional(), pattern_id: z.string().min(1).max(64).optional(), ...resolution, ...partInput }, true, async ({ query, relationship, pattern_id, offset, limit, detail, deck_id, canvas, body, part_preset, part_title, ...options }, signal) => {
 		if (!layoutPatterns.enabled) throw new Error('Layout patterns are off for this session; call set_layout_patterns with mode on to enable them');
 		if (pattern_id === undefined) {
 			if (deck_id !== undefined || body !== undefined || Object.values(options).some(value => value !== undefined) || (canvas !== undefined && part_preset === undefined)) throw new Error('Resolution options require pattern_id');
 			const catalog = await client.layoutPatterns({ signal });
-			const term = (query ?? '').toLowerCase();
-			const matches = pattern => (!relationship || pattern.relationships.includes(relationship)) && [pattern.id, pattern.name, pattern.ratio, pattern.use_when, pattern.avoid_when, ...pattern.relationships].join(' ').toLowerCase().includes(term);
+			const patternHaystack = pattern => [pattern.id, pattern.name, pattern.ratio, pattern.use_when, pattern.avoid_when, ...pattern.relationships].join(' ');
+			const candidates = catalog.patterns.filter(pattern => !relationship || pattern.relationships.includes(relationship));
 			const start = offset ?? 0, count = limit ?? 12, full = !compactResponse(detail);
 			if (part_preset !== undefined) {
 				const ranking = await client.rankLayoutPatterns({ part: part_preset, ...(canvas ? { canvas } : {}), ...(part_title ? { part_title } : {}) }, { signal });
-				const byId = new Map(catalog.patterns.map(pattern => [pattern.id, pattern]));
-				const ranked = ranking.patterns.filter(entry => matches(byId.get(entry.pattern_id)));
-				return { version: catalog.version, part: ranking.part, total: ranked.length, patterns: ranked.slice(start, start + count), next_offset: start + count < ranked.length ? start + count : null, guidance: catalog.guidance };
+				const byId = new Map(candidates.map(pattern => [pattern.id, pattern]));
+				const rankedCandidates = ranking.patterns.filter(entry => byId.has(entry.pattern_id));
+				const { matching: ranked, diagnostics } = filterByQueryTerms(
+					rankedCandidates,
+					query,
+					entry => patternHaystack(byId.get(entry.pattern_id)),
+					entry => {
+						const pattern = byId.get(entry.pattern_id);
+						return { id: pattern.id, name: pattern.name };
+					},
+				);
+				return { version: catalog.version, part: ranking.part, total: ranked.length, patterns: ranked.slice(start, start + count), next_offset: start + count < ranked.length ? start + count : null, guidance: catalog.guidance, ...diagnostics };
 			}
+			const { matching, diagnostics } = filterByQueryTerms(candidates, query, patternHaystack);
 			if (part_title !== undefined) throw new Error('part_title requires part_preset');
-			const matching = catalog.patterns.filter(matches);
 			const patterns = matching.slice(start, start + count).map(pattern => full ? pattern : { id: pattern.id, name: pattern.name, ratio: pattern.ratio, relationships: pattern.relationships, use_when: pattern.use_when, avoid_when: pattern.avoid_when });
-			return { version: catalog.version, total: matching.length, patterns, next_offset: start + count < matching.length ? start + count : null, guidance: catalog.guidance, ...(full ? { tokens: catalog.tokens } : {}) };
+			return { version: catalog.version, total: matching.length, patterns, next_offset: start + count < matching.length ? start + count : null, guidance: catalog.guidance, ...(full ? { tokens: catalog.tokens } : {}), ...diagnostics };
 		}
 		if ([query, relationship, offset, limit].some(value => value !== undefined)) throw new Error('pattern_id resolution does not accept search filters');
 		if (deck_id !== undefined && canvas !== undefined) throw new Error('Supply deck_id or canvas, not both');
@@ -1399,7 +1450,7 @@ const authoringWorkflow = [
 	'compile_report process sections require 2-4 body entries of at most 80 Unicode scalars; other body entries allow 240. Constraint errors name the input path and actual count. Correct only that field, retaining the intended slide count and facts. Do not respond to a repeated validation failure by shortening and resending the entire deck.',
 	'For freeform, exact recreation or high-volume authoring, use create_presentation and apply_operations with complete add_elements at their final frames. Each atomic batch accepts 1..128 typed operations; successful changed batches create one Undo entry, while no-ops create none. Supply expected_revision and expected_hash from the last successful compact mutation response or get_deck_summary. set_frame/set_frames change geometry only. set_text_style, set_surface and set_effects are partial updates that retain unspecified properties. apply_format copies a complete compatible style and can unify mixed run formatting; kind:"filled" changes only surface/effects and preserves rich text. Do not delete/re-add a shape to change its appearance. Do not force a preview_slide_revision candidate for every frame change. Finish with preview_presentation and preflight_presentation.',
 	'Register local files once with register_asset using an operator-approved asset root. Pass asset_id instead of base64 to image/archive/source/font tools, batch add_picture, and GraphNode.icon or GraphGroup.icon. PNG/JPEG registration returns validated pixel width/height. Set add_picture fit="contain" to keep the whole cropped image inside a frame, or fit="cover" for centered additional cropping; omitted fit keeps legacy stretch. Prepared graph icons and catalog icon assets return reusable IDs. list_assets recovers IDs; close_asset releases unused bytes. Original files are never overwritten and imported content is never executed or fetched.',
-	'Compact preview_presentation defaults to a 640px JPEG contact sheet and first eight pages. page_scope reports unselected pages; explicitly select later pages before claiming review of the whole deck. include_images=false still renders; metadata-only reads use get_deck_summary. Catalogs accept query/offset/limit and part_catalog(preset_id) returns one example. detail=full on these tools restores full detail; get_document/get_session_recovery remain explicit large plaintext reads, not the routine progress path.',
+	'Compact preview_presentation defaults to a 640px JPEG contact sheet and first eight pages. detail defaults to summary in every tool profile; page_scope reports unselected pages; explicitly select later pages before claiming review of the whole deck. include_images=false still renders; metadata-only reads use get_deck_summary. Catalogs accept query/offset/limit and part_catalog(preset_id) returns one example. detail=full on these tools restores full detail; get_document/get_session_recovery remain explicit large plaintext reads, not the routine progress path.',
 	'When parts or graphs need later regeneration, prefer apply_operations with add_part/add_graph and explicit layouts: the batch retains both native elements and managed metadata in one transaction. Mixed batches supersede separate per-part calls without removing the existing individual tools. Use create_part/create_graph plus add_elements ONLY as an explicit unmanaged choice; never automatically fall back to ordinary groups after a timeout or rejection. Editing a managed child then update_part/update_graph in the same batch rejects the stale render hash atomically.',
 	'Choose the information relationship before the layout: peers, ordered stages, comparisons, definitions or grouped categories. For peers, prefer list/rows (2-8 heading/detail rows), list-horizontal/columns (2-4 open columns), or list-enumeration/grid (2-8 unordered topics). Read recommended, use_when and avoid_when in part_catalog. Steps, ranks and comparisons should use their matching diagrams rather than a list selected only by item count. When an icon-led technical briefing style is explicitly chosen, use list-horizontal/icon-cards, list/icon-rows, before-after/shift, flow/cards or list/agenda: they render at the PartSpec.layout frame with fixed fonts, fit card heights to content and reject overflow. Find meaningful icons with lucide_icons, prepare them with lucide_icon_assets and pass each returned icon object unchanged.',
 	'For non-card expressions, use flow/open-steps (2-5 ordered stages on a common axis), vertical-flow/rail (2-5 stages with aligned explanations), flow/roadmap (2-4 categorical phases, never a time-proportional axis), list-horizontal/icon-columns (2-4 peers), fact-columns (2-6 verbatim headline facts preserving units and denominators), or image-columns (2-4 approved images kept in full). Do not turn unrelated facts into a causal flow. Review repeated card compositions when relationships differ, but retain intentional comparative consistency. Do not change values, omit qualifiers or force arbitrary visual variety.',
