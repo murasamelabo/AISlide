@@ -31,22 +31,24 @@ Skills do not connect MCP. Label synthetic data.
 	`fallback` when `fits` is false. Optional `component_styles` /
 	`component_profile:"technical_briefing"` shares roles.
 5. For icon-led briefings, read `references/technical-panels.md`. Prefer managed
-	parts/graphs and native charts/tables; never draw data charts from shapes.
-	Composition graph `input` is coordinate-free. `layout_graph` is a grid:
-	1-48 nodes, 64 edges, 1-8 columns (default 3), no groups or node resizing.
+	parts/graphs and native charts/tables; avoid hand-drawn data charts unless no
+	native/managed option fits. Composition graph `input` is coordinate-free.
+	`layout_graph` is a grid: 1-48 nodes, 64 edges, 1-8 columns (default 3), no groups
+	or node resizing.
 6. Register approved local images with `register_asset` / `register_assets` (1-32).
 	Use `asset_id` and dimensions; never output base64. `prepare_assets` batches
 	edits, keeping originals. Use `fit:"contain"` or `fit:"cover"`; omitting `fit`
 	uses legacy stretch. Retain attribution.
 7. Batch 1-128 `apply_operations` (`update_chart` / `remove_elements` adjust in
 	place); after targets exist include `update_notes`, `set_table_headers`,
-	`set_accessibility`. One Undo; atomic rejection. Use planned revision/hash.
+	`set_accessibility`. One Undo; atomic rejection. Use planned revision/hash;
+	never force a stale plan.
 8. `set_text_padding` leaves positive space; `null` resets defaults. `set_rich_text`
 	takes paragraphs; empty input clears. Use dynamic-field ops; keep validation.
 9. Serialize core-backed AISlide calls, including reads/previews. Await each batch;
 	no queues, retries or parallel edits per handle.
-10. Review all required pages in groups of <=8; recheck affected pages. Use
-	 `set_references` (`title:"参考資料"` in Japanese; see
+10. Review all required pages in groups of <=8; recheck affected pages. For
+	 customer/PDF delivery use `set_references` (`title:"参考資料"` in Japanese; see
 	 [distribution references](references/distribution-references.md)) and check
 	 `publication.excluded`. Inspect `page_scope` and `canvas_scale`; read real font
 	 px from `get_deck_summary` / `preflight_presentation`, not downscaled previews.

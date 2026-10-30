@@ -187,6 +187,39 @@ fn prune_elements(elements: &mut Vec<Element>, removed: &mut BTreeSet<String>) -
     changed
 }
 
+fn merge_axis(current: &mut crate::model::chart_format::AxisOptions, patch: &crate::model::chart_format::AxisOptions) {
+    if patch.min.is_some() { current.min = patch.min; }
+    if patch.max.is_some() { current.max = patch.max; }
+    if patch.major_unit.is_some() { current.major_unit = patch.major_unit; }
+    if patch.minor_unit.is_some() { current.minor_unit = patch.minor_unit; }
+    if patch.log_base.is_some() { current.log_base = patch.log_base; }
+    if patch.reverse { current.reverse = true; }
+    if patch.number_format.is_some() { current.number_format = patch.number_format.clone(); }
+    if patch.label_position.is_some() { current.label_position = patch.label_position; }
+}
+
+fn merge_chart_options(current: &mut crate::model::ChartOptions, patch: &crate::model::ChartOptions, next_kind: crate::model::ChartKind) {
+    if patch.legend.is_some() { current.legend = patch.legend; }
+    if next_kind.is_extended() {
+        current.primary_axis = Default::default();
+        current.secondary_axis = Default::default();
+        current.category_axis = Default::default();
+        current.data_labels = None;
+    }
+    merge_axis(&mut current.primary_axis, &patch.primary_axis);
+    merge_axis(&mut current.secondary_axis, &patch.secondary_axis);
+    merge_axis(&mut current.category_axis, &patch.category_axis);
+    if patch.data_labels.is_some() { current.data_labels = patch.data_labels.clone(); }
+    if next_kind != crate::model::ChartKind::Waterfall { current.waterfall_totals = None; }
+    if patch.waterfall_totals.is_some() { current.waterfall_totals = patch.waterfall_totals.clone(); }
+    if next_kind != crate::model::ChartKind::Histogram { current.histogram = None; }
+    if patch.histogram.is_some() { current.histogram = patch.histogram.clone(); }
+    if next_kind != crate::model::ChartKind::BoxWhisker { current.box_whisker = None; }
+    if patch.box_whisker.is_some() { current.box_whisker = patch.box_whisker.clone(); }
+    if !matches!(next_kind, crate::model::ChartKind::Treemap | crate::model::ChartKind::Sunburst) { current.hierarchy = None; }
+    if patch.hierarchy.is_some() { current.hierarchy = patch.hierarchy.clone(); }
+}
+
 fn apply(
     deck: &mut Deck,
     parts: &mut Vec<crate::parts::state::PartInstance>,
@@ -317,7 +350,8 @@ fn apply(
                     if let Some(next_kind) = kind { *current_kind = *next_kind; }
                     if let Some(next_categories) = categories { *current_categories = next_categories.clone(); }
                     if let Some(next_series) = series { *current_series = next_series.clone(); }
-                    if let Some(next_options) = options { *current_options = next_options.clone(); }
+                    if let Some(next_options) = options { merge_chart_options(current_options, next_options, *current_kind); }
+                    else if kind.is_some() { merge_chart_options(current_options, &Default::default(), *current_kind); }
                     crate::model::chart_format::validate(*current_kind, current_categories, current_series, current_options)?;
                 }
                 _ => return Err(Error::Unsupported("update_chart requires a chart element".into())),
@@ -331,22 +365,32 @@ fn apply(
             if ids.is_empty() || ids.len() > 128 || ids.iter().collect::<BTreeSet<_>>().len() != ids.len() {
                 return Err(Error::Limit("remove_elements requires 1-128 distinct IDs".into()));
             }
+            let explicit_roots: BTreeSet<String> = ids.iter().cloned().collect();
             let mut removed = BTreeSet::new();
             for id in ids {
-                let Some(element_index) = slide.elements.iter().position(|element| element.bounds().0 == id) else {
+                if !slide.elements.iter().any(|element| element.bounds().0 == id) {
                     if crate::model::element_list(&slide.elements).iter().any(|element| element.bounds().0 == id) {
                         return Err(Error::Invalid(format!("element {id} is inside a group or managed part; remove the top-level element or use update_part/update_graph")));
                     }
                     return Err(Error::Invalid(format!("element not found: {id}")));
-                };
-                native_guard.check(slide, id)?;
-                let subtree = crate::model::element_list(std::slice::from_ref(&slide.elements[element_index]));
+                }
+                removed.insert(id.clone());
+            }
+            let mut candidate = slide.elements.clone();
+            while prune_elements(&mut candidate, &mut removed) {}
+            for root in &slide.elements {
+                let root_id = root.bounds().0;
+                let subtree = crate::model::element_list(std::slice::from_ref(root));
+                if !subtree.iter().any(|el| removed.contains(el.bounds().0)) { continue; }
+                native_guard.check(slide, root_id)?;
+                if !explicit_roots.contains(root_id) && parts.iter().any(|part| part.slide_id == *slide_id && part.element_id == root_id) {
+                    return Err(Error::Conflict(format!("removing target would detach a connector inside managed part {root_id}; update or remove the managed part explicitly")));
+                }
                 if subtree.iter().any(|el| el.visual().is_some_and(|visual| visual.locked || visual.hidden)) {
                     return Err(Error::Unsupported("unlock and show the target and its parent groups before editing".into()));
                 }
-                for item in subtree { removed.insert(item.bounds().0.to_owned()); }
             }
-            while prune_elements(&mut slide.elements, &mut removed) {}
+            slide.elements = candidate;
             // Native slides (document.origin.native) are further checked by native_save::patch_elements
             // during document::transact for retained XML spid/timing/animation and stCxn/endCxn references;
             // references::refresh also rejects removal of owned citation elements.
@@ -412,5 +456,6 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
             for element_id in spec.diagram_ids(id) { targets.insert((slide_id.clone(), element_id)); }
         }
     }
+    targets.retain(|(slide_id, element_id)| result.document.deck.slides.iter().any(|slide| slide.id == *slide_id && slide.elements.iter().any(|element| element.bounds().0 == element_id)));
     Ok(crate::graphs::annotate_transaction(result, &targets))
 }

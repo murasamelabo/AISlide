@@ -90,11 +90,11 @@ Those general choices do not require that reference's optional technical style.
 - Record one ledger row per slide:
   `reader question | relation | primary visual (native chart / native table / part:<preset> / graph / picture / text / hand-drawn shapes) | why chosen | rejected native alternative and why | verification (preview / PowerPoint / not verified)`.
   A deck-wide rule such as "draw charts with shapes" is invalid.
-- Managed parts use fixed typography (often `14px` or smaller on the `1280x720`
-  canvas). Do not treat fixed-preset `SMALL_TEXT` as a reason to replace a part
-  with hand-drawn shapes, and never estimate font size in px from a downscaled
-  preview image (`canvas_scale` / `tile_scale`); read `get_deck_summary` or
-  `preflight_presentation`.
+- Managed parts use fixed typography (often `14px` or smaller on the `1152px`
+  part canvas / `1280x720` slide canvas). Do not treat fixed-preset `SMALL_TEXT`
+  as a reason to replace a part with hand-drawn shapes, and never estimate font
+  size in px from a downscaled preview image (`canvas_scale` / `tile_scale`);
+  read `get_deck_summary` or `preflight_presentation`.
 - When content exceeds a part's fixed capacity or font size, follow this order:
   (1) cut to key points and move detail to speaker notes or an appendix table;
   (2) split the slide; (3) use a native table with an explicit font size;

@@ -23,9 +23,9 @@ Recommendation-only work permits selection, not editing or rendering.
   supporting section. Record why and which slides; never concatenate full outlines.
 3. Read only selected purpose sections. Aliases aid discovery, not deterministic
   classification. Ask if ambiguity matters. If none fits, disclose the gap;
-  never force an ID or silently expand the taxonomy.
-4. Specify delivery separately: live talk, read-alone PDF, hands-on session or recorded talk;
-  viewport, time and interaction matter. Language and brand do not determine purpose.
+  never force an ID or expand the taxonomy.
+4. Specify delivery separately: live talk, read-alone PDF, hands-on or recorded talk;
+  viewport, time and interaction matter. Language and brand do not set purpose.
 
 ## Selection and delegation
 
@@ -72,11 +72,11 @@ If no purpose fits, propose a custom outline only when planning was requested.
 - For wording use [japanese-editing](../japanese-editing/SKILL.md) or
   [english-editing](../english-editing/SKILL.md); pass audience, purpose, register
   and facts. Route mixed language by passage; no dual editing or unapproved translation.
-- Return the ledger to the caller. If PPTX creation is authorized, hand it once to
-  [aislide-authoring](../aislide-authoring/SKILL.md). If that skill called this one,
-  return instead of invoking it again. HTML or another explicit format retains its own
-  workflow. No new engine, install, overwrite or publication is authorized by
-  selecting a purpose; unavailable MCP does not block an outline-only response.
+- Return the ledger to the caller. If the original request also authorizes PPTX
+  creation, hand it once to [aislide-authoring](../aislide-authoring/SKILL.md). If that
+  skill called this one, return instead of invoking it again. HTML or another explicit
+  format retains its own workflow. No new engine, install, overwrite or publication is
+  authorized by selecting a purpose; unavailable MCP does not block an outline-only response.
 
 ## Output and checks
 
@@ -85,7 +85,8 @@ Return a purpose rationale and a planning record with `primary_purpose`,
 sources, required images, unresolved questions and `specialist_selections`
 (skill, purpose, reason, slide IDs; empty for no specialist). These are planning fields, not
 new MCP parameters or guided `profile_id` values. Add a slide ledger: ID, role, title, main point/task, body,
-evidence IDs, visual type, notes and unknowns (plus layout-pattern IDs when supported).
+evidence IDs, visual type, notes and unknowns. Include resolved layout-pattern IDs
+only when the execution workflow supports and permits them.
 
 Check the reader goal, required scope, source meaning and medium.
 Visual fit belongs to rendering.
