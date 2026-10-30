@@ -25,7 +25,7 @@ impl ColorMap {
     #[must_use]
     pub(crate) fn enter_opt(s: Option<(Self, bool)>) -> ColorMapGuard { ColorMapGuard(ACTIVE_COLOR_MAP.with(|a| { let p = a.get(); a.set((s.map(|(m, _)| m).unwrap_or_default(), s.is_some_and(|(_, u)| !u), p.2 + 1)); p }), std::marker::PhantomData) }
     pub(crate) fn scope<R>(self, run: impl FnOnce() -> R) -> R { let _g = self.enter(); run() }
-    pub(crate) fn resolve<'a>(&self, v: &'a str) -> &'a str { debug_assert!(!v.starts_with('@')); COLOR_MAP_KEYS.iter().position(|k| *k == v).map_or(v, |i| self.0[i]) }
+    pub(crate) fn resolve<'a>(&self, v: &'a str) -> &'a str { COLOR_MAP_KEYS.iter().position(|k| *k == v).map_or(v, |i| self.0[i]) }
     pub(crate) fn set(&mut self, name: &str, value: &str) -> bool {
         let (Some(i), Some(s)) = (COLOR_MAP_KEYS.iter().position(|k| *k == name), COLOR_KEYS.iter().copied().find(|k| *k == value)) else { return false };
         self.0[i] = s; true
@@ -36,7 +36,7 @@ impl ColorMap {
     }
 }
 
-pub(crate) fn color_slot(value: &str) -> &str { ACTIVE_COLOR_MAP.with(|a| { debug_assert!(a.get().2 > 0); if a.get().2 > 0 { a.get().0.resolve(value) } else { "" } }) }
+pub(crate) fn color_slot(value: &str) -> &str { ACTIVE_COLOR_MAP.with(|a| if a.get().2 > 0 { a.get().0.resolve(value) } else { "" }) }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
