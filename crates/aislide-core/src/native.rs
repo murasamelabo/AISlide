@@ -79,8 +79,9 @@ fn color(node: Node<'_, '_>, default: &str) -> String {
 pub(crate) fn bg_node<'a>(r: Node<'a, '_>) -> Option<Node<'a, 'a>> { child(r, P, "cSld").and_then(|n| child(n, P, "bg")) }
 
 fn background(node: Node<'_, '_>) -> Option<String> {
-    bg_node(node).and_then(|node| child(node, P, "bgPr")).map(|node| color(node, &format!("@{}", crate::design::color_slot("bg1"))))
-        .or_else(|| matches!(node.tag_name().name(), "sldMaster" | "notesMaster" | "handoutMaster").then(|| format!("@{}", crate::design::color_slot("bg1"))))
+    let b = bg_node(node);
+    b.and_then(|n| child(n, P, "bgPr")).map(|n| color(n, &format!("@{}", crate::design::color_slot("bg1"))))
+        .or_else(|| (b.is_none() && matches!(node.tag_name().name(), "sldMaster" | "notesMaster" | "handoutMaster")).then(|| format!("@{}", crate::design::color_slot("bg1"))))
 }
 
 fn has_non_solid_bg(root: Node<'_, '_>) -> bool {

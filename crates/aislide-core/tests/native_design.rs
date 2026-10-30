@@ -101,7 +101,9 @@ fn issue32_resolves_and_encodes_color_maps_across_parts() {
     assert_eq!(doc.deck.slides[0].notes_paragraphs[0].runs[0].style.color.as_deref(), Some("@lt1"));
     let mut np = Package::open(bytes).unwrap(); issue32_rep(&mut np, "ppt/notesMasters/notesMaster1.xml", &[("bg1=\"dk1\" ", "")]);
     issue32_rep(&mut np, "ppt/slides/slide1.xml", &[("val=\"tx1\"", "val=\"@bad\"")]);
-    assert!(document::open_presentation("nw".into(), np.save().unwrap()).unwrap()["warnings"].as_array().unwrap().iter().any(|w| w.as_str().is_some_and(|m| m.contains("notesSlide1.xml") && m.contains("Custom native color mapping"))));
+    issue32_rep(&mut np, "ppt/slideMasters/slideMaster1.xml", &[("bgPr", "bgRef")]);
+    let nw = document::open_presentation("nw".into(), np.save().unwrap()).unwrap();
+    assert!(nw["document"]["deck"]["design"]["masters"][0]["background"] == "@lt1" && nw["warnings"].as_array().unwrap().iter().any(|w| w.as_str().is_some_and(|m| m.contains("notesSlide1.xml") && m.contains("Custom native color mapping"))));
     let mut av = serde_json::to_value(&doc.deck).unwrap();
     av["auxiliary_design"]["handout_master"] = json!({"name":"H","background":"@lt1","theme":av["design"]["theme"],"elements":low.slides[0].elements});
     let mut hp = Package::open(save(&change(&doc, serde_json::from_value(av).unwrap()).document)).unwrap();
