@@ -1720,4 +1720,17 @@ fn issue56_preview_reports_canvas_dimensions_scale_and_contact_sheet_tile_scale(
     assert_eq!(sheet.images[0].tile_width, Some(sheet.pages[0].width));
     assert_eq!(sheet.images[0].tile_height, Some(sheet.pages[0].height));
     assert_eq!(sheet.images[0].tile_scale, Some(sheet.canvas_scale));
+
+    // Byte-budget reduction sets both quality_reduced=true and downscaled_from_canvas=true when shrinking from 320 to 240.
+    let noisy = noisy_preview_document();
+    let shrunk = preview_presentation(&noisy, &PreviewOptions {
+        max_dimension: 320,
+        max_output_bytes: noisy_preview_size(&noisy, 240),
+        layout: PreviewLayout::Pages,
+        ..Default::default()
+    }).unwrap();
+    assert!(shrunk.quality_reduced);
+    assert!(shrunk.downscaled_from_canvas);
+    assert_eq!(shrunk.actual_max_dimension, 240);
+    assert_eq!(shrunk.canvas_scale, 0.75);
 }

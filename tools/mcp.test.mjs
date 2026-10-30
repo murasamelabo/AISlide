@@ -3130,7 +3130,7 @@ test('master import MCP POTX inspection, preview, apply and one Undo preserve th
 test('P1 MCP finalization publishes a traceable new bundle without changing the session', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-finalize-mcp-'));
   const client = new Client({ name: 'finalization-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], cwd: directory, stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return result;
@@ -3155,8 +3155,9 @@ test('P1 MCP finalization publishes a traceable new bundle without changing the 
     assert.equal(manifest.document.hash, before.document.hash);
     assert.equal(manifest.producer.name, 'aislide');
     assert.equal(manifest.producer.transport, 'mcp-stdio');
-    assert.match(manifest.producer.git_commit, /^(?:[0-9a-f]{7,40}|unknown)$/);
-    assert.match(manifest.producer.core_git_commit, /^(?:[0-9a-f]{7,40}|unknown)$/);
+    assert.match(manifest.producer.git_commit, /^[0-9a-f]{7,40}$/);
+    assert.match(manifest.producer.core_git_commit, /^[0-9a-f]{7,40}$/);
+    assert.match(manifest.producer.mcp_git_commit, /^[0-9a-f]{7,40}$/);
     assert.equal(manifest.checks.office_visual_parity, false);
     assert.deepEqual(manifest.checks.preflight_page_indices, [0]);
     assert.equal(manifest.multi_file_atomic, false);

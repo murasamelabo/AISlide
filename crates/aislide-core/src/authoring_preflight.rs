@@ -372,7 +372,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				objects.iter().rev().find(|object| warning.scope.as_deref().is_none_or(|scope| scope == object.scope)
 					&& (warning.element_id == object.id || warning.element_id.starts_with(&format!("{}[", object.id))))
 			};
-			let generic_chart_notice = warning.code == "CHART_PREVIEW"
+			let generic_chart_notice = (warning.code == "CHART_PREVIEW" && warning.message.starts_with("Plotters chart layout; axis/legend placement is not Office parity"))
 				|| (warning.code == "CHART_PRESENTATION" && warning.message.starts_with("AISlide bounded chart projection; not Office visual parity"));
 			if generic_chart_notice {
 				if let Some(object) = object {

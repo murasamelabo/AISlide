@@ -552,6 +552,16 @@ fn issue57_agenda_rail_and_fact_columns_support_body_size_and_detailed_overflow_
             invalid["data"]["body_size"] = json!(bad);
             assert!(create(&invalid).unwrap_err().contains("14-22px"), "{preset} body_size={bad}");
         }
+        let mut overflow = example(preset);
+        overflow["data"]["body_size"] = json!(22);
+        let first_ptr = if preset == "vertical-flow/rail" { "/data/steps/0/detail" } else { "/data/items/0/detail" };
+        let second_ptr = if preset == "vertical-flow/rail" { "/data/steps/1/detail" } else { "/data/items/1/detail" };
+        *overflow.pointer_mut(first_ptr).unwrap() = json!("Short.");
+        *overflow.pointer_mut(second_ptr).unwrap() = json!("Synthetic overflow text that stays under the scalar limit yet wraps onto too many lines inside this slot.");
+        overflow["layout"] = json!({"x": 48, "y": 120, "width": if preset == "list-horizontal/fact-columns" { 680 } else { 440 }, "height": if preset == "list-horizontal/fact-columns" { 170 } else if preset == "list/agenda" { 240 } else { 220 }, "show_title": false});
+        let err = create(&overflow).unwrap_err();
+        let expected_slot = if preset == "vertical-flow/rail" { "steps[1]" } else { "items[1]" };
+        assert!(err.contains(expected_slot), "{preset} overflow must identify {expected_slot}: {err}");
     }
     let mut mismatch = example("list-horizontal/fact-columns");
     mismatch["preset"] = json!("fact-columns");

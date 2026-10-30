@@ -50,19 +50,20 @@ If no purpose fits, propose a custom outline only when planning was requested.
   date, version and applicability. Separate observations, proposals, assumptions
   and unknowns; never invent evidence, quotes, numbers, experience or benefits.
 - Keep required images, scope, caveats, negatives, units and denominators. Family
-  outlines are examples, not mandatory sections or page counts.
+  outlines are examples, not mandatory sections or page counts. Persuasion never
+  upgrades uncertainty.
 - Give each slide one role: orientation, claim, comparison, evidence, instruction,
   discussion or decision. Questions and tasks are valid titles. Keep axes, sources
   and limits visible, not hidden in notes.
-- Per slide, record question, relation, primary visual (`native chart` / `native table` /
+- Per slide, add question, relation, primary visual (`native chart` / `native table` /
   `part:<preset>` / `graph` / `picture` / `text` / `hand-drawn shapes` with reason),
-  rejected native alternative, emphasis and shared roles in the ledger (never use a
-  global "draw charts with shapes" rule).
+  rejected native alternative, emphasis and shared roles to the ledger (no global
+  "draw charts with shapes" rule).
   Follow [visual defaults](../aislide-authoring/references/visual-selection.md).
   Explicit user exclusions override this default. Record decisions, not private reasoning.
 - Live talks use staged explanation and notes; read-alone slides need context
-  without a speaker. Learning/discussion needs tasks and outputs (if interactive
-  tools are unavailable, use divider questions/reveals, exercises or companion HTML).
+  without a speaker. Learning/discussion needs tasks and outputs (or divider
+  questions, exercises / companion HTML if interactive tools are unavailable).
 - Preserve the user's voice; do not impose technical report tone on recruiting,
   culture, creative or keynote material. No font shrinking or dropped pages.
 
@@ -73,9 +74,9 @@ If no purpose fits, propose a custom outline only when planning was requested.
   and facts. Route mixed language by passage; no dual editing or unapproved translation.
 - Return the ledger to the caller. If PPTX creation is authorized, hand it once to
   [aislide-authoring](../aislide-authoring/SKILL.md). If that skill called this one,
-  return instead of invoking it again. HTML or another explicit format keeps its own
-  workflow. Selecting a purpose never authorizes a new engine, install, overwrite or
-  publication; unavailable MCP does not block an outline-only response.
+  return instead of invoking it again. HTML or another explicit format retains its own
+  workflow. No new engine, install, overwrite or publication is authorized by
+  selecting a purpose; unavailable MCP does not block an outline-only response.
 
 ## Output and checks
 

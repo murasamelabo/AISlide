@@ -82,115 +82,57 @@ pub(crate) fn exact_chart_number(value: f64) -> String {
 }
 
 fn split_format_sections(format: &str) -> Option<Vec<&str>> {
-    let mut sections = Vec::new();
-    let mut start = 0usize;
-    let mut in_quotes = false;
-    let mut escaped = false;
-    for (index, character) in format.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if character == '\\' {
-            escaped = true;
-            continue;
-        }
-        if character == '"' {
-            in_quotes = !in_quotes;
-            continue;
-        }
-        if !in_quotes && matches!(character, '[' | ']') {
-            return None;
-        }
-        if !in_quotes && character == ';' {
-            sections.push(&format[start..index]);
-            start = index + 1;
-        }
+    let (mut sections, mut start, mut in_quotes, mut escaped) = (Vec::new(), 0usize, false, false);
+    for (index, ch) in format.char_indices() {
+        if escaped { escaped = false; continue; }
+        if ch == '\\' { escaped = true; continue; }
+        if ch == '"' { in_quotes = !in_quotes; continue; }
+        if !in_quotes && matches!(ch, '[' | ']') { return None; }
+        if !in_quotes && ch == ';' { sections.push(&format[start..index]); start = index + 1; }
     }
-    if in_quotes || escaped {
-        return None;
-    }
+    if in_quotes || escaped { return None; }
     sections.push(&format[start..]);
-    if sections.is_empty() || sections.len() > 4 || (sections.len() == 1 && sections[0].is_empty()) {
-        return None;
-    }
-    Some(sections)
+    (!(sections.is_empty() || sections.len() > 4 || sections.len() == 1 && sections[0].is_empty())).then_some(sections)
 }
 
 fn format_single_section(value: f64, section: &str, auto_negative_sign: bool, general: &dyn Fn(f64) -> String) -> Option<String> {
-    if section.is_empty() {
-        return Some(String::new());
-    }
-    if section.eq_ignore_ascii_case("general") {
-        let v = if auto_negative_sign { value } else { value.abs() };
-        return Some(general(if v == 0.0 { 0.0 } else { v }));
-    }
-    let mut prefix = String::new();
-    let mut suffix = String::new();
-    let mut core = String::new();
-    let mut in_quotes = false;
-    let mut escaped = false;
-    let mut seen_core = false;
-    for character in section.chars() {
-        if escaped {
-            escaped = false;
-            if seen_core { suffix.push(character); } else { prefix.push(character); }
-            continue;
-        }
-        if character == '\\' {
-            escaped = true;
-            continue;
-        }
-        if character == '"' {
-            in_quotes = !in_quotes;
-            continue;
-        }
-        if in_quotes {
-            if seen_core { suffix.push(character); } else { prefix.push(character); }
-            continue;
-        }
-        if !seen_core && core.is_empty() && matches!(character, '-' | '+') {
-            prefix.push(character);
-            continue;
-        }
-        if !suffix.is_empty() {
-            return None;
-        }
+    if section.is_empty() { return Some(String::new()); }
+    let (mut prefix, mut suffix, mut core) = (String::new(), String::new(), String::new());
+    let (mut in_quotes, mut escaped, mut seen_core) = (false, false, false);
+    for ch in section.chars() {
+        if escaped { escaped = false; if seen_core { suffix.push(ch); } else { prefix.push(ch); } continue; }
+        if ch == '\\' { escaped = true; continue; }
+        if ch == '"' { in_quotes = !in_quotes; continue; }
+        if in_quotes { if seen_core { suffix.push(ch); } else { prefix.push(ch); } continue; }
+        if !seen_core && core.is_empty() && matches!(ch, '-' | '+') { prefix.push(ch); continue; }
+        if !suffix.is_empty() { return None; }
         seen_core = true;
-        core.push(character);
+        core.push(ch);
     }
-    if in_quotes || escaped {
-        return None;
-    }
-    if core.is_empty() {
-        return (!prefix.is_empty()).then_some(prefix);
+    if in_quotes || escaped { return None; }
+    if core.is_empty() { return (!prefix.is_empty()).then_some(prefix); }
+    if core.eq_ignore_ascii_case("general") {
+        let v = if auto_negative_sign { value } else { value.abs() };
+        return Some(format!("{prefix}{}{suffix}", general(if v == 0.0 { 0.0 } else { v })));
     }
     let percent = core.ends_with('%');
     let pattern = core.strip_suffix('%').unwrap_or(&core);
     let scientific = pattern.ends_with("E+00");
     let pattern = pattern.strip_suffix("E+00").unwrap_or(pattern);
     let (integer, fraction) = pattern.split_once('.').unwrap_or((pattern, ""));
-    if !matches!(integer, "0" | "#,##0") || fraction.len() > 12 || !fraction.chars().all(|character| character == '0') || pattern.ends_with('.') {
-        return None;
-    }
+    if !matches!(integer, "0" | "#,##0") || fraction.len() > 12 || !fraction.chars().all(|ch| ch == '0') || pattern.ends_with('.') { return None; }
     let signed = if auto_negative_sign { value } else { value.abs() };
     let magnitude = if signed == 0.0 { 0.0 } else if percent { signed * 100.0 } else { signed };
     let mut text = if scientific {
         let text = format!("{:.*e}", fraction.len(), magnitude);
         let (mantissa, exponent) = text.split_once('e').unwrap_or((&text, "0"));
         format!("{mantissa}E{:+03}", exponent.parse::<i32>().unwrap_or(0))
-    } else {
-        format!("{:.*}", fraction.len(), magnitude)
-    };
-    if text == "-0" || text.starts_with("-0.") && text.trim_start_matches('-').chars().all(|c| c == '0' || c == '.') {
+    } else { format!("{:.*}", fraction.len(), magnitude) };
+    if text == "-0" || text.starts_with("-0.") && text.trim_start_matches('-').chars().all(|ch| ch == '0' || ch == '.') {
         text = text.trim_start_matches('-').to_owned();
     }
-    if integer == "#,##0" && !scientific {
-        text = grouped_decimal(&text);
-    }
-    if percent {
-        text.push('%');
-    }
+    if integer == "#,##0" && !scientific { text = grouped_decimal(&text); }
+    if percent { text.push('%'); }
     Some(format!("{prefix}{text}{suffix}"))
 }
 
@@ -205,26 +147,19 @@ pub fn format_chart_number(value: f64, format: Option<&str>) -> (String, bool) {
     };
     let format = format.unwrap_or("General");
     if format.eq_ignore_ascii_case("general") { return (general(value), true); }
-    let Some(sections) = split_format_sections(format) else {
+    let Some(sections) = split_format_sections(format) else { return (general(value), false); };
+    if sections.iter().take(3).enumerate().any(|(idx, sec)| format_single_section(1.0, sec, idx == 0 && sections.len() == 1, &general).is_none()) {
         return (general(value), false);
-    };
-    for (index, section) in sections.iter().take(3).enumerate() {
-        if format_single_section(1.0, section, index == 0 && sections.len() == 1, &general).is_none() {
-            return (general(value), false);
-        }
     }
     if sections.len() == 4 && !sections[3].is_empty() && sections[3] != "@" && format_single_section(1.0, sections[3], false, &general).is_none() {
         return (general(value), false);
     }
-    let (selected, auto_negative_sign) = match sections.len() {
+    let (selected, auto_neg) = match sections.len() {
         1 => (sections[0], true),
-        2 => if value < 0.0 { (sections[1], false) } else { (sections[0], false) },
-        _ => if value > 0.0 { (sections[0], false) } else if value < 0.0 { (sections[1], false) } else { (sections[2], false) },
+        2 => (sections[usize::from(value < 0.0)], false),
+        _ => (sections[if value > 0.0 { 0 } else if value < 0.0 { 1 } else { 2 }], false),
     };
-    match format_single_section(value, selected, auto_negative_sign, &general) {
-        Some(text) => (text, true),
-        None => (general(value), false),
-    }
+    format_single_section(value, selected, auto_neg, &general).map_or_else(|| (general(value), false), |text| (text, true))
 }
 
 fn axis(options: &AxisOptions, values: &[f64], zero: bool, percent: bool, warnings: &mut Vec<String>) -> Result<PresentationAxis> {
@@ -365,14 +300,11 @@ pub fn compute_chart_presentation(kind: ChartKind, categories: &[String], series
         if entry.trendline.as_ref().is_some_and(|config| config.display_r_squared) && trend.as_ref().is_some_and(|trend| trend.r_squared.is_none()) { warnings.push(format!("{}: R squared undefined for constant response", entry.name)); }
         let labels = entry.values.iter().enumerate().map(|(index, value)| {
             let Some(labels) = &options.data_labels else { return String::new(); };
-            let formatted_value = labels.show_value.then(|| format_chart_number(*value, labels.number_format.as_deref()).0);
-            if labels.show_value && formatted_value.as_deref() == Some("") {
-                return String::new();
-            }
             let mut parts = Vec::new();
             if labels.show_series_name { parts.push(series[series_index].name.clone()); }
             if labels.show_category_name { parts.push(categories[index].clone()); }
-            if let Some(formatted) = formatted_value {
+            if labels.show_value {
+                let formatted = format_chart_number(*value, labels.number_format.as_deref()).0;
                 if !formatted.is_empty() { parts.push(formatted); }
             }
             parts.join(" ")

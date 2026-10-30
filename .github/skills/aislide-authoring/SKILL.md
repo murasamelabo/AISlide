@@ -62,26 +62,30 @@ Skills do not connect MCP. Label synthetic data.
 
 ## Limits And Recovery
 
-- Asset roots use `--asset-dir`; never widen permissions or fetch external links.
-  Registry: 32 handles / 64MiB raw (PNG/JPEG 1MiB, SVG 256KiB, archives 16MiB,
-  fonts 12MiB, evidence 2MiB). `usage` is registry-only; `raster_cost` is not
-  document capacity. Closing handles retains document images.
-- Report bodies: <=4 items. Process: 2-4 labels, 80 Unicode scalars each; others:
-  240. Notes: 8000. Cards: 1-6 items, <=3 columns. Fix field paths; never drop
-  agreed content.
+- Asset roots use startup `--asset-dir`; never widen permissions
+  or fetch external relationships. Registry: 32 handles / 64MiB raw. PNG/JPEG:
+  1MiB; SVG: 256KiB; archives: 16MiB; fonts: 12MiB; evidence: 2MiB. `usage` is
+	registry-only; `raster_cost` is not document capacity approval. Closing handles
+	retains document images. Registration/preparation is atomic.
+- Report bodies: at most 4 items. Process: 2-4 labels, each 80 Unicode scalars;
+  other bodies: 240. Notes: 8000. Fix field paths; never drop agreed content.
+  Cards: 1-6 items, at most 3 columns.
 - Fix validation/capacity inputs without bypassing guards or flattening managed
-  objects. On busy, await the active call without polling. After timeout/cancel,
-  inspect summaries/manifests. Save before reconnecting.
-- `_meta.aislide_timing` is not model latency or pure CPU time.
+  objects. On busy, stop parallel calls and await the existing operation, no polls.
+  After timeout/cancellation inspect summaries/manifests. Save before reconnecting:
+  handles are process-local.
+- `_meta.aislide_timing` is not model latency or pure CPU time; do not claim speedups.
 
 ## Select And Review The Expression
 
 Follow [visual defaults](references/visual-selection.md).
 Explicit user exclusions override this default.
-Record per-slide question, relation, primary visual, selected/rejected reasons,
-emphasis and role consistency. Use [selection discriminators](references/technical-panels.md#selection-discriminators)
-and `recommend_recipes`; never infer facts or edit managed children.
+Record question, relation, primary visual, selected/rejected reasons, emphasis and
+style roles. `recommend_recipes` accepts goal/dimensions/position need; inspect
+rejected/no-fit, then preview. Check relations, source readability, anchors and
+role consistency, not just overflow. Never infer facts or edit managed children.
 
 ## Further Detail
 
 Source docs: `<repo>/docs/api.md`, `<repo>/docs/authoring/README.md`.
+User installs cannot assume repo-relative paths.

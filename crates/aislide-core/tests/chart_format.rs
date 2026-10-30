@@ -1202,8 +1202,24 @@ fn issue55_multisection_number_formats_and_stacked_chart_preview_layout() {
     assert_eq!(format_chart_number(0.0, Some("0;-0;\"−\"")), ("−".into(), true));
     assert_eq!(format_chart_number(0.0, Some("0;-0")), ("0".into(), true));
     assert_eq!(format_chart_number(-5.0, Some("0;-0")), ("-5".into(), true));
+    assert_eq!(format_chart_number(-0.0, Some("0.0")), ("0.0".into(), true));
+    assert_eq!(format_chart_number(-1e-9, Some("0.0")), ("0.0".into(), true));
     assert_eq!(format_chart_number(5.0, Some("\"A;B\"0")), ("A;B5".into(), true));
+    assert_eq!(format_chart_number(5.0, Some(r#"0\;;-0"#)), ("5;".into(), true));
+    assert_eq!(format_chart_number(-5.0, Some("General;-General")), ("-5".into(), true));
+    assert_eq!(format_chart_number(5.0, Some("0;-0;0;@")), ("5".into(), true));
+    assert_eq!(format_chart_number(5.0, Some("0;-0;0;bad")), ("5".into(), false));
+    assert_eq!(format_chart_number(5.0, Some("0;-0;bad")), ("5".into(), false));
     assert_eq!(format_chart_number(5.0, Some("[Red]0")), ("5".into(), false));
+    assert_eq!(format_chart_number(5.0, Some("[Red]0;-0;0")), ("5".into(), false));
+
+    let presentation = aislide_core::model::chart_format::compute_chart_presentation(
+        aislide_core::model::ChartKind::Column,
+        &["Cat1".into()],
+        &[aislide_core::model::ChartSeries { name: "S1".into(), values: vec![0.0], color: "1976D2".into(), kind: None, axis: None, bubble_sizes: None, trendline: None, error_bars: None }],
+        &serde_json::from_value(json!({"data_labels":{"show_series_name":true,"show_value":true,"number_format":"0;;;"}})).unwrap(),
+    ).unwrap();
+    assert_eq!(presentation.series[0].labels, vec!["S1".to_string()]);
 
     let deck: Deck = serde_json::from_value(json!({
         "version": 1, "title": "Synthetic chart preview", "width": 1280, "height": 720,
@@ -1287,4 +1303,10 @@ fn issue55_multisection_number_formats_and_stacked_chart_preview_layout() {
     let (c_top, c_bot) = top_y(&bar_projected);
     assert!(p_top < p_bot, "Plotters path must place first category at top: {p_top} vs {p_bot}");
     assert!(c_top < c_bot, "Projected path must place first category at top: {c_top} vs {c_bot}");
+
+    let doc = execute_request(json!({"op": "new_document", "id": "preflight-chart", "deck": deck})).unwrap();
+    let preflight = execute_request(json!({"op": "preflight_presentation", "document": doc})).unwrap();
+    let findings = preflight["findings"].as_array().unwrap();
+    assert!(findings.iter().any(|f| f["code"] == "CHART_PREVIEW" && f["severity"] == "info" && f["message"].as_str().unwrap().contains("do not replace with hand-drawn shapes")));
+    assert!(findings.iter().any(|f| f["code"] == "CHART_LABEL_LAYOUT" && f["severity"] == "warning"));
 }

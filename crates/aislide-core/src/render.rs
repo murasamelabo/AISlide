@@ -2036,21 +2036,11 @@ fn chart_svg(
             if f64::from(left_area + right_area) + 56.0 > width {
                 return Err(Error::Unsupported("chart axis labels do not fit the requested font and width; enlarge the chart or use an explicit compact number format".into()));
             }
-            let (legend_rows, legend_items) = if options.legend == Some(LegendPosition::Hidden) {
-                (0, Vec::new())
-            } else {
-                chart_projection::legend_layout(series, f64::from(left_area) + 12.0, width, theme, fonts)
-            };
+            let (legend_rows, legend_items) = if options.legend == Some(LegendPosition::Hidden) { (0, Vec::new()) } else { chart_projection::legend_layout(series, f64::from(left_area) + 12.0, width, theme, fonts) };
             let legend_band = if legend_rows == 0 { 0u32 } else { (legend_rows as u32 * 16 + 4).min((height as u32).saturating_sub(80)) };
-            let (plot_root, legend_root) = if legend_band == 0 {
-                (root.clone(), None)
-            } else if options.legend == Some(LegendPosition::Top) {
-                let (top_area, bottom_area) = root.split_vertically(legend_band);
-                (bottom_area, Some(top_area))
-            } else {
-                let (top_area, bottom_area) = root.split_vertically((height.ceil() as u32).saturating_sub(legend_band));
-                (top_area, Some(bottom_area))
-            };
+            let (plot_root, legend_root) = if legend_band == 0 { (root.clone(), None) }
+                else if options.legend == Some(LegendPosition::Top) { let (t, b) = root.split_vertically(legend_band); (b, Some(t)) }
+                else { let (t, b) = root.split_vertically((height.ceil() as u32).saturating_sub(legend_band)); (t, Some(b)) };
             let mut chart = ChartBuilder::on(&plot_root)
                 .margin(12)
                 .x_label_area_size(32)
@@ -2132,7 +2122,14 @@ fn chart_svg(
                                     coordinates.clone(),
                                     color.stroke_width(2),
                                 ))
-                                .map_err(error)?;
+                                .map_err(error)?
+                                .label(&entry.name)
+                                .legend(move |(x, y)| {
+                                    PathElement::new(
+                                        vec![(x, y), (x + 12, y)],
+                                        color.stroke_width(2),
+                                    )
+                                });
                         }
                         ChartKind::Area => {
                             chart
@@ -2140,7 +2137,11 @@ fn chart_svg(
                                     AreaSeries::new(coordinates.clone(), baseline, color.mix(0.4))
                                         .border_style(color),
                                 )
-                                .map_err(error)?;
+                                .map_err(error)?
+                                .label(&entry.name)
+                                .legend(move |(x, y)| {
+                                    Rectangle::new([(x, y - 5), (x + 10, y + 5)], color.filled())
+                                });
                         }
                         _ => {
                             let maximum_size = series.iter().filter_map(|entry| entry.bubble_sizes.as_ref()).flatten().copied().fold(1.0, f64::max);
@@ -2151,7 +2152,9 @@ fn chart_svg(
                                         Circle::new(*coordinate, radius, color.filled())
                                     }),
                                 )
-                                .map_err(error)?;
+                                .map_err(error)?
+                                .label(&entry.name)
+                                .legend(move |(x, y)| Circle::new((x + 5, y), 4, color.filled()));
                         }
                     }
                     for (index, coordinate) in coordinates.iter().enumerate() {
@@ -2210,9 +2213,14 @@ fn chart_svg(
                         } else {
                             [(left, start), (right, end)]
                         };
-                        chart
+                        let drawn = chart
                             .draw_series(std::iter::once(Rectangle::new(bounds, color.filled())))
                             .map_err(error)?;
+                        if index == 0 {
+                            drawn.label(&entry.name).legend(move |(x, y)| {
+                                Rectangle::new([(x, y - 5), (x + 10, y + 5)], color.filled())
+                            });
+                        }
                         if let Some(label) = chart_label(
                             options,
                             &entry.name,

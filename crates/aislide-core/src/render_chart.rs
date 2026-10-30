@@ -8,28 +8,13 @@ pub(super) fn required(series: &[ChartSeries], options: &ChartOptions) -> bool {
         || options.data_labels.as_ref().is_some_and(|labels| labels.number_format.is_some())
 }
 
-pub(super) fn legend_layout(
-    series: &[ChartSeries],
-    left: f64,
-    width: f64,
-    theme: &Theme,
-    fonts: &mut cosmic_text::FontSystem,
-) -> (usize, Vec<(f64, usize)>) {
-    if series.is_empty() {
-        return (0, Vec::new());
-    }
+pub(super) fn legend_layout(series: &[ChartSeries], left: f64, width: f64, theme: &Theme, fonts: &mut cosmic_text::FontSystem) -> (usize, Vec<(f64, usize)>) {
+    if series.is_empty() { return (0, Vec::new()); }
     let available = (width - left - 12.0).max(60.0);
-    let mut row = 0usize;
-    let mut cursor = 0.0f64;
-    let mut items = Vec::with_capacity(series.len());
+    let (mut row, mut cursor, mut items) = (0usize, 0.0f64, Vec::with_capacity(series.len()));
     for source in series {
-        let family = crate::fonts::requested_family(&source.name, None, theme);
-        let text_width = super::chart_text_extent(fonts, &source.name, 11.0, family);
-        let item_width = 14.0 + text_width;
-        if cursor > 0.0 && cursor + item_width > available {
-            row += 1;
-            cursor = 0.0;
-        }
+        let item_width = 14.0 + super::chart_text_extent(fonts, &source.name, 11.0, crate::fonts::requested_family(&source.name, None, theme));
+        if cursor > 0.0 && cursor + item_width > available { row += 1; cursor = 0.0; }
         items.push((left + cursor, row));
         cursor += item_width + 14.0;
     }
@@ -80,26 +65,12 @@ pub(super) fn svg(kind: ChartKind, categories: &[String], series: &[ChartSeries]
     let legend = options.legend.unwrap_or(LegendPosition::Bottom);
     let widest = |fonts: &mut cosmic_text::FontSystem, axis: &chart_format::PresentationAxis| axis.ticks.iter()
         .map(|tick| super::chart_text_extent(fonts, &tick.label, 10.0, crate::fonts::requested_family(&tick.label, None, theme))).fold(0.0, f64::max);
-    let left = if left_hidden {
-        16.0
-    } else {
-        (widest(fonts, if horizontal { &model.category_axis } else { &model.primary_axis }) + 12.0).max(if horizontal { 80.0 } else { 58.0 })
-    };
-    let right = if horizontal {
-        if primary_hidden { 20.0 } else { 58.0 }
-    } else {
-        model.secondary_axis.as_ref().map_or(58.0, |axis| if secondary_hidden { 20.0 } else { (widest(fonts, axis) + 12.0).max(58.0) })
-    };
+    let left = if left_hidden { 16.0 } else { (widest(fonts, if horizontal { &model.category_axis } else { &model.primary_axis }) + 12.0).max(if horizontal { 80.0 } else { 58.0 }) };
+    let right = if horizontal { if primary_hidden { 20.0 } else { 58.0 } } else { model.secondary_axis.as_ref().map_or(58.0, |axis| if secondary_hidden { 20.0 } else { (widest(fonts, axis) + 12.0).max(58.0) }) };
     let plot_width = width - left - right;
     if plot_width < 30.0 { return Err(Error::Unsupported("chart axis labels do not fit the requested font and format; enlarge the chart or use a compact number format".into())); }
-    let (legend_rows, legend_items) = if legend == LegendPosition::Hidden {
-        (0, Vec::new())
-    } else {
-        legend_layout(series, left, width, theme, fonts)
-    };
-    let bottom_space = if bottom_hidden { 10.0 } else { 28.0 };
-    let legend_space = if legend_rows == 0 { 0.0 } else { legend_rows as f64 * 15.0 + 6.0 };
-    let plot_height = height - top - bottom_space - legend_space;
+    let (legend_rows, legend_items) = if legend == LegendPosition::Hidden { (0, Vec::new()) } else { legend_layout(series, left, width, theme, fonts) };
+    let plot_height = height - top - if bottom_hidden { 10.0 } else { 28.0 } - if legend_rows == 0 { 0.0 } else { legend_rows as f64 * 15.0 + 6.0 };
     if plot_height < 30.0 { return Err(Error::Unsupported("chart equations/legend do not fit; enlarge chart".into())); }
     for (index, equation) in equations.iter().enumerate() { text(&mut writer, [left, index as f64 * 12.0], equation, &ink, (plot_width / (equation.len().max(1) as f64 * 0.6)).clamp(4.0, 10.0), "start"); }
     let project = |point: &PresentationPoint, axis: &chart_format::PresentationAxis| -> Result<[f64; 2]> {
@@ -171,38 +142,17 @@ pub(super) fn svg(kind: ChartKind, categories: &[String], series: &[ChartSeries]
                         let mid_y = (first[1] + last[1]) / 2.0 - 5.0;
                         match effective_pos {
                             LabelPosition::Center | LabelPosition::BestFit => ([(first[0] + last[0]) / 2.0, mid_y], "middle"),
-                            LabelPosition::InsideEnd => {
-                                if bar_w > 18.0 {
-                                    if last[0] >= first[0] { ([last[0] - 4.0, mid_y], "end") } else { ([last[0] + 4.0, mid_y], "start") }
-                                } else {
-                                    ([(first[0] + last[0]) / 2.0, mid_y], "middle")
-                                }
-                            }
-                            LabelPosition::OutsideEnd => {
-                                if last[0] >= first[0] {
-                                    ([(last[0] + 4.0).min(plot_width - 2.0), mid_y], "start")
-                                } else {
-                                    ([(last[0] - 4.0).max(2.0), mid_y], "end")
-                                }
-                            }
+                            LabelPosition::InsideEnd if bar_w > 18.0 => if last[0] >= first[0] { ([last[0] - 4.0, mid_y], "end") } else { ([last[0] + 4.0, mid_y], "start") },
+                            LabelPosition::InsideEnd => ([(first[0] + last[0]) / 2.0, mid_y], "middle"),
+                            LabelPosition::OutsideEnd => if last[0] >= first[0] { ([(last[0] + 4.0).min(plot_width - 2.0), mid_y], "start") } else { ([(last[0] - 4.0).max(2.0), mid_y], "end") },
                         }
                     } else {
-                        let mid_x = (first[0] + last[0]) / 2.0;
-                        let positive_dir = last[1] <= first[1];
+                        let (mid_x, positive_dir) = ((first[0] + last[0]) / 2.0, last[1] <= first[1]);
                         match effective_pos {
                             LabelPosition::Center | LabelPosition::BestFit => ([mid_x, (first[1] + last[1]) / 2.0 - 5.0], "middle"),
-                            LabelPosition::InsideEnd => {
-                                if bar_h > 16.0 {
-                                    let y = if positive_dir { last[1] + 2.0 } else { last[1] - 12.0 };
-                                    ([mid_x, y], "middle")
-                                } else {
-                                    ([mid_x, (first[1] + last[1]) / 2.0 - 5.0], "middle")
-                                }
-                            }
-                            LabelPosition::OutsideEnd => {
-                                let y = if positive_dir { (last[1] - 12.0).max(0.0) } else { (last[1] + 2.0).min(plot_height - 10.0) };
-                                ([mid_x, y], "middle")
-                            }
+                            LabelPosition::InsideEnd if bar_h > 16.0 => ([mid_x, if positive_dir { last[1] + 2.0 } else { last[1] - 12.0 }], "middle"),
+                            LabelPosition::InsideEnd => ([mid_x, (first[1] + last[1]) / 2.0 - 5.0], "middle"),
+                            LabelPosition::OutsideEnd => ([mid_x, if positive_dir { (last[1] - 12.0).max(0.0) } else { (last[1] + 2.0).min(plot_height - 10.0) }], "middle"),
                         }
                     };
                     deferred_labels.push((label_coord, entry.labels[position].clone(), anchor));

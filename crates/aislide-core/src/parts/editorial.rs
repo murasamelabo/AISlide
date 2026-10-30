@@ -146,6 +146,7 @@ fn open_steps(drawing: &mut Drawing, steps: &[EditorialStep], accent: &str, fram
     for (index, step) in steps.iter().enumerate() {
         marker(drawing, [center(index), axis], index + 1, accent);
         let content = Rich::default().add(&step.label, 18.0, "@dk1", true, 500).add(&step.detail, 16.0, "@dk2", false, 0).finish();
+        drawing.name_next(format!("item {} (steps[{index}])", index + 1));
         text(drawing, [left + index as f64 * (column + gap), top + 66.0, column, height - 66.0], content, TextAlign::Left, VerticalAlign::Top);
     }
     Ok(Drawn { bottom: top + height, flexible: Vec::new() })
@@ -183,6 +184,7 @@ fn roadmap(drawing: &mut Drawing, phases: &[RoadmapPhase], accent: &str, frame: 
         let mut content = Rich::default();
         content.add(&phase.label, 18.0, "@dk1", true, 400).add(&phase.detail, 16.0, "@dk2", false, 400);
         for point in &phase.points { content.bullet(point, 16.0, "@dk1", 300); }
+        drawing.name_next(format!("item {} (phases[{index}])", index + 1));
         text(drawing, [x, top + 78.0, column, height - 78.0 - reserved], content.finish(), TextAlign::Left, VerticalAlign::Top);
         if !phase.outcome.is_empty() {
             line(drawing, [x, top + height - 58.0], [x + column, top + height - 58.0], accent, false);
@@ -204,6 +206,7 @@ fn icon_columns(drawing: &mut Drawing, items: &[super::IconRow], frame: [f64; 4]
         let accent = item.accent.as_deref().unwrap_or("@accent1");
         if let Some(icon) = &item.icon { badge(drawing, icon, [x, top], 48.0, &mix(accent, theme, 0.9))?; }
         let content = Rich::default().add(&item.label, 18.0, "@dk1", true, 600).add(&item.detail, 16.0, "@dk2", false, 0).finish();
+        drawing.name_next(format!("item {} (items[{index}])", index + 1));
         text(drawing, [x, top + text_top, column, height - text_top], content, TextAlign::Left, VerticalAlign::Top);
     }
     Ok(Drawn { bottom: top + height, flexible: Vec::new() })
@@ -257,6 +260,7 @@ fn image_columns(drawing: &mut Drawing, items: &[ImageColumn], frame: [f64; 4]) 
         contained_image(drawing, &item.image, [x, top, column, image_height])?;
         if !item.caption.is_empty() { text(drawing, [x, top + image_height + 8.0, column, 32.0], label(&item.caption, 14.0, "@dk2", false), TextAlign::Left, VerticalAlign::Top); }
         let content = Rich::default().add(&item.label, 18.0, "@dk1", true, 500).add(&item.detail, 16.0, "@dk1", false, 0).finish();
+        drawing.name_next(format!("item {} (items[{index}])", index + 1));
         text(drawing, [x, top + text_top, column, height - text_top], content, TextAlign::Left, VerticalAlign::Top);
     }
     Ok(Drawn { bottom: top + height, flexible: Vec::new() })

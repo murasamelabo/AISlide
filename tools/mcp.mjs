@@ -908,7 +908,7 @@ register('recover_presentation', 'Verify supplied recovery JSON and create a NEW
 	const id = randomUUID(); decks.set(id, state);
 	return { deck_id: id, revision: state.revision, hash: state.document.hash, slides: state.document.deck.slides.length };
 });
-register('preview_presentation', 'Read selected pages as actual MCP PNG/JPEG images with slide IDs, coordinates, canvas dimensions (canvas_width/canvas_height), effective scale (canvas_scale / tile_scale, downscaled_from_canvas), revision/hash and warnings. Compact default: 640px JPEG contact sheet, 384KiB images, first 1-8 pages with page_scope showing unselected pages. detail=full restores core defaults (PNG, explicit selection for decks over eight pages). Explicit options override defaults; maximum 1600px, 2MiB encoded, 4MiB response. Only encoded-byte overflow shrinks at 75% then 56.25%, minimum 160px; selected pages are retained. quality_reduced and actual_max_dimension disclose byte-budget reduction (distinct from downscaled_from_canvas); overflow=error forbids shrink. Do not estimate font_size (px) from downscaled preview pixels; read get_deck_summary or preflight_presentation. include_images=false still renders; use get_deck_summary for metadata without rendering. No files, network or Undo changes; not Office parity.', { deck_id: handle, options: previewOptions.optional(), include_images: z.boolean().optional(), detail: detailSchema }, true, async ({ deck_id, options, include_images, detail }, signal) => {
+register('preview_presentation', 'Read selected pages as actual MCP PNG/JPEG images with slide IDs, coordinates, revision/hash and warnings. Compact default: 640px JPEG contact sheet, 384KiB images, first 1-8 pages with page_scope showing unselected pages. detail=full restores core defaults (PNG, explicit selection for decks over eight pages). Explicit options override defaults; maximum 1600px, 2MiB encoded, 4MiB response. Only encoded-byte overflow shrinks at 75% then 56.25%, minimum 160px; selected pages are retained. quality_reduced and actual_max_dimension disclose reduction; overflow=error forbids shrink. include_images=false still renders; use get_deck_summary for metadata without rendering. No files, network or Undo changes; not Office parity.', { deck_id: handle, options: previewOptions.optional(), include_images: z.boolean().optional(), detail: detailSchema }, true, async ({ deck_id, options, include_images, detail }, signal) => {
 	const state = getDeck(deck_id);
 	const total = state.getSummary({ limit: 0 }).slide_count;
 	if (compactResponse(detail)) options = { max_dimension: 640, layout: 'contact_sheet', format: 'jpeg', max_output_bytes: 384 * 1024, ...options, page_indices: previewSelection(total, options) };
@@ -936,8 +936,13 @@ register('finalize_presentation', 'Publish a delivery from the exact revision/ha
 		return { filename: `${name}${file.suffix}`, bytes };
 	});
 	const files = result.files.map(({ base64: _base64, suffix: _suffix, byte_length, ...file }, index) => ({ ...file, filename: items[index].filename, path: join(outputDirectory, items[index].filename), bytes: byte_length }));
-	const coreGitCommit = result.manifest.producer.git_commit ?? mcpGitCommit;
-	const manifestValue = { ...result.manifest, producer: { ...result.manifest.producer, name: serverInfo.name, version: serverInfo.version, git_commit: mcpGitCommit !== 'unknown' ? mcpGitCommit : coreGitCommit, core_version: result.manifest.producer.version, core_git_commit: coreGitCommit, transport: 'mcp-stdio' },
+	const coreGitCommit = result.manifest.producer.git_commit ?? 'unknown';
+	const gitCommit = coreGitCommit !== 'unknown' ? coreGitCommit : mcpGitCommit;
+	const limitations = Array.isArray(result.manifest.limitations) ? [...result.manifest.limitations] : [];
+	if (coreGitCommit !== 'unknown' && mcpGitCommit !== 'unknown' && coreGitCommit !== mcpGitCommit) {
+		limitations.push(`MCP JS commit (${mcpGitCommit}) differs from core binary commit (${coreGitCommit}); rebuild core binary for matching provenance`);
+	}
+	const manifestValue = { ...result.manifest, limitations, producer: { ...result.manifest.producer, name: serverInfo.name, version: serverInfo.version, git_commit: gitCommit, core_version: result.manifest.producer.version, core_git_commit: coreGitCommit, mcp_git_commit: mcpGitCommit, transport: 'mcp-stdio' },
 		files: files.map(({ path: _path, ...file }) => file) };
 	const manifestBytes = Buffer.from(JSON.stringify(manifestValue, null, 2));
 	const manifestFilename = `${name}.manifest.json`;
@@ -949,7 +954,7 @@ register('finalize_presentation', 'Publish a delivery from the exact revision/ha
 		preflight_warnings: result.manifest.preflight?.findings.filter(finding => finding.severity === 'warning').length ?? null, render_warning_count: result.manifest.render_warnings.length };
 	const response = { [imageResult]: true, metadata: { status: 'complete', deck_id, revision: result.revision, hash: result.hash, files, manifest, checks,
 		...(compactResponse(detail) ? { page_scope: { total, selected: options.page_indices.length, unselected: total - options.page_indices.length } } : {}),
-		multi_file_atomic: false, limitations: result.manifest.limitations }, images: thumbnail && include_images !== false ? [{ type: 'image', data: thumbnail.base64, mimeType: thumbnail.mime_type }] : [] };
+		multi_file_atomic: false, limitations }, images: thumbnail && include_images !== false ? [{ type: 'image', data: thumbnail.base64, mimeType: thumbnail.mime_type }] : [] };
 	if (Buffer.byteLength(JSON.stringify(toolResponse(response))) > Math.min(4 * 1048576, CAPACITY_PROFILES[state.capacityProfile].request_bytes)) throw new Error('Delivery response exceeds budget; lower max_dimension or disable images');
 	try { await publishNewBundle(outputDirectory, items, signal); }
 	catch (error) {

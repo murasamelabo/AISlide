@@ -561,7 +561,6 @@ fn measured_slack(element: &Element, theme: &crate::design::Theme, ids: &[String
 
 pub(crate) struct LayoutOverflow {
     pub element_id: String,
-    pub item_index: usize,
     pub text: String,
     pub missing_glyphs: bool,
     pub measured_height: u32,
@@ -571,7 +570,7 @@ pub(crate) struct LayoutOverflow {
 pub(crate) fn layout_overflow(element: &Element, theme: &crate::design::Theme) -> Result<Option<LayoutOverflow>> {
     let measured = crate::layout::measure_layout(&measurement_deck(element, theme))?;
     let elements = crate::model::element_list(std::slice::from_ref(element));
-    Ok(measured.measurements.iter().enumerate().find(|(_, measurement)| measurement.overflow || measurement.missing_glyphs > 0).map(|(index, measurement)| {
+    Ok(measured.measurements.iter().find(|measurement| measurement.overflow || measurement.missing_glyphs > 0).map(|measurement| {
         let text = elements.iter().find_map(|candidate| match candidate {
             Element::Text { id, text, .. } | Element::Shape { id, text, .. } if *id == measurement.element_id => {
                 Some(text.replace('\n', " ").chars().take(40).collect::<String>())
@@ -580,7 +579,6 @@ pub(crate) fn layout_overflow(element: &Element, theme: &crate::design::Theme) -
         }).unwrap_or_else(|| measurement.element_id.clone());
         LayoutOverflow {
             element_id: measurement.element_id.clone(),
-            item_index: index + 1,
             text,
             missing_glyphs: !measurement.overflow,
             measured_height: measurement.measured_height.ceil() as u32,

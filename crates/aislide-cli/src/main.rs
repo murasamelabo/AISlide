@@ -58,7 +58,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         "--help" | "help" => {
-            println!("AISlide\n  request                       JSON stdin -> JSON stdout\n  sample                        print the synthetic report input\n  generate input.json out.pptx [--design-preset ID]\n                                create a new native PPTX (no overwrite)\n  inspect file.pptx             inspect simple top-level text runs");
+            println!("AISlide\n  request                       JSON stdin -> JSON stdout\n  sample                        print the synthetic report input\n  generate input.json out.pptx [--design-preset ID]\n                                create a new native PPTX (no overwrite)\n  inspect file.pptx             inspect simple top-level text runs\n  --version                     print version and git commit");
             Ok(())
         }
         _ => Err(Error::Invalid("unknown command or arguments; use --help".into())),

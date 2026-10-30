@@ -44,7 +44,7 @@ impl<'a> NativeRegenerationGuard<'a> {
         Ok(())
     }
 
-    fn check(&mut self, slide: &crate::model::Slide, id: &str) -> Result<()> {
+    pub(crate) fn check(&mut self, slide: &crate::model::Slide, id: &str) -> Result<()> {
         if self.origin.is_none() { return Ok(()); }
         let source = slide.native_source_id.as_deref().unwrap_or(&slide.id);
         let identity = (source.to_owned(), id.to_owned());

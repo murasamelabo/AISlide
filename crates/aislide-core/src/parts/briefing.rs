@@ -370,12 +370,16 @@ pub(super) fn create(id: &str, spec: &PartSpec, theme: &Theme) -> Result<Element
     crate::model::validate_elements(std::slice::from_ref(&result), (4096.0, 4096.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
     if let Some(overflow) = super::layout_overflow(&result, theme)? {
         let text = &overflow.text;
-        let place = places.get(&overflow.element_id).cloned().unwrap_or_else(|| format!("item {}", overflow.item_index));
+        let place = places.get(&overflow.element_id).map_or(overflow.element_id.as_str(), String::as_str);
         let measured_px = overflow.measured_height;
         let available_px = overflow.available_height.floor().max(0.0) as u32;
-        let over_px = measured_px.saturating_sub(available_px).max(1);
+        let detail = if measured_px > available_px {
+            format!("{place}: measured {measured_px}px > available {available_px}px, over by {}px", measured_px - available_px)
+        } else {
+            format!("{place}: measured {measured_px}px in {available_px}px frame")
+        };
         return Err(Error::Invalid(if overflow.missing_glyphs { format!("{} text \"{text}\" uses glyphs missing from the selected font; choose an installed font that covers it", spec.preset) }
-            else { format!("{} text \"{text}\" does not fit at its fixed font size ({place}: measured {measured_px}px > available {available_px}px, over by {over_px}px); shorten the text, enlarge the part frame or split the slide", spec.preset) }));
+            else { format!("{} text \"{text}\" does not fit at its fixed font size ({detail}); shorten the text, enlarge the part frame or split the slide", spec.preset) }));
     }
     Ok(result)
 }
@@ -643,7 +647,10 @@ fn shift_rows(drawing: &mut Drawing, headings: [&String; 2], rows: &[ShiftRow], 
         shape(drawing, Fill::solid("chevron", accent), [chevron_x, row_top + row_height / 2.0 - 16.0, 26.0, 32.0], None);
         let destination = Rich::default().add(&row.to, 17.0, "@lt1", true, 200).add(&row.caption, 12.0, "@lt1", false, 0).finish();
         shape(drawing, Fill::solid("rect", accent), [to_x, row_top, to_width, row_height], Some((destination, TextAlign::Left, [16.0, 8.0, 12.0, 8.0])));
-        if !row.detail.is_empty() { text(drawing, [detail_x, row_top, detail_width, row_height], label(&row.detail, size, "@dk1", false), TextAlign::Left, VerticalAlign::Middle); }
+        if !row.detail.is_empty() {
+            drawing.name_next(format!("item {} (rows[{index}])", index + 1));
+            text(drawing, [detail_x, row_top, detail_width, row_height], label(&row.detail, size, "@dk1", false), TextAlign::Left, VerticalAlign::Middle);
+        }
     }
     Ok(Drawn { bottom: y + rows.len() as f64 * row_height + gap * (rows.len() - 1) as f64, flexible: Vec::new() })
 }
@@ -690,6 +697,7 @@ fn step_cards(drawing: &mut Drawing, steps: &[StepCard], step_label: &str, accen
         let mut content = Rich::default();
         content.add(&step.label, LABEL, "@dk1", true, 600).add(&step.detail, size, "@dk1", false, 800);
         for point in &step.points { content.bullet(point, size, "@dk1", 600); }
+        drawing.name_next(format!("item {} (steps[{index}])", index + 1));
         flexible.extend(text(drawing, [x, y, column, bottom - y], content.finish(), TextAlign::Left, VerticalAlign::Top));
         if index + 1 < steps.len() { shape(drawing, Fill::solid("chevron", &chevron), [x + column + (arrow - 14.0) / 2.0, chevron_center - 13.0, 14.0, 26.0], None); }
     }
@@ -811,6 +819,7 @@ fn screenshot_callouts(drawing: &mut Drawing, image: &GraphIcon, callouts: &[Cal
         let row_top = top + index as f64 * pitch;
         number_badge(drawing, index + 1, [legend_left, row_top], accent);
         let content = Rich::default().add(&callout.label, LABEL, "@dk1", true, 300).add(&callout.detail, size, "@dk1", false, 0).finish();
+        drawing.name_next(format!("item {} (callouts[{index}])", index + 1));
         flexible.extend(text(drawing, [legend_left + CALLOUT + 14.0, row_top + 1.0, legend_width - CALLOUT - 14.0, pitch - 16.0], content, TextAlign::Left, VerticalAlign::Top));
     }
     Ok(Drawn { bottom: (top + image_height).max(top + pitch * callouts.len() as f64 - 16.0), flexible })

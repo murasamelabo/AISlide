@@ -1261,6 +1261,7 @@ fn typed_batch_native_supported_operations_survive_export_reopen() {
 
 #[test]
 fn issue58_update_chart_remove_elements_and_chartex_validation_guidance() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
     let before = execute_request(request(&populated(), json!([
         {"op":"set_accessibility","slide_id":"slide-1","element_id":"chart","metadata":{"title":"Original chart","description":"Synthetic"}},
         {"op":"set_table_headers","slide_id":"slide-1","element_id":"table","policy":"first_row"}
@@ -1288,22 +1289,91 @@ fn issue58_update_chart_remove_elements_and_chartex_validation_guidance() {
     }), "zero-based category indices");
     reject_atomic(&updated, json!({"op":"update_chart","slide_id":"slide-1","id":"rect","kind":"bar"}), "requires a chart element");
 
-    // Valid waterfall update succeeds and exports/reopens cleanly.
+    // Valid standard <-> waterfall (chartEx) conversion on an authored deck exports and reopens cleanly;
+    // on a reopened native deck, same-family update_chart succeeds while chart<->chartEx conversion is rejected by NativeRegenerationGuard.
     let waterfall = execute_request(request(&updated, json!([
         {"op":"update_chart","slide_id":"slide-1","id":"chart","kind":"waterfall",
          "categories":["Start","Delta","Total"],"series":[{"name":"Score","color":"1F4E8C","values":[19,49,68]}],
          "options":{"legend":"hidden","waterfall_totals":[0,2]}}
     ]))).unwrap()["document"].clone();
     assert_eq!(element(&waterfall, "chart")["kind"], "waterfall");
-
-    // remove_elements removes targets, attached connectors, and review metadata atomically; missing IDs fail closed.
-    reject_atomic(&waterfall, json!({"op":"remove_elements","slide_id":"slide-1","ids":["rect","does-not-exist"]}), "element not found: does-not-exist");
-    let removed = execute_request(request(&waterfall, json!([
-        {"op":"remove_elements","slide_id":"slide-1","ids":["rect","table","chart"]}
+    let exported_wf = execute_request(json!({"op":"export_presentation","document":waterfall})).unwrap();
+    let reopened_wf = execute_request(json!({"op":"open_presentation","id":"wf-reopen","base64":exported_wf["base64"]})).unwrap()["document"].clone();
+    assert_eq!(element(&reopened_wf, "chart")["kind"], "waterfall");
+    reject_atomic(&reopened_wf, json!({
+        "op":"update_chart","slide_id":"slide-1","id":"chart","kind":"column",
+        "categories":["A","B"],"series":[{"name":"Score","color":"1F4E8C","values":[10,20]}],
+        "options":{"legend":"bottom"}
+    }), "native chart/chartEx conversion requires a new chart object");
+    let back_to_col = execute_request(request(&waterfall, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"chart","kind":"column",
+         "categories":["A","B"],"series":[{"name":"Score","color":"1F4E8C","values":[10,20]}],
+         "options":{"legend":"bottom"}}
     ]))).unwrap()["document"].clone();
+    let exported_col = execute_request(json!({"op":"export_presentation","document":back_to_col})).unwrap();
+    let reopened_col = execute_request(json!({"op":"open_presentation","id":"col-reopen","base64":exported_col["base64"]})).unwrap()["document"].clone();
+    assert_eq!(element(&reopened_col, "chart")["kind"], "column");
+
+    // Source-bound chart: update_chart changing series/categories marks binding stale; remove_elements prunes bindings.
+    let source = execute_request(json!({"op":"ingest","input":{"name":"metrics.csv","format":"csv","base64":STANDARD.encode("Category,Value\nStart,19\nDelta,49\nTotal,68\n")}})).unwrap();
+    let binding = json!({
+        "slide_id":"slide-1","element_id":"chart","field":"/series/0/values/0",
+        "source_id":source["id"],"source_sha256":source["sha256"],
+        "locator":source["tables"][0]["locators"][0][1],"raw_value":source["tables"][0]["rows"][0][1],
+        "value":19,"transform":"strict_numeric","stale":false
+    });
+    let bound_doc = execute_request(json!({
+        "op":"new_document","id":"bound-chart","deck":waterfall["deck"],"sources":[source],"bindings":[binding]
+    })).unwrap();
+    let stale_after_update = execute_request(request(&bound_doc, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"chart","series":[{"name":"Score","color":"1F4E8C","values":[20,49,69]}]}
+    ]))).unwrap();
+    assert_eq!(stale_after_update["document"]["bindings"][0]["stale"], true);
+
+    // Imported native chart with unrepresentable foreign attribute is protected by NativeRegenerationGuard.
+    let mut pkg = aislide_core::package::Package::open(STANDARD.decode(exported_col["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let chart_xml = pkg.text("ppt/charts/chart1.xml").unwrap().replacen("<c:plotArea>", "<c:plotArea unknown=\"retained\">", 1);
+    pkg.replace_part("ppt/charts/chart1.xml", chart_xml.into_bytes()).unwrap();
+    let unrepresentable = execute_request(json!({"op":"open_presentation","id":"unrep","base64":STANDARD.encode(pkg.save().unwrap())})).unwrap()["document"].clone();
+    reject_atomic(&unrepresentable, json!({"op":"update_chart","slide_id":"slide-1","id":"chart","kind":"bar"}), "cannot be regenerated");
+
+    // Managed part with internal chart (pareto) rejects direct update_chart and child remove_elements, but allows root remove_elements + Undo.
+    let pareto_example = execute_request(json!({"op":"part_catalog"})).unwrap()["presets"].as_array().unwrap().iter().find(|p| p["id"] == "vertical-bar-graph/pareto").unwrap()["example"].clone();
+    let with_part = execute_request(request(&bound_doc, json!([
+        {"op":"add_part","slide_id":"slide-1","id":"pareto-part","spec":pareto_example}
+    ]))).unwrap()["document"].clone();
+    let pareto_group = element(&with_part, "pareto-part");
+    let internal_chart_id = pareto_group["children"].as_array().unwrap().iter().find(|c| c["type"] == "chart").unwrap()["id"].as_str().unwrap().to_owned();
+    reject_atomic(&with_part, json!({"op":"update_chart","slide_id":"slide-1","id":internal_chart_id,"kind":"bar"}), "managed part");
+    reject_atomic(&with_part, json!({"op":"remove_elements","slide_id":"slide-1","ids":[internal_chart_id]}), "managed part");
+
+    // Locked or hidden elements (or groups with locked/hidden ancestors) reject remove_elements and update_chart.
+    for flag in ["locked", "hidden"] {
+        let mut locked_deck = with_part["deck"].clone();
+        locked_deck["slides"][0]["elements"][2]["visual"][flag] = json!(true);
+        let chart_val = locked_deck["slides"][0]["elements"][6].clone();
+        locked_deck["slides"][0]["elements"][9]["visual"][flag] = json!(true);
+        locked_deck["slides"][0]["elements"][9]["children"].as_array_mut().unwrap().push(chart_val);
+        locked_deck["slides"][0]["elements"].as_array_mut().unwrap().remove(6);
+        let locked_doc = execute_request(json!({"op":"new_document","id":"locked-chart","deck":locked_deck})).unwrap();
+        reject_atomic(&locked_doc, json!({"op":"update_chart","slide_id":"slide-1","id":"chart","kind":"bar"}), "unlock and show");
+        reject_atomic(&locked_doc, json!({"op":"remove_elements","slide_id":"slide-1","ids":["shape"]}), "unlock and show");
+        reject_atomic(&locked_doc, json!({"op":"remove_elements","slide_id":"slide-1","ids":["group"]}), "unlock and show");
+    }
+
+    // remove_elements handles chained ["shape", "connector"] in one operation, cleans up parts/metadata/bindings/reviews, and supports Undo.
+    reject_atomic(&with_part, json!({"op":"remove_elements","slide_id":"slide-1","ids":["rect","does-not-exist"]}), "element not found: does-not-exist");
+    let removed_res = execute_request(request(&with_part, json!([
+        {"op":"remove_elements","slide_id":"slide-1","ids":["shape","connector","table","chart","pareto-part"]}
+    ]))).unwrap();
+    let removed = &removed_res["document"];
     let remaining_ids: Vec<&str> = removed["deck"]["slides"][0]["elements"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
-    for gone in ["rect", "connector", "table", "chart"] {
+    for gone in ["shape", "connector", "table", "chart", "pareto-part"] {
         assert!(!remaining_ids.contains(&gone), "{gone} must be removed: {remaining_ids:?}");
     }
-    assert!(removed["deck"]["slides"][0]["review"].is_null(), "review entries for removed elements must be cleaned up");
+    assert!(removed["parts"].is_null(), "managed part entry must be removed");
+    assert!(removed["bindings"].as_array().unwrap().is_empty(), "bindings for removed chart must be cleaned up");
+    assert!(removed["deck"]["slides"][0]["review"].is_null(), "slide review entries for removed elements must be cleaned up");
+    let undone = execute_request(json!({"op":"undo_transaction","document":removed,"expected_revision":removed["revision"],"receipt":removed_res["receipt"]})).unwrap();
+    assert_eq!(undone["document"]["hash"], with_part["hash"]);
 }

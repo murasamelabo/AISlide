@@ -82,12 +82,11 @@ Those general choices do not require that reference's optional technical style.
   are bounded projections (`office_visual_parity: false`), while the exported
   PPTX contains native OOXML charts. Separate your own layout mistakes from
   preview differences and adjust with `update_chart` rather than redrawing with
-  shapes. Where Windows PowerPoint is available, you may optionally inspect a
-  copied export read-only with no window (never call `Quit`, never overwrite
-  originals, never execute imported content or macros, and never claim Office
-  visual parity from structural checks alone). When PowerPoint verification is
-  unavailable, keep the native chart and report "chart rendering not verified
-  in PowerPoint".
+  shapes. If a user or operator separately inspects a copied export in
+  PowerPoint, never overwrite originals or claim Office visual parity from
+  AISlide structural checks alone. When PowerPoint rendering is not separately
+  verified, keep the native chart and report "chart rendering not verified in
+  PowerPoint".
 - Record one ledger row per slide:
   `reader question | relation | primary visual (native chart / native table / part:<preset> / graph / picture / text / hand-drawn shapes) | why chosen | rejected native alternative and why | verification (preview / PowerPoint / not verified)`.
   A deck-wide rule such as "draw charts with shapes" is invalid.

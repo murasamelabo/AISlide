@@ -210,9 +210,13 @@ pub struct PreviewPage {
 pub struct PresentationPreview {
     pub revision: u64,
     pub hash: String,
+    #[serde(default)]
     pub canvas_width: u32,
+    #[serde(default)]
     pub canvas_height: u32,
+    #[serde(default = "default_preview_scale")]
     pub canvas_scale: f64,
+    #[serde(default)]
     pub downscaled_from_canvas: bool,
     pub requested_max_dimension: u32,
     pub actual_max_dimension: u32,
@@ -295,8 +299,7 @@ fn preview_attempt(
             width: artifact.width, height: artifact.height,
         });
     }
-    let tile_width = pages[0].width;
-    let tile_height = pages[0].height;
+    let (tile_width, tile_height) = pages.first().map_or((deck.width, deck.height), |page| (page.width, page.height));
     let raw_scale = (f64::from(tile_width) / f64::from(deck.width)).min(f64::from(tile_height) / f64::from(deck.height));
     let canvas_scale = (raw_scale * 10000.0).round() / 10000.0;
     let downscaled_from_canvas = canvas_scale < 1.0 - 1e-6;

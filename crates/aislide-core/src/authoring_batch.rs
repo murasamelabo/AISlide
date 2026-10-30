@@ -172,6 +172,21 @@ fn text_style(element: &mut Element, style: &RunStyle) -> Result<()> {
     Ok(())
 }
 
+fn prune_elements(elements: &mut Vec<Element>, removed: &mut BTreeSet<String>) -> bool {
+    let mut changed = false;
+    elements.retain_mut(|element| {
+        let drop = removed.contains(element.bounds().0)
+            || matches!(element, Element::Connector { start, end, .. } if [start.as_ref(), end.as_ref()].into_iter().flatten().any(|c| removed.contains(&c.element_id)));
+        if drop {
+            for item in crate::model::element_list(std::slice::from_ref(element)) { changed |= removed.insert(item.bounds().0.to_owned()); }
+            return false;
+        }
+        if let Element::Group { children, .. } = element { changed |= prune_elements(children, removed); }
+        true
+    });
+    changed
+}
+
 fn apply(
     deck: &mut Deck,
     parts: &mut Vec<crate::parts::state::PartInstance>,
@@ -287,13 +302,15 @@ fn apply(
             if kind.is_none() && categories.is_none() && series.is_none() && options.is_none() && destination.is_none() {
                 return Err(Error::Invalid("update_chart requires at least one of kind, categories, series, options or frame".into()));
             }
-            if let Some(part) = parts.iter().find(|part| part.slide_id == *slide_id && part.element_id == *id) {
-                return Err(Error::Invalid(if part.spec.preset == "diagram/custom" {
-                    format!("element {id} is a managed graph; use update_graph")
-                } else {
-                    format!("element {id} is a managed part; use update_part")
-                }));
+            for part in parts.iter().filter(|part| part.slide_id == *slide_id) {
+                let owns = part.element_id == *id || slide.elements.iter().find(|el| el.bounds().0 == part.element_id)
+                    .is_some_and(|root| crate::model::element_list(std::slice::from_ref(root)).iter().any(|c| c.bounds().0 == id));
+                if owns {
+                    let (label, tool) = if part.spec.preset == "diagram/custom" { ("graph", "update_graph") } else { ("part", "update_part") };
+                    return Err(Error::Invalid(format!("element {id} belongs to managed {label} {}; use {tool}", part.element_id)));
+                }
             }
+            native_guard.check(slide, id)?;
             let element = target(&mut slide.elements, id)?;
             match element {
                 Element::Chart { kind: current_kind, categories: current_categories, series: current_series, options: current_options, .. } => {
@@ -305,12 +322,16 @@ fn apply(
                 }
                 _ => return Err(Error::Unsupported("update_chart requires a chart element".into())),
             }
+            if categories.is_some() || series.is_some() {
+                for binding in bindings.iter_mut().filter(|b| b.slide_id == *slide_id && b.element_id == *id) { binding.stale = true; }
+            }
             if let Some(destination) = destination { frame(element, destination)?; }
         }
         Operation::RemoveElements { ids, .. } => {
             if ids.is_empty() || ids.len() > 128 || ids.iter().collect::<BTreeSet<_>>().len() != ids.len() {
                 return Err(Error::Limit("remove_elements requires 1-128 distinct IDs".into()));
             }
+            let mut removed = BTreeSet::new();
             for id in ids {
                 let Some(element_index) = slide.elements.iter().position(|element| element.bounds().0 == id) else {
                     if crate::model::element_list(&slide.elements).iter().any(|element| element.bounds().0 == id) {
@@ -318,19 +339,20 @@ fn apply(
                     }
                     return Err(Error::Invalid(format!("element not found: {id}")));
                 };
-                if slide.elements[element_index].visual().is_some_and(|visual| visual.locked || visual.hidden) {
-                    return Err(Error::Unsupported("unlock and show the target before removing".into()));
+                let subtree = crate::model::element_list(std::slice::from_ref(&slide.elements[element_index]));
+                if subtree.iter().any(|el| el.visual().is_some_and(|visual| visual.locked || visual.hidden)) {
+                    return Err(Error::Unsupported("unlock and show the target and its parent groups before editing".into()));
                 }
-                let removed: BTreeSet<_> = crate::model::element_list(std::slice::from_ref(&slide.elements[element_index])).iter().map(|element| element.bounds().0.to_owned()).collect();
-                slide.elements.retain(|element| element.bounds().0 != id && !matches!(element, Element::Connector { start, end, .. } if [start, end].into_iter().flatten().any(|connection| removed.contains(&connection.element_id))));
-                parts.retain(|part| part.slide_id != *slide_id || &part.element_id != id);
-                bindings.retain(|binding| binding.slide_id != *slide_id || !removed.contains(&binding.element_id));
-                if let Some(review) = &mut slide.review {
-                    review.table_headers.retain(|key, _| !removed.contains(key));
-                    review.accessibility.retain(|key, _| !removed.contains(key));
-                    review.reading_order.retain(|key| !removed.contains(key));
-                    if *review == crate::review::SlideReview::default() { slide.review = None; }
-                }
+                for item in subtree { removed.insert(item.bounds().0.to_owned()); }
+            }
+            while prune_elements(&mut slide.elements, &mut removed) {}
+            parts.retain(|part| part.slide_id != *slide_id || !removed.contains(&part.element_id));
+            bindings.retain(|binding| binding.slide_id != *slide_id || !removed.contains(&binding.element_id));
+            if let Some(review) = &mut slide.review {
+                review.table_headers.retain(|key, _| !removed.contains(key));
+                review.accessibility.retain(|key, _| !removed.contains(key));
+                review.reading_order.retain(|key| !removed.contains(key));
+                if *review == crate::review::SlideReview::default() { slide.review = None; }
             }
         }
     }
@@ -366,8 +388,8 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
         changed.insert(apply(&mut deck, &mut parts, &mut bindings, operation, &mut native_guard).map_err(|error| Error::Invalid(format!("{context}: {error}")))?);
         crate::preflight::deck(&deck, document.capacity_profile.limits())?;
     }
-    if parts.len() != document.parts.len() { metadata_changed = true; }
-    let bindings_changed = bindings.len() != document.bindings.len();
+    if crate::canonical::bytes(&parts)? != crate::canonical::bytes(&document.parts)? { metadata_changed = true; }
+    let bindings_changed = crate::canonical::bytes(&bindings)? != crate::canonical::bytes(&document.bindings)?;
     let page_indices: Vec<_> = changed.iter().copied().collect();
     let mut patches: Vec<_> = if metadata_changed && changed.len() == 128 {
         vec![json!({"op":"replace","path":"/deck/slides","value":deck.slides})]
