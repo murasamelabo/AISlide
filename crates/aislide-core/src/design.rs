@@ -36,7 +36,7 @@ impl ColorMap {
     }
 }
 
-pub(crate) fn color_slot(value: &str) -> &str { ACTIVE_COLOR_MAP.with(|a| if a.get().2 > 0 { a.get().0.resolve(value) } else { value }) }
+pub(crate) fn color_slot(value: &str) -> &str { ACTIVE_COLOR_MAP.with(|a| a.get().0.resolve(value)) }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
