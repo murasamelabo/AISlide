@@ -1188,3 +1188,103 @@ fn phase3_typed_preview_read_only_and_untrusted_input_rejection() {
     assert_eq!(output["office_parity_verified"],false);
     assert!(execute_request(json!({"op":"render_element_preview","element":element,"svg":"<script/>"})).is_err());
 }
+
+#[test]
+fn issue55_multisection_number_formats_and_stacked_chart_preview_layout() {
+    use aislide_core::model::chart_format::format_chart_number;
+    assert_eq!(format_chart_number(288.0, Some("0;;;")), ("288".into(), true));
+    assert_eq!(format_chart_number(0.0, Some("0;;;")), ("".into(), true));
+    assert_eq!(format_chart_number(-5.0, Some("0;;;")), ("".into(), true));
+    assert_eq!(format_chart_number(1234.0, Some("#,##0;;;")), ("1,234".into(), true));
+    assert_eq!(format_chart_number(0.0, Some("#,##0;;;")), ("".into(), true));
+    assert_eq!(format_chart_number(5.0, Some("0;-0;\"−\"")), ("5".into(), true));
+    assert_eq!(format_chart_number(-5.0, Some("0;-0;\"−\"")), ("-5".into(), true));
+    assert_eq!(format_chart_number(0.0, Some("0;-0;\"−\"")), ("−".into(), true));
+    assert_eq!(format_chart_number(0.0, Some("0;-0")), ("0".into(), true));
+    assert_eq!(format_chart_number(-5.0, Some("0;-0")), ("-5".into(), true));
+    assert_eq!(format_chart_number(5.0, Some("\"A;B\"0")), ("A;B5".into(), true));
+    assert_eq!(format_chart_number(5.0, Some("[Red]0")), ("5".into(), false));
+
+    let deck: Deck = serde_json::from_value(json!({
+        "version": 1, "title": "Synthetic chart preview", "width": 1280, "height": 720,
+        "slides": [{
+            "id": "slide-1", "title": "Synthetic", "background": "FFFFFF", "notes": "Synthetic data",
+            "elements": [
+                {
+                    "type": "chart", "id": "c-stacked", "kind": "stacked_bar",
+                    "x": 72, "y": 178, "width": 688, "height": 150,
+                    "categories": ["全体 410"],
+                    "series": [
+                        { "name": "稼働中", "color": "4C9A6A", "values": [288] },
+                        { "name": "長期未使用", "color": "E8590C", "values": [42] },
+                        { "name": "未利用", "color": "F2B600", "values": [21] },
+                        { "name": "無効", "color": "9AA1AD", "values": [59] }
+                    ],
+                    "options": {
+                        "legend": "bottom",
+                        "category_axis": { "label_position": "hidden" },
+                        "primary_axis": { "label_position": "hidden", "min": 0, "max": 410, "major_unit": 410 },
+                        "data_labels": { "show_value": true, "position": "center", "number_format": "0;;;" }
+                    }
+                },
+                {
+                    "type": "chart", "id": "c-col", "kind": "stacked_column",
+                    "x": 72, "y": 380, "width": 688, "height": 220,
+                    "categories": ["区分A", "区分B", "区分C"],
+                    "series": [
+                        { "name": "系列1", "color": "E8590C", "values": [15, 20, 0] },
+                        { "name": "系列2", "color": "F2B600", "values": [0, 5, 21] }
+                    ],
+                    "options": {
+                        "legend": "bottom",
+                        "primary_axis": { "min": 0, "max": 25, "major_unit": 5 },
+                        "data_labels": { "show_value": true, "position": "inside_end", "number_format": "0;;;" }
+                    }
+                }
+            ]
+        }]
+    })).unwrap();
+    let rendered = aislide_core::render::render_slide_svg(&deck, 0, false).unwrap();
+    assert!(!rendered.warnings.iter().any(|w| w.message.contains("Unsupported")), "{:?}", rendered.warnings);
+    assert!(rendered.warnings.iter().any(|w| w.code == "CHART_PREVIEW" && w.message.contains("do not replace with hand-drawn shapes")));
+    let parsed = roxmltree::Document::parse(&rendered.svg).unwrap();
+    let stacked_group = parsed.descendants().find(|node| node.attribute("transform").is_some_and(|t| t.starts_with("translate(72 178) "))).unwrap();
+    let stacked_titles: Vec<_> = stacked_group.descendants().filter(|node| node.has_tag_name("title")).filter_map(|node| node.text()).collect();
+    assert!(!stacked_titles.contains(&"全体 410"), "hidden category axis must not render category label: {stacked_titles:?}");
+    assert!(!stacked_titles.contains(&"410"), "hidden primary axis must not render 410 tick: {stacked_titles:?}");
+    for expected in ["288", "42", "21", "59", "稼働中", "長期未使用", "未利用", "無効"] {
+        assert!(stacked_titles.contains(&expected), "missing {expected} in {stacked_titles:?}");
+    }
+    let col_group = parsed.descendants().find(|node| node.attribute("transform").is_some_and(|t| t.starts_with("translate(72 380) "))).unwrap();
+    let col_titles: Vec<_> = col_group.descendants().filter(|node| node.has_tag_name("title")).filter_map(|node| node.text()).collect();
+    // 0 values in stacked series must be suppressed by "0;;;", leaving only the primary axis "0" tick once.
+    assert_eq!(col_titles.iter().filter(|&&t| t == "0").count(), 1, "zero data labels must be hidden: {col_titles:?}");
+
+    // Horizontal bar category order must match between Plotters path and chart_projection path.
+    let bar_plotters: Deck = serde_json::from_value(json!({
+        "version": 1, "title": "Bar order", "width": 640, "height": 400,
+        "slides": [{"id": "s1", "title": "Bar", "background": "FFFFFF", "notes": "", "elements": [{
+            "type": "chart", "id": "b1", "kind": "bar", "x": 0, "y": 0, "width": 600, "height": 360,
+            "categories": ["TopCat", "BottomCat"],
+            "series": [{"name": "S1", "color": "1976D2", "values": [10, 20]}]
+        }]}]
+    })).unwrap();
+    let mut bar_projected = bar_plotters.clone();
+    if let aislide_core::model::Element::Chart { options, .. } = &mut bar_projected.slides[0].elements[0] {
+        options.primary_axis.major_unit = Some(10.0);
+    }
+    let top_y = |d: &Deck| -> (f64, f64) {
+        let svg = aislide_core::render::render_slide_svg(d, 0, false).unwrap().svg;
+        let doc = roxmltree::Document::parse(&svg).unwrap();
+        let y_of = |label: &str| -> f64 {
+            let title = doc.descendants().find(|n| n.has_tag_name("title") && n.text() == Some(label)).unwrap();
+            let tf = title.ancestors().find_map(|n| n.attribute("transform")).unwrap();
+            tf.strip_prefix("translate(").unwrap().strip_suffix(')').unwrap().split_whitespace().nth(1).unwrap().parse().unwrap()
+        };
+        (y_of("TopCat"), y_of("BottomCat"))
+    };
+    let (p_top, p_bot) = top_y(&bar_plotters);
+    let (c_top, c_bot) = top_y(&bar_projected);
+    assert!(p_top < p_bot, "Plotters path must place first category at top: {p_top} vs {p_bot}");
+    assert!(c_top < c_bot, "Projected path must place first category at top: {c_top} vs {c_bot}");
+}

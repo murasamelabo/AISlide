@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 const KPI_HEIGHT: f64 = 200.0;
+pub const KPI_BAD_ACCENT: &str = "C0392B";
 const KAPPA: f64 = 0.552_284_75;
 const RACI_CODES: [&str; 6] = ["", "R", "A", "C", "I", "A/R"];
 
@@ -22,6 +23,7 @@ pub struct KpiCard {
     #[serde(default, skip_serializing_if = "String::is_empty")] pub unit: String,
     #[serde(default, skip_serializing_if = "String::is_empty")] pub delta: String,
     #[serde(default, skip_serializing_if = "neutral")] pub status: KpiStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub accent: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")] pub comparison: String,
 }
 
@@ -107,6 +109,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
             for card in cards {
                 field(&card.label, 48, "kpi label", true)?; single(&card.value, 16, "kpi value", true)?; single(&card.unit, 12, "kpi unit", false)?;
                 field(&card.delta, 40, "kpi delta", false)?; field(&card.comparison, 60, "kpi comparison", false)?;
+                super::briefing::colors(&[&card.accent])?;
             }
             message(band)?;
         }
@@ -280,17 +283,18 @@ fn kpi_cards(drawing: &mut Drawing, cards: &[KpiCard], columns: Option<usize>, f
     for (index, card) in cards.iter().enumerate() {
         let x = left + (index % columns) as f64 * (card_width + GAP);
         let y = top + (index / columns) as f64 * (card_height + GAP);
-        let accent = match card.status { KpiStatus::Good => "@accent1", KpiStatus::Bad => "@accent2", KpiStatus::Neutral => "@dk2" };
+        let accent = card.accent.as_deref().unwrap_or(match card.status { KpiStatus::Good => "@accent1", KpiStatus::Bad => KPI_BAD_ACCENT, KpiStatus::Neutral => "@dk2" });
         shape(drawing, Fill::solid("rect", &panel), [x, y, card_width, card_height], None);
         shape(drawing, Fill::solid("rect", accent), [x, y, 6.0, card_height], None);
         let unit = if card.unit.is_empty() { String::new() } else { format!(" {}", card.unit) };
         let value_size = ((card_width - 52.0 - estimate(&unit, 18.0)) / estimate(&card.value, 1.0).max(0.6)).clamp(24.0, 44.0).floor();
-        let emphasis = if card.status == KpiStatus::Neutral { "@dk2".to_string() } else { darken(accent, theme, 0.2) };
+        let emphasis = if card.status == KpiStatus::Neutral && card.accent.is_none() { "@dk2".to_string() } else { darken(accent, theme, 0.2) };
         let mut content = Rich::default();
         content.add(&card.label, 15.0, "@dk2", true, 300)
             .runs(&[(card.value.as_str(), value_size, "@dk1", true), (unit.as_str(), 18.0, "@dk2", false)], 200)
             .add(&card.delta, 16.0, &emphasis, true, 100)
             .add(&card.comparison, SMALL, "@dk2", false, 0);
+        drawing.name_next(format!("item {} (cards[{index}])", index + 1));
         text(drawing, [x + 26.0, y + 12.0, card_width - 44.0, card_height - 24.0], content.finish(), TextAlign::Left, VerticalAlign::Middle);
     }
     Ok(Drawn { bottom: top + rows as f64 * card_height + GAP * (rows - 1) as f64, flexible: Vec::new() })

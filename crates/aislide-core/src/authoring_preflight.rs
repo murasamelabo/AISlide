@@ -372,9 +372,8 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				objects.iter().rev().find(|object| warning.scope.as_deref().is_none_or(|scope| scope == object.scope)
 					&& (warning.element_id == object.id || warning.element_id.starts_with(&format!("{}[", object.id))))
 			};
-			let generic_chart_notice = matches!((warning.code.as_str(), warning.message.as_str()),
-				("CHART_PREVIEW", "Plotters chart layout; axis/legend placement is not Office parity")
-				| ("CHART_PRESENTATION", "AISlide bounded chart projection; not Office visual parity"));
+			let generic_chart_notice = warning.code == "CHART_PREVIEW"
+				|| (warning.code == "CHART_PRESENTATION" && warning.message.starts_with("AISlide bounded chart projection; not Office visual parity"));
 			if generic_chart_notice {
 				if let Some(object) = object {
 					if !chart_notices.iter().any(|previous| std::ptr::eq(*previous, object)) { chart_notices.push(object); }
@@ -397,8 +396,8 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		}
 		if !chart_notices.is_empty() {
 			push_finding(&mut report, page, &slide.id, &chart_notices, "CHART_PREVIEW", "info", "renderer",
-				&format!("{} chart preview(s) use bounded rendering; axis and legend placement are not Office visual parity", chart_notices.len()),
-				&["Compare the listed charts in Office when visual parity matters", "Review specific chart warnings separately"])?;
+				&format!("{} chart preview(s) use bounded rendering; axis and legend placement are not Office visual parity (exported PPTX retains editable native OOXML charts; do not replace with hand-drawn shapes)", chart_notices.len()),
+				&["Keep native editable charts; do not replace them with hand-drawn shapes because of preview approximation", "Compare the listed charts in Office when visual parity matters", "Review specific chart warnings separately"])?;
 		}
 		container_findings(&mut report, page, &slide.id, &objects)?;
 		numbered_sequence_findings(&mut report, page, &slide.id, &objects)?;

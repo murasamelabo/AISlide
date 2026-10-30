@@ -503,14 +503,29 @@ test('visual defaults reach planning, all specialists and authoring with explici
     }
   }
   const guide = await readFile(guideUrl, 'utf8');
-  for (const heading of ['Default And Overrides', 'Choose By Meaning', 'Discover And Draw', 'Review The Deck', 'Acceptance Cases']) {
+  for (const heading of ['Default And Overrides', 'Choose By Meaning', 'Discover And Draw', 'Native First For Data Visuals', 'Review The Deck', 'Acceptance Cases']) {
     assert.ok(guide.includes(`## ${heading}`), heading);
   }
   for (const phrase of ['No diagrams', 'No icons', 'text-only', 'no fixed quota', 'no suitable visual',
     'architecture', 'concept', 'native charts', 'approved source', 'lucide_icons', 'lucide_icon_assets',
     'part_catalog', 'recommend_recipes', 'reader question', 'same ledger', 'not new MCP parameters',
-    'Existing slides', 'Do not invent', 'not proof of model compliance']) {
+    'Existing slides', 'Do not invent', 'not proof of model compliance',
+    'Do not rebuild a data-linked chart', 'CHART_PREVIEW', 'CHART_PRESENTATION', 'CHART_LABEL_LAYOUT',
+    'chart rendering not verified', 'draw charts with shapes', 'SMALL_TEXT', 'canvas_scale',
+    'verified distributions, compositions and progression numbers']) {
     assert.ok(guide.includes(phrase), phrase);
+  }
+  const authoring = await readFile(new URL('../.github/skills/aislide-authoring/SKILL.md', import.meta.url), 'utf8');
+  for (const phrase of ['loaded:false', 'get_tool_schema({name})', 'update_chart', 'remove_elements', 'canvas_scale', 'SMALL_TEXT', 'CHART_PREVIEW', 'producer.git_commit']) {
+    assert.ok(authoring.includes(phrase), `aislide-authoring: ${phrase}`);
+  }
+  const techDeck = await readFile(new URL('../.github/skills/tech-deck-ja/SKILL.md', import.meta.url), 'utf8');
+  for (const phrase of ['native chart', 'native table', 'hand-drawn shapes', 'stacked_bar', 'waterfall_totals', 'producer.git_commit', '実機描画は未確認']) {
+    assert.ok(techDeck.includes(phrase), `tech-deck-ja: ${phrase}`);
+  }
+  const planning = await readFile(new URL('../.github/skills/slide-planning/SKILL.md', import.meta.url), 'utf8');
+  for (const phrase of ['native chart', 'hand-drawn shapes', 'draw charts with shapes', 'companion HTML']) {
+    assert.ok(planning.includes(phrase), `slide-planning: ${phrase}`);
   }
   assert.match(guide, /"No diagrams" excludes diagrams, not an otherwise\s+permitted chart/);
   for (const path of ['../.github/skills/README.md', '../docs/authoring/README.md']) {

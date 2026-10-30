@@ -51,7 +51,7 @@ pub(crate) fn validate(kind: ChartKind, categories: &[String], series: &[ChartSe
         return Err(invalid("chartEx requires one plain series without combo, bubble, trendline or error-bar options"));
     }
     if !options.primary_axis.is_default() || !options.secondary_axis.is_default() || !options.category_axis.is_default() || options.data_labels.is_some() {
-        return Err(invalid("chartEx custom axes and data labels are not supported"));
+        return Err(invalid("chartEx custom axes and data labels are not supported; omit primary_axis, secondary_axis, category_axis and data_labels (for waterfall totals, use options.waterfall_totals with 0-based category indices)"));
     }
     if kind == ChartKind::Funnel {
         if options.waterfall_totals.is_some() || series[0].values.iter().any(|value| *value <= 0.0) { return Err(invalid("funnel requires strictly positive values and no waterfall_totals")); }

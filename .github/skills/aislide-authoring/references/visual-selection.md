@@ -68,6 +68,41 @@ Those general choices do not require that reference's optional technical style.
   and shared style roles. These are planning notes, not new MCP parameters.
   When a complete ledger was supplied, reuse it; do not demand a new ledger.
 
+## Native First For Data Visuals
+
+- Do not rebuild a data-linked chart, stacked bar, waterfall, gauge, progress
+  bar, heat table or KPI tile from hand-drawn rectangles, ellipses and text
+  boxes (`rect`, `shape`, `text`). A hand-drawn data visual is not data-bound
+  and recipients cannot edit its series, so treat it like a rasterized chart.
+  Use a native chart (`add_elements` with `type:"chart"` and `update_chart`), a
+  managed part/graph, or a native table. Conceptual diagrams with no
+  quantitative series remain valid when they clarify structure or flow.
+- A preview approximation is not a reason to abandon a native chart. AISlide
+  chart previews (`CHART_PREVIEW`, `CHART_PRESENTATION`, `CHART_LABEL_LAYOUT`)
+  are bounded projections (`office_visual_parity: false`), while the exported
+  PPTX contains native OOXML charts. Separate your own layout mistakes from
+  preview differences and adjust with `update_chart` rather than redrawing with
+  shapes. Where Windows PowerPoint is available, you may optionally inspect a
+  copied export read-only with no window (never call `Quit`, never overwrite
+  originals, never execute imported content or macros, and never claim Office
+  visual parity from structural checks alone). When PowerPoint verification is
+  unavailable, keep the native chart and report "chart rendering not verified
+  in PowerPoint".
+- Record one ledger row per slide:
+  `reader question | relation | primary visual (native chart / native table / part:<preset> / graph / picture / text / hand-drawn shapes) | why chosen | rejected native alternative and why | verification (preview / PowerPoint / not verified)`.
+  A deck-wide rule such as "draw charts with shapes" is invalid.
+- Managed parts use fixed typography (often `14px` or smaller on the `1280x720`
+  canvas). Do not treat fixed-preset `SMALL_TEXT` as a reason to replace a part
+  with hand-drawn shapes, and never estimate font size in px from a downscaled
+  preview image (`canvas_scale` / `tile_scale`); read `get_deck_summary` or
+  `preflight_presentation`.
+- When content exceeds a part's fixed capacity or font size, follow this order:
+  (1) cut to key points and move detail to speaker notes or an appendix table;
+  (2) split the slide; (3) use a native table with an explicit font size;
+  (4) only when no native or managed expression can represent the relation, use
+  hand-drawn shapes, record the reason in the ledger, and disclose it in the
+  final report.
+
 ## Review The Deck
 
 Look across the deck, not just at whether each page fits. Where meanings differ,
@@ -103,6 +138,7 @@ These are synthetic evaluation inputs, not user facts or prescribed outlines.
 | "No diagrams"; comparable verified numbers are supplied and charts are allowed | No structural/concept diagrams; a useful native chart is still allowed | Interpreting a type-specific exclusion as a ban on every visual |
 | "No icons"; confirmed trend values are supplied | No icons; a useful native trend chart is still allowed | Treating the icon ban as a ban on every visual, or adding icons anyway |
 | A required original figure with small labels | Preserve it, enlarge/detail-crop and annotate as permitted | Replacing it with a prettier but unsupported drawing |
+| A report with verified distributions, compositions and progression numbers | Editable native charts (`type:"chart"`), native tables and managed parts (`part:<preset>`) with per-slide ledger reasons | Rebuilding bar charts, gauges, waterfalls or KPI tiles from rectangles and text boxes, or applying a global "draw charts with shapes" rule |
 | A short decision or evidence that supports no visual relation | A clear statement; record no suitable visual | Decorative shapes, invented connections or forced category counts |
 
 Static link, phrase and tool-contract tests protect the guidance wiring. They are

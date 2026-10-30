@@ -142,6 +142,8 @@ export class DocumentSession {
   setHyperlink(slideId: string, input: { id: string; link: string | null }, options?: AuthoringOptions): Promise<AislideDocument>
   setShapeAdjustment(slideId: string, input: { id: string; adjustment: ShapeAdjustment }, options?: AuthoringOptions): Promise<AislideDocument>
   addPicture(slideId: string, input: PictureInput, options?: AuthoringOptions): Promise<AislideDocument>
+  updateChart(slideId: string, input: { id: string; kind?: import('./types').ChartKind | null; categories?: string[] | null; series?: import('./types').ChartSeries[] | null; options?: import('./types').ChartOptions | null; frame?: Frame | null }, options?: AuthoringOptions): Promise<AislideDocument>
+  removeElements(slideId: string, ids: string[], options?: AuthoringOptions): Promise<AislideDocument>
   /** Imports selected authored source slides with matching canvas in one Undo. Native source documents fail closed. */
   importSlides(source: AislideDocument, input: SlideImportInput, options?: AuthoringOptions): Promise<AislideDocument>
   replaceDeck(deck: Deck, options?: ReplaceOptions): Promise<AislideDocument>

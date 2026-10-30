@@ -2,8 +2,8 @@
 export type StaticExportFormat = 'png' | 'jpeg' | 'pdf'
 export type StaticExportOptions = { format?: StaticExportFormat; page_indices?: number[] | null; scale?: number; transparent?: boolean; jpeg_quality?: number; jpeg_matte?: [number, number, number]; max_output_bytes?: number; deny_warnings?: boolean }
 export type PreviewOptions = { page_indices?: number[] | null; max_dimension?: number; layout?: 'pages' | 'contact_sheet'; max_output_bytes?: number; format?: 'png' | 'jpeg'; overflow?: 'shrink' | 'error' }
-export type PreviewImage = { base64: string; mime_type: 'image/png' | 'image/jpeg'; width: number; height: number; byte_length: number; sha256: string }
-export type PresentationPreview = { revision: number; hash: string; requested_max_dimension: number; actual_max_dimension: number; quality_reduced: boolean; pages: { page_index: number; slide_id: string; image_index: number; x: number; y: number; width: number; height: number }[]; images: PreviewImage[]; warnings: StaticExport['warnings']; office_visual_parity: false }
+export type PreviewImage = { base64: string; mime_type: 'image/png' | 'image/jpeg'; width: number; height: number; byte_length: number; sha256: string; canvas_scale?: number; downscaled_from_canvas?: boolean; tile_width?: number; tile_height?: number; tile_scale?: number }
+export type PresentationPreview = { revision: number; hash: string; canvas_width: number; canvas_height: number; canvas_scale: number; downscaled_from_canvas: boolean; requested_max_dimension: number; actual_max_dimension: number; quality_reduced: boolean; pages: { page_index: number; slide_id: string; image_index: number; x: number; y: number; width: number; height: number }[]; images: PreviewImage[]; warnings: StaticExport['warnings']; office_visual_parity: false }
 export type PreflightOptions = { page_indices?: number[] | null; min_font_size?: number; include_inherited?: boolean }
 export type ReferenceEntry = { id: string; name: string; url: string; slide_ids: string[]; publish?: boolean }
 export type ReferencePublication = { supplied: number; published: number; excluded: number }
@@ -40,7 +40,7 @@ export type RecipeApplyOptions = { expectedRevision: number; expectedHash: strin
 export type DeliveryOptions = { page_indices?: number[] | null; pdf?: boolean; preview?: 'none' | 'pages' | 'contact_sheet'; notes?: boolean; source_report?: boolean; preflight?: boolean; max_dimension?: number; min_font_size?: number; max_output_bytes?: number }
 export type DeliveryFile = { kind: 'pptx' | 'pdf' | 'preview' | 'notes' | 'source_report'; suffix: string; mime_type: string; page_indices: number[]; byte_length: number; sha256: string; base64: string; width?: number; height?: number }
 export type DeliveryChecks = { document_verified: true; pptx_exported: true; native_preservation_checked: boolean; source_bindings_current: true; layout_measured: boolean; layout_scope?: 'visible_slide_elements_and_used_design' | 'not_measured_for_native_origin'; layout_issues: { code: string; severity: string; message: string }[]; preflight_page_indices: number[]; static_render_page_indices: number[]; office_visual_parity: false; source_authenticity_verified: false; source_freshness_verified: false; semantic_truth_verified: false; accessibility_checked: false }
-export type DeliveryManifest = { format: 'aislide.delivery'; version: 1; producer: { name: string; version: string; engine: 'aislide-core'; contract_version: 1 }; document: { id: string; revision: number; hash: string; title: string; slide_count: number }; options: Required<DeliveryOptions>; files: (Omit<DeliveryFile, 'base64' | 'width' | 'height'> & { width: number | null; height: number | null })[]; preview_pages: PresentationPreview['pages']; multi_file_atomic: false; checks: DeliveryChecks; preflight: PreflightReport | null; render_warnings: StaticExport['warnings']; privacy: { pptx_includes_notes: true; pptx_may_include_sources_and_bindings: true; pptx_includes_guided_record?: true; separate_notes_requested: boolean; separate_source_report_requested: boolean }; limitations: string[] }
+export type DeliveryManifest = { format: 'aislide.delivery'; version: 1; producer: { name: string; version: string; git_commit: string; core_version?: string; core_git_commit?: string; transport?: string; engine: 'aislide-core'; contract_version: 1 }; document: { id: string; revision: number; hash: string; title: string; slide_count: number }; options: Required<DeliveryOptions>; files: (Omit<DeliveryFile, 'base64' | 'width' | 'height'> & { width: number | null; height: number | null })[]; preview_pages: PresentationPreview['pages']; multi_file_atomic: false; checks: DeliveryChecks; preflight: PreflightReport | null; render_warnings: StaticExport['warnings']; privacy: { pptx_includes_notes: true; pptx_may_include_sources_and_bindings: true; pptx_includes_guided_record?: true; separate_notes_requested: boolean; separate_source_report_requested: boolean }; limitations: string[] }
 export type PreparedDelivery = { revision: number; hash: string; files: DeliveryFile[]; manifest: DeliveryManifest }
 export type StaticExportFile = { filename: string; base64: string; byte_length: number; mime_type: 'image/png' | 'image/jpeg' | 'application/pdf'; page_indices: number[]; width: number; height: number }
 export type StaticExport = { files: StaticExportFile[]; warnings: { code: string; page_index: number; element_id: string; scope?: string; message: string }[]; office_parity_verified: false; pdf_rasterized: false; pdf_text_outlined: boolean; pdf_editable_text: false; pdf_tagged: boolean; pdf_searchable_text: boolean; pdf_selectable_text: boolean; pdf_semantic_overlay: boolean; pdf_ua_certified: false }
@@ -269,6 +269,8 @@ export type AuthoringOperation =
   | { op: 'update_part'; slide_id: string; id: string; spec: PartSpec }
   | { op: 'add_graph'; slide_id: string; id: string; spec: GraphSpec; layout?: PartLayout | null }
   | { op: 'update_graph'; slide_id: string; id: string; spec: GraphSpec }
+  | { op: 'update_chart'; slide_id: string; id: string; kind?: ChartKind | null; categories?: string[] | null; series?: ChartSeries[] | null; options?: ChartOptions | null; frame?: Frame | null }
+  | { op: 'remove_elements'; slide_id: string; ids: string[] }
 export type SlideImportInput = { source_slide_ids: string[]; prefix: string; after?: string | null }
 
 export type PartItem = { label: string; detail?: string; value?: number | null }
@@ -286,7 +288,7 @@ export type ImageColumn = { image: GraphIcon; label: string; detail?: string; ca
 export type AgendaItem = { label: string; detail?: string; meta?: string }
 export type CalloutRegion = { x: number; y: number; width: number; height: number }
 export type Callout = { x: number; y: number; label: string; detail?: string; target_region?: CalloutRegion | null }
-export type KpiCard = { label: string; value: string; unit?: string; delta?: string; status?: 'neutral' | 'good' | 'bad'; comparison?: string }
+export type KpiCard = { label: string; value: string; unit?: string; delta?: string; status?: 'neutral' | 'good' | 'bad'; accent?: string | null; comparison?: string }
 /** `ranges` are ascending qualitative limits; the last one is the axis maximum. */
 export type BulletRow = { label: string; actual: number; target: number; ranges: number[]; unit?: string; note?: string; lower_is_better?: boolean }
 export type VarianceRow = { label: string; plan: number; actual: number }
@@ -325,12 +327,12 @@ export type PartData =
   | { kind: 'shift_rows'; from_label?: string; to_label?: string; rows: ShiftRow[]; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'step_cards'; steps: StepCard[]; step_label?: string; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'open_steps'; steps: EditorialStep[]; accent?: string | null }
-  | { kind: 'rail_steps'; steps: EditorialStep[]; accent?: string | null }
+  | { kind: 'rail_steps'; steps: EditorialStep[]; accent?: string | null; body_size?: number | null }
   | { kind: 'roadmap'; phases: RoadmapPhase[]; accent?: string | null }
   | { kind: 'icon_columns'; items: Omit<IconRow, 'detail_emphasis'>[] }
-  | { kind: 'fact_columns'; items: FactColumn[]; columns?: number | null; accent?: string | null }
+  | { kind: 'fact_columns'; items: FactColumn[]; columns?: number | null; accent?: string | null; body_size?: number | null }
   | { kind: 'image_columns'; items: ImageColumn[] }
-  | { kind: 'agenda'; items: AgendaItem[]; accent?: string | null }
+  | { kind: 'agenda'; items: AgendaItem[]; accent?: string | null; body_size?: number | null }
   | { kind: 'screenshot_callouts'; image: GraphIcon; callouts: Callout[]; detail_views?: boolean; accent?: string | null; body_size?: number | null; message?: PartMessage | null }
   | { kind: 'kpi_cards'; cards: KpiCard[]; columns?: number | null; message?: PartMessage | null }
   | { kind: 'bullet_graphs'; rows: BulletRow[]; message?: PartMessage | null }

@@ -17,79 +17,71 @@ Skills do not connect MCP. Label synthetic data.
 
 1. Confirm audience, purpose, pages, evidence, images and notes.
 	Never invent data or redraw source images.
-2. IDs: `list_decks` / `get_deck_summary`. Use `discover_tools`, then
-	`get_tool_schema({name:"apply_operations"})` before advanced elements, rich text,
+2. IDs: `list_decks` / `get_deck_summary`. Expose any `loaded:false` tool in
+	`discover_tools` via `get_tool_schema({name})` right before use (compact mode
+	retains 4); fetch `apply_operations` before advanced elements, rich text,
 	composition, parts or graphs.
 3. Use `compile_report`, guided authoring or `create_presentation`. Set
-	`setup:{design_preset,font_family,theme?}` before content. Check installed
-	glyph coverage; names do not install/embed fonts.
-4. Reuse title/header/footer/body regions and styles. On generated empty slides,
-	`compose_slide` accepts 1-3 blocks: cards, callout, text, steps, comparison, part
-	or graph. Reuse `style`; default card padding is 24px. Native/nonempty slides
-	reject; edit them explicitly to preserve templates.
-	If `layout_patterns` exists and the user has not opted out, resolve one per
-	slide for the deck, use its frames and follow `fallback` when `fits` is false.
-	On a request to use/skip patterns, call `set_layout_patterns` (on/off/status).
-	Optional `component_styles` / `component_profile:"technical_briefing"` shares
-	roles across recipes, patterns and manual elements; preserve imported templates.
-5. For icon-led briefings, read `references/technical-panels.md`.
-	Prefer managed parts/graphs. A composition graph block takes coordinate-free
-	`input` and inserts managed metadata in one operation. `layout_graph` returns
-	a bounded grid GraphSpec, not a hierarchical layout: 1-48 nodes, 64 edges,
-	1-8 columns (default 3), no groups or node resizing.
-6. Register approved local images with `register_asset` or atomic `register_assets`
-	(1-32). Use returned `asset_id` and dimensions; never regenerate/output base64
-	through the model. `prepare_assets` batches explicit resize/format changes,
-	preserving originals. Use `fit:"contain"` or intentional `fit:"cover"`.
-	Omitting `fit` uses legacy stretch. Retain attribution.
-7. Batch 1-128 `apply_operations`; after targets exist include `update_notes`,
-	`set_table_headers`, `set_accessibility`. One Undo; atomic rejection.
-	Use planned revision/hash; never force a stale plan.
-8. `set_text_padding` must leave positive content space; `null` resets defaults.
-	`set_rich_text` takes paragraphs; core derives plain text; empty input clears.
-	Use dedicated dynamic-field operations; keep plain/rich validation.
+	`setup:{design_preset,font_family,theme?}` before content. Check glyph coverage;
+	names do not install/embed fonts.
+4. Reuse deck regions/styles. On empty slides, `compose_slide` accepts 1-3 blocks
+	(cards, callout, text, steps, comparison, part, graph; default card padding 24px).
+	Native/nonempty slides reject; edit explicitly to preserve templates. Resolve one
+	`layout_patterns` per slide unless opted out (`set_layout_patterns`); follow
+	`fallback` when `fits` is false. Optional `component_styles` /
+	`component_profile:"technical_briefing"` shares roles.
+5. For icon-led briefings, read `references/technical-panels.md`. Prefer managed
+	parts/graphs and native charts/tables; never draw data charts from shapes.
+	Composition graph `input` is coordinate-free. `layout_graph` is a grid:
+	1-48 nodes, 64 edges, 1-8 columns (default 3), no groups or node resizing.
+6. Register approved local images with `register_asset` / `register_assets` (1-32).
+	Use `asset_id` and dimensions; never output base64. `prepare_assets` batches
+	edits, keeping originals. Use `fit:"contain"` or `fit:"cover"`; omitting `fit`
+	uses legacy stretch. Retain attribution.
+7. Batch 1-128 `apply_operations` (`update_chart` / `remove_elements` adjust in
+	place); after targets exist include `update_notes`, `set_table_headers`,
+	`set_accessibility`. One Undo; atomic rejection. Use planned revision/hash.
+8. `set_text_padding` leaves positive space; `null` resets defaults. `set_rich_text`
+	takes paragraphs; empty input clears. Use dynamic-field ops; keep validation.
 9. Serialize core-backed AISlide calls, including reads/previews. Await each batch;
-	no automatic queues, retries or parallel edits per handle.
-10. Review all required pages in groups of at most 8, then recheck affected pages.
-	 For customer/PDF delivery use `set_references`; check `publication.excluded`.
-	 Read [distribution references](references/distribution-references.md);
-	 for Japanese use `title:"参考資料"`.
-	 Compact preview defaults to the first 8; inspect `page_scope`. Verify images,
-	 notes, headers, alt text, Japanese glyphs/fallbacks, inner padding, overflow and
-	 graph collisions. Composition text rejects overflow; managed parts
-	 keep bounded fitting. Structure is not Office visual parity.
+	no queues, retries or parallel edits per handle.
+10. Review all required pages in groups of <=8; recheck affected pages. Use
+	 `set_references` (`title:"参考資料"` in Japanese; see
+	 [distribution references](references/distribution-references.md)) and check
+	 `publication.excluded`. Inspect `page_scope` and `canvas_scale`; read real font
+	 px from `get_deck_summary` / `preflight_presentation`, not downscaled previews.
+	 Do not replace fixed-font parts (`SMALL_TEXT`) or chart previews (`CHART_PREVIEW`)
+	 with shapes. Verify images, notes, headers, alt text, glyphs, padding, overflow
+	 and collisions. Structure is not Office visual parity.
 11. Interactive exports: [mandatory playback checks](../../../docs/authoring/powerpoint-interactive.md#mandatory-creation-and-delivery-checklist).
-	 Test exported HTML after clicks; rebuild/re-export fixes.
-	 Export under a new approved filename. Verify path, hash, page count and
-	 review scope. Report unmet requirements, substitutions and unverified items.
-	 Never overwrite originals, publish, deploy or install without authorization.
+	 Test exported HTML after clicks; rebuild/re-export fixes. Export to a new
+	 approved filename; verify path, hash, `producer.git_commit`, page count and
+	 scope. Report native chart/table/part counts, hand-drawn data slides with
+	 reasons, unmet requirements, substitutions and unverified items. Never overwrite,
+	 publish, deploy or install without authorization.
 
 ## Limits And Recovery
 
-- Asset roots use startup `--asset-dir`; never widen permissions
-  or fetch external relationships. Registry: 32 handles / 64MiB raw. PNG/JPEG:
-  1MiB; SVG: 256KiB; archives: 16MiB; fonts: 12MiB; evidence: 2MiB. `usage` is
-	registry-only; `raster_cost` is not document capacity approval. Closing handles
-	retains document images. Registration/preparation is atomic.
-- Report bodies: at most 4 items. Process: 2-4 labels, each 80 Unicode scalars;
-  other bodies: 240. Notes: 8000. Fix field paths; never drop agreed content.
-  Cards: 1-6 items, at most 3 columns.
+- Asset roots use `--asset-dir`; never widen permissions or fetch external links.
+  Registry: 32 handles / 64MiB raw (PNG/JPEG 1MiB, SVG 256KiB, archives 16MiB,
+  fonts 12MiB, evidence 2MiB). `usage` is registry-only; `raster_cost` is not
+  document capacity. Closing handles retains document images.
+- Report bodies: <=4 items. Process: 2-4 labels, 80 Unicode scalars each; others:
+  240. Notes: 8000. Cards: 1-6 items, <=3 columns. Fix field paths; never drop
+  agreed content.
 - Fix validation/capacity inputs without bypassing guards or flattening managed
-  objects. On busy, stop parallel calls and await the existing operation, no polls.
-  After timeout/cancellation inspect summaries/manifests. Save before reconnecting:
-  handles are process-local.
-- `_meta.aislide_timing` is not model latency or pure CPU time; do not claim speedups.
+  objects. On busy, await the active call without polling. After timeout/cancel,
+  inspect summaries/manifests. Save before reconnecting.
+- `_meta.aislide_timing` is not model latency or pure CPU time.
 
 ## Select And Review The Expression
 
 Follow [visual defaults](references/visual-selection.md).
 Explicit user exclusions override this default.
-Record question, relation, primary visual, selected/rejected reasons, emphasis and
-style roles. `recommend_recipes` accepts goal/dimensions/position need; inspect
-rejected/no-fit, then preview. Check relations, source readability, anchors and
-role consistency, not just overflow. Never infer facts or edit managed children.
+Record per-slide question, relation, primary visual, selected/rejected reasons,
+emphasis and role consistency. Use [selection discriminators](references/technical-panels.md#selection-discriminators)
+and `recommend_recipes`; never infer facts or edit managed children.
 
 ## Further Detail
 
 Source docs: `<repo>/docs/api.md`, `<repo>/docs/authoring/README.md`.
-User installs cannot assume repo-relative paths.

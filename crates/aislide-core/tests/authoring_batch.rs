@@ -683,8 +683,8 @@ fn typed_authoring_and_slide_import_are_discoverable_without_claiming_office_par
     assert_eq!(capabilities["typed_authoring"]["scale_fonts"], false);
     assert_eq!(capabilities["typed_authoring"]["one_undo"], true);
     let operations = capabilities["typed_authoring"]["operations"].as_array().unwrap();
-    assert_eq!(operations.len(), 21);
-    for operation in ["add_elements", "set_frame", "set_text_style", "set_surface", "set_effects", "set_slide_background", "set_connector", "set_picture_crop", "set_hyperlink", "set_shape_adjustment", "add_picture", "add_part", "update_part", "add_graph", "update_graph", "update_notes", "set_table_headers", "set_accessibility"] {
+    assert_eq!(operations.len(), 23);
+    for operation in ["add_elements", "set_frame", "set_text_style", "set_surface", "set_effects", "set_slide_background", "set_connector", "set_picture_crop", "set_hyperlink", "set_shape_adjustment", "add_picture", "add_part", "update_part", "add_graph", "update_graph", "update_notes", "set_table_headers", "set_accessibility", "update_chart", "remove_elements"] {
         assert!(operations.contains(&json!(operation)), "missing {operation}");
     }
     assert_eq!(capabilities["typed_authoring"]["managed_parts_limit"], 128);
@@ -1257,4 +1257,53 @@ fn typed_batch_native_supported_operations_survive_export_reopen() {
     assert_eq!(element(after, "table")["width"].as_f64(), Some(800.0));
     assert_eq!(element(after, "table")["rows"], element(&before, "table")["rows"]);
     assert_eq!(element(after, "chart"), element(&before, "chart"));
+}
+
+#[test]
+fn issue58_update_chart_remove_elements_and_chartex_validation_guidance() {
+    let before = execute_request(request(&populated(), json!([
+        {"op":"set_accessibility","slide_id":"slide-1","element_id":"chart","metadata":{"title":"Original chart","description":"Synthetic"}},
+        {"op":"set_table_headers","slide_id":"slide-1","element_id":"table","policy":"first_row"}
+    ]))).unwrap()["document"].clone();
+
+    // Update chart kind, categories, series and options in place while preserving frame and accessibility metadata.
+    let updated = execute_request(request(&before, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"chart","kind":"bar","categories":["Cat A","Cat B"],"options":{"legend":"hidden","data_labels":{"show_value":true,"position":"outside_end"}}}
+    ]))).unwrap()["document"].clone();
+    let chart = element(&updated, "chart");
+    assert_eq!(chart["kind"], "bar");
+    assert_eq!(chart["categories"], json!(["Cat A", "Cat B"]));
+    assert_eq!(chart["x"], element(&before, "chart")["x"]);
+    assert_eq!(chart["width"], element(&before, "chart")["width"]);
+    assert_eq!(updated["deck"]["slides"][0]["review"]["accessibility"]["chart"]["title"], "Original chart");
+
+    // Switching to waterfall with unsupported data_labels or missing waterfall_totals gives actionable guidance.
+    reject_atomic(&updated, json!({
+        "op":"update_chart","slide_id":"slide-1","id":"chart","kind":"waterfall",
+        "options":{"data_labels":{"show_value":true},"waterfall_totals":[0,1]}
+    }), "waterfall_totals");
+    reject_atomic(&updated, json!({
+        "op":"update_chart","slide_id":"slide-1","id":"chart","kind":"waterfall",
+        "options":{"legend":"hidden","waterfall_totals":[0,5]}
+    }), "zero-based category indices");
+    reject_atomic(&updated, json!({"op":"update_chart","slide_id":"slide-1","id":"rect","kind":"bar"}), "requires a chart element");
+
+    // Valid waterfall update succeeds and exports/reopens cleanly.
+    let waterfall = execute_request(request(&updated, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"chart","kind":"waterfall",
+         "categories":["Start","Delta","Total"],"series":[{"name":"Score","color":"1F4E8C","values":[19,49,68]}],
+         "options":{"legend":"hidden","waterfall_totals":[0,2]}}
+    ]))).unwrap()["document"].clone();
+    assert_eq!(element(&waterfall, "chart")["kind"], "waterfall");
+
+    // remove_elements removes targets, attached connectors, and review metadata atomically; missing IDs fail closed.
+    reject_atomic(&waterfall, json!({"op":"remove_elements","slide_id":"slide-1","ids":["rect","does-not-exist"]}), "element not found: does-not-exist");
+    let removed = execute_request(request(&waterfall, json!([
+        {"op":"remove_elements","slide_id":"slide-1","ids":["rect","table","chart"]}
+    ]))).unwrap()["document"].clone();
+    let remaining_ids: Vec<&str> = removed["deck"]["slides"][0]["elements"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+    for gone in ["rect", "connector", "table", "chart"] {
+        assert!(!remaining_ids.contains(&gone), "{gone} must be removed: {remaining_ids:?}");
+    }
+    assert!(removed["deck"]["slides"][0]["review"].is_null(), "review entries for removed elements must be cleaned up");
 }
