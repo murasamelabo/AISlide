@@ -525,7 +525,7 @@ Every operation has `op` and `slide_id`, plus the following fields:
 | `set_hyperlink` | `id`, required `link` | Set a validated text/shape URL; explicit `null` clears it, an absent field is an error |
 | `set_shape_adjustment` | `id`, `adjustment` | Set a supported typed shape adjustment; not arbitrary DrawingML formulas |
 | `add_picture` | `id`, `base64`, `mime_type`, `alt`, optional `frame`, `crop` | Decode PNG/JPEG and insert at the supplied frame/crop in the same transaction; omission retains the fitted picture defaults |
-| `update_chart` | `id`, optional `kind`, `categories`, `series`, `options`, `frame` | Update an existing native `Element::Chart` in place without rebuilding the slide; omitted fields are preserved and `chartEx` rules are re-validated |
+| `update_chart` | `id`, optional `kind`, `categories`, `series`, `options`, `replace_options`, `frame` | Update an existing native `Element::Chart` in place without rebuilding the slide; omitted fields are preserved (`options` merges non-empty fields unless `replace_options: true` resets/replaces `options`) and `chartEx` rules are re-validated |
 | `remove_elements` | `ids` | Remove 1-128 distinct top-level elements on one slide, cleaning up attached connectors, managed part metadata, source bindings and review metadata |
 
 `Frame` is `{x,y,width,height}`: finite nonnegative coordinates, positive

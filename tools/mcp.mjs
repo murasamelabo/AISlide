@@ -312,7 +312,7 @@ const authoringVariants = [
 	z.object({ op: z.literal('update_part'), slide_id: slideId, id: z.string().min(1).max(40), spec: z.lazy(() => partSpec) }).strict(),
 	z.object({ op: z.literal('add_graph'), slide_id: slideId, id: z.string().min(1).max(40), spec: z.lazy(() => graphSpec), layout: optional(z.lazy(() => partLayout)) }).strict(),
 	z.object({ op: z.literal('update_graph'), slide_id: slideId, id: z.string().min(1).max(40), spec: z.lazy(() => graphSpec) }).strict(),
-	z.object({ op: z.literal('update_chart'), slide_id: slideId, id: slideId, kind: optional(chartKinds), categories: optional(z.array(z.string().max(80)).max(32)), series: optional(z.array(chartSeriesSchema).min(1).max(6)), options: optional(chartOptionsSchema), frame: optional(frameSchema) }).strict(),
+	z.object({ op: z.literal('update_chart'), slide_id: slideId, id: slideId, kind: optional(chartKinds), categories: optional(z.array(z.string().max(80)).max(32)), series: optional(z.array(chartSeriesSchema).min(1).max(6)), options: optional(chartOptionsSchema), replace_options: optional(z.boolean()), frame: optional(frameSchema) }).strict(),
 	z.object({ op: z.literal('remove_elements'), slide_id: slideId, ids: authoringIds }).strict(),
 ];
 const authoringOperations = z.array(z.discriminatedUnion('op', authoringVariants.map(variant => variant.shape.op.value === 'add_picture' ? withAssetReference(variant) : variant))).min(1).max(128);
@@ -1247,7 +1247,7 @@ const authoringDescriptions = {
 	set_hyperlink: 'Set or clear a text/shape hyperlink in one Undo. Core validates allowed link targets without fetching them.',
 	set_shape_adjustment: 'Set the existing adj guide of a supported roundRect, chevron or triangle in one Undo. Core rejects unsupported presets and values.',
 	add_picture: 'Decode and append embedded PNG/JPEG bytes with optional final frame/crop in one core transaction and Undo. No linked images or execution. Optional revision retains legacy calls; supply it for stale-edit protection.',
-	update_chart: 'Update an existing native chart element in place (kind, categories, series, options and optional frame) without rebuilding the slide, in one Undo. Omitted fields are preserved; chartEx constraints are re-validated.',
+	update_chart: 'Update an existing native chart element in place (kind, categories, series, options, optional replace_options and frame) without rebuilding the slide, in one Undo. Omitted fields are preserved (options merges non-empty fields by default; set replace_options:true to replace/reset options); chartEx constraints are re-validated.',
 	remove_elements: 'Remove 1-128 distinct top-level elements on one slide in one Undo, cleaning up attached connectors, managed part records, bindings and review metadata.',
 };
 for (const variant of authoringVariants) {

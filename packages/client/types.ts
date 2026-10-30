@@ -269,7 +269,7 @@ export type AuthoringOperation =
   | { op: 'update_part'; slide_id: string; id: string; spec: PartSpec }
   | { op: 'add_graph'; slide_id: string; id: string; spec: GraphSpec; layout?: PartLayout | null }
   | { op: 'update_graph'; slide_id: string; id: string; spec: GraphSpec }
-  | { op: 'update_chart'; slide_id: string; id: string; kind?: ChartKind | null; categories?: string[] | null; series?: ChartSeries[] | null; options?: ChartOptions | null; frame?: Frame | null }
+  | { op: 'update_chart'; slide_id: string; id: string; kind?: ChartKind | null; categories?: string[] | null; series?: ChartSeries[] | null; options?: ChartOptions | null; replace_options?: boolean | null; frame?: Frame | null }
   | { op: 'remove_elements'; slide_id: string; ids: string[] }
 export type SlideImportInput = { source_slide_ids: string[]; prefix: string; after?: string | null }
 

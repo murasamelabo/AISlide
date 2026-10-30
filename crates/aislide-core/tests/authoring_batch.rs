@@ -1294,6 +1294,18 @@ fn issue58_update_chart_remove_elements_and_chartex_validation_guidance() {
     reject_atomic(&updated, json!({"op":"update_chart","slide_id":"slide-1","id":"rect","kind":"bar"}), "requires a chart element");
 
     // Valid standard <-> waterfall (chartEx) conversion on an authored deck exports and reopens cleanly;
+    // replace_options: true resets options (e.g. clearing reverse or min/max).
+    let with_reverse = execute_request(request(&updated, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"chart","options":{"primary_axis":{"reverse":true}}}
+    ]))).unwrap()["document"].clone();
+    assert_eq!(element(&with_reverse, "chart")["options"]["primary_axis"]["reverse"], true);
+    assert_eq!(element(&with_reverse, "chart")["options"]["primary_axis"]["min"], 0.0);
+    let reset_opts = execute_request(request(&with_reverse, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"chart","replace_options":true,"options":{"legend":"bottom"}}
+    ]))).unwrap()["document"].clone();
+    assert!(element(&reset_opts, "chart")["options"].get("primary_axis").is_none());
+    assert_eq!(element(&reset_opts, "chart")["options"]["legend"], "bottom");
+
     // on a reopened native deck, same-family update_chart succeeds while chart<->chartEx conversion is rejected by NativeRegenerationGuard.
     let waterfall = execute_request(request(&cleared_axis, json!([
         {"op":"update_chart","slide_id":"slide-1","id":"wf-chart","kind":"waterfall",

@@ -63,6 +63,7 @@ pub enum Operation {
         #[serde(default)] categories: Option<Vec<String>>,
         #[serde(default)] series: Option<Vec<crate::model::ChartSeries>>,
         #[serde(default)] options: Option<crate::model::ChartOptions>,
+        #[serde(default)] replace_options: bool,
         #[serde(default)] frame: Option<Frame>,
     },
     RemoveElements { slide_id: String, ids: Vec<String> },
@@ -331,9 +332,9 @@ fn apply(
             position_picture(&mut element, destination.as_ref(), crop, *fit)?;
             slide.elements.push(element);
         }
-        Operation::UpdateChart { id, kind, categories, series, options, frame: destination, .. } => {
-            if kind.is_none() && categories.is_none() && series.is_none() && options.is_none() && destination.is_none() {
-                return Err(Error::Invalid("update_chart requires at least one of kind, categories, series, options or frame".into()));
+        Operation::UpdateChart { id, kind, categories, series, options, replace_options, frame: destination, .. } => {
+            if kind.is_none() && categories.is_none() && series.is_none() && options.is_none() && !*replace_options && destination.is_none() {
+                return Err(Error::Invalid("update_chart requires at least one of kind, categories, series, options, replace_options or frame".into()));
             }
             for part in parts.iter().filter(|part| part.slide_id == *slide_id) {
                 let owns = part.element_id == *id || slide.elements.iter().find(|el| el.bounds().0 == part.element_id)
@@ -350,13 +351,14 @@ fn apply(
                     if let Some(next_kind) = kind { *current_kind = *next_kind; }
                     if let Some(next_categories) = categories { *current_categories = next_categories.clone(); }
                     if let Some(next_series) = series { *current_series = next_series.clone(); }
-                    if let Some(next_options) = options { merge_chart_options(current_options, next_options, *current_kind); }
+                    if *replace_options { *current_options = options.clone().unwrap_or_default(); }
+                    else if let Some(next_options) = options { merge_chart_options(current_options, next_options, *current_kind); }
                     else if kind.is_some() { merge_chart_options(current_options, &Default::default(), *current_kind); }
                     crate::model::chart_format::validate(*current_kind, current_categories, current_series, current_options)?;
                 }
                 _ => return Err(Error::Unsupported("update_chart requires a chart element".into())),
             }
-            if kind.is_some() || categories.is_some() || series.is_some() || options.is_some() {
+            if kind.is_some() || categories.is_some() || series.is_some() || options.is_some() || *replace_options {
                 for binding in bindings.iter_mut().filter(|b| b.slide_id == *slide_id && b.element_id == *id) { binding.stale = true; }
             }
             if let Some(destination) = destination { frame(element, destination)?; }

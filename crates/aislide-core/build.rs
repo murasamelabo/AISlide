@@ -37,7 +37,9 @@ fn resolve_git_commit(manifest_dir: &Path) -> String {
         }
         if trimmed == "unknown" { return "unknown".into(); }
     }
-    if let Ok(output) = Command::new("git").args(["rev-parse", "--short", "HEAD"]).current_dir(manifest_dir).output() {
+    let Some(repo_root) = manifest_dir.parent().and_then(Path::parent) else { return "unknown".into(); };
+    if git_paths(repo_root).is_none() { return "unknown".into(); }
+    if let Ok(output) = Command::new("git").args(["rev-parse", "--short", "HEAD"]).current_dir(repo_root).output() {
         if output.status.success() {
             if let Ok(stdout) = String::from_utf8(output.stdout) {
                 let trimmed = stdout.trim();
