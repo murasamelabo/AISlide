@@ -322,7 +322,7 @@ fn apply(
                 }
                 _ => return Err(Error::Unsupported("update_chart requires a chart element".into())),
             }
-            if categories.is_some() || series.is_some() {
+            if kind.is_some() || categories.is_some() || series.is_some() || options.is_some() {
                 for binding in bindings.iter_mut().filter(|b| b.slide_id == *slide_id && b.element_id == *id) { binding.stale = true; }
             }
             if let Some(destination) = destination { frame(element, destination)?; }
@@ -339,6 +339,7 @@ fn apply(
                     }
                     return Err(Error::Invalid(format!("element not found: {id}")));
                 };
+                native_guard.check(slide, id)?;
                 let subtree = crate::model::element_list(std::slice::from_ref(&slide.elements[element_index]));
                 if subtree.iter().any(|el| el.visual().is_some_and(|visual| visual.locked || visual.hidden)) {
                     return Err(Error::Unsupported("unlock and show the target and its parent groups before editing".into()));
@@ -346,6 +347,9 @@ fn apply(
                 for item in subtree { removed.insert(item.bounds().0.to_owned()); }
             }
             while prune_elements(&mut slide.elements, &mut removed) {}
+            // Native slides (document.origin.native) are further checked by native_save::patch_elements
+            // during document::transact for retained XML spid/timing/animation and stCxn/endCxn references;
+            // references::refresh also rejects removal of owned citation elements.
             parts.retain(|part| part.slide_id != *slide_id || !removed.contains(&part.element_id));
             bindings.retain(|binding| binding.slide_id != *slide_id || !removed.contains(&binding.element_id));
             if let Some(review) = &mut slide.review {
@@ -395,7 +399,7 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
         vec![json!({"op":"replace","path":"/deck/slides","value":deck.slides})]
     } else { changed.into_iter().map(|index| json!({"op":"replace","path":format!("/deck/slides/{index}"),"value":deck.slides[index]})).collect() };
     if metadata_changed { patches.push(json!({"op":"add","path":"/parts","value":parts})); }
-    if bindings_changed { patches.push(json!({"op":"replace","path":"/bindings","value":bindings})); }
+    if bindings_changed { patches.push(json!({"op":"add","path":"/bindings","value":bindings})); }
     let mut result = document::transact(document, Transaction { expected_revision, expected_hash: expected_hash.into(), operations: serde_json::from_value(json!(patches))? })?;
     result.render_warnings = crate::render::validated_authoring_effect_warnings(&result.document.deck, &page_indices)?;
     let mut targets: BTreeSet<_> = operations.iter().filter_map(|operation| match operation {

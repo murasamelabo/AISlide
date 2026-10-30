@@ -1330,12 +1330,23 @@ fn issue58_update_chart_remove_elements_and_chartex_validation_guidance() {
     ]))).unwrap();
     assert_eq!(stale_after_update["document"]["bindings"][0]["stale"], true);
 
-    // Imported native chart with unrepresentable foreign attribute is protected by NativeRegenerationGuard.
+    // Imported native chart with unrepresentable foreign attribute is protected by NativeRegenerationGuard for both update_chart and remove_elements.
     let mut pkg = aislide_core::package::Package::open(STANDARD.decode(exported_col["base64"].as_str().unwrap()).unwrap()).unwrap();
     let chart_xml = pkg.text("ppt/charts/chart1.xml").unwrap().replacen("<c:plotArea>", "<c:plotArea unknown=\"retained\">", 1);
     pkg.replace_part("ppt/charts/chart1.xml", chart_xml.into_bytes()).unwrap();
     let unrepresentable = execute_request(json!({"op":"open_presentation","id":"unrep","base64":STANDARD.encode(pkg.save().unwrap())})).unwrap()["document"].clone();
     reject_atomic(&unrepresentable, json!({"op":"update_chart","slide_id":"slide-1","id":"chart","kind":"bar"}), "cannot be regenerated");
+    reject_atomic(&unrepresentable, json!({"op":"remove_elements","slide_id":"slide-1","ids":["chart"]}), "cannot be regenerated");
+
+    // Imported native slide with retained XML spid reference rejects remove_elements; clean native slide allows remove_elements and exports cleanly.
+    let mut spid_pkg = aislide_core::package::Package::open(STANDARD.decode(exported_col["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let slide_xml = spid_pkg.text("ppt/slides/slide1.xml").unwrap().replacen("</p:sld>", "<p:timing><p:tnLst><p:par><p:spTgt spid=\"2\"/></p:par></p:tnLst></p:timing></p:sld>", 1);
+    spid_pkg.replace_part("ppt/slides/slide1.xml", slide_xml.into_bytes()).unwrap();
+    let spid_doc = execute_request(json!({"op":"open_presentation","id":"spid-doc","base64":STANDARD.encode(spid_pkg.save().unwrap())})).unwrap()["document"].clone();
+    let first_native_id = spid_doc["deck"]["slides"][0]["elements"][0]["id"].as_str().unwrap().to_owned();
+    reject_atomic(&spid_doc, json!({"op":"remove_elements","slide_id":"slide-1","ids":[first_native_id]}), "retained shape reference");
+    let native_removed = execute_request(request(&reopened_col, json!([{"op":"remove_elements","slide_id":"slide-1","ids":["rect"]}]))).unwrap()["document"].clone();
+    assert!(execute_request(json!({"op":"export_presentation","document":native_removed})).is_ok());
 
     // Managed part with internal chart (pareto) rejects direct update_chart and child remove_elements, but allows root remove_elements + Undo.
     let pareto_example = execute_request(json!({"op":"part_catalog"})).unwrap()["presets"].as_array().unwrap().iter().find(|p| p["id"] == "vertical-bar-graph/pareto").unwrap()["example"].clone();
