@@ -119,7 +119,7 @@ fn issue32_resolves_and_encodes_color_maps_across_parts() {
     let mut cd = ri.deck.clone(); if let Element::Chart { series, .. } = &mut cd.slides[1].elements[1] { series[0].values = vec![15.0, 25.0]; }
     let cb = save(&change(&ri, cd).document);
     assert!(Package::open(cb.clone()).unwrap().text("ppt/charts/chart2.xml").unwrap().contains("val=\"accent2\"") && val(&open(cb).deck.slides[1].elements)[1]["series"][0] == json!({"name":"R","values":[15.0,25.0],"color":"@accent1"}));
-    let mut ed = doc.deck.clone(); ed.slides[0].notes = "N1".into();
+    let mut ed = doc.deck.clone(); ed.slides[0].notes = "N1".into(); ed.slides[0].review = Some(Default::default());
     let r0 = &mut ed.slides[0].notes_paragraphs[0].runs[0]; r0.text = "N1".into(); r0.style.color = Some("@accent1".into());
     for e in [&mut ed.slides[0].elements[0], &mut ed.design.as_mut().unwrap().layouts[0].elements[0]] { if let Element::Text { color, .. } = e { *color = "@accent1".into(); } }
     let b = save(&change(&doc, ed).document); let (ep, eo) = (Package::open(b.clone()).unwrap(), open(b));
