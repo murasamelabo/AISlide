@@ -191,48 +191,32 @@ pub struct GraphBadge {
     #[serde(default = "ink")] pub color: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Prepared PNG/JPEG icon or image. In MCP, pass the {asset_id, mime_type, alt} object returned by lucide_icon_assets, architecture_icon_assets, create_graph_icon or register_asset unchanged; direct core/CLI calls require {base64, mime_type, alt?}.
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = add_mcp_asset_handle_schema)]
 pub struct GraphIcon {
-    pub base64: String,
-    pub mime_type: String,
-    #[serde(default)] pub alt: String,
+    #[schemars(length(min = 1, max = 1398104))] pub base64: String,
+    #[schemars(extend("enum" = ["image/png", "image/jpeg"]))] pub mime_type: String,
+    #[serde(default)] #[schemars(length(max = 500))] pub alt: String,
 }
 
-impl schemars::JsonSchema for GraphIcon {
-    fn schema_name() -> std::borrow::Cow<'static, str> { "GraphIcon".into() }
-    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "object",
-            "description": "Prepared PNG/JPEG icon or image. In MCP, pass the {asset_id, mime_type, alt} object returned by lucide_icon_assets, architecture_icon_assets, create_graph_icon or register_asset unchanged; direct core/CLI calls require {base64, mime_type, alt?}.",
-            "additionalProperties": false,
-            "properties": {
-                "asset_id": {
-                    "type": "string",
-                    "format": "uuid",
-                    "description": "MCP process-local asset handle returned by lucide_icon_assets, architecture_icon_assets, create_graph_icon or register_asset (resolved by MCP before calling core)."
-                },
-                "base64": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1398104
-                },
-                "mime_type": {
-                    "type": "string",
-                    "enum": ["image/png", "image/jpeg"]
-                },
-                "alt": {
-                    "type": "string",
-                    "maxLength": 500,
-                    "default": ""
-                }
-            },
-            "oneOf": [
-                { "required": ["base64", "mime_type"], "not": { "required": ["asset_id"] } },
-                { "required": ["asset_id"], "not": { "required": ["base64"] } }
-            ]
-        })
-    }
+/// The derived schema describes the core form. `asset_id` exists only in MCP, which resolves it to `base64`
+/// before calling core, so the MCP-accepted alternative is added here and the core deserializer still rejects it.
+fn add_mcp_asset_handle_schema(schema: &mut schemars::Schema) {
+    let object = schema.as_object_mut().expect("generated icon schema must be an object");
+    object.remove("required");
+    let properties = object.get_mut("properties").and_then(serde_json::Value::as_object_mut)
+        .expect("generated icon schema must have object properties");
+    properties.insert("asset_id".into(), serde_json::json!({
+        "type": "string",
+        "format": "uuid",
+        "description": "MCP process-local asset handle returned by lucide_icon_assets, architecture_icon_assets, create_graph_icon or register_asset (resolved by MCP before calling core)."
+    }));
+    object.insert("oneOf".into(), serde_json::json!([
+        { "required": ["base64", "mime_type"], "not": { "required": ["asset_id"] } },
+        { "required": ["asset_id"], "not": { "required": ["base64"] } }
+    ]));
 }
 
 pub fn create_icon(base64: String, mime_type: &str, alt: &str) -> Result<GraphIcon> {

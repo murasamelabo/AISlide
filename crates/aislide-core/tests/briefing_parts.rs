@@ -612,4 +612,73 @@ fn issue61_part_catalog_schema_matches_icon_column_graph_icon_and_body_size_limi
         panels["data"]["panels"][0]["body_size"] = json!(size);
         assert_eq!(create(&panels).is_ok(), ok, "contrast/panels body_size={size}");
     }
+
+    // 4. Each bullet point is bounded per item as well as per list, and the validators enforce the advertised bounds.
+    for definition in ["IconCard", "StepCard", "RoadmapPhase"] {
+        let points = &defs[definition]["properties"]["points"];
+        assert_eq!(points["maxItems"], 4, "{definition}");
+        assert_eq!(points["items"]["minLength"], 1, "{definition}");
+        assert_eq!(points["items"]["maxLength"], 80, "{definition}");
+    }
+    let mut long_point = example("list-horizontal/icon-cards");
+    long_point["data"]["cards"][0]["points"] = json!(["p".repeat(81)]);
+    assert!(create(&long_point).unwrap_err().contains("exceeds 80"));
+    let mut blank_point = example("list-horizontal/icon-cards");
+    blank_point["data"]["cards"][0]["points"] = json!([" "]);
+    assert!(create(&blank_point).unwrap_err().contains("card point is required"));
+}
+
+#[test]
+fn issue61_graph_icon_schema_tracks_the_struct_and_core_rejects_mcp_asset_handles() {
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let schema = &catalog["schema"]["$defs"]["GraphIcon"];
+
+    // Every field core serializes is documented; `asset_id` is the only MCP-only addition.
+    let serialized = icon(32, 32);
+    let mut core_fields: Vec<&str> = serialized.as_object().unwrap().keys().map(String::as_str).collect();
+    let mut documented: Vec<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).filter(|name| *name != "asset_id").collect();
+    core_fields.sort_unstable();
+    documented.sort_unstable();
+    assert_eq!(core_fields, documented);
+    assert!(schema.get("required").is_none(), "required fields live in the oneOf alternatives");
+    assert!(schema["description"].as_str().is_some_and(|text| text.contains("asset_id") && text.contains("base64")), "the schema says which form MCP and direct callers use");
+
+    // MCP resolves `asset_id` to base64 before calling core, which has no asset registry and must not accept the handle.
+    let mut spec = example("list-horizontal/icon-cards");
+    spec["data"]["cards"][0]["icon"] = json!({"asset_id":"123e4567-e89b-42d3-a456-426614174000","mime_type":"image/png","alt":"Synthetic indicator"});
+    let error = create(&spec).unwrap_err();
+    assert!(error.contains("asset_id"), "{error}");
+}
+
+#[test]
+fn issue61_schema_text_limits_match_what_the_validators_enforce() {
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let defs = &catalog["schema"]["$defs"];
+    let probes = [
+        ("IconCard", "list-horizontal/icon-cards", "/data/cards/0"),
+        ("IconRow", "list/icon-rows", "/data/rows/0"),
+        ("ShiftRow", "before-after/shift", "/data/rows/0"),
+        ("StepCard", "flow/cards", "/data/steps/0"),
+        ("AgendaItem", "list/agenda", "/data/items/0"),
+        ("Callout", "list-enumeration/screenshot-callouts", "/data/callouts/0"),
+        ("EditorialStep", "flow/open-steps", "/data/steps/0"),
+        ("RoadmapPhase", "flow/roadmap", "/data/phases/0"),
+        ("IconColumn", "list-horizontal/icon-columns", "/data/items/0"),
+        ("FactColumn", "list-horizontal/fact-columns", "/data/items/0"),
+        ("ImageColumn", "list-horizontal/image-columns", "/data/items/0"),
+    ];
+    for (definition, preset, pointer) in probes {
+        for (property, schema) in defs[definition]["properties"].as_object().unwrap() {
+            let Some(maximum) = schema["maxLength"].as_u64() else { continue };
+            let probe = |length: u64| {
+                let mut spec = example(preset);
+                spec.pointer_mut(pointer).unwrap_or_else(|| panic!("{preset} example lacks {pointer}"))[property] = json!("x".repeat(length as usize));
+                create(&spec)
+            };
+            let over = probe(maximum + 1).unwrap_err();
+            assert!(over.contains(&format!("exceeds {maximum} ")), "{definition}.{property} advertises {maximum}: {over}");
+            // Fitting the frame is a separate rule, so only the length rule is asserted at the advertised limit.
+            if let Err(error) = probe(maximum) { assert!(!error.contains("exceeds"), "{definition}.{property} at {maximum}: {error}"); }
+        }
+    }
 }

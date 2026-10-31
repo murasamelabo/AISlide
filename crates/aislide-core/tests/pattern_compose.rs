@@ -297,15 +297,15 @@ fn issue60_compose_slide_part_blocks_support_show_title_in_block_and_pattern_mod
         }
     });
 
-    // With show_title omitted (defaults to true because title is nonempty), 2 rows of tall cards + message band overflow the 369.6px body height.
+    // With show_title omitted it defaults to true because the title is nonempty, so the 88px band is reserved and the cards overflow.
     let overflow_with_title = compose(&base, json!({
         "title": "Slide Title",
         "subtitle": "Slide Subtitle",
         "blocks": [{ "kind": "part", "spec": six_cards }]
     })).unwrap_err();
-    assert!(overflow_with_title.contains("fit"), "{overflow_with_title}");
+    assert!(overflow_with_title.contains("list-horizontal/icon-cards") && overflow_with_title.contains("does not fit at its fixed font size"), "{overflow_with_title}");
 
-    // With show_title: false, the 88px internal part title band is omitted (457.6px body height), so the same 6 cards fit and retain spec.title.
+    // A whitespace-only title counts as empty, so no title band is reserved by default and the same cards fit.
     let mut blank_title_cards = six_cards.clone();
     blank_title_cards["title"] = json!("   ");
     let blank_title_composed = compose(&base, json!({
@@ -315,6 +315,7 @@ fn issue60_compose_slide_part_blocks_support_show_title_in_block_and_pattern_mod
     })).unwrap();
     assert_eq!(blank_title_composed["document"]["parts"][0]["spec"]["layout"]["show_title"], false);
 
+    // An explicit show_title: false omits the 88px band, so the same cards fit and spec.title is retained.
     let block_composed = compose(&base, json!({
         "title": "Slide Title",
         "subtitle": "Slide Subtitle",
@@ -337,7 +338,7 @@ fn issue60_compose_slide_part_blocks_support_show_title_in_block_and_pattern_mod
     })).unwrap();
     assert_eq!(updated["document"]["parts"][0]["spec"]["layout"]["show_title"], false);
 
-    // interactive/summary and diagram/custom require nonempty title even when show_title is false.
+    // Interactive and custom-diagram parts keep their title when the band is hidden.
     let interactive_spec = json!({
         "version": 1,
         "preset": "interactive/summary",
@@ -394,6 +395,17 @@ fn issue60_compose_slide_part_blocks_support_show_title_in_block_and_pattern_mod
         })).unwrap();
         assert_eq!(pattern_res["document"]["parts"][0]["spec"]["layout"]["show_title"], false);
         assert_eq!(pattern_res["document"]["parts"][0]["spec"]["title"], candidate["title"]);
+    }
+
+    // Interactive parts still require a nonempty title when the band is hidden.
+    let mut untitled_interactive = interactive_spec.clone();
+    untitled_interactive["title"] = json!("");
+    for spec in [
+        json!({ "title": "Slide Title", "blocks": [{ "kind": "part", "show_title": false, "spec": untitled_interactive }] }),
+        json!({ "title": "Slide Title", "pattern": { "id": "focus/full" }, "slots": { "primary": { "kind": "part", "show_title": false, "spec": untitled_interactive } } }),
+    ] {
+        let error = compose(&base, spec).unwrap_err();
+        assert!(error.contains("interactive.title: nonempty text is required"), "{error}");
     }
 
     // Explicit show_title: true with an empty title is rejected in both block and pattern modes.

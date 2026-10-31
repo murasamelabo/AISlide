@@ -159,20 +159,23 @@ Blocks are `cards:{items:[{label,detail?}],columns?}` (1-6 cards, 1-3 columns),
 `callout:{text}`, `text:{paragraphs}`, `steps:{items}`,
 `comparison:{rows,columns,cells,corner_label?}`, `part:{spec,show_title?}`, or
 `graph:{input}`. Each includes its `kind` discriminator. Parts omit explicit
-`layout`; core supplies it. `show_title` defaults to `false` for an empty or
-whitespace-only `spec.title` and `true` otherwise. Pass `show_title:false` to
-omit the 88px internal part title band while retaining `spec.title` as metadata.
-`interactive/summary` and `diagram/custom` still require a nonempty title when
-the band is hidden; explicit `show_title:true` always requires a nonempty title.
-Steps, comparisons, parts and graphs keep managed metadata and normal
-regeneration guards. Cards/callouts remain native editable shapes; plain/rich
-text stays editable. The same `style` object can be reused across slides: `title_size`
-24-64 (default 40), `body_size` 16-40 (24), `footer_size` 10-24 (14),
-`padding` 8-64 (24), `card_fill` (`@lt2`), and `accent` (`@accent1`). All
-distances and sizes are slide pixels.
+`layout`; core supplies it. Steps, comparisons, parts and graphs keep managed
+metadata and normal regeneration guards. Cards/callouts remain native editable
+shapes; plain/rich text stays editable. The same `style` object can be reused
+across slides: `title_size` 24-64 (default 40), `body_size` 16-40 (24),
+`footer_size` 10-24 (14), `padding` 8-64 (24), `card_fill` (`@lt2`), and
+`accent` (`@accent1`). All distances and sizes are slide pixels.
 Headers, cards and callouts reject measured text overflow instead of shrinking;
 managed parts retain their existing bounded fitting rules. Missing fonts,
 glyphs and visual collisions still require preview/preflight review.
+
+A `part` block takes an optional `show_title` that controls the part's internal
+88px title band; pattern-mode `slots` accept the same field. It defaults to
+`false` when `spec.title` is empty or whitespace-only and to `true` otherwise.
+Pass `show_title:false` to omit the band, for example under the slide title,
+while `spec.title` stays as metadata. Explicit `show_title:true` requires a
+nonempty title. `interactive/*` still requires a nonempty title when the band
+is hidden, and then needs a frame of at least 960×400 instead of 960×480.
 
 Pattern mode replaces `blocks` with `pattern:{id,count?,mirror?,message_band?}`
 and `slots:{<slot id>:block}`. Core resolves the [layout pattern](#layout-patterns)
@@ -267,11 +270,12 @@ fit. Explicit style wins.
 `layout_patterns` resolution option, 56px plus one gap) adds a `lead-message` slot
 directly under the title on any non-full-page pattern; it accepts emphasis, text,
 callout or label and only the `inline` or `rule` style, and the slot is named
-`lead-message` because `split/1-2` already owns a `lead` slot. A `list/icon-rows` row accepts `detail_emphasis` (up to four non-overlapping
-phrases that must occur verbatim in its `detail`); they render bold in the
-emphasis color while `detail` stays one string. For backwards compatibility,
-`icon_columns` accepts only `detail_emphasis:[]`; it is deprecated, omitted from
-serialized parts and should not be sent by new callers.
+`lead-message` because `split/1-2` already owns a `lead` slot. A `list/icon-rows`
+row accepts `detail_emphasis` (up to four phrases that must occur verbatim in its
+`detail`, non-overlapping); they render bold in the emphasis color while `detail`
+stays one string. For backwards compatibility, `icon_columns` accepts only
+`detail_emphasis:[]`; it is deprecated, omitted from serialized parts and should
+not be sent by new callers.
 No prose classification or severity inference is performed. `takeaway.band_frame`
 is the outer region; `text_frame` and `separator_frame` describe its default rule
 layout. Variant `surface_frame`, fill, stroke and padding-derived text frame are
@@ -1227,7 +1231,10 @@ Call `add_part` / `update_part` (or their batch variants) with a new
 one undoable transaction. Metadata and the default survive a single-PPTX
 save/open. Manual native child edits use existing stale-part guards.
 Rendering uses native-sized text and rejects insufficient space instead of
-silently shrinking labels. The default frame is 1152×512; minimum 960×480.
+silently shrinking labels. The default frame is 1152×512; minimum 960×480, or
+960×400 when `layout.show_title` is false (the 80px title band is not drawn, so
+the body keeps the same height). Explicit JavaScript labs (below) keep their own
+960×480 canvas minimum and reject shorter frames.
 
 The separate experimental `export_copilot_interactive` operation uses the
 observed `fa000000210` / `sdxcatalog` / `en-US` reference with a JSON-string

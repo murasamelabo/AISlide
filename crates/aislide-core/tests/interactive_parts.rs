@@ -133,3 +133,25 @@ fn map_group_headers_and_ungrouped_items_have_separate_tracks() {
         }
     }
 }
+
+#[test]
+fn interactive_minimum_frame_follows_the_visible_title_band() {
+    // Hiding the 80px title band lowers the required height by the same amount, so the body stays 340px at either minimum.
+    for template in ["summary","dashboard","timeline","comparison","map"] {
+        let at=|width:f64,height:f64,show_title:bool| {
+            let mut input=spec(template);
+            input["layout"]=json!({"x":0,"y":0,"width":width,"height":height,"show_title":show_title});
+            execute_request(json!({"op":"create_part","id":"frame","spec":input})).map_err(|error|error.to_string())
+        };
+        assert!(at(960.0,480.0,true).is_ok(),"{template}: title shown at the minimum");
+        assert!(at(960.0,400.0,false).is_ok(),"{template}: title hidden at the minimum");
+        let titled=at(960.0,479.0,true).unwrap_err();
+        assert!(titled.contains("at least 960x480") && titled.contains("960x400 when show_title is false"),"{template}: {titled}");
+        let hidden=at(960.0,399.0,false).unwrap_err();
+        assert!(hidden.contains("at least 960x400") && !hidden.contains("960x480"),"{template}: {hidden}");
+        for show_title in [true,false] {
+            let narrow=at(959.0,720.0,show_title).unwrap_err();
+            assert!(narrow.contains("at least 960x"),"{template}, show_title={show_title}: {narrow}");
+        }
+    }
+}

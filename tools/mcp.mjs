@@ -435,7 +435,7 @@ const compositionBlocks = [
 	z.object({ kind: z.literal('text'), paragraphs: paragraphsSchema }).strict(),
 	z.object({ kind: z.literal('steps'), items: z.array(partItem).min(2).max(12) }).strict(),
 	z.object({ kind: z.literal('comparison'), rows: z.array(partLabel).min(2).max(4), columns: z.array(partLabel).min(2).max(4), cells: z.array(z.array(partLabel).min(2).max(4)).min(2).max(4), corner_label: partLabel.optional() }).strict(),
-	z.object({ kind: z.literal('part'), spec: partSpec.omit({ layout: true }), show_title: z.boolean().optional().describe('Set false to omit the 88px internal part title band when the slide already has a title; spec.title remains retained for metadata and accessibility.') }).strict(),
+	z.object({ kind: z.literal('part'), spec: partSpec.omit({ layout: true }), show_title: z.boolean().optional().describe('Set false to omit the 88px internal part title band when the slide already has a title; spec.title is still kept in the part metadata. Defaults to false for an empty or whitespace-only title, otherwise true.') }).strict(),
 	z.object({ kind: z.literal('graph'), input: graphLayoutInput }).strict(),
 ];
 const patternBlocks = [

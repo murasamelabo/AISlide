@@ -17,7 +17,7 @@ pub struct RoadmapPhase {
     #[schemars(length(min = 1, max = 24))] pub period: String,
     #[schemars(length(min = 1, max = 48))] pub label: String,
     #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 160))] pub detail: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4))] pub points: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4), inner(length(min = 1, max = 80)))] pub points: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 64))] pub outcome: String,
 }
 

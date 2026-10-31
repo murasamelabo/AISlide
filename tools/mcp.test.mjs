@@ -503,6 +503,18 @@ test('issue61 part_catalog schema matches MCP input validation and core constrai
         const parsed = createPartSchema.safeParse({ id: 'catalog-ex', spec: preset.example });
         assert.equal(parsed.success, true, `preset ${preset.id} example failed MCP Zod validation: ${parsed.error?.message}`);
       }
+      // zod v4 `.meta()` must reach the published JSON Schema so clients see the legacy property as deprecated.
+      const advertised = [];
+      const visit = node => {
+        if (Array.isArray(node)) node.forEach(visit);
+        else if (node && typeof node === 'object') {
+          if (node.detail_emphasis?.maxItems === 0) advertised.push(node.detail_emphasis);
+          Object.values(node).forEach(visit);
+        }
+      };
+      visit(z.toJSONSchema(createPartSchema, { io: 'input' }));
+      assert.ok(advertised.length > 0, 'create_part publishes the legacy detail_emphasis property');
+      for (const schema of advertised) assert.equal(schema.deprecated, true, 'the legacy property is marked deprecated');
     });
   } finally {
     await client.close();

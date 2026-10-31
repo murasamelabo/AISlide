@@ -114,7 +114,7 @@ pub struct IconCard {
     #[schemars(length(min = 1, max = 48))] pub label: String,
     #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 64))] pub caption: String,
     #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 240))] pub detail: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4))] pub points: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4), inner(length(min = 1, max = 80)))] pub points: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 40))] pub tag: String,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<GraphIcon>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub accent: Option<String>,
@@ -168,7 +168,7 @@ pub struct ShiftRow {
 pub struct StepCard {
     #[schemars(length(min = 1, max = 48))] pub label: String,
     #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 240))] pub detail: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4))] pub points: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4), inner(length(min = 1, max = 80)))] pub points: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 64))] pub outcome: String,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub image: Option<GraphIcon>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<GraphIcon>,

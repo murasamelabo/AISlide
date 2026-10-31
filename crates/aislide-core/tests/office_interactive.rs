@@ -95,6 +95,24 @@ fn javascript_lab_export_accepts_only_explicit_trusted_kinds_and_preserves_sourc
 }
 
 #[test]
+fn hidden_title_minimum_frame_exports_typed_content_but_javascript_labs_keep_their_own_canvas_minimum() {
+    let catalog=execute_request(json!({"op":"part_catalog"})).unwrap();
+    let mut spec=catalog["presets"].as_array().unwrap().iter().find(|entry|entry["id"]=="interactive/summary").unwrap()["example"].clone();
+    spec["layout"]=json!({"x":0,"y":0,"width":960,"height":400,"show_title":false});
+    let document=execute_request(json!({"op":"create_presentation","id":"short-frame","title":"Synthetic short interactive"})).unwrap();
+    let inserted=execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":"short","spec":spec})).unwrap();
+    let document=&inserted["document"];
+    // The typed export recompiles the part from its native frame and keeps show_title, so the 960x400 minimum holds there.
+    let typed=execute_request(json!({"op":"export_copilot_interactive","document":document,"acknowledged_experimental":true})).unwrap();
+    let package=Package::open(STANDARD.decode(typed["base64"].as_str().unwrap()).unwrap()).unwrap();
+    assert!(package.part("ppt/media/aislide-interactive-1.png").is_ok());
+    // The JavaScript lab runtime is verified from 960x480, so it rejects the shorter frame instead of running unverified.
+    let error=execute_request(json!({"op":"export_copilot_interactive","document":document,"acknowledged_experimental":true,
+        "javascript_labs":[{"slide_id":"slide-1","element_id":"short","kind":"simulator"}]})).unwrap_err().to_string();
+    assert!(error.contains("JavaScript lab canvas requires"),"{error}");
+}
+
+#[test]
 fn showcase_appearance_compiles_native_views_without_changing_plain_defaults() {
     let catalog=execute_request(json!({"op":"part_catalog"})).unwrap();
     for entry in catalog["presets"].as_array().unwrap().iter().filter(|entry|entry["category"]=="interactive") {
