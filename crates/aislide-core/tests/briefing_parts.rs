@@ -540,6 +540,7 @@ fn issue18_a_floor_above_the_default_body_makes_it_an_author_choice() {
 
 #[test]
 fn issue61_part_catalog_schema_matches_icon_column_graph_icon_and_body_size_limits() {
+    // Compile-time check: IconColumn is public and constructible, including its legacy field, from outside the crate.
     let _column = aislide_core::parts::IconColumn {
         label: "Item".into(),
         detail: String::new(),
