@@ -194,8 +194,11 @@ pub fn create_picture(id: &str, base64: String, mime_type: &str, alt: &str) -> R
         base64, mime_type: mime_type.into(), alt: alt.into(), crop: Default::default(), visual: None, svg: None })
 }
 
+/// Longest base64 text of a 1 MiB raster (4 characters per 3 bytes, padded); schemas advertise the same bound.
+pub const MAX_IMAGE_BASE64_LEN: usize = 1_398_104;
+
 pub fn inspect_raster(base64: &str, mime_type: &str) -> Result<RasterInfo> {
-    if base64.len() > 1_398_104 { return Err(Error::Limit("image > 1 MiB".into())); }
+    if base64.len() > MAX_IMAGE_BASE64_LEN { return Err(Error::Limit("image > 1 MiB".into())); }
     let bytes = STANDARD.decode(base64).map_err(|_| Error::Invalid("invalid image base64".into()))?;
     if bytes.len() > 1024 * 1024 { return Err(Error::Limit("image > 1 MiB".into())); }
     let expected = match mime_type {

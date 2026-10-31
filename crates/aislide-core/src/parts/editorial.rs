@@ -7,37 +7,48 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditorialStep {
-    pub label: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub detail: String,
+    #[schemars(length(min = 1, max = 48))] pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 160))] pub detail: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RoadmapPhase {
-    pub period: String,
-    pub label: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub detail: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub points: Vec<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub outcome: String,
+    #[schemars(length(min = 1, max = 24))] pub period: String,
+    #[schemars(length(min = 1, max = 48))] pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 160))] pub detail: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4), inner(length(min = 1, max = 80)))] pub points: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 64))] pub outcome: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IconColumn {
+    #[schemars(length(min = 1, max = 48))] pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 200))] pub detail: String,
+    /// Legacy compatibility only; only an empty array is accepted. Omit for new parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 0), extend("deprecated" = true))] pub detail_emphasis: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<GraphIcon>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub accent: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FactColumn {
-    pub value: String,
-    pub label: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub unit: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub detail: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub qualifier: String,
+    #[schemars(length(min = 1, max = 24))] pub value: String,
+    #[schemars(length(min = 1, max = 48))] pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 12))] pub unit: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 160))] pub detail: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 100))] pub qualifier: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImageColumn {
     pub image: GraphIcon,
-    pub label: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub detail: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub caption: String,
+    #[schemars(length(min = 1, max = 48))] pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 160))] pub detail: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 80))] pub caption: String,
 }
 
 pub(super) fn validate(data: &PartData) -> Result<()> {
@@ -68,7 +79,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
                 field(&item.label, 48, "icon column label", true)?;
                 field(&item.detail, 200, "icon column detail", false)?;
                 if !item.detail_emphasis.is_empty() { return Err(Error::Unsupported("icon columns do not draw detail_emphasis; use list/icon-rows to emphasize a phrase".into())); }
-                if let Some(icon) = &item.icon { valid_text(&icon.alt, 500)?; }
+                if let Some(icon) = &item.icon { valid_text(&icon.alt, crate::graphs::ICON_ALT_MAX)?; }
                 colors(&[&item.accent])?;
             }
         }
@@ -90,7 +101,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
         PartData::ImageColumns { items } => {
             if !(2..=4).contains(&items.len()) { return Err(Error::Invalid("image columns require 2-4 items".into())); }
             for item in items {
-                valid_text(&item.image.alt, 500)?;
+                valid_text(&item.image.alt, crate::graphs::ICON_ALT_MAX)?;
                 field(&item.label, 48, "image column label", true)?;
                 field(&item.detail, 160, "image column detail", false)?;
                 field(&item.caption, 80, "image caption", false)?;
@@ -183,7 +194,7 @@ fn roadmap(drawing: &mut Drawing, phases: &[RoadmapPhase], accent: &str, frame: 
     Ok(Drawn { bottom: top + height, flexible: Vec::new() })
 }
 
-fn icon_columns(drawing: &mut Drawing, items: &[super::IconRow], frame: [f64; 4], theme: &Theme) -> Result<Drawn> {
+fn icon_columns(drawing: &mut Drawing, items: &[IconColumn], frame: [f64; 4], theme: &Theme) -> Result<Drawn> {
     let [left, top, width, height] = frame;
     let gap = 32.0;
     let column = (width - gap * (items.len() - 1) as f64) / items.len() as f64;

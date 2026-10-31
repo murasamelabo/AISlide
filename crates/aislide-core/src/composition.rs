@@ -57,7 +57,7 @@ pub enum CompositionBlock {
     Steps { items: Vec<PartItem> },
     Comparison { rows: Vec<String>, columns: Vec<String>, cells: Vec<Vec<String>>, #[serde(default)] corner_label: String },
     Graph { input: crate::graphs::GraphLayoutInput },
-    Part { spec: PartSpec },
+    Part { spec: PartSpec, #[serde(default, skip_serializing_if = "Option::is_none")] show_title: Option<bool> },
     Statement { text: String },
     Quote { text: String, #[serde(default)] attribution: String },
     Metric { value: String, label: String, #[serde(default)] detail: String },
@@ -97,8 +97,15 @@ impl CompositionBlock {
     }
 
     fn diagram(&self) -> bool {
-        matches!(self, Self::Graph { .. }) || matches!(self, Self::Part { spec } if matches!(spec.data, PartData::Diagram { .. }))
+        matches!(self, Self::Graph { .. }) || matches!(self, Self::Part { spec, .. } if matches!(spec.data, PartData::Diagram { .. }))
     }
+}
+
+pub(crate) fn resolve_part_show_title(explicit: Option<bool>, part: &PartSpec) -> Result<bool> {
+    if explicit == Some(true) && part.title.trim().is_empty() {
+        return Err(Error::Invalid("part show_title:true requires a nonempty part title".into()));
+    }
+    Ok(explicit.unwrap_or(!part.title.trim().is_empty()))
 }
 
 impl CompositionSpec {
@@ -159,7 +166,7 @@ pub(crate) fn compose(deck: &mut Deck, parts: &mut Vec<crate::parts::state::Part
     for (block_index, block) in spec.blocks.iter().enumerate() {
         let block_id = format!("{id}-b{block_index}");
         let frame = [margin, top + block_index as f64 * (block_height + gutter), body_width, block_height];
-        let part = match block {
+        let (part, explicit_show_title) = match block {
             CompositionBlock::Cards { items, columns } => {
                 if items.is_empty() || items.len() > 6 { return Err(Error::Limit("composition cards require 1-6 items".into())); }
                 let columns = columns.unwrap_or(items.len().min(3));
@@ -170,30 +177,31 @@ pub(crate) fn compose(deck: &mut Deck, parts: &mut Vec<crate::parts::state::Part
                 for (item_index, item) in items.iter().enumerate() {
                     elements.push(card(&format!("{block_id}-c{item_index}"), item, [frame[0] + (item_index % columns) as f64 * (card_width + gutter), frame[1] + (item_index / columns) as f64 * (card_height + gutter), card_width, card_height], style)?);
                 }
-                None
+                (None, None)
             }
             CompositionBlock::Callout { text: value } => {
                 elements.push(card(&block_id, &PartItem { label: String::new(), detail: value.clone(), value: None }, frame, style)?);
-                None
+                (None, None)
             }
             CompositionBlock::Text { paragraphs } => {
                 elements.push(crate::rich_text::replace_paragraphs(text(&block_id, "", frame, style.body_size, "@minor")?, paragraphs.clone())?);
-                None
+                (None, None)
             }
-            CompositionBlock::Steps { items } => Some(PartSpec { version: 1, preset: "list-horizontal/labeled".into(), title: String::new(), subtitle: String::new(), data: PartData::Items { items: items.clone(), center: String::new() }, layout: None }),
-            CompositionBlock::Comparison { rows, columns, cells, corner_label } => Some(PartSpec { version: 1, preset: "matrix/balanced".into(), title: String::new(), subtitle: String::new(), data: PartData::Matrix { rows: rows.clone(), columns: columns.clone(), cells: cells.clone(), corner_label: corner_label.clone() }, layout: None }),
+            CompositionBlock::Steps { items } => (Some(PartSpec { version: 1, preset: "list-horizontal/labeled".into(), title: String::new(), subtitle: String::new(), data: PartData::Items { items: items.clone(), center: String::new() }, layout: None }), None),
+            CompositionBlock::Comparison { rows, columns, cells, corner_label } => (Some(PartSpec { version: 1, preset: "matrix/balanced".into(), title: String::new(), subtitle: String::new(), data: PartData::Matrix { rows: rows.clone(), columns: columns.clone(), cells: cells.clone(), corner_label: corner_label.clone() }, layout: None }), None),
             CompositionBlock::Graph { input } => {
                 let graph = crate::graphs::layout_graph(input)?;
-                Some(PartSpec { version: 1, preset: "diagram/custom".into(), title: graph.title.clone(), subtitle: graph.subtitle.clone(), data: PartData::Diagram { graph }, layout: None })
+                (Some(PartSpec { version: 1, preset: "diagram/custom".into(), title: graph.title.clone(), subtitle: graph.subtitle.clone(), data: PartData::Diagram { graph }, layout: None }), None)
             }
-            CompositionBlock::Part { spec: part } => {
+            CompositionBlock::Part { spec: part, show_title } => {
                 if part.layout.is_some() { return Err(Error::Invalid("composition supplies part layout; omit explicit part coordinates".into())); }
-                Some(part.clone())
+                (Some(part.clone()), *show_title)
             }
             other => return Err(Error::Invalid(format!("{} blocks require a pattern; set spec.pattern and place blocks in slots", other.kind_name()))),
         };
         if let Some(mut part) = part {
-            part.layout = Some(PartLayout { x: frame[0], y: frame[1], width: frame[2], height: frame[3], show_title: !part.title.is_empty(), fit: crate::parts::PartFit::Stretch });
+            let show_title = resolve_part_show_title(explicit_show_title, &part)?;
+            part.layout = Some(PartLayout { x: frame[0], y: frame[1], width: frame[2], height: frame[3], show_title, fit: crate::parts::PartFit::Stretch });
             managed.push((block_id, part));
         }
     }

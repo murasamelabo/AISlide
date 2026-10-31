@@ -249,7 +249,7 @@ fn table(id: String, frame: [f64; 4], rows: &[Vec<String>], body_size: f64, toke
 fn paired_table_size(blocks: &BTreeMap<String, CompositionBlock>, placed: &[PlacedSlot], tokens: &DesignTokens, theme: &Theme) -> Result<f64> {
     if !blocks.values().any(|block| matches!(block, CompositionBlock::Table { .. })) { return Ok(tokens.type_scale.body); }
     for slot in placed {
-        let Some(block @ CompositionBlock::Part { spec }) = blocks.get(&slot.id) else { continue };
+        let Some(block @ CompositionBlock::Part { spec, .. }) = blocks.get(&slot.id) else { continue };
         if spec.preset != "layer/balanced" { continue; }
         let PartData::Items { items, .. } = &spec.data else { continue };
         let rendered = crate::parts::create_with_theme("paired-table", &part(block, slot.frame)?, theme)?;
@@ -263,21 +263,22 @@ fn paired_table_size(blocks: &BTreeMap<String, CompositionBlock>, placed: &[Plac
 }
 
 fn part(block: &CompositionBlock, frame: [f64; 4]) -> Result<PartSpec> {
-    let mut spec = match block {
-        CompositionBlock::Steps { items } => PartSpec { version: 1, preset: "list-horizontal/labeled".into(), title: String::new(), subtitle: String::new(), data: PartData::Items { items: items.clone(), center: String::new() }, layout: None },
-        CompositionBlock::Comparison { rows, columns, cells, corner_label } => PartSpec { version: 1, preset: "matrix/balanced".into(), title: String::new(), subtitle: String::new(), data: PartData::Matrix { rows: rows.clone(), columns: columns.clone(), cells: cells.clone(), corner_label: corner_label.clone() }, layout: None },
+    let (mut spec, explicit_show_title) = match block {
+        CompositionBlock::Steps { items } => (PartSpec { version: 1, preset: "list-horizontal/labeled".into(), title: String::new(), subtitle: String::new(), data: PartData::Items { items: items.clone(), center: String::new() }, layout: None }, None),
+        CompositionBlock::Comparison { rows, columns, cells, corner_label } => (PartSpec { version: 1, preset: "matrix/balanced".into(), title: String::new(), subtitle: String::new(), data: PartData::Matrix { rows: rows.clone(), columns: columns.clone(), cells: cells.clone(), corner_label: corner_label.clone() }, layout: None }, None),
         CompositionBlock::Graph { input } => {
             let graph = crate::graphs::layout_graph(input)?;
-            PartSpec { version: 1, preset: "diagram/custom".into(), title: graph.title.clone(), subtitle: graph.subtitle.clone(), data: PartData::Diagram { graph }, layout: None }
+            (PartSpec { version: 1, preset: "diagram/custom".into(), title: graph.title.clone(), subtitle: graph.subtitle.clone(), data: PartData::Diagram { graph }, layout: None }, None)
         }
-        CompositionBlock::Part { spec } => {
+        CompositionBlock::Part { spec, show_title } => {
             if spec.layout.is_some() { return Err(Error::Invalid("composition supplies part layout; omit explicit part coordinates".into())); }
-            spec.clone()
+            (spec.clone(), *show_title)
         }
         other => return Err(Error::Invalid(format!("{} is not a managed part block", other.kind_name()))),
     };
     let [x, y, width, height] = frame;
-    spec.layout = Some(PartLayout { x, y, width, height, show_title: !spec.title.is_empty(), fit: PartFit::Stretch });
+    let show_title = crate::composition::resolve_part_show_title(explicit_show_title, &spec)?;
+    spec.layout = Some(PartLayout { x, y, width, height, show_title, fit: PartFit::Stretch });
     let advice = crate::parts::aspect::fit_in(&crate::parts::aspect::profile(&spec)?, width, height);
     if advice["fit"] == "contain" { if let Some(layout) = spec.layout.as_mut() { layout.fit = PartFit::Contain; } }
     Ok(spec)

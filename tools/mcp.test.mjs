@@ -297,6 +297,300 @@ test('issue52 catalog and tool search queries match all whitespace-separated ter
   }, ['--tool-profile', 'full', '--layout-patterns', 'on']);
 });
 
+test('issue60 compose_slide part blocks accept show_title in block and pattern modes', async () => {
+  await feedbackMcpFixture(async ({ call, calls, registrations }) => {
+    const created = await call('create_presentation', { title: 'Synthetic compose part show_title' });
+    const partSpecValue = {
+      version: 1,
+      preset: 'interactive/summary',
+      title: 'Interactive summary',
+      subtitle: '',
+      data: {
+        kind: 'interactive',
+        spec: {
+          version: 1,
+          template: 'summary',
+          source: 'Synthetic source',
+          groups: [],
+          dimensions: [],
+          items: [
+            { id: 'item-1', label: 'Item 1', detail: 'First item detail.', action: 'Review item 1' },
+            { id: 'item-2', label: 'Item 2', detail: 'Second item detail.', action: 'Review item 2' },
+          ],
+          initial_state: { selected_id: 'item-1', dimension: 0, scale: 'linear' },
+        },
+      },
+    };
+    const blockSpec = {
+      title: 'Slide Title',
+      blocks: [{ kind: 'part', show_title: false, spec: partSpecValue }],
+    };
+    await call('compose_slide', { deck_id: created.deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'block-part', spec: blockSpec });
+    assert.deepEqual(calls.at(-1).request.operations, [{ op: 'compose_slide', slide_id: 'slide-1', id: 'block-part', spec: blockSpec }]);
+
+    const patternSpec = {
+      title: 'Pattern Slide Title',
+      pattern: { id: 'focus/full' },
+      slots: { primary: { kind: 'part', show_title: false, spec: partSpecValue } },
+    };
+    await call('compose_slide', { deck_id: created.deck_id, expected_revision: 1, slide_id: 'slide-1', id: 'pattern-part', spec: patternSpec });
+    assert.deepEqual(calls.at(-1).request.operations, [{ op: 'compose_slide', slide_id: 'slide-1', id: 'pattern-part', spec: patternSpec }]);
+
+    const composeSchema = registrations.get('compose_slide').config.inputSchema;
+    const accepted = spec => composeSchema.safeParse({ deck_id: created.deck_id, expected_revision: 2, slide_id: 'slide-1', id: 'checked-part', spec }).success;
+    assert.equal(accepted({ title: 'Slide', blocks: [{ kind: 'part', show_title: false, spec: partSpecValue }] }), true);
+    assert.equal(accepted({ title: 'Slide', blocks: [{ kind: 'part', show_title: 'no', spec: partSpecValue }] }), false);
+    assert.equal(accepted({ title: 'Slide', blocks: [{ kind: 'part', show_title: false, unknown_field: true, spec: partSpecValue }] }), false, 'part blocks stay strict');
+    const inSlot = block => ({ title: 'Slide', pattern: { id: 'focus/full' }, slots: { primary: block } });
+    assert.equal(accepted(inSlot({ kind: 'part', show_title: false, spec: partSpecValue })), true);
+    assert.equal(accepted(inSlot({ kind: 'part', show_title: 'no', spec: partSpecValue })), false);
+    assert.equal(accepted(inSlot({ kind: 'part', show_title: false, unknown_field: true, spec: partSpecValue })), false, 'slot parts stay strict');
+  });
+});
+
+test('issue61 part_catalog schema matches MCP input validation and core constraints for IconColumn, GraphIcon and body_size', async () => {
+  const client = new Client({ name: 'aislide-issue61-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const catalog = await call('part_catalog', { detail: 'full' });
+    const defs = catalog.schema.$defs ?? catalog.schema.definitions;
+    assert.ok(defs.IconColumn, 'schema defines IconColumn');
+    assert.equal(defs.IconColumn.properties.detail_emphasis.maxItems, 0, 'IconColumn accepts only legacy empty detail_emphasis');
+    assert.equal(defs.IconColumn.properties.label.minLength, 1);
+    assert.equal(defs.IconColumn.properties.label.maxLength, 48);
+    assert.equal(defs.IconColumn.properties.detail.maxLength, 200);
+    const iconColumnsVariant = defs.PartData.oneOf.find(variant => variant.properties?.kind?.const === 'icon_columns');
+    assert.equal(iconColumnsVariant.properties.items.items.$ref, '#/$defs/IconColumn');
+    assert.equal(iconColumnsVariant.properties.items.minItems, 2);
+    assert.equal(iconColumnsVariant.properties.items.maxItems, 4);
+
+    // Core describes the inline form only; every catalog schema this server republishes offers the asset handle as well.
+    const graphCatalog = await call('graph_catalog', {});
+    const guide = await call('best_practice_guide', { profile_id: 'technical-explainer' });
+    for (const [source, schema] of [['part_catalog', catalog.schema], ['graph_catalog', graphCatalog.schema], ['graph_catalog operation_schema', graphCatalog.operation_schema], ['best_practice_guide', guide.input_schema]]) {
+      const icon = (schema.$defs ?? schema.definitions).GraphIcon;
+      assert.ok(icon.properties.asset_id, `${source}: GraphIcon schema documents asset_id`);
+      assert.equal(icon.properties.asset_id.format, 'uuid', source);
+      assert.equal(icon.properties.base64.minLength, 1, source);
+      assert.equal(icon.properties.base64.maxLength, 1398104, source);
+      assert.deepEqual(icon.properties.mime_type.enum, ['image/png', 'image/jpeg'], source);
+      assert.equal(icon.properties.alt.maxLength, 500, source);
+      assert.equal(icon.additionalProperties, false, source);
+      assert.equal(icon.required, undefined, `${source}: the required fields live in the oneOf alternatives`);
+      assert.equal(icon.oneOf.length, 2, source);
+    }
+
+    assert.equal(defs.ComparisonPanel.properties.body_size.minimum, 16);
+    assert.equal(defs.ComparisonPanel.properties.body_size.maximum, 28);
+    for (const kind of ['icon_cards', 'icon_rows', 'shift_rows', 'step_cards', 'screenshot_callouts']) {
+      const variant = defs.PartData.oneOf.find(entry => entry.properties?.kind?.const === kind);
+      assert.equal(variant.properties.body_size.minimum, 14, `${kind} minimum`);
+      assert.equal(variant.properties.body_size.maximum, 22, `${kind} maximum`);
+    }
+
+    const legacy = await call('create_part', {
+      id: 'repro-icon-col',
+      spec: {
+        version: 1,
+        preset: 'list-horizontal/icon-columns',
+        title: 'Icon Columns',
+        subtitle: '',
+        data: {
+          kind: 'icon_columns',
+          items: [
+            { label: 'Item 1', detail: 'First item detail.', detail_emphasis: [] },
+            { label: 'Item 2', detail: 'Second item detail.', detail_emphasis: [] },
+          ],
+        },
+      },
+    });
+    assert.equal(legacy.type, 'group');
+    const rejected = await client.callTool({
+      name: 'create_part',
+      arguments: {
+        id: 'unsupported-icon-col',
+        spec: {
+          version: 1,
+          preset: 'list-horizontal/icon-columns',
+          title: 'Icon Columns',
+          subtitle: '',
+          data: {
+            kind: 'icon_columns',
+            items: [
+              { label: 'Item 1', detail: 'First item detail.', detail_emphasis: ['phrase'] },
+              { label: 'Item 2', detail: 'Second item detail.' },
+            ],
+          },
+        },
+      },
+    });
+    assert.equal(rejected.isError, true);
+    assert.match(rejected.content[0].text, /detail_emphasis/);
+
+    const validColumns = await call('create_part', {
+      id: 'valid-icon-col',
+      spec: {
+        version: 1,
+        preset: 'list-horizontal/icon-columns',
+        title: 'Icon Columns',
+        subtitle: '',
+        data: {
+          kind: 'icon_columns',
+          items: [
+            { label: 'Item 1', detail: 'First item detail.' },
+            { label: 'Item 2', detail: 'Second item detail.' },
+          ],
+        },
+      },
+    });
+    assert.equal(validColumns.type, 'group');
+
+    const preparedIcons = await call('lucide_icon_assets', { icons: [{ name: 'ShieldCheck' }, { name: 'Bot' }] });
+    const withIconHandles = await call('create_part', {
+      id: 'icon-col-handles',
+      spec: {
+        version: 1,
+        preset: 'list-horizontal/icon-columns',
+        title: 'Icon Columns With Handles',
+        subtitle: '',
+        data: {
+          kind: 'icon_columns',
+          items: [
+            { label: 'Item 1', detail: 'First item detail.', icon: preparedIcons.icons[0].icon },
+            { label: 'Item 2', detail: 'Second item detail.', icon: preparedIcons.icons[1].icon },
+          ],
+        },
+      },
+    });
+    assert.equal(withIconHandles.type, 'group');
+
+    const created = await call('create_presentation', { title: 'Live compose part show_title' });
+    await call('compose_slide', {
+      deck_id: created.deck_id,
+      expected_revision: 0,
+      slide_id: 'slide-1',
+      id: 'repro-part',
+      spec: {
+        title: 'Slide Title',
+        blocks: [
+          {
+            kind: 'part',
+            show_title: false,
+            spec: {
+              version: 1,
+              preset: 'interactive/summary',
+              title: 'Interactive Summary',
+              subtitle: '',
+              data: {
+                kind: 'interactive',
+                spec: {
+                  version: 1,
+                  template: 'summary',
+                  source: 'Synthetic source',
+                  groups: [],
+                  dimensions: [],
+                  items: [
+                    { id: 'item-1', label: 'Item 1', detail: 'First item detail.', action: 'Review item 1' },
+                    { id: 'item-2', label: 'Item 2', detail: 'Second item detail.', action: 'Review item 2' },
+                  ],
+                  initial_state: { selected_id: 'item-1', dimension: 0, scale: 'linear' },
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+    const doc = await call('get_document', { deck_id: created.deck_id });
+    assert.equal(doc.parts[0].spec.title, 'Interactive Summary');
+    assert.equal(doc.parts[0].spec.layout.show_title, false);
+
+    await feedbackMcpFixture(async ({ registrations }) => {
+      const createPartSchema = registrations.get('create_part').config.inputSchema;
+      for (const preset of catalog.presets) {
+        const parsed = createPartSchema.safeParse({ id: 'catalog-ex', spec: preset.example });
+        assert.equal(parsed.success, true, `preset ${preset.id} example failed MCP Zod validation: ${parsed.error?.message}`);
+      }
+      // MCP's own input schema rejects a nonempty legacy emphasis before any core call; the empty array stays accepted.
+      const columns = catalog.presets.find(preset => preset.example.data.kind === 'icon_columns').example;
+      const withEmphasis = phrases => ({ id: 'legacy', spec: { ...columns, data: { ...columns.data, items: columns.data.items.map((item, index) => index === 0 ? { ...item, detail_emphasis: phrases } : item) } } });
+      assert.equal(createPartSchema.safeParse(withEmphasis([])).success, true);
+      assert.equal(createPartSchema.safeParse(withEmphasis(['phrase'])).success, false);
+      // zod v4 `.meta()` must reach the published JSON Schema so clients see the legacy property as deprecated.
+      const advertised = [];
+      const visit = node => {
+        if (Array.isArray(node)) node.forEach(visit);
+        else if (node && typeof node === 'object') {
+          if (node.detail_emphasis?.maxItems === 0) advertised.push(node.detail_emphasis);
+          Object.values(node).forEach(visit);
+        }
+      };
+      visit(z.toJSONSchema(createPartSchema, { io: 'input' }));
+      assert.ok(advertised.length > 0, 'create_part publishes the legacy detail_emphasis property');
+      for (const schema of advertised) assert.equal(schema.deprecated, true, 'the legacy property is marked deprecated');
+    });
+  } finally {
+    await client.close();
+  }
+});
+
+test('issue61 every GraphIcon site accepts a prepared asset handle through MCP and core lists no other site', async () => {
+  const client = new Client({ name: 'aislide-issue61-sites', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const catalog = await call('part_catalog', { detail: 'full' });
+    const defs = catalog.schema.$defs ?? catalog.schema.definitions;
+    const mentionsIcon = node => Boolean(node) && typeof node === 'object' && (node.$ref === '#/$defs/GraphIcon' || Object.values(node).some(mentionsIcon));
+    const advertised = new Set();
+    for (const [name, definition] of Object.entries(defs)) {
+      if (name === 'GraphIcon') continue;
+      for (const owner of [definition, ...(definition.oneOf ?? [])]) {
+        for (const [property, schema] of Object.entries(owner.properties ?? {})) if (mentionsIcon(schema)) advertised.add(`${name}.${property}`);
+      }
+    }
+    // The schema offers the asset handle at every property typed GraphIcon, so each one must be resolved by MCP.
+    // A new site in core fails the comparison below until it is added here and exercised.
+    const partSites = {
+      'ComparisonPanelItem.icon': ['comparison_panels', data => [data.panels[0].items[0], 'icon']],
+      'IconCard.icon': ['icon_cards', data => [data.cards[0], 'icon']],
+      'IconColumn.icon': ['icon_columns', data => [data.items[0], 'icon']],
+      'IconRow.icon': ['icon_rows', data => [data.rows[0], 'icon']],
+      'ImageColumn.image': ['image_columns', data => [data.items[0], 'image']],
+      'PartData.image': ['screenshot_callouts', data => [data, 'image']],
+      'StepCard.icon': ['step_cards', data => [data.steps[0], 'icon']],
+      'StepCard.image': ['step_cards', data => [data.steps[0], 'image']],
+    };
+    assert.deepEqual([...advertised].sort(), [...Object.keys(partSites), 'GraphGroup.icon', 'GraphNode.icon'].sort());
+
+    const handle = (await call('lucide_icon_assets', { icons: [{ name: 'ShieldCheck' }] })).icons[0].icon;
+    assert.ok(handle.asset_id && !handle.base64, 'the prepared icon is a handle, not inline data');
+    for (const [site, [kind, locate]] of Object.entries(partSites)) {
+      const spec = structuredClone(catalog.presets.find(preset => preset.example.data.kind === kind).example);
+      const [holder, property] = locate(spec.data);
+      holder[property] = { ...handle };
+      assert.equal((await call('create_part', { id: 'site', spec })).type, 'group', site);
+    }
+    const node = { id: 'node', label: 'Node', x: 40, y: 140, width: 160, height: 80 };
+    const graph = (nodes, groups) => ({ version: 1, title: '', nodes, edges: [], groups });
+    await call('create_graph', { id: 'node-site', spec: graph([{ ...node, icon: { ...handle } }], []) });
+    await call('create_graph', { id: 'group-site', spec: graph([node], [{ id: 'group', label: 'Group', x: 0, y: 88, width: 300, height: 200, icon: { ...handle } }]) });
+  } finally {
+    await client.close();
+  }
+});
+
 test('recipe MCP discovers semantic candidates and uses strict bounded input schemas', async () => {
   await feedbackMcpFixture(async ({ registrations, call, fixture }) => {
     for (const name of ['recipe_catalog', 'recommend_recipes', 'preview_recipe', 'apply_recipe']) assert.ok(registrations.has(name), `Missing ${name}`);
