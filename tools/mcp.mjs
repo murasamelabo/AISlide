@@ -503,6 +503,29 @@ function withAssetReference(schema) {
 		.meta({ oneOf: [{ required: hasMime ? ['base64', 'mime_type'] : ['base64'], not: { required: ['asset_id'] } }, { required: ['asset_id'], not: { required: ['base64'] } }] });
 }
 
+// Core's catalogs describe the inline GraphIcon only. This server also accepts a prepared handle, which expandAssetReferences
+// resolves before any core call, so the catalog schemas it republishes offer both forms.
+function withAssetHandleSchema(payload) {
+	const visit = node => {
+		if (Array.isArray(node)) return node.forEach(visit);
+		if (!node || typeof node !== 'object') return;
+		for (const key of ['$defs', 'definitions']) {
+			const icon = node[key]?.GraphIcon;
+			if (!icon) continue;
+			const { required: _required, ...inline } = icon;
+			node[key].GraphIcon = {
+				...inline,
+				description: 'Prepared PNG or JPEG: inline {base64, mime_type, alt?}, or the {asset_id, mime_type?, alt?} handle returned by lucide_icon_assets, architecture_icon_assets, create_graph_icon or register_asset. This server resolves a handle to inline data before calling core, which accepts only the inline form.',
+				properties: { ...icon.properties, asset_id: { type: 'string', format: 'uuid', description: 'Process-local asset handle; supply it instead of base64.' } },
+				oneOf: [{ required: ['base64', 'mime_type'], not: { required: ['asset_id'] } }, { required: ['asset_id'], not: { required: ['base64'] } }],
+			};
+		}
+		Object.values(node).forEach(visit);
+	};
+	visit(payload);
+	return payload;
+}
+
 function expandAssetReferences(input, name, rootMime, budget) {
 	let size = Buffer.byteLength(JSON.stringify(input));
 	const expand = (value, root = false) => {
@@ -1029,7 +1052,7 @@ register('add_asset', 'Insert an SVG/PNG/JPEG asset in one undoable revision. SV
 	const state = getDeck(deck_id); await state.addAsset(slide_id, input, { expectedRevision: expected_revision, signal });
 	return { deck_id, revision: state.revision, element_id: input.id };
 });
-register('graph_catalog', 'List architecture diagram shapes, ports, routing styles, typed schemas, limits and editable examples. Does not create a document or contact a network.', {}, true, async (_input, signal) => client.graphCatalog({ signal }));
+register('graph_catalog', 'List architecture diagram shapes, ports, routing styles, typed schemas, limits and editable examples. Does not create a document or contact a network.', {}, true, async (_input, signal) => withAssetHandleSchema(await client.graphCatalog({ signal })));
 register('architecture_icons', 'Search the fixed 1498-entry Azure/Entra, AWS and GCP catalog. Compact mode returns 20 entries per page with vendor notices/provenance; query/provider/offset/limit narrow results. detail=full without filters returns the full catalog. configured checks consent, not integrity or redistribution rights. No artwork, downloads, installation or external fetching.' + querySearchDescription, { ...catalogPage, provider: z.enum(['azure', 'aws', 'gcp']).optional() }, true, async ({ query, provider, offset, limit, detail }, signal) => {
 	const catalog = await client.architectureIcons({ signal });
 	const hasFilters = Boolean((query ?? '').trim()) || provider !== undefined || offset !== undefined || limit !== undefined;
@@ -1122,10 +1145,10 @@ register('apply_recipe', 'Apply the exact previewed recipe to the same new empty
 	await state.applyRecipe(slide_id, { id, input, variant }, { expectedRevision: expected_revision, expectedHash: expected_hash, candidateHash: candidate_hash, signal });
 	return { deck_id, slide_id, variant, revision: state.revision, hash: state.document.hash, can_undo: state.canUndo, ...renderWarningMetadata(state) };
 });
-register('part_catalog', 'Search 143 original presets including five typed interactive prototypes. Compact default (detail="summary" in all profiles) returns 12 concise entries, next_offset, recommended/use_when/avoid_when; preset_id returns one synthetic example. detail=full without filters returns all examples and the core schema. Prefer flow/open-steps or vertical-flow/rail for ordered explanations, flow/roadmap for categorical phases, list-horizontal/icon-columns for icon-led peers, fact-columns for supplied headline facts with qualifiers, and image-columns for fully contained evidence pictures. Use cards only when enclosing items serves the content. Existing technical briefing and 14 specialized business-analysis presets remain available. Legacy rendering is retained. No model calls, downloads or mutation.' + querySearchDescription, { ...catalogPage, preset_id: z.string().min(1).max(100).optional() }, true, async ({ query, preset_id, offset, limit, detail }, signal) => {
+register('part_catalog', 'Search 143 original presets including five typed interactive prototypes. Compact default (detail="summary" in all profiles) returns 12 concise entries, next_offset, recommended/use_when/avoid_when; preset_id returns one synthetic example. detail=full without filters returns all examples and the schema (GraphIcon also lists the asset_id handle this server accepts). Prefer flow/open-steps or vertical-flow/rail for ordered explanations, flow/roadmap for categorical phases, list-horizontal/icon-columns for icon-led peers, fact-columns for supplied headline facts with qualifiers, and image-columns for fully contained evidence pictures. Use cards only when enclosing items serves the content. Existing technical briefing and 14 specialized business-analysis presets remain available. Legacy rendering is retained. No model calls, downloads or mutation.' + querySearchDescription, { ...catalogPage, preset_id: z.string().min(1).max(100).optional() }, true, async ({ query, preset_id, offset, limit, detail }, signal) => {
 	const catalog = await client.partCatalog({ signal });
 	const hasFilters = Boolean((query ?? '').trim()) || preset_id !== undefined || offset !== undefined || limit !== undefined;
-	if (!compactResponse(detail) && !hasFilters) return catalog;
+	if (!compactResponse(detail) && !hasFilters) return withAssetHandleSchema(catalog);
 	const candidates = catalog.presets.filter(preset => !preset_id || preset.id === preset_id);
 	const { matching, diagnostics } = filterByQueryTerms(candidates, query, preset => [preset.id, preset.name, preset.category, preset.category_name, preset.use_when, preset.avoid_when].join(' '));
 	const start = offset ?? 0, count = limit ?? 12;
@@ -1183,7 +1206,7 @@ register('set_layout_patterns', 'Turn the layout_patterns guide on or off for th
 		instruction: layoutPatterns.enabled ? layoutPatternInstruction.trim() : 'Do not use layout_patterns; place body content freely or follow the existing template. Call set_layout_patterns with mode on to use patterns again.' };
 });
 register('best_practice_profiles', 'List four evidence-led authoring profiles: consulting decisions, technical explanations, event talks and reports. English guides are retrieved separately; no file or model access.', {}, true, async (_input, signal) => client.bestPracticeProfiles({ signal }));
-register('best_practice_guide', 'Retrieve the English five-stage workflow, profile-specific guidance and strict creation schema. The consulting catalog retains 48 patterns with honest native-template, composition-required or guidance-only status. Read this before planning; guidance does not verify truth.', { profile_id: authoringProfile }, true, async ({ profile_id }, signal) => client.bestPracticeGuide(profile_id, { signal }));
+register('best_practice_guide', 'Retrieve the English five-stage workflow, profile-specific guidance and strict creation schema. The consulting catalog retains 48 patterns with honest native-template, composition-required or guidance-only status. Read this before planning; guidance does not verify truth.', { profile_id: authoringProfile }, true, async ({ profile_id }, signal) => withAssetHandleSchema(await client.bestPracticeGuide(profile_id, { signal })));
 register('validate_guided_presentation', 'Dry-run a structured outline, clause-to-body evidence, numeric source declarations and native layout. ready means compilable, not semantically proven or Office-qualified. Returns unmet checks and human-review requirements; no deck handle or file is created.', { input: guidedInput }, true, async ({ input }, signal) => client.validateGuidedPresentation(input, { signal }));
 register('create_guided_presentation', 'Create a NEW evidence-led presentation after strict validation. Defaults: sentence headlines, 32 slides. input.authoring.headline_style="keyword" permits keyword headings; slide_limit explicitly raises the limit within 32..128. Evidence and numeric checks still apply. input.authoring.ledger_notes selects full (default, legacy notes), summary (speaker text first, readable summary), or none (speaker text only). Summary/none keep the complete creation record outside notes in document.guided_record and PPTX Custom XML; they do not redact evidence. Only consulting-decision multi-page decks require 3-6 issues, C02 summary and C03 close. Unknown numbers remain xx in qualitative content. No model call or file save; review actual rendering and export separately.', { input: guidedInput }, false, async ({ input }, signal, options) => {
 	if (decks.size >= 8) throw new Error('At most eight decks per session; close a deck first');

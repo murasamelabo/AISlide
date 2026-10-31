@@ -370,14 +370,21 @@ test('issue61 part_catalog schema matches MCP input validation and core constrai
     assert.equal(iconColumnsVariant.properties.items.minItems, 2);
     assert.equal(iconColumnsVariant.properties.items.maxItems, 4);
 
-    assert.ok(defs.GraphIcon.properties.asset_id, 'GraphIcon schema documents asset_id');
-    assert.equal(defs.GraphIcon.properties.asset_id.format, 'uuid');
-    assert.equal(defs.GraphIcon.properties.base64.minLength, 1);
-    assert.equal(defs.GraphIcon.properties.base64.maxLength, 1398104);
-    assert.deepEqual(defs.GraphIcon.properties.mime_type.enum, ['image/png', 'image/jpeg']);
-    assert.equal(defs.GraphIcon.properties.alt.maxLength, 500);
-    assert.equal(defs.GraphIcon.additionalProperties, false);
-    assert.equal(defs.GraphIcon.oneOf.length, 2);
+    // Core describes the inline form only; every catalog schema this server republishes offers the asset handle as well.
+    const graphCatalog = await call('graph_catalog', {});
+    const guide = await call('best_practice_guide', { profile_id: 'technical-explainer' });
+    for (const [source, schema] of [['part_catalog', catalog.schema], ['graph_catalog', graphCatalog.schema], ['graph_catalog operation_schema', graphCatalog.operation_schema], ['best_practice_guide', guide.input_schema]]) {
+      const icon = (schema.$defs ?? schema.definitions).GraphIcon;
+      assert.ok(icon.properties.asset_id, `${source}: GraphIcon schema documents asset_id`);
+      assert.equal(icon.properties.asset_id.format, 'uuid', source);
+      assert.equal(icon.properties.base64.minLength, 1, source);
+      assert.equal(icon.properties.base64.maxLength, 1398104, source);
+      assert.deepEqual(icon.properties.mime_type.enum, ['image/png', 'image/jpeg'], source);
+      assert.equal(icon.properties.alt.maxLength, 500, source);
+      assert.equal(icon.additionalProperties, false, source);
+      assert.equal(icon.required, undefined, `${source}: the required fields live in the oneOf alternatives`);
+      assert.equal(icon.oneOf.length, 2, source);
+    }
 
     assert.equal(defs.ComparisonPanel.properties.body_size.minimum, 16);
     assert.equal(defs.ComparisonPanel.properties.body_size.maximum, 28);
@@ -510,6 +517,11 @@ test('issue61 part_catalog schema matches MCP input validation and core constrai
         const parsed = createPartSchema.safeParse({ id: 'catalog-ex', spec: preset.example });
         assert.equal(parsed.success, true, `preset ${preset.id} example failed MCP Zod validation: ${parsed.error?.message}`);
       }
+      // MCP's own input schema rejects a nonempty legacy emphasis before any core call; the empty array stays accepted.
+      const columns = catalog.presets.find(preset => preset.example.data.kind === 'icon_columns').example;
+      const withEmphasis = phrases => ({ id: 'legacy', spec: { ...columns, data: { ...columns.data, items: columns.data.items.map((item, index) => index === 0 ? { ...item, detail_emphasis: phrases } : item) } } });
+      assert.equal(createPartSchema.safeParse(withEmphasis([])).success, true);
+      assert.equal(createPartSchema.safeParse(withEmphasis(['phrase'])).success, false);
       // zod v4 `.meta()` must reach the published JSON Schema so clients see the legacy property as deprecated.
       const advertised = [];
       const visit = node => {
@@ -523,6 +535,57 @@ test('issue61 part_catalog schema matches MCP input validation and core constrai
       assert.ok(advertised.length > 0, 'create_part publishes the legacy detail_emphasis property');
       for (const schema of advertised) assert.equal(schema.deprecated, true, 'the legacy property is marked deprecated');
     });
+  } finally {
+    await client.close();
+  }
+});
+
+test('issue61 every GraphIcon site accepts a prepared asset handle through MCP and core lists no other site', async () => {
+  const client = new Client({ name: 'aislide-issue61-sites', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const catalog = await call('part_catalog', { detail: 'full' });
+    const defs = catalog.schema.$defs ?? catalog.schema.definitions;
+    const mentionsIcon = node => Boolean(node) && typeof node === 'object' && (node.$ref === '#/$defs/GraphIcon' || Object.values(node).some(mentionsIcon));
+    const advertised = new Set();
+    for (const [name, definition] of Object.entries(defs)) {
+      if (name === 'GraphIcon') continue;
+      for (const owner of [definition, ...(definition.oneOf ?? [])]) {
+        for (const [property, schema] of Object.entries(owner.properties ?? {})) if (mentionsIcon(schema)) advertised.add(`${name}.${property}`);
+      }
+    }
+    // The schema offers the asset handle at every property typed GraphIcon, so each one must be resolved by MCP.
+    // A new site in core fails the comparison below until it is added here and exercised.
+    const partSites = {
+      'ComparisonPanelItem.icon': ['comparison_panels', data => [data.panels[0].items[0], 'icon']],
+      'IconCard.icon': ['icon_cards', data => [data.cards[0], 'icon']],
+      'IconColumn.icon': ['icon_columns', data => [data.items[0], 'icon']],
+      'IconRow.icon': ['icon_rows', data => [data.rows[0], 'icon']],
+      'ImageColumn.image': ['image_columns', data => [data.items[0], 'image']],
+      'PartData.image': ['screenshot_callouts', data => [data, 'image']],
+      'StepCard.icon': ['step_cards', data => [data.steps[0], 'icon']],
+      'StepCard.image': ['step_cards', data => [data.steps[0], 'image']],
+    };
+    assert.deepEqual([...advertised].sort(), [...Object.keys(partSites), 'GraphGroup.icon', 'GraphNode.icon'].sort());
+
+    const handle = (await call('lucide_icon_assets', { icons: [{ name: 'ShieldCheck' }] })).icons[0].icon;
+    assert.ok(handle.asset_id && !handle.base64, 'the prepared icon is a handle, not inline data');
+    for (const [site, [kind, locate]] of Object.entries(partSites)) {
+      const spec = structuredClone(catalog.presets.find(preset => preset.example.data.kind === kind).example);
+      const [holder, property] = locate(spec.data);
+      holder[property] = { ...handle };
+      assert.equal((await call('create_part', { id: 'site', spec })).type, 'group', site);
+    }
+    const node = { id: 'node', label: 'Node', x: 40, y: 140, width: 160, height: 80 };
+    const graph = (nodes, groups) => ({ version: 1, title: '', nodes, edges: [], groups });
+    await call('create_graph', { id: 'node-site', spec: graph([{ ...node, icon: { ...handle } }], []) });
+    await call('create_graph', { id: 'group-site', spec: graph([node], [{ id: 'group', label: 'Group', x: 0, y: 88, width: 300, height: 200, icon: { ...handle } }]) });
   } finally {
     await client.close();
   }

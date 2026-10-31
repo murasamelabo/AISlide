@@ -209,6 +209,17 @@ fn screenshot_callouts_reject_unbounded_positions_and_counts() {
     let item = |x: f64| json!({"x":x,"y":0.5,"label":"Item"});
     assert!(create(&screenshot_spec(json!([item(1.2)]))).unwrap_err().contains("0-1 fractions"));
     assert!(create(&screenshot_spec(json!([item(-0.1)]))).unwrap_err().contains("0-1 fractions"));
+    // The published schema advertises the same closed 0-1 range the validator enforces, for both axes.
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let position = &catalog["schema"]["$defs"]["Callout"]["properties"];
+    for axis in ["x", "y"] {
+        assert_eq!((position[axis]["minimum"].as_f64(), position[axis]["maximum"].as_f64()), (Some(0.0), Some(1.0)), "{axis}");
+    }
+    for edge in [0.0, 1.0] {
+        assert!(create(&screenshot_spec(json!([{"x":edge,"y":0.5,"label":"Item"}]))).is_ok(), "x={edge} is inside the closed range");
+        assert!(create(&screenshot_spec(json!([{"x":0.5,"y":edge,"label":"Item"}]))).is_ok(), "y={edge} is inside the closed range");
+    }
+    assert!(create(&screenshot_spec(json!([{"x":0.5,"y":1.2,"label":"Item"}]))).unwrap_err().contains("0-1 fractions"));
     assert!(create(&screenshot_spec(json!((0..7).map(|_| item(0.5)).collect::<Vec<_>>()))).unwrap_err().contains("1-6 items"));
     for region in [
         json!({"x": 0.9, "y": 0.4, "width": 0.2, "height": 0.2}),
@@ -580,19 +591,19 @@ fn issue61_part_catalog_schema_matches_icon_column_graph_icon_and_body_size_limi
     with_emphasis["data"]["items"][0]["detail_emphasis"] = json!(["phrase"]);
     assert!(create(&with_emphasis).unwrap_err().contains("Unsupported: icon columns do not draw detail_emphasis"), "the rejection keeps its Unsupported category");
 
-    // 2. GraphIcon schema in part_catalog, graph_catalog, and best_practice_guide documents both asset_id and base64.
+    // 2. The catalogs core returns describe the inline GraphIcon only; MCP adds the asset handle to the schema it republishes.
     let graph_catalog = execute_request(json!({"op":"graph_catalog"})).unwrap();
     let guide = execute_request(json!({"op":"best_practice_guide","profile_id":"technical-explainer"})).unwrap();
-    for schema in [&catalog["schema"], &graph_catalog["schema"], &guide["input_schema"]] {
+    for schema in [&catalog["schema"], &graph_catalog["schema"], &graph_catalog["operation_schema"], &guide["input_schema"]] {
         let schema_defs = schema.get("$defs").or_else(|| schema.get("definitions")).unwrap();
         let graph_icon = &schema_defs["GraphIcon"];
         assert_eq!(graph_icon["additionalProperties"], false);
-        assert_eq!(graph_icon["properties"]["asset_id"]["format"], "uuid");
+        assert_eq!(graph_icon["required"], json!(["base64", "mime_type"]));
+        assert!(graph_icon["properties"].get("asset_id").is_none() && graph_icon.get("oneOf").is_none(), "core does not accept asset handles");
         assert_eq!(graph_icon["properties"]["base64"]["minLength"], 1);
         assert_eq!(graph_icon["properties"]["base64"]["maxLength"], 1398104);
         assert_eq!(graph_icon["properties"]["mime_type"]["enum"], json!(["image/png", "image/jpeg"]));
         assert_eq!(graph_icon["properties"]["alt"]["maxLength"], 500);
-        assert_eq!(graph_icon["oneOf"].as_array().unwrap().len(), 2);
     }
 
     // 3. body_size bounds in schema match core validation constants and boundary checks.
@@ -631,20 +642,18 @@ fn issue61_part_catalog_schema_matches_icon_column_graph_icon_and_body_size_limi
 }
 
 #[test]
-fn issue61_graph_icon_schema_tracks_the_struct_and_core_rejects_mcp_asset_handles() {
+fn issue61_graph_icon_schema_tracks_the_struct_and_core_rejects_asset_handles() {
     let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
     let schema = &catalog["schema"]["$defs"]["GraphIcon"];
 
-    // Every field core serializes is documented; `asset_id` is the only MCP-only addition.
+    // Every field core serializes is documented, and nothing else is.
     let serialized = icon(32, 32);
     let mut core_fields: Vec<&str> = serialized.as_object().unwrap().keys().map(String::as_str).collect();
-    let mut documented: Vec<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).filter(|name| *name != "asset_id").collect();
+    let mut documented: Vec<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).collect();
     core_fields.sort_unstable();
     documented.sort_unstable();
     assert_eq!(core_fields, documented);
-    assert!(schema.get("required").is_none(), "required fields live in the oneOf alternatives");
-    assert_eq!(schema["properties"]["asset_id"]["x-mcp-only"], true, "direct callers can tell the handle is MCP-only");
-    assert!(schema["description"].as_str().is_some_and(|text| text.contains("asset_id") && text.contains("base64")), "the schema says which form MCP and direct callers use");
+    assert_eq!(schema["required"], json!(["base64", "mime_type"]));
 
     // MCP resolves `asset_id` to base64 before calling core, which has no asset registry and must not accept the handle.
     let mut spec = example("list-horizontal/icon-cards");
@@ -696,8 +705,11 @@ fn issue61_schema_text_limits_match_what_the_validators_enforce() {
                 };
                 let over = probe(maximum + 1).unwrap_err();
                 assert!(over.contains(&format!("exceeds {maximum} ")), "{preset} {pointer}.{property} advertises {maximum} for {unit}: {over}");
-                // Fitting the frame is a separate rule, so only the length rule is asserted at the advertised limit.
-                if let Err(error) = probe(maximum) { assert!(!error.contains("exceeds"), "{preset} {pointer}.{property} at {maximum} for {unit}: {error}"); }
+                // Fitting the frame is a separate rule: at the advertised limit the length rule must pass, so the only
+                // accepted failures are the ones that name the frame, never a length or required-text error.
+                if let Err(error) = probe(maximum) {
+                    assert!(["does not fit", "too long for its panel"].iter().any(|fit| error.contains(fit)), "{preset} {pointer}.{property} at {maximum} for {unit}: {error}");
+                }
             }
         }
     }
