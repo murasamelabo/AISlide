@@ -11,11 +11,15 @@ mod diagrams;
 mod editorial;
 mod process;
 pub mod state;
-pub use briefing::{AgendaItem, Callout, CalloutRegion, IconCard, IconRow, PartMessage, ShiftRow, StepCard};
+pub use briefing::{AgendaItem, BODY_SIZE_MAX, BODY_SIZE_MIN, Callout, CalloutRegion, IconCard, IconRow, PartMessage, ShiftRow, StepCard};
 pub use business::{BulletRow, HarveyRow, HeatmapRow, KpiCard, KpiStatus, ParetoItem, RaciTask, Risk, VarianceRow};
 pub use catalog::catalog;
-pub use editorial::{EditorialStep, FactColumn, ImageColumn, RoadmapPhase};
+pub use editorial::{EditorialStep, FactColumn, IconColumn, ImageColumn, RoadmapPhase};
 pub use process::{ArchitectureElement, ArchitectureKind, ArchitectureRelation, FishboneCategory, FishboneCause, JourneyRow, SankeyLink, SankeyNode, StepShape, SwimlaneFlow, SwimlaneStep};
+
+/// Allowed `body_size` (px) of a comparison panel; the briefing presets use `BODY_SIZE_MIN`/`BODY_SIZE_MAX`.
+pub const PANEL_BODY_SIZE_MIN: f64 = 16.0;
+pub const PANEL_BODY_SIZE_MAX: f64 = 28.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -63,19 +67,19 @@ impl PartLayout {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PartData {
     Interactive { spec: crate::interactive::Spec },
-    ComparisonPanels { panels: Vec<ComparisonPanel>, #[serde(default)] transition: bool },
-    IconCards { cards: Vec<IconCard>, #[serde(default, skip_serializing_if = "Option::is_none")] columns: Option<usize>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] numbered: bool, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
-    IconRows { rows: Vec<IconRow>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] boxed: bool, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
-    ShiftRows { #[serde(default, skip_serializing_if = "String::is_empty")] from_label: String, #[serde(default, skip_serializing_if = "String::is_empty")] to_label: String, rows: Vec<ShiftRow>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
-    StepCards { steps: Vec<StepCard>, #[serde(default, skip_serializing_if = "String::is_empty")] step_label: String, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
-    OpenSteps { steps: Vec<EditorialStep>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
-    RailSteps { steps: Vec<EditorialStep>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
-    Roadmap { phases: Vec<RoadmapPhase>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
-    IconColumns { items: Vec<IconRow> },
-    FactColumns { items: Vec<FactColumn>, #[serde(default, skip_serializing_if = "Option::is_none")] columns: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
-    ImageColumns { items: Vec<ImageColumn> },
-    Agenda { items: Vec<AgendaItem>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
-    ScreenshotCallouts { image: crate::graphs::GraphIcon, callouts: Vec<Callout>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] detail_views: bool, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    ComparisonPanels { #[schemars(length(min = 2, max = 2))] panels: Vec<ComparisonPanel>, #[serde(default)] transition: bool },
+    IconCards { #[schemars(length(min = 2, max = 6))] cards: Vec<IconCard>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = 2, max = 4))] columns: Option<usize>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] numbered: bool, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    IconRows { #[schemars(length(min = 2, max = 6))] rows: Vec<IconRow>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] boxed: bool, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    ShiftRows { #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 24))] from_label: String, #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 24))] to_label: String, #[schemars(length(min = 2, max = 5))] rows: Vec<ShiftRow>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    StepCards { #[schemars(length(min = 2, max = 4))] steps: Vec<StepCard>, #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 12))] step_label: String, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    OpenSteps { #[schemars(length(min = 2, max = 5))] steps: Vec<EditorialStep>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    RailSteps { #[schemars(length(min = 2, max = 5))] steps: Vec<EditorialStep>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    Roadmap { #[schemars(length(min = 2, max = 4))] phases: Vec<RoadmapPhase>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    IconColumns { #[schemars(length(min = 2, max = 4))] items: Vec<IconColumn> },
+    FactColumns { #[schemars(length(min = 2, max = 6))] items: Vec<FactColumn>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = 2, max = 3))] columns: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    ImageColumns { #[schemars(length(min = 2, max = 4))] items: Vec<ImageColumn> },
+    Agenda { #[schemars(length(min = 2, max = 7))] items: Vec<AgendaItem>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    ScreenshotCallouts { image: crate::graphs::GraphIcon, #[schemars(length(min = 1, max = 6))] callouts: Vec<Callout>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] detail_views: bool, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     KpiCards { cards: Vec<KpiCard>, #[serde(default, skip_serializing_if = "Option::is_none")] columns: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     BulletGraphs { rows: Vec<BulletRow>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     Variance {
@@ -156,18 +160,18 @@ pub struct PartItem { pub label: String, #[serde(default)] pub detail: String, #
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ComparisonPanel {
-    pub label: String,
-    pub items: Vec<ComparisonPanelItem>,
+    #[schemars(length(min = 1, max = 64))] pub label: String,
+    #[schemars(length(min = 1, max = 5))] pub items: Vec<ComparisonPanelItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub fill: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub heading_fill: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub heading_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub accent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub icon_fill: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub body_size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = PANEL_BODY_SIZE_MIN, max = PANEL_BODY_SIZE_MAX))] pub body_size: Option<f64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ComparisonPanelItem { pub text: String, #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<crate::graphs::GraphIcon> }
+pub struct ComparisonPanelItem { #[schemars(length(min = 1, max = 240))] pub text: String, #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<crate::graphs::GraphIcon> }
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TreeNode { pub id: String, pub label: String, #[serde(default)] pub parent: Option<String> }
@@ -203,7 +207,7 @@ fn validate_data(data: &PartData) -> Result<()> {
                 count(panel.items.len(), 1, 5)?;
                 for item in &panel.items { bounded_text(&item.text, 240)?; if item.text.trim().is_empty() { return Err(Error::Invalid("comparison panel row text is required".into())); } }
                 for color in [&panel.fill, &panel.heading_fill, &panel.heading_color, &panel.accent, &panel.icon_fill].into_iter().flatten() { crate::model::valid_color(color)?; }
-                if panel.body_size.is_some_and(|size| !size.is_finite() || !(16.0..=28.0).contains(&size)) { return Err(Error::Invalid("comparison body size must be 16-28px".into())); }
+                if panel.body_size.is_some_and(|size| !size.is_finite() || !(PANEL_BODY_SIZE_MIN..=PANEL_BODY_SIZE_MAX).contains(&size)) { return Err(Error::Invalid(format!("comparison body size must be {PANEL_BODY_SIZE_MIN}-{PANEL_BODY_SIZE_MAX}px"))); }
             }
         }
         PartData::IconCards { .. } | PartData::IconRows { .. } | PartData::ShiftRows { .. } | PartData::StepCards { .. } | PartData::Agenda { .. } | PartData::ScreenshotCallouts { .. }

@@ -30,6 +30,9 @@ timeline label overages include `spec.data.tasks[N].label`, actual count and lim
 Valid records remain managed. New part creation/update still enforces the current
 rules. Malformed XML, unknown metadata structure/version, invalid IDs/hashes and
 capacity violations are not ignored. No provenance-skip option bypasses these guards.
+A saved `icon_columns` item may carry the legacy `detail_emphasis`: an empty
+array is read and dropped, and a nonempty value is quarantined like any other
+record that fails the current creation rules.
 
 An unchanged save, or Undo back to the opened state, preserves the exact source
 archive including quarantined metadata. A later edited export may omit incompatible
@@ -157,7 +160,7 @@ or master/layout operations when an existing template must be retained.
 
 Blocks are `cards:{items:[{label,detail?}],columns?}` (1-6 cards, 1-3 columns),
 `callout:{text}`, `text:{paragraphs}`, `steps:{items}`,
-`comparison:{rows,columns,cells,corner_label?}`, `part:{spec}`, or
+`comparison:{rows,columns,cells,corner_label?}`, `part:{spec,show_title?}`, or
 `graph:{input}`. Each includes its `kind` discriminator. Parts omit explicit
 `layout`; core supplies it. Steps, comparisons, parts and graphs keep managed
 metadata and normal regeneration guards. Cards/callouts remain native editable
@@ -168,6 +171,16 @@ across slides: `title_size` 24-64 (default 40), `body_size` 16-40 (24),
 Headers, cards and callouts reject measured text overflow instead of shrinking;
 managed parts retain their existing bounded fitting rules. Missing fonts,
 glyphs and visual collisions still require preview/preflight review.
+
+A `part` block takes an optional `show_title` that controls the part's internal
+title band (88px, or 80px for `interactive/*`); pattern-mode `slots` accept the
+same field. It defaults to `false` when `spec.title` is empty or whitespace-only
+and to `true` otherwise. Pass `show_title:false` to omit the band, for example
+under the slide title, while `spec.title` stays as metadata. Explicit
+`show_title:true` requires a nonempty title; managed `add_part` and
+`insert_part` take `layout.show_title` as given and do not. `interactive/*`
+still requires a nonempty title when the band is hidden, and then needs a frame
+of at least 960×400 instead of 960×480.
 
 Pattern mode replaces `blocks` with `pattern:{id,count?,mirror?,message_band?}`
 and `slots:{<slot id>:block}`. Core resolves the [layout pattern](#layout-patterns)
@@ -265,7 +278,10 @@ callout or label and only the `inline` or `rule` style, and the slot is named
 `lead-message` because `split/1-2` already owns a `lead` slot. A `list/icon-rows`
 row accepts `detail_emphasis` (up to four phrases that must occur verbatim in its
 `detail`, non-overlapping); they render bold in the emphasis color while `detail`
-stays one string. `icon_columns` rejects it.
+stays one string. For backwards compatibility, `icon_columns` accepts only
+`detail_emphasis:[]`; it is deprecated, omitted from serialized parts and should
+not be sent by new callers. A nonempty value keeps failing validation with the
+`Unsupported:` error, and MCP rejects it earlier through its input schema.
 No prose classification or severity inference is performed. `takeaway.band_frame`
 is the outer region; `text_frame` and `separator_frame` describe its default rule
 layout. Variant `surface_frame`, fill, stroke and padding-derived text frame are
@@ -446,7 +462,7 @@ Six non-card presets share the native-frame and fixed-font validation path:
 | `flow/open-steps` | `open_steps`: 2-5 `steps:{label,detail?}`, optional `accent`; one horizontal milestone axis |
 | `vertical-flow/rail` | `rail_steps`: the same step fields, 2-5 items; one vertical rail with explanations on the right |
 | `flow/roadmap` | `roadmap`: 2-4 `phases:{period,label,detail?,points?,outcome?}`, optional `accent`; at most four short points per phase |
-| `list-horizontal/icon-columns` | `icon_columns`: 2-4 `items:{label,detail?,icon?,accent?}` grouped by whitespace |
+| `list-horizontal/icon-columns` | `icon_columns`: 2-4 `items:{label,detail?,icon?,accent?}` grouped by whitespace; legacy `detail_emphasis:[]` is accepted but not emitted |
 | `list-horizontal/fact-columns` | `fact_columns`: 2-6 `items:{value,label,unit?,detail?,qualifier?}`, optional `columns` 2-3 and `accent`; at most two rows |
 | `list-horizontal/image-columns` | `image_columns`: 2-4 `items:{image,label,detail?,caption?}` with required approved `GraphIcon` images kept in full |
 
@@ -1221,7 +1237,10 @@ Call `add_part` / `update_part` (or their batch variants) with a new
 one undoable transaction. Metadata and the default survive a single-PPTX
 save/open. Manual native child edits use existing stale-part guards.
 Rendering uses native-sized text and rejects insufficient space instead of
-silently shrinking labels. The default frame is 1152×512; minimum 960×480.
+silently shrinking labels. The default frame is 1152×512; minimum 960×480, or
+960×400 when `layout.show_title` is false (the 80px title band is not drawn, so
+the body keeps the same height). Explicit JavaScript labs (below) keep their own
+960×480 canvas minimum and reject shorter frames.
 
 The separate experimental `export_copilot_interactive` operation uses the
 observed `fa000000210` / `sdxcatalog` / `en-US` reference with a JSON-string
@@ -1411,7 +1430,7 @@ parity notices become one informational `CHART_PREVIEW` finding per selected
 page; specific `CHART_PRESENTATION` limits remain warnings. Raw renderer and
 preview warnings remain available, and `office_visual_parity` remains false.
 
-`GraphIcon` is `{base64,mime_type,alt?}` with PNG/JPEG bytes, not a path, URL or raw SVG. Set `icon` to null or omit it on a complete replacement to remove an icon; an icon-mode node must also return to `presentation: "card"`. Each payload uses the existing 1 MiB/4096px/64 MiB decoder bounds; total encoded node and boundary icons share a 3 MiB budget. Document/metadata/response budgets can reject a graph before these maxima. Use `create_graph_icon` for generic imported images: inert SVG becomes PNG at a 256px longest side, larger PNG/JPEG images are downsampled in their format, and smaller rasters retain their bytes. Prepared cloud PNGs bypass this helper to preserve originals up to 512px. Normal `create_asset` behavior is unchanged. Alt text is at most 500 characters.
+`GraphIcon` is `{base64,mime_type,alt?}` in direct core/SDK calls, with PNG/JPEG bytes rather than a path, URL or raw SVG. MCP accepts either that form or a prepared handle, `{asset_id,mime_type?,alt?}`, and resolves the handle to inline data before calling core. The `schema.$defs.GraphIcon` entry that MCP returns from `part_catalog`, `graph_catalog` and `best_practice_guide` documents both forms. The catalogs from core, the CLI and the SDK describe only the inline form, and core rejects `asset_id`. Set `icon` to null or omit it on a complete replacement to remove an icon; an icon-mode node must also return to `presentation: "card"`. Each payload uses the existing 1 MiB/4096px/64 MiB decoder bounds; total encoded node and boundary icons share a 3 MiB budget. Document/metadata/response budgets can reject a graph before these maxima. Use `create_graph_icon` for generic imported images: inert SVG becomes PNG at a 256px longest side, larger PNG/JPEG images are downsampled in their format, and smaller rasters retain their bytes. Prepared cloud PNGs bypass this helper to preserve originals up to 512px. Normal `create_asset` behavior is unchanged. Alt text is at most 500 characters.
 
 Omitted presentation preserves legacy card output, including the aspect-fitted picture beside the label at up to 48 graph pixels. Icon mode places a picture above an editable label with a transparent native connection anchor; Studio service icons start at 160x140 with 16px labels. Node headings and details are written as paragraphs inside the node shape (or icon-mode anchor), with text padding reproducing the fitted label frame and an 8px-scaled space before the detail, so Office moves and resizes the text with its shape. Boundary headers are likewise written inside the boundary rectangle. Centered single-frame labels raise thin top/bottom padding toward 8 px only when the measured text still fits. A boundary with an icon becomes a nested PowerPoint group of its rectangle and picture. A node icon stays a separate sibling picture because AISlide connectors attach only to siblings; direct Office movement of only the node shape does not move that picture. Edge labels and badges remain separate objects because PowerPoint connectors cannot hold text. Logical boundary nesting is metadata, not nested PowerPoint groups. Graph-editor movement moves the complete node. Vendor colors and proportions remain unchanged, not live theme bindings.
 

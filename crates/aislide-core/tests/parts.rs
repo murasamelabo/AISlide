@@ -311,6 +311,56 @@ fn issue21_quarantine_does_not_bypass_provenance_structure_identity_or_count_lim
 }
 
 #[test]
+fn issue61_saved_icon_columns_follow_the_stored_part_metadata_rules() {
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let spec = catalog["presets"].as_array().unwrap().iter().find(|entry| entry["id"] == "list-horizontal/icon-columns").unwrap()["example"].clone();
+    let mut scene = deck(json!({}));
+    scene["slides"][0]["elements"] = json!([]);
+    let created = execute_request(json!({"op":"new_document","id":"legacy-columns","deck":scene})).unwrap();
+    let inserted = execute_request(json!({"op":"insert_part","document":created,"expected_revision":0,"slide_id":"slide","id":"columns","spec":spec})).unwrap();
+    let output = execute_request(json!({"op":"export_presentation","document":inserted["document"]})).unwrap();
+    let pristine = Package::open(STANDARD.decode(output["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let path = pristine.parts().keys().find(|path| path.starts_with("customXml/aislide-provenance") && path.ends_with(".xml")).unwrap().clone();
+    let xml = pristine.text(&path).unwrap();
+    let parsed = roxmltree::Document::parse(xml).unwrap();
+    let items = parsed.descendants().find(|node| node.attribute("name") == Some("items")).unwrap();
+    let first_item = items.descendants().find(|node| node.tag_name().name() == "object").unwrap();
+    let range = first_item.range();
+    let insert_at = range.start + xml[range.clone()].rfind("</").unwrap();
+    let label = first_item.descendants().find(|node| node.attribute("name") == Some("label")).unwrap().children().find(|node| node.is_element()).unwrap().range();
+    let with_field = |field: &str| { let mut changed = xml.to_owned(); changed.insert_str(insert_at, field); changed };
+    let open = |changed: String| {
+        let mut altered = Package::open(pristine.save().unwrap()).unwrap();
+        altered.replace_part(&path, changed.into_bytes()).unwrap();
+        execute_request(json!({"op":"open_presentation","id":"legacy-open","base64":STANDARD.encode(altered.save().unwrap())}))
+    };
+    let warnings = |opened: &Value| opened["warnings"].as_array().map(|list| list.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+
+    // A legacy empty array is dropped and the part stays managed.
+    let opened = open(with_field("<m:field name='detail_emphasis'><m:array/></m:field>")).unwrap();
+    let document = &opened["document"];
+    assert_eq!(document["parts"].as_array().unwrap().len(), 1);
+    assert_eq!(document["parts"][0]["stale"], false);
+    assert!(document["parts"][0]["spec"]["data"]["items"][0].get("detail_emphasis").is_none(), "legacy empty emphasis is dropped");
+    assert!(!warnings(&opened).contains("PART_METADATA_UNMANAGED"), "{}", warnings(&opened));
+
+    // A value outside the current limits quarantines only that part: the document opens and the native shapes stay.
+    let mut too_long = xml.to_owned();
+    too_long.replace_range(label, &format!("<m:string>{}</m:string>", "x".repeat(49)));
+    let opened = open(too_long).unwrap();
+    assert!(opened["document"]["parts"].as_array().is_none_or(|parts| parts.is_empty()));
+    assert!(warnings(&opened).contains("PART_METADATA_UNMANAGED") && warnings(&opened).contains("icon column label exceeds 48"), "{}", warnings(&opened));
+
+    // A value current creation rules reject quarantines only its part, as before: the legacy nonempty emphasis is one such value,
+    // while an unknown field is unknown metadata structure and the file does not open.
+    let unknown = open(with_field("<m:field name='unrecognized'><m:boolean>true</m:boolean></m:field>")).unwrap_err().to_string();
+    assert!(unknown.contains("unrecognized"), "{unknown}");
+    let opened = open(with_field("<m:field name='detail_emphasis'><m:array><m:string>phrase</m:string></m:array></m:field>")).unwrap();
+    assert!(opened["document"]["parts"].as_array().is_none_or(|parts| parts.is_empty()));
+    assert!(warnings(&opened).contains("PART_METADATA_UNMANAGED") && warnings(&opened).contains("icon columns do not draw detail_emphasis"), "{}", warnings(&opened));
+}
+
+#[test]
 fn issue22_stale_copy_error_identifies_part_and_recovery() {
     assert!(execute_request(json!({"op":"authoring_capabilities"})).unwrap()["operations"].as_array().unwrap().contains(&json!("detach_part")));
     let document = issue22_stale_native_document();

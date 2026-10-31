@@ -95,7 +95,7 @@ export type CompositionBlock =
   | { kind: 'steps'; items: PartItem[] }
   | { kind: 'comparison'; rows: string[]; columns: string[]; cells: string[][]; corner_label?: string }
   | { kind: 'graph'; input: GraphLayoutInput }
-  | { kind: 'part'; spec: Omit<PartSpec, 'layout'> }
+  | { kind: 'part'; spec: Omit<PartSpec, 'layout'>; show_title?: boolean }
 /** Pattern-mode blocks; legacy `blocks` stacking rejects them. */
 export type PatternBlock =
   | CompositionBlock
@@ -277,6 +277,8 @@ export type ComparisonPanel = { label: string; items: ComparisonPanelItem[]; fil
 export type PartMessage = { text: string; detail?: string; fill?: string | null; color?: string | null }
 export type IconCard = { label: string; caption?: string; detail?: string; points?: string[]; tag?: string; icon?: GraphIcon | null; accent?: string | null }
 export type IconRow = { label: string; detail?: string; detail_emphasis?: string[]; icon?: GraphIcon | null; accent?: string | null }
+/** Backward compatibility only; new inputs should omit this empty-only field. */
+export type IconColumn = Omit<IconRow, 'detail_emphasis'> & { detail_emphasis?: [] }
 export type ShiftRow = { from: string; to: string; caption?: string; detail?: string }
 export type StepCard = { label: string; detail?: string; points?: string[]; outcome?: string; image?: GraphIcon | null; icon?: GraphIcon | null }
 export type EditorialStep = { label: string; detail?: string }
@@ -327,7 +329,7 @@ export type PartData =
   | { kind: 'open_steps'; steps: EditorialStep[]; accent?: string | null }
   | { kind: 'rail_steps'; steps: EditorialStep[]; accent?: string | null }
   | { kind: 'roadmap'; phases: RoadmapPhase[]; accent?: string | null }
-  | { kind: 'icon_columns'; items: Omit<IconRow, 'detail_emphasis'>[] }
+  | { kind: 'icon_columns'; items: IconColumn[] }
   | { kind: 'fact_columns'; items: FactColumn[]; columns?: number | null; accent?: string | null }
   | { kind: 'image_columns'; items: ImageColumn[] }
   | { kind: 'agenda'; items: AgendaItem[]; accent?: string | null }
