@@ -345,6 +345,7 @@ fn apply(
                 }
             }
             native_guard.check(slide, id)?;
+            // target() enforces visual.locked || visual.hidden on the chart and all ancestor groups.
             let element = target(&mut slide.elements, id)?;
             match element {
                 Element::Chart { kind: current_kind, categories: current_categories, series: current_series, options: current_options, .. } => {
@@ -458,6 +459,6 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
             for element_id in spec.diagram_ids(id) { targets.insert((slide_id.clone(), element_id)); }
         }
     }
-    targets.retain(|(slide_id, element_id)| result.document.deck.slides.iter().any(|slide| slide.id == *slide_id && slide.elements.iter().any(|element| element.bounds().0 == element_id)));
+    targets.retain(|(slide_id, element_id)| result.document.deck.slides.iter().any(|slide| slide.id == *slide_id && crate::model::element_list(&slide.elements).iter().any(|element| element.bounds().0 == element_id)));
     Ok(crate::graphs::annotate_transaction(result, &targets))
 }
