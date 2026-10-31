@@ -73,14 +73,15 @@ fn insert_slide(package: &mut Package, layouts: &[NativePart], deck: &Deck, slid
     let layout = layouts.iter().find(|layout| &layout.id == layout_id).ok_or_else(|| Error::Invalid("native layout missing".into()))?;
     let blank = Slide { id: slide.id.clone(), elements: Vec::new(), layout_id: None, native_source_id: None, review: None, ..slide.clone() };
     let generated = Package::open(crate::pptx::export_pptx(&Deck { slides: vec![blank], design: None, ..deck.clone() })?)?;
-    let xml = generated.text("ppt/slides/slide1.xml")?.to_owned(); let parsed = parse(&xml)?;
+    let _scope = crate::native::enter_part_color_map(package, &layout.path);
+    let xml = crate::native_save::encode_scheme_colors(generated.text("ppt/slides/slide1.xml")?.to_owned(), crate::design::ColorMap::scoped())?; let parsed = parse(&xml)?;
     let tree = child(parsed.root_element(), P, "cSld").and_then(|node| child(node, P, "spTree")).ok_or_else(|| Error::Invalid("generated slide tree".into()))?;
     let ids: BTreeMap<_, _> = element_list(&slide.elements).into_iter().enumerate().map(|(index, element)| (element.bounds().0, index + 2)).collect();
     let binding = NativePart { path: path.into(), id: slide.id.clone(), nodes: ids.iter().map(|(id, numeric)| ((*id).into(), numeric.to_string())).collect() };
     let mut relationships = format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"rIdLayout\" Type=\"{R}/slideLayout\" Target=\"/{}\"/>", layout.path);
     if let Some(master) = relationship_targets(package, main, "notesMaster")?.into_values().next() {
         let notes = path.replace("/slides/", "/notesSlides/");
-        package.add_part(notes.clone(), generated.part("ppt/notesSlides/notesSlide1.xml")?.to_vec())?;
+        package.add_part(notes.clone(), crate::native_save::encode_scheme_colors(generated.text("ppt/notesSlides/notesSlide1.xml")?.to_owned(), crate::native::try_part_color_map(package, &master))?.into_bytes())?;
         add_type(package, &notes, "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml")?;
         package.add_part(relations_path(&notes), format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"rIdSlide\" Type=\"{R}/slide\" Target=\"/{path}\"/><Relationship Id=\"rIdMaster\" Type=\"{R}/notesMaster\" Target=\"/{master}\"/></Relationships>").into_bytes())?;
         relationships.push_str(&format!("<Relationship Id=\"rIdNotes\" Type=\"{R}/notesSlide\" Target=\"/{notes}\"/>"));
