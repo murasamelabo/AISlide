@@ -194,9 +194,9 @@ Plan the page mix by reading task: open columns, rows, shifts, steps, graphs,
 required tables and occasional justified cards. Do not convert every page to cards.
 In `compose_slide`, the `comparison` block remains a matrix. To request these
 visuals, use a `part` block with the preset (pass `show_title: false` on the
-`part` block to omit the 88px internal part title band when `spec.title` is set,
-including for `interactive/*` and `diagram/custom`), or insert it with managed
-`add_part`.
+`part` block to omit the internal part title band (88px; 80px for `interactive/*`)
+when `spec.title` is set, including for `interactive/*` and `diagram/custom`), or
+insert it with managed `add_part`.
 
 When the server exposes `layout_patterns` and the user has not asked for free
 placement, no layout patterns or an existing template, choose the body pattern

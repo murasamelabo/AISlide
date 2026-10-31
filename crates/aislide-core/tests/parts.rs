@@ -351,12 +351,13 @@ fn issue61_saved_icon_columns_follow_the_stored_part_metadata_rules() {
     assert!(opened["document"]["parts"].as_array().is_none_or(|parts| parts.is_empty()));
     assert!(warnings(&opened).contains("PART_METADATA_UNMANAGED") && warnings(&opened).contains("icon column label exceeds 48"), "{}", warnings(&opened));
 
-    // Unknown metadata structure is never ignored; a nonempty legacy emphasis is such a field. No AISlide version can have
-    // saved one (validation rejected it from the start and empty values were never serialized), so the file fails to open.
+    // A value current creation rules reject quarantines only its part, as before: the legacy nonempty emphasis is one such value,
+    // while an unknown field is unknown metadata structure and the file does not open.
     let unknown = open(with_field("<m:field name='unrecognized'><m:boolean>true</m:boolean></m:field>")).unwrap_err().to_string();
     assert!(unknown.contains("unrecognized"), "{unknown}");
-    let legacy = open(with_field("<m:field name='detail_emphasis'><m:array><m:string>phrase</m:string></m:array></m:field>")).unwrap_err().to_string();
-    assert!(legacy.contains("icon columns do not draw detail_emphasis"), "{legacy}");
+    let opened = open(with_field("<m:field name='detail_emphasis'><m:array><m:string>phrase</m:string></m:array></m:field>")).unwrap();
+    assert!(opened["document"]["parts"].as_array().is_none_or(|parts| parts.is_empty()));
+    assert!(warnings(&opened).contains("PART_METADATA_UNMANAGED") && warnings(&opened).contains("icon columns do not draw detail_emphasis"), "{}", warnings(&opened));
 }
 
 #[test]

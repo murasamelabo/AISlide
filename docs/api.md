@@ -30,11 +30,9 @@ timeline label overages include `spec.data.tasks[N].label`, actual count and lim
 Valid records remain managed. New part creation/update still enforces the current
 rules. Malformed XML, unknown metadata structure/version, invalid IDs/hashes and
 capacity violations are not ignored. No provenance-skip option bypasses these guards.
-A saved `icon_columns` item may carry the legacy `detail_emphasis` only as an
-empty array, which is read and dropped. A nonempty value is unknown metadata
-structure, so the file does not open instead of being quarantined; no AISlide
-version has written one, because creation always rejected it and empty values
-were never serialized.
+A saved `icon_columns` item may carry the legacy `detail_emphasis`: an empty
+array is read and dropped, and a nonempty value is quarantined like any other
+record that fails the current creation rules.
 
 An unchanged save, or Undo back to the opened state, preserves the exact source
 archive including quarantined metadata. A later edited export may omit incompatible
@@ -175,12 +173,14 @@ managed parts retain their existing bounded fitting rules. Missing fonts,
 glyphs and visual collisions still require preview/preflight review.
 
 A `part` block takes an optional `show_title` that controls the part's internal
-88px title band; pattern-mode `slots` accept the same field. It defaults to
-`false` when `spec.title` is empty or whitespace-only and to `true` otherwise.
-Pass `show_title:false` to omit the band, for example under the slide title,
-while `spec.title` stays as metadata. Explicit `show_title:true` requires a
-nonempty title. `interactive/*` still requires a nonempty title when the band
-is hidden, and then needs a frame of at least 960×400 instead of 960×480.
+title band (88px, or 80px for `interactive/*`); pattern-mode `slots` accept the
+same field. It defaults to `false` when `spec.title` is empty or whitespace-only
+and to `true` otherwise. Pass `show_title:false` to omit the band, for example
+under the slide title, while `spec.title` stays as metadata. Explicit
+`show_title:true` requires a nonempty title; managed `add_part` and
+`insert_part` take `layout.show_title` as given and do not. `interactive/*`
+still requires a nonempty title when the band is hidden, and then needs a frame
+of at least 960×400 instead of 960×480.
 
 Pattern mode replaces `blocks` with `pattern:{id,count?,mirror?,message_band?}`
 and `slots:{<slot id>:block}`. Core resolves the [layout pattern](#layout-patterns)
@@ -280,10 +280,8 @@ row accepts `detail_emphasis` (up to four phrases that must occur verbatim in it
 `detail`, non-overlapping); they render bold in the emphasis color while `detail`
 stays one string. For backwards compatibility, `icon_columns` accepts only
 `detail_emphasis:[]`; it is deprecated, omitted from serialized parts and should
-not be sent by new callers. A nonempty value is rejected while parsing, so core,
-CLI and SDK callers see a `JSON:`-prefixed error with the sentence earlier versions
-returned behind an `Unsupported:` prefix; MCP rejects it earlier through its input
-schema.
+not be sent by new callers. A nonempty value keeps failing validation with the
+`Unsupported:` error, and MCP rejects it earlier through its input schema.
 No prose classification or severity inference is performed. `takeaway.band_frame`
 is the outer region; `text_frame` and `separator_frame` describe its default rule
 layout. Variant `surface_frame`, fill, stroke and padding-derived text frame are

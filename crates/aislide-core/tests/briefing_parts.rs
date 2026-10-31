@@ -543,6 +543,7 @@ fn issue61_part_catalog_schema_matches_icon_column_graph_icon_and_body_size_limi
     let _column = aislide_core::parts::IconColumn {
         label: "Item".into(),
         detail: String::new(),
+        detail_emphasis: Vec::new(),
         icon: None,
         accent: None,
     };
@@ -576,7 +577,7 @@ fn issue61_part_catalog_schema_matches_icon_column_graph_icon_and_body_size_limi
     assert!(normalized["data"]["items"][0].get("detail_emphasis").is_none(), "legacy detail_emphasis is removed when serialized");
     let mut with_emphasis = example("list-horizontal/icon-columns");
     with_emphasis["data"]["items"][0]["detail_emphasis"] = json!(["phrase"]);
-    assert!(create(&with_emphasis).unwrap_err().contains("detail_emphasis"));
+    assert!(create(&with_emphasis).unwrap_err().contains("Unsupported: icon columns do not draw detail_emphasis"), "the rejection keeps its Unsupported category");
 
     // 2. GraphIcon schema in part_catalog, graph_catalog, and best_practice_guide documents both asset_id and base64.
     let graph_catalog = execute_request(json!({"op":"graph_catalog"})).unwrap();
@@ -655,31 +656,48 @@ fn issue61_graph_icon_schema_tracks_the_struct_and_core_rejects_mcp_asset_handle
 fn issue61_schema_text_limits_match_what_the_validators_enforce() {
     let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
     let defs = &catalog["schema"]["$defs"];
+    let variant = |kind: &str| defs["PartData"]["oneOf"].as_array().unwrap().iter()
+        .find(|variant| variant["properties"]["kind"]["const"] == kind).unwrap_or_else(|| panic!("missing {kind}"));
+    let example_of = |preset: &str| catalog["presets"].as_array().unwrap().iter().find(|entry| entry["id"] == preset).unwrap_or_else(|| panic!("missing {preset}"))["example"].clone();
+    // The schema object that owns the limits, a preset, and the JSON pointer of one such object in that preset's example.
     let probes = [
-        ("IconCard", "list-horizontal/icon-cards", "/data/cards/0"),
-        ("IconRow", "list/icon-rows", "/data/rows/0"),
-        ("ShiftRow", "before-after/shift", "/data/rows/0"),
-        ("StepCard", "flow/cards", "/data/steps/0"),
-        ("AgendaItem", "list/agenda", "/data/items/0"),
-        ("Callout", "list-enumeration/screenshot-callouts", "/data/callouts/0"),
-        ("EditorialStep", "flow/open-steps", "/data/steps/0"),
-        ("RoadmapPhase", "flow/roadmap", "/data/phases/0"),
-        ("IconColumn", "list-horizontal/icon-columns", "/data/items/0"),
-        ("FactColumn", "list-horizontal/fact-columns", "/data/items/0"),
-        ("ImageColumn", "list-horizontal/image-columns", "/data/items/0"),
+        (&defs["IconCard"], "list-horizontal/icon-cards", "/data/cards/0"),
+        (&defs["PartMessage"], "list-horizontal/icon-cards", "/data/message"),
+        (&defs["IconRow"], "list/icon-rows", "/data/rows/0"),
+        (&defs["ShiftRow"], "before-after/shift", "/data/rows/0"),
+        (variant("shift_rows"), "before-after/shift", "/data"),
+        (&defs["StepCard"], "flow/cards", "/data/steps/0"),
+        (variant("step_cards"), "flow/cards", "/data"),
+        (&defs["AgendaItem"], "list/agenda", "/data/items/0"),
+        (&defs["Callout"], "list-enumeration/screenshot-callouts", "/data/callouts/0"),
+        (&defs["EditorialStep"], "flow/open-steps", "/data/steps/0"),
+        (&defs["RoadmapPhase"], "flow/roadmap", "/data/phases/0"),
+        (&defs["IconColumn"], "list-horizontal/icon-columns", "/data/items/0"),
+        (&defs["FactColumn"], "list-horizontal/fact-columns", "/data/items/0"),
+        (&defs["ImageColumn"], "list-horizontal/image-columns", "/data/items/0"),
+        (&defs["ComparisonPanel"], "contrast/panels", "/data/panels/0"),
+        (&defs["ComparisonPanelItem"], "contrast/panels", "/data/panels/0/items/0"),
     ];
-    for (definition, preset, pointer) in probes {
-        for (property, schema) in defs[definition]["properties"].as_object().unwrap() {
-            let Some(maximum) = schema["maxLength"].as_u64() else { continue };
-            let probe = |length: u64| {
-                let mut spec = example(preset);
-                spec.pointer_mut(pointer).unwrap_or_else(|| panic!("{preset} example lacks {pointer}"))[property] = json!("x".repeat(length as usize));
-                create(&spec)
-            };
-            let over = probe(maximum + 1).unwrap_err();
-            assert!(over.contains(&format!("exceeds {maximum} ")), "{definition}.{property} advertises {maximum}: {over}");
-            // Fitting the frame is a separate rule, so only the length rule is asserted at the advertised limit.
-            if let Err(error) = probe(maximum) { assert!(!error.contains("exceeds"), "{definition}.{property} at {maximum}: {error}"); }
+    // JSON Schema and the validators both count Unicode scalar values, whatever their UTF-8 width.
+    for unit in ["x", "あ", "😀"] {
+        for (owner, preset, pointer) in probes {
+            for (property, schema) in owner["properties"].as_object().unwrap() {
+                let Some(maximum) = schema["maxLength"].as_u64() else { continue };
+                let probe = |length: u64| {
+                    let mut spec = example_of(preset);
+                    if spec.pointer(pointer).is_none() {
+                        // Optional objects such as `message` are absent from the example; seed the smallest valid one.
+                        let (parent, key) = pointer.rsplit_once('/').unwrap();
+                        spec.pointer_mut(parent).unwrap()[key] = json!({"text":"Message"});
+                    }
+                    spec.pointer_mut(pointer).unwrap()[property] = json!(unit.repeat(length as usize));
+                    create(&spec)
+                };
+                let over = probe(maximum + 1).unwrap_err();
+                assert!(over.contains(&format!("exceeds {maximum} ")), "{preset} {pointer}.{property} advertises {maximum} for {unit}: {over}");
+                // Fitting the frame is a separate rule, so only the length rule is asserted at the advertised limit.
+                if let Err(error) = probe(maximum) { assert!(!error.contains("exceeds"), "{preset} {pointer}.{property} at {maximum} for {unit}: {error}"); }
+            }
         }
     }
 }

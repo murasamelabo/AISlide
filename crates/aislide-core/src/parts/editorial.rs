@@ -21,50 +21,15 @@ pub struct RoadmapPhase {
     #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 64))] pub outcome: String,
 }
 
-#[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
-#[schemars(transform = add_legacy_icon_column_schema)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IconColumn {
     #[schemars(length(min = 1, max = 48))] pub label: String,
     #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 200))] pub detail: String,
+    /// Legacy compatibility only; only an empty array is accepted. Omit for new parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 0), extend("deprecated" = true))] pub detail_emphasis: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<GraphIcon>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub accent: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct IconColumnInput {
-    label: String,
-    #[serde(default)] detail: String,
-    #[serde(default)] detail_emphasis: Vec<String>,
-    #[serde(default)] icon: Option<GraphIcon>,
-    #[serde(default)] accent: Option<String>,
-}
-
-impl<'de> Deserialize<'de> for IconColumn {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
-        let input = IconColumnInput::deserialize(deserializer)?;
-        if !input.detail_emphasis.is_empty() {
-            return Err(<D::Error as serde::de::Error>::custom(
-                "icon columns do not draw detail_emphasis; use list/icon-rows to emphasize a phrase",
-            ));
-        }
-        Ok(Self { label: input.label, detail: input.detail, icon: input.icon, accent: input.accent })
-    }
-}
-
-fn add_legacy_icon_column_schema(schema: &mut schemars::Schema) {
-    let Some(object) = schema.as_object_mut() else { return };
-    object.insert("additionalProperties".into(), serde_json::Value::Bool(false));
-    if let Some(properties) = object.entry("properties").or_insert_with(|| serde_json::json!({})).as_object_mut() {
-        properties.insert("detail_emphasis".into(), serde_json::json!({
-            "type": "array",
-            "items": { "type": "string" },
-            "maxItems": 0,
-            "deprecated": true,
-            "description": "Legacy compatibility only; only an empty array is accepted. Omit for new parts."
-        }));
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -113,6 +78,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
             for item in items {
                 field(&item.label, 48, "icon column label", true)?;
                 field(&item.detail, 200, "icon column detail", false)?;
+                if !item.detail_emphasis.is_empty() { return Err(Error::Unsupported("icon columns do not draw detail_emphasis; use list/icon-rows to emphasize a phrase".into())); }
                 if let Some(icon) = &item.icon { valid_text(&icon.alt, 500)?; }
                 colors(&[&item.accent])?;
             }

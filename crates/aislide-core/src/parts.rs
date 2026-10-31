@@ -17,6 +17,7 @@ pub use catalog::catalog;
 pub use editorial::{EditorialStep, FactColumn, IconColumn, ImageColumn, RoadmapPhase};
 pub use process::{ArchitectureElement, ArchitectureKind, ArchitectureRelation, FishboneCategory, FishboneCause, JourneyRow, SankeyLink, SankeyNode, StepShape, SwimlaneFlow, SwimlaneStep};
 
+/// Allowed `body_size` (px) of a comparison panel; the briefing presets use `BODY_SIZE_MIN`/`BODY_SIZE_MAX`.
 pub const PANEL_BODY_SIZE_MIN: f64 = 16.0;
 pub const PANEL_BODY_SIZE_MAX: f64 = 28.0;
 

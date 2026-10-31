@@ -92,6 +92,7 @@ pub(super) const GAP: f64 = 16.0;
 const PAD: f64 = 20.0;
 const LABEL: f64 = 18.0;
 pub(super) const BODY: f64 = 16.0;
+/// Allowed `body_size` (px) of the briefing presets; comparison panels use `PANEL_BODY_SIZE_MIN`/`PANEL_BODY_SIZE_MAX`.
 pub const BODY_SIZE_MIN: f64 = 14.0;
 pub const BODY_SIZE_MAX: f64 = 22.0;
 pub(super) const SMALL: f64 = 13.0;
