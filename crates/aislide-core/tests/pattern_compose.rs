@@ -275,3 +275,135 @@ fn pattern_mode_rejects_ambiguous_or_unfitting_input_atomically() {
     let error = compose(&before, base(json!({"id":"focus/statement"}), json!({"statement":{"kind":"statement","text":long}}))).unwrap_err();
     assert!(error.contains("font sizes are not reduced"), "{error}");
 }
+
+#[test]
+fn issue60_compose_slide_part_blocks_support_show_title_in_block_and_pattern_modes() {
+    let base = document(Some("trust"));
+    let six_cards = json!({
+        "version": 1,
+        "preset": "list-horizontal/icon-cards",
+        "title": "Part Heading",
+        "subtitle": "Part Subtitle",
+        "data": {
+            "kind": "icon_cards",
+            "columns": 3,
+            "message": { "text": "People set direction; automation extends reach.", "detail": "Keep human review at decision boundaries." },
+            "cards": (1..=6).map(|index| json!({
+                "label": format!("Capability {index}"),
+                "caption": "Operating boundary",
+                "detail": "Signals, context and controls are managed together across every stage of the workflow.",
+                "tag": format!("Stage {index}")
+            })).collect::<Vec<_>>()
+        }
+    });
+
+    // With show_title omitted (defaults to true because title is nonempty), 2 rows of tall cards + message band overflow the 369.6px body height.
+    let overflow_with_title = compose(&base, json!({
+        "title": "Slide Title",
+        "subtitle": "Slide Subtitle",
+        "blocks": [{ "kind": "part", "spec": six_cards }]
+    })).unwrap_err();
+    assert!(overflow_with_title.contains("fit"), "{overflow_with_title}");
+
+    // With show_title: false, the 88px internal part title band is omitted (457.6px body height), so the same 6 cards fit and retain spec.title.
+    let mut blank_title_cards = six_cards.clone();
+    blank_title_cards["title"] = json!("   ");
+    let blank_title_composed = compose(&base, json!({
+        "title": "Slide Title",
+        "subtitle": "Slide Subtitle",
+        "blocks": [{ "kind": "part", "spec": blank_title_cards }]
+    })).unwrap();
+    assert_eq!(blank_title_composed["document"]["parts"][0]["spec"]["layout"]["show_title"], false);
+
+    let block_composed = compose(&base, json!({
+        "title": "Slide Title",
+        "subtitle": "Slide Subtitle",
+        "blocks": [{ "kind": "part", "show_title": false, "spec": six_cards }]
+    })).unwrap();
+    let stored_part = &block_composed["document"]["parts"][0];
+    assert_eq!(stored_part["spec"]["title"], "Part Heading");
+    assert_eq!(stored_part["spec"]["layout"]["show_title"], false);
+
+    // Updating the composed part from its stored spec preserves show_title: false.
+    let mut updated_cards = stored_part["spec"].clone();
+    updated_cards["data"]["cards"][0]["label"] = json!("Updated Capability 1");
+    let updated = execute_request(json!({
+        "op": "update_part",
+        "document": block_composed["document"],
+        "expected_revision": block_composed["document"]["revision"],
+        "slide_id": "slide-1",
+        "id": "c-b0",
+        "spec": updated_cards
+    })).unwrap();
+    assert_eq!(updated["document"]["parts"][0]["spec"]["layout"]["show_title"], false);
+
+    // interactive/summary and diagram/custom require nonempty title even when show_title is false.
+    let interactive_spec = json!({
+        "version": 1,
+        "preset": "interactive/summary",
+        "title": "Interactive Summary",
+        "subtitle": "",
+        "data": {
+            "kind": "interactive",
+            "spec": {
+                "version": 1,
+                "template": "summary",
+                "source": "Synthetic source",
+                "groups": [],
+                "dimensions": [],
+                "items": [
+                    { "id": "item-1", "label": "Item 1", "detail": "First item detail.", "action": "Review item 1" },
+                    { "id": "item-2", "label": "Item 2", "detail": "Second item detail.", "action": "Review item 2" }
+                ],
+                "initial_state": { "selected_id": "item-1", "dimension": 0, "scale": "linear" }
+            }
+        }
+    });
+    let diagram_spec = json!({
+        "version": 1,
+        "preset": "diagram/custom",
+        "title": "Custom Flow",
+        "subtitle": "",
+        "data": {
+            "kind": "diagram",
+            "graph": {
+                "version": 1,
+                "title": "Custom Flow",
+                "subtitle": "",
+                "nodes": [
+                    { "id": "n1", "label": "Source", "x": 64.0, "y": 120.0, "width": 200.0, "height": 88.0 },
+                    { "id": "n2", "label": "Target", "x": 360.0, "y": 120.0, "width": 200.0, "height": 88.0 }
+                ],
+                "edges": [{ "id": "e1", "source": "n1", "target": "n2" }]
+            }
+        }
+    });
+
+    for candidate in [&interactive_spec, &diagram_spec] {
+        let block_res = compose(&base, json!({
+            "title": "Slide Title",
+            "blocks": [{ "kind": "part", "show_title": false, "spec": candidate }]
+        })).unwrap();
+        assert_eq!(block_res["document"]["parts"][0]["spec"]["layout"]["show_title"], false);
+        assert_eq!(block_res["document"]["parts"][0]["spec"]["title"], candidate["title"]);
+
+        let pattern_res = compose(&base, json!({
+            "title": "Slide Title",
+            "pattern": { "id": "focus/full" },
+            "slots": { "primary": { "kind": "part", "show_title": false, "spec": candidate } }
+        })).unwrap();
+        assert_eq!(pattern_res["document"]["parts"][0]["spec"]["layout"]["show_title"], false);
+        assert_eq!(pattern_res["document"]["parts"][0]["spec"]["title"], candidate["title"]);
+    }
+
+    // Explicit show_title: true with an empty title is rejected in both block and pattern modes.
+    let mut empty_title_part = six_cards;
+    empty_title_part["title"] = json!("   ");
+    for spec in [
+        json!({ "title": "Slide Title", "blocks": [{ "kind": "part", "show_title": true, "spec": empty_title_part }] }),
+        json!({ "title": "Slide Title", "pattern": { "id": "focus/full" }, "slots": { "primary": { "kind": "part", "show_title": true, "spec": empty_title_part } } }),
+    ] {
+        let error = compose(&base, spec).unwrap_err();
+        assert!(error.contains("show_title:true requires a nonempty part title"), "{error}");
+    }
+}

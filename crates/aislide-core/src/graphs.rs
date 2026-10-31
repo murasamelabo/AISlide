@@ -191,12 +191,48 @@ pub struct GraphBadge {
     #[serde(default = "ink")] pub color: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphIcon {
     pub base64: String,
     pub mime_type: String,
     #[serde(default)] pub alt: String,
+}
+
+impl schemars::JsonSchema for GraphIcon {
+    fn schema_name() -> std::borrow::Cow<'static, str> { "GraphIcon".into() }
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "description": "Prepared PNG/JPEG icon or image. In MCP, pass the {asset_id, mime_type, alt} object returned by lucide_icon_assets, architecture_icon_assets, create_graph_icon or register_asset unchanged; direct core/CLI calls require {base64, mime_type, alt?}.",
+            "additionalProperties": false,
+            "properties": {
+                "asset_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "MCP process-local asset handle returned by lucide_icon_assets, architecture_icon_assets, create_graph_icon or register_asset (resolved by MCP before calling core)."
+                },
+                "base64": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1398104
+                },
+                "mime_type": {
+                    "type": "string",
+                    "enum": ["image/png", "image/jpeg"]
+                },
+                "alt": {
+                    "type": "string",
+                    "maxLength": 500,
+                    "default": ""
+                }
+            },
+            "oneOf": [
+                { "required": ["base64", "mime_type"], "not": { "required": ["asset_id"] } },
+                { "required": ["asset_id"], "not": { "required": ["base64"] } }
+            ]
+        })
+    }
 }
 
 pub fn create_icon(base64: String, mime_type: &str, alt: &str) -> Result<GraphIcon> {

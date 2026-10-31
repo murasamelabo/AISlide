@@ -297,6 +297,218 @@ test('issue52 catalog and tool search queries match all whitespace-separated ter
   }, ['--tool-profile', 'full', '--layout-patterns', 'on']);
 });
 
+test('issue60 compose_slide part blocks accept show_title in block and pattern modes', async () => {
+  await feedbackMcpFixture(async ({ call, calls, registrations }) => {
+    const created = await call('create_presentation', { title: 'Synthetic compose part show_title' });
+    const partSpecValue = {
+      version: 1,
+      preset: 'interactive/summary',
+      title: 'Interactive summary',
+      subtitle: '',
+      data: {
+        kind: 'interactive',
+        spec: {
+          version: 1,
+          template: 'summary',
+          source: 'Synthetic source',
+          groups: [],
+          dimensions: [],
+          items: [
+            { id: 'item-1', label: 'Item 1', detail: 'First item detail.', action: 'Review item 1' },
+            { id: 'item-2', label: 'Item 2', detail: 'Second item detail.', action: 'Review item 2' },
+          ],
+          initial_state: { selected_id: 'item-1', dimension: 0, scale: 'linear' },
+        },
+      },
+    };
+    const blockSpec = {
+      title: 'Slide Title',
+      blocks: [{ kind: 'part', show_title: false, spec: partSpecValue }],
+    };
+    await call('compose_slide', { deck_id: created.deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'block-part', spec: blockSpec });
+    assert.deepEqual(calls.at(-1).request.operations, [{ op: 'compose_slide', slide_id: 'slide-1', id: 'block-part', spec: blockSpec }]);
+
+    const patternSpec = {
+      title: 'Pattern Slide Title',
+      pattern: { id: 'focus/full' },
+      slots: { primary: { kind: 'part', show_title: false, spec: partSpecValue } },
+    };
+    await call('compose_slide', { deck_id: created.deck_id, expected_revision: 1, slide_id: 'slide-1', id: 'pattern-part', spec: patternSpec });
+    assert.deepEqual(calls.at(-1).request.operations, [{ op: 'compose_slide', slide_id: 'slide-1', id: 'pattern-part', spec: patternSpec }]);
+
+    const composeSchema = registrations.get('compose_slide').config.inputSchema;
+    assert.equal(composeSchema.safeParse({ deck_id: created.deck_id, expected_revision: 2, slide_id: 'slide-1', id: 'bad-part', spec: { title: 'Slide', blocks: [{ kind: 'part', show_title: 'no', spec: partSpecValue }] } }).success, false);
+  });
+});
+
+test('issue61 part_catalog schema matches MCP input validation and core constraints for IconColumn, GraphIcon and body_size', async () => {
+  const client = new Client({ name: 'aislide-issue61-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const catalog = await call('part_catalog', { detail: 'full' });
+    const defs = catalog.schema.$defs ?? catalog.schema.definitions;
+    assert.ok(defs.IconColumn, 'schema defines IconColumn');
+    assert.equal(defs.IconColumn.properties.detail_emphasis.maxItems, 0, 'IconColumn accepts only legacy empty detail_emphasis');
+    assert.equal(defs.IconColumn.properties.label.minLength, 1);
+    assert.equal(defs.IconColumn.properties.label.maxLength, 48);
+    assert.equal(defs.IconColumn.properties.detail.maxLength, 200);
+    const iconColumnsVariant = defs.PartData.oneOf.find(variant => variant.properties?.kind?.const === 'icon_columns');
+    assert.equal(iconColumnsVariant.properties.items.items.$ref, '#/$defs/IconColumn');
+    assert.equal(iconColumnsVariant.properties.items.minItems, 2);
+    assert.equal(iconColumnsVariant.properties.items.maxItems, 4);
+
+    assert.ok(defs.GraphIcon.properties.asset_id, 'GraphIcon schema documents asset_id');
+    assert.equal(defs.GraphIcon.properties.asset_id.format, 'uuid');
+    assert.equal(defs.GraphIcon.properties.base64.minLength, 1);
+    assert.equal(defs.GraphIcon.properties.base64.maxLength, 1398104);
+    assert.deepEqual(defs.GraphIcon.properties.mime_type.enum, ['image/png', 'image/jpeg']);
+    assert.equal(defs.GraphIcon.properties.alt.maxLength, 500);
+    assert.equal(defs.GraphIcon.additionalProperties, false);
+    assert.equal(defs.GraphIcon.oneOf.length, 2);
+
+    assert.equal(defs.ComparisonPanel.properties.body_size.minimum, 16);
+    assert.equal(defs.ComparisonPanel.properties.body_size.maximum, 28);
+    for (const kind of ['icon_cards', 'icon_rows', 'shift_rows', 'step_cards', 'screenshot_callouts']) {
+      const variant = defs.PartData.oneOf.find(entry => entry.properties?.kind?.const === kind);
+      assert.equal(variant.properties.body_size.minimum, 14, `${kind} minimum`);
+      assert.equal(variant.properties.body_size.maximum, 22, `${kind} maximum`);
+    }
+
+    const legacy = await call('create_part', {
+      id: 'repro-icon-col',
+      spec: {
+        version: 1,
+        preset: 'list-horizontal/icon-columns',
+        title: 'Icon Columns',
+        subtitle: '',
+        data: {
+          kind: 'icon_columns',
+          items: [
+            { label: 'Item 1', detail: 'First item detail.', detail_emphasis: [] },
+            { label: 'Item 2', detail: 'Second item detail.', detail_emphasis: [] },
+          ],
+        },
+      },
+    });
+    assert.equal(legacy.type, 'group');
+    const rejected = await client.callTool({
+      name: 'create_part',
+      arguments: {
+        id: 'unsupported-icon-col',
+        spec: {
+          version: 1,
+          preset: 'list-horizontal/icon-columns',
+          title: 'Icon Columns',
+          subtitle: '',
+          data: {
+            kind: 'icon_columns',
+            items: [
+              { label: 'Item 1', detail: 'First item detail.', detail_emphasis: ['phrase'] },
+              { label: 'Item 2', detail: 'Second item detail.' },
+            ],
+          },
+        },
+      },
+    });
+    assert.equal(rejected.isError, true);
+    assert.match(rejected.content[0].text, /detail_emphasis/);
+
+    const validColumns = await call('create_part', {
+      id: 'valid-icon-col',
+      spec: {
+        version: 1,
+        preset: 'list-horizontal/icon-columns',
+        title: 'Icon Columns',
+        subtitle: '',
+        data: {
+          kind: 'icon_columns',
+          items: [
+            { label: 'Item 1', detail: 'First item detail.' },
+            { label: 'Item 2', detail: 'Second item detail.' },
+          ],
+        },
+      },
+    });
+    assert.equal(validColumns.type, 'group');
+
+    const preparedIcons = await call('lucide_icon_assets', { icons: [{ name: 'ShieldCheck' }, { name: 'Bot' }] });
+    const withIconHandles = await call('create_part', {
+      id: 'icon-col-handles',
+      spec: {
+        version: 1,
+        preset: 'list-horizontal/icon-columns',
+        title: 'Icon Columns With Handles',
+        subtitle: '',
+        data: {
+          kind: 'icon_columns',
+          items: [
+            { label: 'Item 1', detail: 'First item detail.', icon: preparedIcons.icons[0].icon },
+            { label: 'Item 2', detail: 'Second item detail.', icon: preparedIcons.icons[1].icon },
+          ],
+        },
+      },
+    });
+    assert.equal(withIconHandles.type, 'group');
+
+    const created = await call('create_presentation', { title: 'Live compose part show_title' });
+    await call('compose_slide', {
+      deck_id: created.deck_id,
+      expected_revision: 0,
+      slide_id: 'slide-1',
+      id: 'repro-part',
+      spec: {
+        title: 'Slide Title',
+        blocks: [
+          {
+            kind: 'part',
+            show_title: false,
+            spec: {
+              version: 1,
+              preset: 'interactive/summary',
+              title: 'Interactive Summary',
+              subtitle: '',
+              data: {
+                kind: 'interactive',
+                spec: {
+                  version: 1,
+                  template: 'summary',
+                  source: 'Synthetic source',
+                  groups: [],
+                  dimensions: [],
+                  items: [
+                    { id: 'item-1', label: 'Item 1', detail: 'First item detail.', action: 'Review item 1' },
+                    { id: 'item-2', label: 'Item 2', detail: 'Second item detail.', action: 'Review item 2' },
+                  ],
+                  initial_state: { selected_id: 'item-1', dimension: 0, scale: 'linear' },
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+    const doc = await call('get_document', { deck_id: created.deck_id });
+    assert.equal(doc.parts[0].spec.title, 'Interactive Summary');
+    assert.equal(doc.parts[0].spec.layout.show_title, false);
+
+    await feedbackMcpFixture(async ({ registrations }) => {
+      const createPartSchema = registrations.get('create_part').config.inputSchema;
+      for (const preset of catalog.presets) {
+        const parsed = createPartSchema.safeParse({ id: 'catalog-ex', spec: preset.example });
+        assert.equal(parsed.success, true, `preset ${preset.id} example failed MCP Zod validation: ${parsed.error?.message}`);
+      }
+    });
+  } finally {
+    await client.close();
+  }
+});
+
 test('recipe MCP discovers semantic candidates and uses strict bounded input schemas', async () => {
   await feedbackMcpFixture(async ({ registrations, call, fixture }) => {
     for (const name of ['recipe_catalog', 'recommend_recipes', 'preview_recipe', 'apply_recipe']) assert.ok(registrations.has(name), `Missing ${name}`);

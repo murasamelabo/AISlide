@@ -351,7 +351,10 @@ const callout = z.object({ x: z.number().min(0).max(1).describe('0-1 fraction of
 const briefingLine = (maximum, name, required = false) => briefingText(maximum, name, required).refine(value => !value.includes('\n'), `${name} must be one line`);
 const editorialStep = z.object({ label: briefingText(48, 'Open step label', true), detail: briefingText(160, 'Open step detail').optional() }).strict();
 const roadmapPhase = z.object({ period: briefingLine(24, 'Roadmap period', true), label: briefingText(48, 'Roadmap label', true), detail: briefingText(160, 'Roadmap detail').optional(), points: briefingPoints.optional(), outcome: briefingText(64, 'Roadmap outcome').optional() }).strict();
-const iconColumn = iconRow.omit({ detail_emphasis: true }).extend({ label: briefingText(48, 'Icon column label', true) }).strict();
+const iconColumn = iconRow.omit({ detail_emphasis: true }).extend({
+	label: briefingText(48, 'Icon column label', true),
+	detail_emphasis: z.array(z.string()).max(0).optional().describe('Legacy compatibility only; only an empty array is accepted. Omit for new parts.').meta({ deprecated: true }),
+}).strict();
 const factColumn = z.object({ value: briefingLine(24, 'Fact value', true).describe('Supplied verbatim text, never normalized or compared by area'), label: briefingText(48, 'Fact label', true), unit: briefingLine(12, 'Fact unit').optional(), detail: briefingText(160, 'Fact detail').optional(), qualifier: briefingText(100, 'Fact qualifier').optional() }).strict();
 const imageColumn = z.object({ image: graphIcon, label: briefingText(48, 'Image column label', true), detail: briefingText(160, 'Image column detail').optional(), caption: briefingText(80, 'Image caption').optional() }).strict();
 const partId = z.string().min(1).max(24).regex(/^[A-Za-z0-9_-]+$/, 'Use 1-24 ASCII letters, digits, - or _');
@@ -432,7 +435,7 @@ const compositionBlocks = [
 	z.object({ kind: z.literal('text'), paragraphs: paragraphsSchema }).strict(),
 	z.object({ kind: z.literal('steps'), items: z.array(partItem).min(2).max(12) }).strict(),
 	z.object({ kind: z.literal('comparison'), rows: z.array(partLabel).min(2).max(4), columns: z.array(partLabel).min(2).max(4), cells: z.array(z.array(partLabel).min(2).max(4)).min(2).max(4), corner_label: partLabel.optional() }).strict(),
-	z.object({ kind: z.literal('part'), spec: partSpec.omit({ layout: true }) }).strict(),
+	z.object({ kind: z.literal('part'), spec: partSpec.omit({ layout: true }), show_title: z.boolean().optional().describe('Set false to omit the 88px internal part title band when the slide already has a title; spec.title remains retained for metadata and accessibility.') }).strict(),
 	z.object({ kind: z.literal('graph'), input: graphLayoutInput }).strict(),
 ];
 const patternBlocks = [

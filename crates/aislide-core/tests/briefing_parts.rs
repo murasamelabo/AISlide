@@ -537,3 +537,79 @@ fn issue18_a_floor_above_the_default_body_makes_it_an_author_choice() {
     let raised = preflight_spec(spec, "raised", 18.0);
     assert!(severities(&raised).iter().all(|severity| *severity == "info"), "raising body_size to the floor clears the warning: {raised}");
 }
+
+#[test]
+fn issue61_part_catalog_schema_matches_icon_column_graph_icon_and_body_size_limits() {
+    let _column = aislide_core::parts::IconColumn {
+        label: "Item".into(),
+        detail: String::new(),
+        icon: None,
+        accent: None,
+    };
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let defs = catalog["schema"].get("$defs").or_else(|| catalog["schema"].get("definitions")).unwrap();
+
+    // 1. IconColumn is distinct from IconRow, accepts only the legacy empty detail_emphasis, and bounds label to 1..=48 scalars.
+    assert!(defs.get("IconColumn").is_some(), "missing IconColumn in part_catalog schema");
+    assert_eq!(defs["IconColumn"]["additionalProperties"], false);
+    assert_eq!(defs["IconColumn"]["properties"]["detail_emphasis"]["maxItems"], 0);
+    assert_eq!(defs["IconColumn"]["properties"]["detail_emphasis"]["deprecated"], true);
+    assert_eq!(defs["IconColumn"]["properties"]["label"]["minLength"], 1);
+    assert_eq!(defs["IconColumn"]["properties"]["label"]["maxLength"], 48);
+    assert_eq!(defs["IconColumn"]["properties"]["detail"]["maxLength"], 200);
+    let icon_columns_variant = defs["PartData"]["oneOf"].as_array().unwrap().iter()
+        .find(|variant| variant["properties"]["kind"]["const"] == "icon_columns").unwrap();
+    assert_eq!(icon_columns_variant["properties"]["items"]["items"]["$ref"], "#/$defs/IconColumn");
+    assert_eq!(icon_columns_variant["properties"]["items"]["minItems"], 2);
+    assert_eq!(icon_columns_variant["properties"]["items"]["maxItems"], 4);
+
+    let mut valid_col = example("list-horizontal/icon-columns");
+    valid_col["data"]["items"][0]["label"] = json!("a".repeat(48));
+    assert!(create(&valid_col).is_ok());
+    valid_col["data"]["items"][0]["label"] = json!("a".repeat(49));
+    assert!(create(&valid_col).unwrap_err().contains("48"));
+    let mut with_empty_emphasis = example("list-horizontal/icon-columns");
+    with_empty_emphasis["data"]["items"][0]["detail_emphasis"] = json!([]);
+    assert!(create(&with_empty_emphasis).is_ok(), "legacy empty detail_emphasis remains readable");
+    let parsed: aislide_core::parts::PartSpec = serde_json::from_value(with_empty_emphasis.clone()).unwrap();
+    let normalized = serde_json::to_value(parsed).unwrap();
+    assert!(normalized["data"]["items"][0].get("detail_emphasis").is_none(), "legacy detail_emphasis is removed when serialized");
+    let mut with_emphasis = example("list-horizontal/icon-columns");
+    with_emphasis["data"]["items"][0]["detail_emphasis"] = json!(["phrase"]);
+    assert!(create(&with_emphasis).unwrap_err().contains("detail_emphasis"));
+
+    // 2. GraphIcon schema in part_catalog, graph_catalog, and best_practice_guide documents both asset_id and base64.
+    let graph_catalog = execute_request(json!({"op":"graph_catalog"})).unwrap();
+    let guide = execute_request(json!({"op":"best_practice_guide","profile_id":"technical-explainer"})).unwrap();
+    for schema in [&catalog["schema"], &graph_catalog["schema"], &guide["input_schema"]] {
+        let schema_defs = schema.get("$defs").or_else(|| schema.get("definitions")).unwrap();
+        let graph_icon = &schema_defs["GraphIcon"];
+        assert_eq!(graph_icon["additionalProperties"], false);
+        assert_eq!(graph_icon["properties"]["asset_id"]["format"], "uuid");
+        assert_eq!(graph_icon["properties"]["base64"]["minLength"], 1);
+        assert_eq!(graph_icon["properties"]["base64"]["maxLength"], 1398104);
+        assert_eq!(graph_icon["properties"]["mime_type"]["enum"], json!(["image/png", "image/jpeg"]));
+        assert_eq!(graph_icon["properties"]["alt"]["maxLength"], 500);
+        assert_eq!(graph_icon["oneOf"].as_array().unwrap().len(), 2);
+    }
+
+    // 3. body_size bounds in schema match core validation constants and boundary checks.
+    assert_eq!(defs["ComparisonPanel"]["properties"]["body_size"]["minimum"], aislide_core::parts::PANEL_BODY_SIZE_MIN);
+    assert_eq!(defs["ComparisonPanel"]["properties"]["body_size"]["maximum"], aislide_core::parts::PANEL_BODY_SIZE_MAX);
+    for kind in ["icon_cards", "icon_rows", "shift_rows", "step_cards", "screenshot_callouts"] {
+        let variant = defs["PartData"]["oneOf"].as_array().unwrap().iter()
+            .find(|variant| variant["properties"]["kind"]["const"] == kind).unwrap();
+        assert_eq!(variant["properties"]["body_size"]["minimum"], aislide_core::parts::BODY_SIZE_MIN, "{kind}");
+        assert_eq!(variant["properties"]["body_size"]["maximum"], aislide_core::parts::BODY_SIZE_MAX, "{kind}");
+    }
+    for (size, ok) in [(13.9, false), (14.0, true), (22.0, true), (22.1, false)] {
+        let mut cards = example("list-horizontal/icon-cards");
+        cards["data"]["body_size"] = json!(size);
+        assert_eq!(create(&cards).is_ok(), ok, "icon_cards body_size={size}");
+    }
+    for (size, ok) in [(15.9, false), (16.0, true), (28.0, true), (28.1, false)] {
+        let mut panels = example("contrast/panels");
+        panels["data"]["panels"][0]["body_size"] = json!(size);
+        assert_eq!(create(&panels).is_ok(), ok, "contrast/panels body_size={size}");
+    }
+}

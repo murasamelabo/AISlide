@@ -152,8 +152,10 @@ pub(crate) fn create(id: &str, part: &PartSpec, spec: &Spec, state: &State, them
     field(id,40,"interactive part ID",true)?;
     crate::design::validate_theme(theme)?;
     let frame=part.layout.as_ref().map_or([64.0,144.0,1152.0,512.0],|l|[l.x,l.y,l.width,l.height]);
-    if frame[2]<960.0 || frame[3]<480.0 { return Err(Error::Invalid("interactive part requires a frame of at least 960x480; enlarge it rather than shrinking text".into())); }
-    let width=frame[2]; let height=frame[3]; let top=if part.layout.as_ref().is_none_or(|l|l.show_title) {80.0} else {0.0};
+    let show_title=part.layout.as_ref().is_none_or(|l|l.show_title);
+    let min_height=if show_title {480.0} else {400.0};
+    if frame[2]<960.0 || frame[3]<min_height { return Err(Error::Invalid(format!("interactive part requires a frame of at least 960x{min_height:.0}; enlarge it rather than shrinking text"))); }
+    let width=frame[2]; let height=frame[3]; let top=if show_title {80.0} else {0.0};
     let bottom=height-48.0; let body_height=bottom-top-12.0;
     let mut drawing=Drawing::new(&format!("{id}-interactive"));
     if spec.appearance==Appearance::Showcase {

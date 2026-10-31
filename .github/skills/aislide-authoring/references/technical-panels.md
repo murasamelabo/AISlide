@@ -193,7 +193,10 @@ geometry and source-byte checks do not prove these human-reading properties.
 Plan the page mix by reading task: open columns, rows, shifts, steps, graphs,
 required tables and occasional justified cards. Do not convert every page to cards.
 In `compose_slide`, the `comparison` block remains a matrix. To request these
-visuals, use a `part` block with the preset, or insert it with managed `add_part`.
+visuals, use a `part` block with the preset (pass `show_title: false` on the
+`part` block to omit the 88px internal part title band when `spec.title` is set,
+including for `interactive/*` and `diagram/custom`), or insert it with managed
+`add_part`.
 
 When the server exposes `layout_patterns` and the user has not asked for free
 placement, no layout patterns or an existing template, choose the body pattern
@@ -268,7 +271,7 @@ overflow. Do not replace facts or drop qualifiers to make a layout fit.
 | `flow/open-steps` | `open_steps`: 2-5 `steps:{label<=48, detail<=160}`, optional `accent`; common horizontal axis |
 | `vertical-flow/rail` | `rail_steps`: the same fields and count; vertical rail with aligned explanations |
 | `flow/roadmap` | `roadmap`: 2-4 `phases:{period<=24 (one line), label<=48, detail<=160, points<=4x80, outcome<=64}`, optional `accent` |
-| `list-horizontal/icon-columns` | `icon_columns`: 2-4 `items:{label<=48, detail<=200, icon?, accent?}`; no enclosing cards |
+| `list-horizontal/icon-columns` | `icon_columns`: 2-4 `items:{label<=48, detail<=200, icon?, accent?}` (`IconColumn`; legacy `detail_emphasis:[]` is accepted but not emitted; use `list/icon-rows` for inline phrase emphasis); no enclosing cards |
 | `list-horizontal/fact-columns` | `fact_columns`: 2-6 `items:{value<=24 (text), label<=48, unit<=12, detail<=160, qualifier<=100}`, optional `columns` 2-3 (max two rows) and `accent` |
 | `list-horizontal/image-columns` | `image_columns`: 2-4 `items:{image, label<=48, detail<=160, caption<=80}`; approved images contain without cropping |
 

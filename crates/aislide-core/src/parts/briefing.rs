@@ -92,6 +92,8 @@ pub(super) const GAP: f64 = 16.0;
 const PAD: f64 = 20.0;
 const LABEL: f64 = 18.0;
 pub(super) const BODY: f64 = 16.0;
+pub const BODY_SIZE_MIN: f64 = 14.0;
+pub const BODY_SIZE_MAX: f64 = 22.0;
 pub(super) const SMALL: f64 = 13.0;
 const FIT_MARGIN: f64 = 28.0;
 const ROW_PITCH: f64 = 112.0;
@@ -100,8 +102,8 @@ const CALLOUT: f64 = 28.0;
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PartMessage {
-    pub text: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub detail: String,
+    #[schemars(length(min = 1, max = 120))] pub text: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 160))] pub detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub fill: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub color: Option<String>,
 }
@@ -109,11 +111,11 @@ pub struct PartMessage {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IconCard {
-    pub label: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub caption: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub detail: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub points: Vec<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub tag: String,
+    #[schemars(length(min = 1, max = 48))] pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 64))] pub caption: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 240))] pub detail: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4))] pub points: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 40))] pub tag: String,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<GraphIcon>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub accent: Option<String>,
 }
@@ -121,10 +123,10 @@ pub struct IconCard {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IconRow {
-    pub label: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub detail: String,
+    #[schemars(length(min = 1, max = 60))] pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 200))] pub detail: String,
     /// Phrases of `detail` shown in bold with the emphasis color; each must occur verbatim and phrases may not overlap.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub detail_emphasis: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4))] pub detail_emphasis: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<GraphIcon>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub accent: Option<String>,
 }
@@ -155,19 +157,19 @@ fn detail_pieces(detail: &str, emphasis: &[String]) -> Result<Vec<(String, bool)
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ShiftRow {
-    pub from: String,
-    pub to: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub caption: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub detail: String,
+    #[schemars(length(min = 1, max = 48))] pub from: String,
+    #[schemars(length(min = 1, max = 48))] pub to: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 64))] pub caption: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 200))] pub detail: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StepCard {
-    pub label: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub detail: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub points: Vec<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub outcome: String,
+    #[schemars(length(min = 1, max = 48))] pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 240))] pub detail: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4))] pub points: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 64))] pub outcome: String,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub image: Option<GraphIcon>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<GraphIcon>,
 }
@@ -175,20 +177,20 @@ pub struct StepCard {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgendaItem {
-    pub label: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub detail: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub meta: String,
+    #[schemars(length(min = 1, max = 60))] pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 120))] pub detail: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 16))] pub meta: String,
 }
 
 /// `x` and `y` are 0-1 fractions of the source image, measured from its top-left corner.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Callout {
-    pub x: f64,
-    pub y: f64,
+    #[schemars(range(min = 0, max = 1))] pub x: f64,
+    #[schemars(range(min = 0, max = 1))] pub y: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub target_region: Option<CalloutRegion>,
-    pub label: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub detail: String,
+    #[schemars(length(min = 1, max = 48))] pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 200))] pub detail: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -255,7 +257,7 @@ pub(super) fn colors(values: &[&Option<String>]) -> Result<()> {
 }
 
 fn body_size(value: Option<f64>) -> Result<()> {
-    if value.is_some_and(|size| !size.is_finite() || !(14.0..=22.0).contains(&size)) { return Err(Error::Invalid("body_size must be 14-22px".into())); }
+    if value.is_some_and(|size| !size.is_finite() || !(BODY_SIZE_MIN..=BODY_SIZE_MAX).contains(&size)) { return Err(Error::Invalid("body_size must be 14-22px".into())); }
     Ok(())
 }
 
