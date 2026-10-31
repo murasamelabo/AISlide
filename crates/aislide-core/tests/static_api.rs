@@ -342,6 +342,11 @@ fn delivery_preparation_bounds_selection_and_rejects_stale_or_unknown_options() 
         let mut invalid=request.clone();invalid["options"]=options;
         assert!(execute_request(invalid).is_err());
     }
+    assert_eq!(document["deck"]["slides"].as_array().unwrap().len(), 9);
+    let delivery_error = execute_request(json!({"op":"prepare_delivery","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"options":{}})).unwrap_err().to_string();
+    assert_eq!(delivery_error, "Invalid input: delivery visual selection requires 1-8 unique existing page indices (use options.page_indices); PPTX always contains the whole deck");
+    let preview_error = execute_request(json!({"op":"preview_presentation","document":document,"options":{}})).unwrap_err().to_string();
+    assert_eq!(preview_error, "Invalid input: preview requires 1-8 unique existing page indices; select a smaller batch with options.page_indices");
     for (field,value) in [("expected_revision",json!(1)),("expected_hash",json!("0".repeat(64)))] {
         let mut invalid=request.clone();invalid[field]=value;assert!(execute_request(invalid).is_err());
     }
