@@ -302,6 +302,8 @@ fn delivery_preparation_is_read_only_and_hashes_requested_artifacts() {
     let document=execute_request(json!({"op":"new_document","id":"delivery-core","deck":deck})).unwrap();
     let result=execute_request(json!({"op":"prepare_delivery","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"options":{"pdf":true,"preview":"contact_sheet","notes":true,"source_report":true,"preflight":true,"max_dimension":320}})).unwrap();
     assert_eq!(result["manifest"]["format"],"aislide.delivery");
+    let git_commit = result["manifest"]["producer"]["git_commit"].as_str().expect("producer.git_commit must be present");
+    assert!(git_commit == "unknown" || (git_commit.len() >= 7 && git_commit.bytes().all(|b| b.is_ascii_hexdigit())), "unexpected git_commit: {git_commit}");
     assert_eq!(result["manifest"]["document"]["hash"],document["hash"]);
     assert_eq!(result["manifest"]["checks"]["office_visual_parity"],false);
     assert_eq!(result["manifest"]["checks"]["source_authenticity_verified"],false);

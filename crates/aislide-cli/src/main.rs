@@ -53,8 +53,12 @@ fn run() -> Result<()> {
             let bytes = bounded_read(std::fs::File::open(&args[1])?, aislide_core::package::MAX_ARCHIVE_BYTES)?;
             print_json(&serde_json::to_value(inspect_pptx(bytes)?)?)
         }
+        "--version" | "version" => {
+            println!("aislide {} ({})", env!("CARGO_PKG_VERSION"), aislide_core::GIT_COMMIT);
+            Ok(())
+        }
         "--help" | "help" => {
-            println!("AISlide\n  request                       JSON stdin -> JSON stdout\n  sample                        print the synthetic report input\n  generate input.json out.pptx [--design-preset ID]\n                                create a new native PPTX (no overwrite)\n  inspect file.pptx             inspect simple top-level text runs");
+            println!("AISlide\n  request                       JSON stdin -> JSON stdout\n  sample                        print the synthetic report input\n  generate input.json out.pptx [--design-preset ID]\n                                create a new native PPTX (no overwrite)\n  inspect file.pptx             inspect simple top-level text runs\n  --version                     print version and git commit");
             Ok(())
         }
         _ => Err(Error::Invalid("unknown command or arguments; use --help".into())),

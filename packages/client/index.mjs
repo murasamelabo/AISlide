@@ -256,6 +256,8 @@ export class DocumentSession {
   setHyperlink(slideId, input, options) { return this.applyOperations([{ ...input, op: 'set_hyperlink', slide_id: slideId }], options); }
   setShapeAdjustment(slideId, input, options) { return this.applyOperations([{ ...input, op: 'set_shape_adjustment', slide_id: slideId }], options); }
   addPicture(slideId, input, options) { return this.applyOperations([{ ...input, op: 'add_picture', slide_id: slideId }], options); }
+  updateChart(slideId, input, options) { return this.applyOperations([{ ...input, op: 'update_chart', slide_id: slideId }], options); }
+  removeElements(slideId, ids, options) { return this.applyOperations([{ op: 'remove_elements', slide_id: slideId, ids }], options); }
   importSlides(source, input, options) { return this.#guardedAuthor('import_slides', { ...input, source }, options); }
   #guardedAuthor(op, input, options = {}) {
     return this.#run(async () => {

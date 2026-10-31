@@ -23,9 +23,9 @@ Recommendation-only work permits selection, not editing or rendering.
   supporting section. Record why and which slides; never concatenate full outlines.
 3. Read only selected purpose sections. Aliases aid discovery, not deterministic
   classification. Ask if ambiguity matters. If none fits, disclose the gap;
-  never force an ID or silently expand the taxonomy.
-4. Specify delivery separately: live talk, read-alone PDF, hands-on session or recorded talk;
-  viewport, time and interaction matter. Language and brand do not determine purpose.
+  never force an ID or expand the taxonomy.
+4. Specify delivery separately: live talk, read-alone PDF, hands-on or recorded talk;
+  viewport, time and interaction matter. Language and brand do not set purpose.
 
 ## Selection and delegation
 
@@ -53,17 +53,19 @@ If no purpose fits, propose a custom outline only when planning was requested.
   outlines are examples, not mandatory sections or page counts. Persuasion never
   upgrades uncertainty.
 - Give each slide one role: orientation, claim, comparison, evidence, instruction,
-  discussion or decision. Questions and tasks are valid titles. Choose visuals by
-  that role; keep axes, sources and limits visible, not hidden in notes.
-- Add reader question, actual relation, primary visual, selected/rejected reasons,
-  emphasis and shared component roles to the same ledger.
+  discussion or decision. Questions and tasks are valid titles. Keep axes, sources
+  and limits visible, not hidden in notes.
+- Per slide, add question, relation, primary visual (`native chart` / `native table` /
+  `part:<preset>` / `graph` / `picture` / `text` / `hand-drawn shapes` with reason),
+  rejected native alternative, emphasis and shared roles to the ledger (no global
+  "draw charts with shapes" rule).
   Follow [visual defaults](../aislide-authoring/references/visual-selection.md).
   Explicit user exclusions override this default. Record decisions, not private reasoning.
-- Live talks use staged explanation and supporting notes; read-alone slides need
-  enough context without a speaker. Learning/discussion needs tasks and expected outputs.
-- Preserve the user's voice, not authorship scores or banned-word quotas. Do not
-  impose technical report tone on recruiting, culture, creative or keynote material.
-  No font shrinking or dropped pages to fit.
+- Live talks use staged explanation and notes; read-alone slides need context
+  without a speaker. Learning/discussion needs tasks and outputs (or divider
+  questions, exercises / companion HTML if interactive tools are unavailable).
+- Preserve the user's voice; do not impose technical report tone on recruiting,
+  culture, creative or keynote material. No font shrinking or dropped pages.
 
 ## Editing and execution
 
@@ -73,9 +75,8 @@ If no purpose fits, propose a custom outline only when planning was requested.
 - Return the ledger to the caller. If the original request also authorizes PPTX
   creation, hand it once to [aislide-authoring](../aislide-authoring/SKILL.md). If that
   skill called this one, return instead of invoking it again. HTML or another explicit
-  format retains its own execution workflow. No new engine, install, overwrite or
-  publication is authorized by selecting a purpose; unavailable MCP does not block
-  an outline-only response.
+  format retains its own workflow. No new engine, install, overwrite or publication is
+  authorized by selecting a purpose; unavailable MCP does not block an outline-only response.
 
 ## Output and checks
 

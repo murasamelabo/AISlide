@@ -893,13 +893,13 @@ impl Scene<'_> {
                 })?;
                 if chart_projection::required(series, options) && !kind.is_polar() && !kind.is_extended() && !matches!(kind, crate::model::ChartKind::Radar | crate::model::ChartKind::RadarFilled) {
                     for warning in crate::model::chart_format::compute_chart_presentation(*kind, categories, series, options)?.warnings { self.warning(id, "CHART_PRESENTATION", warning); }
-                    if options.legend.is_some_and(|legend| !matches!(legend, crate::model::chart_format::LegendPosition::Bottom | crate::model::chart_format::LegendPosition::Hidden)) { self.warning(id, "CHART_LEGEND_LAYOUT", "Statistical chart preview uses a bottom legend; native legend placement is retained"); }
-                    if options.data_labels.as_ref().and_then(|labels| labels.position).is_some() { self.warning(id, "CHART_LABEL_LAYOUT", "Statistical chart preview places labels above points; native placement is retained"); }
+                    if options.legend.is_some_and(|legend| !matches!(legend, crate::model::chart_format::LegendPosition::Bottom | crate::model::chart_format::LegendPosition::Hidden)) { self.warning(id, "CHART_LEGEND_LAYOUT", "Statistical chart preview uses a bottom legend; native legend placement is retained (exported PPTX retains editable native OOXML charts; do not replace with hand-drawn shapes)"); }
+                    if options.data_labels.as_ref().and_then(|labels| labels.position).is_some() { self.warning(id, "CHART_LABEL_LAYOUT", "Statistical chart preview places labels by approximate bounds; native placement is retained (exported PPTX retains editable native OOXML charts; do not replace with hand-drawn shapes)"); }
                 }
                 self.warning(
                     id,
                     "CHART_PREVIEW",
-                    "Plotters chart layout; axis/legend placement is not Office parity",
+                    "Plotters chart layout; axis/legend placement is not Office parity (exported PPTX retains editable native OOXML charts; do not replace with hand-drawn shapes)",
                 );
                 if kind.is_3d() {
                     self.warning(id, "CHART_3D_PROJECTED", "Native 3D chart rendered as an explicit 2D data projection; depth and perspective are omitted");
@@ -2036,7 +2036,12 @@ fn chart_svg(
             if f64::from(left_area + right_area) + 56.0 > width {
                 return Err(Error::Unsupported("chart axis labels do not fit the requested font and width; enlarge the chart or use an explicit compact number format".into()));
             }
-            let mut chart = ChartBuilder::on(&root)
+            let (legend_rows, legend_items) = if options.legend == Some(LegendPosition::Hidden) { (0, Vec::new()) } else { chart_projection::legend_layout(series, f64::from(left_area) + 12.0, width, theme, fonts) };
+            let legend_band = if legend_rows == 0 { 0u32 } else { (legend_rows as u32 * 16 + 4).min((height as u32).saturating_sub(80)) };
+            let (plot_root, legend_root) = if legend_band == 0 { (root.clone(), None) }
+                else if options.legend == Some(LegendPosition::Top) { let (t, b) = root.split_vertically(legend_band); (b, Some(t)) }
+                else { let (t, b) = root.split_vertically((height.ceil() as u32).saturating_sub(legend_band)); (t, Some(b)) };
+            let mut chart = ChartBuilder::on(&plot_root)
                 .margin(12)
                 .x_label_area_size(32)
                 .y_label_area_size(left_area)
@@ -2057,16 +2062,17 @@ fn chart_svg(
                 for step in 0..=4 {
                     let value = secondary_lower + (secondary_upper - secondary_lower) * step as f64 / 4.0;
                     let (left, top) = chart.backend_coord(&(category_end, project_secondary(value)));
-                    root.draw(&Text::new(format_tick(&value), (left + 5, top), ("sans-serif", 12).into_font())).map_err(error)?;
+                    plot_root.draw(&Text::new(format_tick(&value), (left + 5, top), ("sans-serif", 12).into_font())).map_err(error)?;
                 }
             }
             if !kind.is_xy() {
                 use plotters::style::text_anchor::{HPos, Pos, VPos};
                 for (index, category) in categories.iter().enumerate() {
+                    let slot = if horizontal { (categories.len() - 1 - index) as f64 } else { index as f64 };
                     let coordinate = if horizontal {
-                        (lower, index as f64 + 0.5)
+                        (lower, slot + 0.5)
                     } else {
-                        (index as f64 + 0.5, lower)
+                        (slot + 0.5, lower)
                     };
                     let (left, top) = chart.backend_coord(&coordinate);
                     let position = if horizontal {
@@ -2080,7 +2086,7 @@ fn chart_svg(
                         } else {
                             Pos::new(HPos::Center, VPos::Top)
                         });
-                    root.draw(&Text::new(category.as_str(), position, style))
+                    plot_root.draw(&Text::new(category.as_str(), position, style))
                         .map_err(error)?;
                 }
             }
@@ -2100,6 +2106,8 @@ fn chart_svg(
                             (
                                 if kind.is_xy() {
                                     categories[index].parse::<f64>().unwrap_or(0.0)
+                                } else if horizontal {
+                                    (categories.len() - 1 - index) as f64 + 0.5
                                 } else {
                                     index as f64 + 0.5
                                 },
@@ -2116,8 +2124,11 @@ fn chart_svg(
                                 ))
                                 .map_err(error)?
                                 .label(&entry.name)
-                                .legend(move |(left, top)| {
-                                    PathElement::new(vec![(left, top), (left + 14, top)], color)
+                                .legend(move |(x, y)| {
+                                    PathElement::new(
+                                        vec![(x, y), (x + 12, y)],
+                                        color.stroke_width(2),
+                                    )
                                 });
                         }
                         ChartKind::Area => {
@@ -2128,11 +2139,8 @@ fn chart_svg(
                                 )
                                 .map_err(error)?
                                 .label(&entry.name)
-                                .legend(move |(left, top)| {
-                                    Rectangle::new(
-                                        [(left, top - 3), (left + 14, top + 3)],
-                                        color.filled(),
-                                    )
+                                .legend(move |(x, y)| {
+                                    Rectangle::new([(x, y - 5), (x + 10, y + 5)], color.filled())
                                 });
                         }
                         _ => {
@@ -2146,9 +2154,7 @@ fn chart_svg(
                                 )
                                 .map_err(error)?
                                 .label(&entry.name)
-                                .legend(move |(left, top)| {
-                                    Circle::new((left + 7, top), 4, color.filled())
-                                });
+                                .legend(move |(x, y)| Circle::new((x + 5, y), 4, color.filled()));
                         }
                     }
                     for (index, coordinate) in coordinates.iter().enumerate() {
@@ -2193,7 +2199,8 @@ fn chart_svg(
                         } else {
                             0.8 / series.len() as f64
                         };
-                        let left = index as f64
+                        let slot = if horizontal { (categories.len() - 1 - index) as f64 } else { index as f64 };
+                        let left = slot
                             + 0.1
                             + if stacked {
                                 0.0
@@ -2206,15 +2213,12 @@ fn chart_svg(
                         } else {
                             [(left, start), (right, end)]
                         };
-                        let annotation = chart
+                        let drawn = chart
                             .draw_series(std::iter::once(Rectangle::new(bounds, color.filled())))
                             .map_err(error)?;
                         if index == 0 {
-                            annotation.label(&entry.name).legend(move |(left, top)| {
-                                Rectangle::new(
-                                    [(left, top - 3), (left + 14, top + 3)],
-                                    color.filled(),
-                                )
+                            drawn.label(&entry.name).legend(move |(x, y)| {
+                                Rectangle::new([(x, y - 5), (x + 10, y + 5)], color.filled())
                             });
                         }
                         if let Some(label) = chart_label(
@@ -2242,21 +2246,17 @@ fn chart_svg(
                     }
                 }
             }
-            if options.legend != Some(LegendPosition::Hidden) {
-                let position = match options.legend.unwrap_or(LegendPosition::Bottom) {
-                    LegendPosition::Bottom => SeriesLabelPosition::LowerMiddle,
-                    LegendPosition::Top => SeriesLabelPosition::UpperMiddle,
-                    LegendPosition::Left => SeriesLabelPosition::MiddleLeft,
-                    LegendPosition::Right => SeriesLabelPosition::MiddleRight,
-                    _ => SeriesLabelPosition::UpperRight,
-                };
-                chart
-                    .configure_series_labels()
-                    .position(position)
-                    .label_font(("sans-serif", 13))
-                    .background_style(WHITE.mix(0.8))
-                    .draw()
-                    .map_err(error)?;
+            if let Some(legend_area) = legend_root {
+                use plotters::style::text_anchor::{HPos, Pos, VPos};
+                let ink = rgb("@dk1");
+                let legend_style = TextStyle::from(("sans-serif", 12).into_font()).color(&ink).pos(Pos::new(HPos::Left, VPos::Top));
+                for ((item_x, row), entry) in legend_items.into_iter().zip(series) {
+                    let color = rgb(&entry.color);
+                    let x = item_x as i32;
+                    let y = (row as i32) * 16 + 2;
+                    legend_area.draw(&Rectangle::new([(x, y + 2), (x + 10, y + 12)], color.filled())).map_err(error)?;
+                    legend_area.draw(&Text::new(entry.name.as_str(), (x + 14, y), legend_style.clone())).map_err(error)?;
+                }
             }
         }
         root.present().map_err(error)?;

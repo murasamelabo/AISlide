@@ -260,8 +260,8 @@ pub(crate) fn create(id: &str, part: &PartSpec, spec: &Spec, state: &State, them
         }
     }
     let result=Element::Group{visual:None,id:id.into(),x:frame[0],y:frame[1],width,height,view_width:width,view_height:height,children:drawing.elements};
-    if let Some((text,missing))=crate::parts::layout_overflow(&result,theme)? {
-        return Err(Error::Invalid(format!("interactive content \"{text}\" {}; enlarge the frame, shorten text or split the view",if missing {"has missing glyphs"} else {"does not fit without reducing font size"})));
+    if let Some(overflow)=crate::parts::layout_overflow(&result,theme)? {
+        return Err(Error::Invalid(format!("interactive content \"{}\" {}; enlarge the frame, shorten text or split the view",overflow.text,if overflow.missing_glyphs {"has missing glyphs"} else {"does not fit without reducing font size"})));
     }
     Ok(result)
 }

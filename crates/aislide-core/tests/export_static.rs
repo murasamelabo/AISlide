@@ -1667,3 +1667,70 @@ fn sanitized_svg_renders_instead_of_stale_fallback_and_external_svg_is_rejected(
         matches!(export_static(&source, &ExportOptions::default()), Err(Error::Unsupported(message)) if message.contains("SVG") || message.contains("external"))
     );
 }
+
+#[test]
+fn issue56_preview_reports_canvas_dimensions_scale_and_contact_sheet_tile_scale() {
+    let mut source = deck();
+    source.width = 1280;
+    source.height = 720;
+    let mut second = source.slides[0].clone();
+    second.id = "slide-2".into();
+    source.slides.push(second);
+    let doc: aislide_core::document::Document = serde_json::from_value(
+        aislide_core::execute_request(json!({"op":"new_document","id":"preview-scale","deck":source})).unwrap(),
+    ).unwrap();
+
+    // 960px single-page preview of 1280x720 -> canvas_scale = 0.75, downscaled_from_canvas = true, quality_reduced = false
+    let p960 = preview_presentation(&doc, &PreviewOptions {
+        page_indices: Some(vec![0]),
+        max_dimension: 960,
+        layout: PreviewLayout::Pages,
+        ..Default::default()
+    }).unwrap();
+    assert_eq!((p960.canvas_width, p960.canvas_height), (1280, 720));
+    assert_eq!(p960.canvas_scale, 0.75);
+    assert!(p960.downscaled_from_canvas);
+    assert!(!p960.quality_reduced);
+    assert_eq!(p960.images[0].canvas_scale, 0.75);
+    assert!(p960.images[0].downscaled_from_canvas);
+    assert_eq!(p960.images[0].tile_scale, None);
+
+    // 1280px single-page preview of 1280x720 -> canvas_scale = 1.0, downscaled_from_canvas = false
+    let p1280 = preview_presentation(&doc, &PreviewOptions {
+        page_indices: Some(vec![0]),
+        max_dimension: 1280,
+        layout: PreviewLayout::Pages,
+        ..Default::default()
+    }).unwrap();
+    assert_eq!(p1280.canvas_scale, 1.0);
+    assert!(!p1280.downscaled_from_canvas);
+    assert!(!p1280.quality_reduced);
+
+    // Contact sheet (compact default 640px) -> tile_width, tile_height, tile_scale populated
+    let sheet = preview_presentation(&doc, &PreviewOptions {
+        page_indices: Some(vec![0, 1]),
+        max_dimension: 640,
+        layout: PreviewLayout::ContactSheet,
+        format: PreviewFormat::Jpeg,
+        ..Default::default()
+    }).unwrap();
+    assert_eq!((sheet.canvas_width, sheet.canvas_height), (1280, 720));
+    assert!(sheet.downscaled_from_canvas);
+    assert!(sheet.canvas_scale < 0.5 && sheet.canvas_scale > 0.1);
+    assert_eq!(sheet.images[0].tile_width, Some(sheet.pages[0].width));
+    assert_eq!(sheet.images[0].tile_height, Some(sheet.pages[0].height));
+    assert_eq!(sheet.images[0].tile_scale, Some(sheet.canvas_scale));
+
+    // Byte-budget reduction sets both quality_reduced=true and downscaled_from_canvas=true when shrinking from 320 to 240.
+    let noisy = noisy_preview_document();
+    let shrunk = preview_presentation(&noisy, &PreviewOptions {
+        max_dimension: 320,
+        max_output_bytes: noisy_preview_size(&noisy, 240),
+        layout: PreviewLayout::Pages,
+        ..Default::default()
+    }).unwrap();
+    assert!(shrunk.quality_reduced);
+    assert!(shrunk.downscaled_from_canvas);
+    assert_eq!(shrunk.actual_max_dimension, 240);
+    assert_eq!(shrunk.canvas_scale, 0.75);
+}

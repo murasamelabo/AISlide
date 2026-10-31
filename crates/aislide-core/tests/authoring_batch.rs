@@ -683,8 +683,8 @@ fn typed_authoring_and_slide_import_are_discoverable_without_claiming_office_par
     assert_eq!(capabilities["typed_authoring"]["scale_fonts"], false);
     assert_eq!(capabilities["typed_authoring"]["one_undo"], true);
     let operations = capabilities["typed_authoring"]["operations"].as_array().unwrap();
-    assert_eq!(operations.len(), 21);
-    for operation in ["add_elements", "set_frame", "set_text_style", "set_surface", "set_effects", "set_slide_background", "set_connector", "set_picture_crop", "set_hyperlink", "set_shape_adjustment", "add_picture", "add_part", "update_part", "add_graph", "update_graph", "update_notes", "set_table_headers", "set_accessibility"] {
+    assert_eq!(operations.len(), 23);
+    for operation in ["add_elements", "set_frame", "set_text_style", "set_surface", "set_effects", "set_slide_background", "set_connector", "set_picture_crop", "set_hyperlink", "set_shape_adjustment", "add_picture", "add_part", "update_part", "add_graph", "update_graph", "update_notes", "set_table_headers", "set_accessibility", "update_chart", "remove_elements"] {
         assert!(operations.contains(&json!(operation)), "missing {operation}");
     }
     assert_eq!(capabilities["typed_authoring"]["managed_parts_limit"], 128);
@@ -1257,4 +1257,154 @@ fn typed_batch_native_supported_operations_survive_export_reopen() {
     assert_eq!(element(after, "table")["width"].as_f64(), Some(800.0));
     assert_eq!(element(after, "table")["rows"], element(&before, "table")["rows"]);
     assert_eq!(element(after, "chart"), element(&before, "chart"));
+}
+
+#[test]
+fn issue58_update_chart_remove_elements_and_chartex_validation_guidance() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let before = execute_request(request(&populated(), json!([
+        {"op":"set_accessibility","slide_id":"slide-1","element_id":"chart","metadata":{"title":"Original chart","description":"Synthetic"}},
+        {"op":"set_table_headers","slide_id":"slide-1","element_id":"table","policy":"first_row"}
+    ]))).unwrap()["document"].clone();
+
+    // Update chart kind, categories, series and options in place while preserving frame, unpassed options.primary_axis, and accessibility metadata.
+    let updated = execute_request(request(&before, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"chart","kind":"bar","categories":["Cat A","Cat B"],"options":{"legend":"hidden","data_labels":{"show_value":true,"position":"outside_end"}}}
+    ]))).unwrap()["document"].clone();
+    let chart = element(&updated, "chart");
+    assert_eq!(chart["kind"], "bar");
+    assert_eq!(chart["categories"], json!(["Cat A", "Cat B"]));
+    assert_eq!(chart["options"]["primary_axis"], json!({"min": 0.0, "max": 5.0}));
+    assert_eq!(chart["x"], element(&before, "chart")["x"]);
+    assert_eq!(chart["width"], element(&before, "chart")["width"]);
+    assert_eq!(updated["deck"]["slides"][0]["review"]["accessibility"]["chart"]["title"], "Original chart");
+
+    // Switching to waterfall with unsupported data_labels or missing waterfall_totals gives actionable guidance.
+    let cleared_axis = execute_request(request(&before, json!([
+        {"op":"add_elements","slide_id":"slide-1","elements":[{"type":"chart","id":"wf-chart","x":40,"y":280,"width":400,"height":200,"kind":"column","categories":["Start","Delta","Total"],"series":[{"name":"Score","color":"1F4E8C","values":[19,49,68]}]}]}
+    ]))).unwrap()["document"].clone();
+    reject_atomic(&cleared_axis, json!({
+        "op":"update_chart","slide_id":"slide-1","id":"wf-chart","kind":"waterfall",
+        "options":{"data_labels":{"show_value":true},"waterfall_totals":[0,1]}
+    }), "waterfall_totals");
+    reject_atomic(&cleared_axis, json!({
+        "op":"update_chart","slide_id":"slide-1","id":"wf-chart","kind":"waterfall",
+        "options":{"legend":"hidden","waterfall_totals":[0,5]}
+    }), "zero-based category indices");
+    reject_atomic(&updated, json!({"op":"update_chart","slide_id":"slide-1","id":"rect","kind":"bar"}), "requires a chart element");
+
+    // Valid standard <-> waterfall (chartEx) conversion on an authored deck exports and reopens cleanly;
+    // replace_options: true resets options (e.g. clearing reverse or min/max).
+    let with_reverse = execute_request(request(&updated, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"chart","options":{"primary_axis":{"reverse":true}}}
+    ]))).unwrap()["document"].clone();
+    assert_eq!(element(&with_reverse, "chart")["options"]["primary_axis"]["reverse"], true);
+    assert_eq!(element(&with_reverse, "chart")["options"]["primary_axis"]["min"], 0.0);
+    let reset_opts = execute_request(request(&with_reverse, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"chart","replace_options":true,"options":{"legend":"bottom"}}
+    ]))).unwrap()["document"].clone();
+    assert!(element(&reset_opts, "chart")["options"].get("primary_axis").is_none());
+    assert_eq!(element(&reset_opts, "chart")["options"]["legend"], "bottom");
+
+    // on a reopened native deck, same-family update_chart succeeds while chart<->chartEx conversion is rejected by NativeRegenerationGuard.
+    let waterfall = execute_request(request(&cleared_axis, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"wf-chart","kind":"waterfall",
+         "options":{"legend":"hidden","waterfall_totals":[0,2]}}
+    ]))).unwrap()["document"].clone();
+    assert_eq!(element(&waterfall, "wf-chart")["kind"], "waterfall");
+    let exported_wf = execute_request(json!({"op":"export_presentation","document":waterfall})).unwrap();
+    let reopened_wf = execute_request(json!({"op":"open_presentation","id":"wf-reopen","base64":exported_wf["base64"]})).unwrap()["document"].clone();
+    assert_eq!(element(&reopened_wf, "wf-chart")["kind"], "waterfall");
+    reject_atomic(&reopened_wf, json!({
+        "op":"update_chart","slide_id":"slide-1","id":"wf-chart","kind":"column",
+        "categories":["A","B"],"series":[{"name":"Score","color":"1F4E8C","values":[10,20]}],
+        "options":{"legend":"bottom"}
+    }), "native chart/chartEx conversion requires a new chart object");
+    let back_to_col = execute_request(request(&waterfall, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"wf-chart","kind":"column",
+         "categories":["A","B"],"series":[{"name":"Score","color":"1F4E8C","values":[10,20]}],
+         "options":{"legend":"bottom"}}
+    ]))).unwrap()["document"].clone();
+    let exported_col = execute_request(json!({"op":"export_presentation","document":back_to_col})).unwrap();
+    let reopened_col = execute_request(json!({"op":"open_presentation","id":"col-reopen","base64":exported_col["base64"]})).unwrap()["document"].clone();
+    assert_eq!(element(&reopened_col, "wf-chart")["kind"], "column");
+
+    // Source-bound chart: update_chart changing series/categories marks binding stale; remove_elements prunes bindings.
+    let source = execute_request(json!({"op":"ingest","input":{"name":"metrics.csv","format":"csv","base64":STANDARD.encode("Category,Value\nStart,19\nDelta,49\nTotal,68\n")}})).unwrap();
+    let binding = json!({
+        "slide_id":"slide-1","element_id":"wf-chart","field":"/series/0/values/0",
+        "source_id":source["id"],"source_sha256":source["sha256"],
+        "locator":source["tables"][0]["locators"][0][1],"raw_value":source["tables"][0]["rows"][0][1],
+        "value":19,"transform":"strict_numeric","stale":false
+    });
+    let bound_doc = execute_request(json!({
+        "op":"new_document","id":"bound-chart","deck":waterfall["deck"],"sources":[source],"bindings":[binding]
+    })).unwrap();
+    let stale_after_update = execute_request(request(&bound_doc, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"wf-chart","series":[{"name":"Score","color":"1F4E8C","values":[20,49,69]}]}
+    ]))).unwrap();
+    assert_eq!(stale_after_update["document"]["bindings"][0]["stale"], true);
+
+    // Imported native chart with unrepresentable foreign attribute is protected by NativeRegenerationGuard for both update_chart and remove_elements.
+    let mut pkg = aislide_core::package::Package::open(STANDARD.decode(exported_col["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let chart_xml = pkg.text("ppt/charts/chart1.xml").unwrap().replacen("<c:plotArea>", "<c:plotArea unknown=\"retained\">", 1);
+    pkg.replace_part("ppt/charts/chart1.xml", chart_xml.into_bytes()).unwrap();
+    let unrepresentable = execute_request(json!({"op":"open_presentation","id":"unrep","base64":STANDARD.encode(pkg.save().unwrap())})).unwrap()["document"].clone();
+    reject_atomic(&unrepresentable, json!({"op":"update_chart","slide_id":"slide-1","id":"chart","kind":"bar"}), "cannot be regenerated");
+    reject_atomic(&unrepresentable, json!({"op":"remove_elements","slide_id":"slide-1","ids":["chart"]}), "cannot be regenerated");
+
+    // Imported native slide with retained XML spid reference rejects remove_elements; clean native slide allows remove_elements and exports cleanly.
+    let mut spid_pkg = aislide_core::package::Package::open(STANDARD.decode(exported_col["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let slide_xml = spid_pkg.text("ppt/slides/slide1.xml").unwrap().replacen("</p:sld>", "<p:timing><p:tnLst><p:par><p:spTgt spid=\"2\"/></p:par></p:tnLst></p:timing></p:sld>", 1);
+    spid_pkg.replace_part("ppt/slides/slide1.xml", slide_xml.into_bytes()).unwrap();
+    let spid_doc = execute_request(json!({"op":"open_presentation","id":"spid-doc","base64":STANDARD.encode(spid_pkg.save().unwrap())})).unwrap()["document"].clone();
+    let first_native_id = spid_doc["deck"]["slides"][0]["elements"][0]["id"].as_str().unwrap().to_owned();
+    reject_atomic(&spid_doc, json!({"op":"remove_elements","slide_id":"slide-1","ids":[first_native_id]}), "retained shape reference");
+    let native_removed = execute_request(request(&reopened_col, json!([{"op":"remove_elements","slide_id":"slide-1","ids":["rect"]}]))).unwrap()["document"].clone();
+    assert!(execute_request(json!({"op":"export_presentation","document":native_removed})).is_ok());
+
+    // Managed part with internal chart (pareto) rejects direct update_chart and child remove_elements, but allows root remove_elements + Undo.
+    let pareto_example = execute_request(json!({"op":"part_catalog"})).unwrap()["presets"].as_array().unwrap().iter().find(|p| p["id"] == "vertical-bar-graph/pareto").unwrap()["example"].clone();
+    let with_part = execute_request(request(&bound_doc, json!([
+        {"op":"add_part","slide_id":"slide-1","id":"pareto-part","spec":pareto_example}
+    ]))).unwrap()["document"].clone();
+    let pareto_group = element(&with_part, "pareto-part");
+    let internal_chart_id = pareto_group["children"].as_array().unwrap().iter().find(|c| c["type"] == "chart").unwrap()["id"].as_str().unwrap().to_owned();
+    reject_atomic(&with_part, json!({"op":"update_chart","slide_id":"slide-1","id":internal_chart_id,"kind":"bar"}), "managed part");
+    reject_atomic(&with_part, json!({"op":"remove_elements","slide_id":"slide-1","ids":[internal_chart_id]}), "managed part");
+
+    // Locked or hidden elements (or groups with locked/hidden ancestors, or locked attached connectors) reject remove_elements and update_chart.
+    for flag in ["locked", "hidden"] {
+        let mut locked_deck = with_part["deck"].clone();
+        locked_deck["slides"][0]["elements"][2]["visual"][flag] = json!(true);
+        let chart_val = locked_deck["slides"][0]["elements"][6].clone();
+        locked_deck["slides"][0]["elements"][9]["visual"][flag] = json!(true);
+        locked_deck["slides"][0]["elements"][9]["children"].as_array_mut().unwrap().push(chart_val);
+        locked_deck["slides"][0]["elements"].as_array_mut().unwrap().remove(6);
+        let locked_doc = execute_request(json!({"op":"new_document","id":"locked-chart","deck":locked_deck})).unwrap();
+        reject_atomic(&locked_doc, json!({"op":"update_chart","slide_id":"slide-1","id":"chart","kind":"bar"}), "unlock and show");
+        reject_atomic(&locked_doc, json!({"op":"remove_elements","slide_id":"slide-1","ids":["shape"]}), "unlock and show");
+        reject_atomic(&locked_doc, json!({"op":"remove_elements","slide_id":"slide-1","ids":["group"]}), "unlock and show");
+
+        let mut locked_conn_deck = with_part["deck"].clone();
+        locked_conn_deck["slides"][0]["elements"][8]["visual"] = json!({flag: true});
+        let locked_conn_doc = execute_request(json!({"op":"new_document","id":"locked-conn","deck":locked_conn_deck})).unwrap();
+        reject_atomic(&locked_conn_doc, json!({"op":"remove_elements","slide_id":"slide-1","ids":["rect"]}), "unlock and show");
+    }
+
+    // remove_elements handles chained ["shape", "connector"] in one operation, cleans up parts/metadata/bindings/reviews, and supports Undo.
+    reject_atomic(&with_part, json!({"op":"remove_elements","slide_id":"slide-1","ids":["rect","does-not-exist"]}), "element not found: does-not-exist");
+    let removed_res = execute_request(request(&with_part, json!([
+        {"op":"remove_elements","slide_id":"slide-1","ids":["shape","connector","table","chart","wf-chart","pareto-part"]}
+    ]))).unwrap();
+    let removed = &removed_res["document"];
+    let remaining_ids: Vec<&str> = removed["deck"]["slides"][0]["elements"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+    for gone in ["shape", "connector", "table", "chart", "wf-chart", "pareto-part"] {
+        assert!(!remaining_ids.contains(&gone), "{gone} must be removed: {remaining_ids:?}");
+    }
+    assert!(removed["parts"].is_null(), "managed part entry must be removed");
+    assert!(removed["bindings"].as_array().unwrap().is_empty(), "bindings for removed chart must be cleaned up");
+    assert!(removed["deck"]["slides"][0]["review"].is_null(), "slide review entries for removed elements must be cleaned up");
+    let undone = execute_request(json!({"op":"undo_transaction","document":removed,"expected_revision":removed["revision"],"receipt":removed_res["receipt"]})).unwrap();
+    assert_eq!(undone["document"]["hash"], with_part["hash"]);
 }

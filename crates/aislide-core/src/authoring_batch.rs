@@ -56,6 +56,17 @@ pub enum Operation {
     SetHyperlink { slide_id: String, id: String, #[serde(deserialize_with = "Option::deserialize")] link: Option<String> },
     SetShapeAdjustment { slide_id: String, id: String, adjustment: crate::visual::ShapeAdjustment },
     AddPicture { slide_id: String, id: String, base64: String, mime_type: String, alt: String, #[serde(default)] frame: Option<Frame>, #[serde(default)] crop: Crop, #[serde(default)] fit: PictureFit },
+    UpdateChart {
+        slide_id: String,
+        id: String,
+        #[serde(default)] kind: Option<crate::model::ChartKind>,
+        #[serde(default)] categories: Option<Vec<String>>,
+        #[serde(default)] series: Option<Vec<crate::model::ChartSeries>>,
+        #[serde(default)] options: Option<crate::model::ChartOptions>,
+        #[serde(default)] replace_options: bool,
+        #[serde(default)] frame: Option<Frame>,
+    },
+    RemoveElements { slide_id: String, ids: Vec<String> },
 }
 
 fn target<'a>(elements: &'a mut [Element], id: &str) -> Result<&'a mut Element> {
@@ -162,14 +173,69 @@ fn text_style(element: &mut Element, style: &RunStyle) -> Result<()> {
     Ok(())
 }
 
-fn apply(deck: &mut Deck, parts: &mut Vec<crate::parts::state::PartInstance>, operation: &Operation, native_guard: &mut crate::parts::state::NativeRegenerationGuard<'_>) -> Result<usize> {
+fn prune_elements(elements: &mut Vec<Element>, removed: &mut BTreeSet<String>) -> bool {
+    let mut changed = false;
+    elements.retain_mut(|element| {
+        let drop = removed.contains(element.bounds().0)
+            || matches!(element, Element::Connector { start, end, .. } if [start.as_ref(), end.as_ref()].into_iter().flatten().any(|c| removed.contains(&c.element_id)));
+        if drop {
+            for item in crate::model::element_list(std::slice::from_ref(element)) { changed |= removed.insert(item.bounds().0.to_owned()); }
+            return false;
+        }
+        if let Element::Group { children, .. } = element { changed |= prune_elements(children, removed); }
+        true
+    });
+    changed
+}
+
+fn merge_axis(current: &mut crate::model::chart_format::AxisOptions, patch: &crate::model::chart_format::AxisOptions) {
+    if patch.min.is_some() { current.min = patch.min; }
+    if patch.max.is_some() { current.max = patch.max; }
+    if patch.major_unit.is_some() { current.major_unit = patch.major_unit; }
+    if patch.minor_unit.is_some() { current.minor_unit = patch.minor_unit; }
+    if patch.log_base.is_some() { current.log_base = patch.log_base; }
+    if patch.reverse { current.reverse = true; }
+    if patch.number_format.is_some() { current.number_format = patch.number_format.clone(); }
+    if patch.label_position.is_some() { current.label_position = patch.label_position; }
+}
+
+fn merge_chart_options(current: &mut crate::model::ChartOptions, patch: &crate::model::ChartOptions, next_kind: crate::model::ChartKind) {
+    if patch.legend.is_some() { current.legend = patch.legend; }
+    if next_kind.is_extended() {
+        current.primary_axis = Default::default();
+        current.secondary_axis = Default::default();
+        current.category_axis = Default::default();
+        current.data_labels = None;
+    }
+    merge_axis(&mut current.primary_axis, &patch.primary_axis);
+    merge_axis(&mut current.secondary_axis, &patch.secondary_axis);
+    merge_axis(&mut current.category_axis, &patch.category_axis);
+    if patch.data_labels.is_some() { current.data_labels = patch.data_labels.clone(); }
+    if next_kind != crate::model::ChartKind::Waterfall { current.waterfall_totals = None; }
+    if patch.waterfall_totals.is_some() { current.waterfall_totals = patch.waterfall_totals.clone(); }
+    if next_kind != crate::model::ChartKind::Histogram { current.histogram = None; }
+    if patch.histogram.is_some() { current.histogram = patch.histogram.clone(); }
+    if next_kind != crate::model::ChartKind::BoxWhisker { current.box_whisker = None; }
+    if patch.box_whisker.is_some() { current.box_whisker = patch.box_whisker.clone(); }
+    if !matches!(next_kind, crate::model::ChartKind::Treemap | crate::model::ChartKind::Sunburst) { current.hierarchy = None; }
+    if patch.hierarchy.is_some() { current.hierarchy = patch.hierarchy.clone(); }
+}
+
+fn apply(
+    deck: &mut Deck,
+    parts: &mut Vec<crate::parts::state::PartInstance>,
+    bindings: &mut Vec<crate::data_report::SourceBinding>,
+    operation: &Operation,
+    native_guard: &mut crate::parts::state::NativeRegenerationGuard<'_>,
+) -> Result<usize> {
     let slide_id = match operation {
         Operation::ComposeSlide { slide_id, .. } | Operation::AddElements { slide_id, .. } | Operation::SetFrame { slide_id, .. } | Operation::SetTextStyle { slide_id, .. } | Operation::SetRichText { slide_id, .. } | Operation::SetTextPadding { slide_id, .. }
         | Operation::SetSurface { slide_id, .. } | Operation::SetEffects { slide_id, .. }
         | Operation::AddPart { slide_id, .. } | Operation::UpdatePart { slide_id, .. } | Operation::AddGraph { slide_id, .. } | Operation::UpdateGraph { slide_id, .. }
         | Operation::UpdateNotes { slide_id, .. } | Operation::SetTableHeaders { slide_id, .. } | Operation::SetAccessibility { slide_id, .. }
         | Operation::SetSlideBackground { slide_id, .. } | Operation::SetConnector { slide_id, .. } | Operation::SetPictureCrop { slide_id, .. }
-        | Operation::SetHyperlink { slide_id, .. } | Operation::SetShapeAdjustment { slide_id, .. } | Operation::AddPicture { slide_id, .. } => slide_id,
+        | Operation::SetHyperlink { slide_id, .. } | Operation::SetShapeAdjustment { slide_id, .. } | Operation::AddPicture { slide_id, .. }
+        | Operation::UpdateChart { slide_id, .. } | Operation::RemoveElements { slide_id, .. } => slide_id,
     };
     let index = deck.slides.iter().position(|slide| slide.id == *slide_id).ok_or_else(|| Error::Invalid(format!("slide not found: {slide_id}")))?;
     let slide = &mut deck.slides[index];
@@ -266,6 +332,80 @@ fn apply(deck: &mut Deck, parts: &mut Vec<crate::parts::state::PartInstance>, op
             position_picture(&mut element, destination.as_ref(), crop, *fit)?;
             slide.elements.push(element);
         }
+        Operation::UpdateChart { id, kind, categories, series, options, replace_options, frame: destination, .. } => {
+            if kind.is_none() && categories.is_none() && series.is_none() && options.is_none() && !*replace_options && destination.is_none() {
+                return Err(Error::Invalid("update_chart requires at least one of kind, categories, series, options, replace_options or frame".into()));
+            }
+            for part in parts.iter().filter(|part| part.slide_id == *slide_id) {
+                let owns = part.element_id == *id || slide.elements.iter().find(|el| el.bounds().0 == part.element_id)
+                    .is_some_and(|root| crate::model::element_list(std::slice::from_ref(root)).iter().any(|c| c.bounds().0 == id));
+                if owns {
+                    let (label, tool) = if part.spec.preset == "diagram/custom" { ("graph", "update_graph") } else { ("part", "update_part") };
+                    return Err(Error::Invalid(format!("element {id} belongs to managed {label} {}; use {tool}", part.element_id)));
+                }
+            }
+            native_guard.check(slide, id)?;
+            // target() enforces visual.locked || visual.hidden on the chart and all ancestor groups.
+            let element = target(&mut slide.elements, id)?;
+            match element {
+                Element::Chart { kind: current_kind, categories: current_categories, series: current_series, options: current_options, .. } => {
+                    if let Some(next_kind) = kind { *current_kind = *next_kind; }
+                    if let Some(next_categories) = categories { *current_categories = next_categories.clone(); }
+                    if let Some(next_series) = series { *current_series = next_series.clone(); }
+                    if *replace_options { *current_options = options.clone().unwrap_or_default(); }
+                    else if let Some(next_options) = options { merge_chart_options(current_options, next_options, *current_kind); }
+                    else if kind.is_some() { merge_chart_options(current_options, &Default::default(), *current_kind); }
+                    crate::model::chart_format::validate(*current_kind, current_categories, current_series, current_options)?;
+                }
+                _ => return Err(Error::Unsupported("update_chart requires a chart element".into())),
+            }
+            if kind.is_some() || categories.is_some() || series.is_some() || options.is_some() || *replace_options {
+                for binding in bindings.iter_mut().filter(|b| b.slide_id == *slide_id && b.element_id == *id) { binding.stale = true; }
+            }
+            if let Some(destination) = destination { frame(element, destination)?; }
+        }
+        Operation::RemoveElements { ids, .. } => {
+            if ids.is_empty() || ids.len() > 128 || ids.iter().collect::<BTreeSet<_>>().len() != ids.len() {
+                return Err(Error::Limit("remove_elements requires 1-128 distinct IDs".into()));
+            }
+            let explicit_roots: BTreeSet<String> = ids.iter().cloned().collect();
+            let mut removed = BTreeSet::new();
+            for id in ids {
+                if !slide.elements.iter().any(|element| element.bounds().0 == id) {
+                    if crate::model::element_list(&slide.elements).iter().any(|element| element.bounds().0 == id) {
+                        return Err(Error::Invalid(format!("element {id} is inside a group or managed part; remove the top-level element or use update_part/update_graph")));
+                    }
+                    return Err(Error::Invalid(format!("element not found: {id}")));
+                }
+                removed.insert(id.clone());
+            }
+            let mut candidate = slide.elements.clone();
+            while prune_elements(&mut candidate, &mut removed) {}
+            for root in &slide.elements {
+                let root_id = root.bounds().0;
+                let subtree = crate::model::element_list(std::slice::from_ref(root));
+                if !subtree.iter().any(|el| removed.contains(el.bounds().0)) { continue; }
+                native_guard.check(slide, root_id)?;
+                if !explicit_roots.contains(root_id) && parts.iter().any(|part| part.slide_id == *slide_id && part.element_id == root_id) {
+                    return Err(Error::Conflict(format!("removing target would detach a connector inside managed part {root_id}; update or remove the managed part explicitly")));
+                }
+                if subtree.iter().any(|el| el.visual().is_some_and(|visual| visual.locked || visual.hidden)) {
+                    return Err(Error::Unsupported("unlock and show the target and its parent groups before editing".into()));
+                }
+            }
+            slide.elements = candidate;
+            // Native slides (document.origin.native) are further checked by native_save::patch_elements
+            // during document::transact for retained XML spid/timing/animation and stCxn/endCxn references;
+            // references::refresh also rejects removal of owned citation elements.
+            parts.retain(|part| part.slide_id != *slide_id || !removed.contains(&part.element_id));
+            bindings.retain(|binding| binding.slide_id != *slide_id || !removed.contains(&binding.element_id));
+            if let Some(review) = &mut slide.review {
+                review.table_headers.retain(|key, _| !removed.contains(key));
+                review.accessibility.retain(|key, _| !removed.contains(key));
+                review.reading_order.retain(|key| !removed.contains(key));
+                if *review == crate::review::SlideReview::default() { slide.review = None; }
+            }
+        }
     }
     Ok(index)
 }
@@ -276,8 +416,9 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
     document::verify(document)?;
     let mut deck = document.deck.clone();
     let mut parts = document.parts.clone();
+    let mut bindings = document.bindings.clone();
     let mut native_guard = crate::parts::state::NativeRegenerationGuard::new(document);
-    let metadata_changed = operations.iter().any(|operation| matches!(operation, Operation::ComposeSlide { .. } | Operation::AddPart { .. } | Operation::UpdatePart { .. } | Operation::AddGraph { .. } | Operation::UpdateGraph { .. }));
+    let mut metadata_changed = operations.iter().any(|operation| matches!(operation, Operation::ComposeSlide { .. } | Operation::AddPart { .. } | Operation::UpdatePart { .. } | Operation::AddGraph { .. } | Operation::UpdateGraph { .. }));
     let mut changed = BTreeSet::new();
     for (index, operation) in operations.iter().enumerate() {
         if matches!(operation, Operation::ComposeSlide { .. }) && document.origin.as_ref().is_some_and(|origin| origin.native) {
@@ -295,14 +436,17 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
                 if !unchanged { native_guard.check_rich_text(slide.native_source_id.as_deref().unwrap_or(slide_id), id).map_err(|error| Error::Invalid(format!("{context}: {error}")))?; }
             }
         }
-        changed.insert(apply(&mut deck, &mut parts, operation, &mut native_guard).map_err(|error| Error::Invalid(format!("{context}: {error}")))?);
+        changed.insert(apply(&mut deck, &mut parts, &mut bindings, operation, &mut native_guard).map_err(|error| Error::Invalid(format!("{context}: {error}")))?);
         crate::preflight::deck(&deck, document.capacity_profile.limits())?;
     }
+    if crate::canonical::bytes(&parts)? != crate::canonical::bytes(&document.parts)? { metadata_changed = true; }
+    let bindings_changed = crate::canonical::bytes(&bindings)? != crate::canonical::bytes(&document.bindings)?;
     let page_indices: Vec<_> = changed.iter().copied().collect();
     let mut patches: Vec<_> = if metadata_changed && changed.len() == 128 {
         vec![json!({"op":"replace","path":"/deck/slides","value":deck.slides})]
     } else { changed.into_iter().map(|index| json!({"op":"replace","path":format!("/deck/slides/{index}"),"value":deck.slides[index]})).collect() };
     if metadata_changed { patches.push(json!({"op":"add","path":"/parts","value":parts})); }
+    if bindings_changed { patches.push(json!({"op":"add","path":"/bindings","value":bindings})); }
     let mut result = document::transact(document, Transaction { expected_revision, expected_hash: expected_hash.into(), operations: serde_json::from_value(json!(patches))? })?;
     result.render_warnings = crate::render::validated_authoring_effect_warnings(&result.document.deck, &page_indices)?;
     let mut targets: BTreeSet<_> = operations.iter().filter_map(|operation| match operation {
@@ -315,5 +459,6 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
             for element_id in spec.diagram_ids(id) { targets.insert((slide_id.clone(), element_id)); }
         }
     }
+    targets.retain(|(slide_id, element_id)| result.document.deck.slides.iter().any(|slide| slide.id == *slide_id && crate::model::element_list(&slide.elements).iter().any(|element| element.bounds().0 == element_id)));
     Ok(crate::graphs::annotate_transaction(result, &targets))
 }

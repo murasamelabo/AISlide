@@ -528,3 +528,22 @@ fn journey_maps_mark_the_highlighted_stage_and_plot_emotions() {
     assert_eq!(number(markers[2], "y"), low, "the -2 stage is the lowest point");
     assert_eq!(items.iter().filter(|child| child["type"] == "connector").count(), 4);
 }
+
+#[test]
+fn issue57_kpi_bad_status_uses_semantic_warning_color_and_accepts_accent_override() {
+    for preset in ["public", "minimal", "stylish", "pop", "dynamic", "trust", "luxury"] {
+        let mut doc = execute_request(json!({"op":"create_presentation","id":format!("kpi-{preset}"),"title":"KPI","setup":{"design_preset":preset}})).unwrap();
+        let mut spec = example("list-horizontal/kpi-cards");
+        spec["data"]["cards"] = json!([
+            {"label":"Critical Findings","value":"4","unit":"items","delta":"+2 vs baseline","status":"bad","comparison":"Target 0"},
+            {"label":"Custom Accent","value":"19","unit":"pts","delta":"Needs action","status":"bad","accent":"@accent3","comparison":"Target 80"}
+        ]);
+        doc = execute_request(json!({"op":"insert_part","document":doc,"expected_revision":0,"slide_id":"slide-1","id":"kpi","spec":spec})).unwrap()["document"].clone();
+        let group = &doc["deck"]["slides"][0]["elements"][0];
+        let stripes: Vec<&Value> = children(group).iter().filter(|c| c["preset"] == "rect" && number(c, "width") == 6.0).collect();
+        assert_eq!(stripes.len(), 2);
+        assert_ne!(stripes[0]["fill"], "@accent2", "{preset}: bad status must not use @accent2");
+        assert_eq!(stripes[0]["fill"], "C0392B", "{preset}: bad status uses semantic warning color");
+        assert_eq!(stripes[1]["fill"], "@accent3", "{preset}: explicit card accent override");
+    }
+}

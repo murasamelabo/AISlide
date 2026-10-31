@@ -81,36 +81,85 @@ pub(crate) fn exact_chart_number(value: f64) -> String {
     grouped_decimal(&if value == 0.0 { "0".into() } else { value.to_string() })
 }
 
-pub fn format_chart_number(value: f64, format: Option<&str>) -> (String, bool) {
-    let general = || {
-        if value == 0.0 { return "0".into(); }
-        let exponent = value.abs().log10().floor() as i32;
-        if !(-6..12).contains(&exponent) { return format!("{value:.6e}"); }
-        let digits = (11 - exponent).clamp(0, 12) as usize;
-        let text = format!("{value:.digits$}");
-        if text.contains('.') { text.trim_end_matches('0').trim_end_matches('.').into() } else { text }
-    };
-    let format = format.unwrap_or("General");
-    if format.eq_ignore_ascii_case("general") { return (general(), true); }
-    let percent = format.ends_with('%');
-    let pattern = format.strip_suffix('%').unwrap_or(format);
+fn split_format_sections(format: &str) -> Option<Vec<&str>> {
+    let (mut sections, mut start, mut in_quotes, mut escaped) = (Vec::new(), 0usize, false, false);
+    for (index, ch) in format.char_indices() {
+        if escaped { escaped = false; continue; }
+        if ch == '\\' { escaped = true; continue; }
+        if ch == '"' { in_quotes = !in_quotes; continue; }
+        if !in_quotes && matches!(ch, '[' | ']') { return None; }
+        if !in_quotes && ch == ';' { sections.push(&format[start..index]); start = index + 1; }
+    }
+    if in_quotes || escaped { return None; }
+    sections.push(&format[start..]);
+    (!(sections.is_empty() || sections.len() > 4 || sections.len() == 1 && sections[0].is_empty())).then_some(sections)
+}
+
+fn format_single_section(value: f64, section: &str, auto_negative_sign: bool, general: &dyn Fn(f64) -> String) -> Option<String> {
+    if section.is_empty() { return Some(String::new()); }
+    let (mut prefix, mut suffix, mut core) = (String::new(), String::new(), String::new());
+    let (mut in_quotes, mut escaped, mut seen_core) = (false, false, false);
+    for ch in section.chars() {
+        if escaped { escaped = false; if seen_core { suffix.push(ch); } else { prefix.push(ch); } continue; }
+        if ch == '\\' { escaped = true; continue; }
+        if ch == '"' { in_quotes = !in_quotes; continue; }
+        if in_quotes { if seen_core { suffix.push(ch); } else { prefix.push(ch); } continue; }
+        if !seen_core && core.is_empty() && matches!(ch, '-' | '+') { prefix.push(ch); continue; }
+        if !suffix.is_empty() { return None; }
+        seen_core = true;
+        core.push(ch);
+    }
+    if in_quotes || escaped { return None; }
+    if core.is_empty() { return (!prefix.is_empty()).then_some(prefix); }
+    if core.eq_ignore_ascii_case("general") {
+        let v = if auto_negative_sign { value } else { value.abs() };
+        return Some(format!("{prefix}{}{suffix}", general(if v == 0.0 { 0.0 } else { v })));
+    }
+    let percent = core.ends_with('%');
+    let pattern = core.strip_suffix('%').unwrap_or(&core);
     let scientific = pattern.ends_with("E+00");
     let pattern = pattern.strip_suffix("E+00").unwrap_or(pattern);
     let (integer, fraction) = pattern.split_once('.').unwrap_or((pattern, ""));
-    if !matches!(integer, "0" | "#,##0") || fraction.len() > 12 || !fraction.chars().all(|character| character == '0') || pattern.ends_with('.') {
-        return (general(), false);
-    }
-    let magnitude = if percent { value * 100.0 } else { value };
+    if !matches!(integer, "0" | "#,##0") || fraction.len() > 12 || !fraction.chars().all(|ch| ch == '0') || pattern.ends_with('.') { return None; }
+    let signed = if auto_negative_sign { value } else { value.abs() };
+    let magnitude = if signed == 0.0 { 0.0 } else if percent { signed * 100.0 } else { signed };
     let mut text = if scientific {
         let text = format!("{:.*e}", fraction.len(), magnitude);
         let (mantissa, exponent) = text.split_once('e').unwrap_or((&text, "0"));
         format!("{mantissa}E{:+03}", exponent.parse::<i32>().unwrap_or(0))
     } else { format!("{:.*}", fraction.len(), magnitude) };
-    if integer == "#,##0" && !scientific {
-        text = grouped_decimal(&text);
+    if text == "-0" || text.starts_with("-0.") && text.trim_start_matches('-').chars().all(|ch| ch == '0' || ch == '.') {
+        text = text.trim_start_matches('-').to_owned();
     }
+    if integer == "#,##0" && !scientific { text = grouped_decimal(&text); }
     if percent { text.push('%'); }
-    (text, true)
+    Some(format!("{prefix}{text}{suffix}"))
+}
+
+pub fn format_chart_number(value: f64, format: Option<&str>) -> (String, bool) {
+    let general = |v: f64| -> String {
+        if v == 0.0 { return "0".into(); }
+        let exponent = v.abs().log10().floor() as i32;
+        if !(-6..12).contains(&exponent) { return format!("{v:.6e}"); }
+        let digits = (11 - exponent).clamp(0, 12) as usize;
+        let text = format!("{v:.digits$}");
+        if text.contains('.') { text.trim_end_matches('0').trim_end_matches('.').into() } else { text }
+    };
+    let format = format.unwrap_or("General");
+    if format.eq_ignore_ascii_case("general") { return (general(value), true); }
+    let Some(sections) = split_format_sections(format) else { return (general(value), false); };
+    if sections.iter().take(3).enumerate().any(|(idx, sec)| format_single_section(1.0, sec, idx == 0 && sections.len() == 1, &general).is_none()) {
+        return (general(value), false);
+    }
+    if sections.len() == 4 && !sections[3].is_empty() && sections[3] != "@" && format_single_section(1.0, sections[3], false, &general).is_none() {
+        return (general(value), false);
+    }
+    let (selected, auto_neg) = match sections.len() {
+        1 => (sections[0], true),
+        2 => (sections[usize::from(value < 0.0)], false),
+        _ => (sections[if value > 0.0 { 0 } else if value < 0.0 { 1 } else { 2 }], false),
+    };
+    format_single_section(value, selected, auto_neg, &general).map_or_else(|| (general(value), false), |text| (text, true))
 }
 
 fn axis(options: &AxisOptions, values: &[f64], zero: bool, percent: bool, warnings: &mut Vec<String>) -> Result<PresentationAxis> {
@@ -229,7 +278,7 @@ pub fn compute_chart_presentation(kind: ChartKind, categories: &[String], series
     validate(kind, categories, series, options)?;
     if kind.is_extended() || kind.is_polar() || matches!(kind, ChartKind::Radar | ChartKind::RadarFilled) { return Err(Error::Unsupported("cartesian presentation required".into())); }
     let coordinates: Vec<_> = categories.iter().enumerate().map(|(index, value)| if kind.is_xy() { value.parse::<f64>().map_err(|_| invalid("invalid X coordinate")) } else { Ok(index as f64 + 1.0) }).collect::<Result<_>>()?;
-    let mut warnings = vec!["AISlide bounded chart projection; not Office visual parity".into()];
+    let mut warnings = vec!["AISlide bounded chart projection; not Office visual parity (exported PPTX retains editable native OOXML charts; do not replace with hand-drawn shapes)".into()];
     let mut projected = Vec::new();
     for (series_index, entry) in series.iter().enumerate() {
         let points = entry.values.iter().enumerate().map(|(index, value)| PresentationPoint { x: coordinates[index], y: if kind.is_percent() { value / series.iter().map(|entry| entry.values[index]).sum::<f64>() } else { *value } }).collect();
@@ -254,7 +303,10 @@ pub fn compute_chart_presentation(kind: ChartKind, categories: &[String], series
             let mut parts = Vec::new();
             if labels.show_series_name { parts.push(series[series_index].name.clone()); }
             if labels.show_category_name { parts.push(categories[index].clone()); }
-            if labels.show_value { parts.push(format_chart_number(*value, labels.number_format.as_deref()).0); }
+            if labels.show_value {
+                let formatted = format_chart_number(*value, labels.number_format.as_deref()).0;
+                if !formatted.is_empty() { parts.push(formatted); }
+            }
             parts.join(" ")
         }).collect();
         projected.push(PresentationSeries { axis: entry.axis.unwrap_or_default(), points, labels, errors, trend });
