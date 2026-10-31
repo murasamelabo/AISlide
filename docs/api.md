@@ -30,6 +30,11 @@ timeline label overages include `spec.data.tasks[N].label`, actual count and lim
 Valid records remain managed. New part creation/update still enforces the current
 rules. Malformed XML, unknown metadata structure/version, invalid IDs/hashes and
 capacity violations are not ignored. No provenance-skip option bypasses these guards.
+A saved `icon_columns` item may carry the legacy `detail_emphasis` only as an
+empty array, which is read and dropped. A nonempty value is unknown metadata
+structure, so the file does not open instead of being quarantined; no AISlide
+version has written one, because creation always rejected it and empty values
+were never serialized.
 
 An unchanged save, or Undo back to the opened state, preserves the exact source
 archive including quarantined metadata. A later edited export may omit incompatible
@@ -275,7 +280,10 @@ row accepts `detail_emphasis` (up to four phrases that must occur verbatim in it
 `detail`, non-overlapping); they render bold in the emphasis color while `detail`
 stays one string. For backwards compatibility, `icon_columns` accepts only
 `detail_emphasis:[]`; it is deprecated, omitted from serialized parts and should
-not be sent by new callers.
+not be sent by new callers. A nonempty value is rejected while parsing, so core,
+CLI and SDK callers see a `JSON:`-prefixed error with the sentence earlier versions
+returned behind an `Unsupported:` prefix; MCP rejects it earlier through its input
+schema.
 No prose classification or severity inference is performed. `takeaway.band_frame`
 is the outer region; `text_frame` and `separator_frame` describe its default rule
 layout. Variant `surface_frame`, fill, stroke and padding-derived text frame are
@@ -1424,7 +1432,7 @@ parity notices become one informational `CHART_PREVIEW` finding per selected
 page; specific `CHART_PRESENTATION` limits remain warnings. Raw renderer and
 preview warnings remain available, and `office_visual_parity` remains false.
 
-`GraphIcon` is `{base64,mime_type,alt?}` in direct core/SDK calls (or `{asset_id,mime_type?,alt?}` in MCP, where `part_catalog` / `graph_catalog` / `best_practice_guide` `schema.$defs.GraphIcon` documents both the `asset_id` handle form and the `base64` form), with PNG/JPEG bytes, not a path, URL or raw SVG. Set `icon` to null or omit it on a complete replacement to remove an icon; an icon-mode node must also return to `presentation: "card"`. Each payload uses the existing 1 MiB/4096px/64 MiB decoder bounds; total encoded node and boundary icons share a 3 MiB budget. Document/metadata/response budgets can reject a graph before these maxima. Use `create_graph_icon` for generic imported images: inert SVG becomes PNG at a 256px longest side, larger PNG/JPEG images are downsampled in their format, and smaller rasters retain their bytes. Prepared cloud PNGs bypass this helper to preserve originals up to 512px. Normal `create_asset` behavior is unchanged. Alt text is at most 500 characters.
+`GraphIcon` is `{base64,mime_type,alt?}` in direct core/SDK calls (or `{asset_id,mime_type?,alt?}` in MCP, where `part_catalog` / `graph_catalog` / `best_practice_guide` `schema.$defs.GraphIcon` documents both the `asset_id` handle form (marked `x-mcp-only`; core rejects it) and the `base64` form), with PNG/JPEG bytes, not a path, URL or raw SVG. Set `icon` to null or omit it on a complete replacement to remove an icon; an icon-mode node must also return to `presentation: "card"`. Each payload uses the existing 1 MiB/4096px/64 MiB decoder bounds; total encoded node and boundary icons share a 3 MiB budget. Document/metadata/response budgets can reject a graph before these maxima. Use `create_graph_icon` for generic imported images: inert SVG becomes PNG at a 256px longest side, larger PNG/JPEG images are downsampled in their format, and smaller rasters retain their bytes. Prepared cloud PNGs bypass this helper to preserve originals up to 512px. Normal `create_asset` behavior is unchanged. Alt text is at most 500 characters.
 
 Omitted presentation preserves legacy card output, including the aspect-fitted picture beside the label at up to 48 graph pixels. Icon mode places a picture above an editable label with a transparent native connection anchor; Studio service icons start at 160x140 with 16px labels. Node headings and details are written as paragraphs inside the node shape (or icon-mode anchor), with text padding reproducing the fitted label frame and an 8px-scaled space before the detail, so Office moves and resizes the text with its shape. Boundary headers are likewise written inside the boundary rectangle. Centered single-frame labels raise thin top/bottom padding toward 8 px only when the measured text still fits. A boundary with an icon becomes a nested PowerPoint group of its rectangle and picture. A node icon stays a separate sibling picture because AISlide connectors attach only to siblings; direct Office movement of only the node shape does not move that picture. Edge labels and badges remain separate objects because PowerPoint connectors cannot hold text. Logical boundary nesting is metadata, not nested PowerPoint groups. Graph-editor movement moves the complete node. Vendor colors and proportions remain unchanged, not live theme bindings.
 

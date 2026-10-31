@@ -311,7 +311,7 @@ fn issue21_quarantine_does_not_bypass_provenance_structure_identity_or_count_lim
 }
 
 #[test]
-fn issue61_saved_icon_columns_keep_opening_with_legacy_detail_emphasis_metadata() {
+fn issue61_saved_icon_columns_follow_the_stored_part_metadata_rules() {
     let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
     let spec = catalog["presets"].as_array().unwrap().iter().find(|entry| entry["id"] == "list-horizontal/icon-columns").unwrap()["example"].clone();
     let mut scene = deck(json!({}));
@@ -327,24 +327,36 @@ fn issue61_saved_icon_columns_keep_opening_with_legacy_detail_emphasis_metadata(
     let first_item = items.descendants().find(|node| node.tag_name().name() == "object").unwrap();
     let range = first_item.range();
     let insert_at = range.start + xml[range.clone()].rfind("</").unwrap();
-    let open_with = |emphasis: &str| {
-        let mut legacy = xml.to_owned();
-        legacy.insert_str(insert_at, &format!("<m:field name='detail_emphasis'>{emphasis}</m:field>"));
+    let label = first_item.descendants().find(|node| node.attribute("name") == Some("label")).unwrap().children().find(|node| node.is_element()).unwrap().range();
+    let with_field = |field: &str| { let mut changed = xml.to_owned(); changed.insert_str(insert_at, field); changed };
+    let open = |changed: String| {
         let mut altered = Package::open(pristine.save().unwrap()).unwrap();
-        altered.replace_part(&path, legacy.into_bytes()).unwrap();
+        altered.replace_part(&path, changed.into_bytes()).unwrap();
         execute_request(json!({"op":"open_presentation","id":"legacy-open","base64":STANDARD.encode(altered.save().unwrap())}))
     };
-    let opened = open_with("<m:array/>").unwrap();
+    let warnings = |opened: &Value| opened["warnings"].as_array().map(|list| list.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+
+    // A legacy empty array is dropped and the part stays managed.
+    let opened = open(with_field("<m:field name='detail_emphasis'><m:array/></m:field>")).unwrap();
     let document = &opened["document"];
     assert_eq!(document["parts"].as_array().unwrap().len(), 1);
     assert_eq!(document["parts"][0]["stale"], false);
     assert!(document["parts"][0]["spec"]["data"]["items"][0].get("detail_emphasis").is_none(), "legacy empty emphasis is dropped");
-    let warnings = opened["warnings"].as_array().map(|list| list.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")).unwrap_or_default();
-    assert!(!warnings.contains("PART_METADATA_UNMANAGED"), "{warnings}");
-    // No AISlide version can have saved nonempty emphasis (validation rejected it from the start and empty values were never
-    // serialized), so metadata claiming it is invalid and the document fails closed instead of silently normalizing it.
-    let error = open_with("<m:array><m:string>phrase</m:string></m:array>").unwrap_err().to_string();
-    assert!(error.contains("icon columns do not draw detail_emphasis"), "{error}");
+    assert!(!warnings(&opened).contains("PART_METADATA_UNMANAGED"), "{}", warnings(&opened));
+
+    // A value outside the current limits quarantines only that part: the document opens and the native shapes stay.
+    let mut too_long = xml.to_owned();
+    too_long.replace_range(label, &format!("<m:string>{}</m:string>", "x".repeat(49)));
+    let opened = open(too_long).unwrap();
+    assert!(opened["document"]["parts"].as_array().is_none_or(|parts| parts.is_empty()));
+    assert!(warnings(&opened).contains("PART_METADATA_UNMANAGED") && warnings(&opened).contains("icon column label exceeds 48"), "{}", warnings(&opened));
+
+    // Unknown metadata structure is never ignored; a nonempty legacy emphasis is such a field. No AISlide version can have
+    // saved one (validation rejected it from the start and empty values were never serialized), so the file fails to open.
+    let unknown = open(with_field("<m:field name='unrecognized'><m:boolean>true</m:boolean></m:field>")).unwrap_err().to_string();
+    assert!(unknown.contains("unrecognized"), "{unknown}");
+    let legacy = open(with_field("<m:field name='detail_emphasis'><m:array><m:string>phrase</m:string></m:array></m:field>")).unwrap_err().to_string();
+    assert!(legacy.contains("icon columns do not draw detail_emphasis"), "{legacy}");
 }
 
 #[test]

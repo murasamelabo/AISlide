@@ -315,6 +315,21 @@ fn issue60_compose_slide_part_blocks_support_show_title_in_block_and_pattern_mod
     })).unwrap();
     assert_eq!(blank_title_composed["document"]["parts"][0]["spec"]["layout"]["show_title"], false);
 
+    // Pattern mode derives the same default from the trimmed title.
+    let small_part = |title: &str| json!({
+        "version": 1,
+        "preset": "list-horizontal/icon-cards",
+        "title": title,
+        "data": { "kind": "icon_cards", "cards": [{ "label": "One", "detail": "First card." }, { "label": "Two", "detail": "Second card." }] }
+    });
+    for (title, expected) in [("   ", false), ("Part Heading", true)] {
+        let composed = compose(&base, json!({
+            "title": "Slide Title",
+            "pattern": { "id": "focus/full" },
+            "slots": { "primary": { "kind": "part", "spec": small_part(title) } }
+        })).unwrap();
+        assert_eq!(composed["document"]["parts"][0]["spec"]["layout"]["show_title"], expected, "pattern title {title:?}");
+    }
     // An explicit show_title: false omits the 88px band, so the same cards fit and spec.title is retained.
     let block_composed = compose(&base, json!({
         "title": "Slide Title",
@@ -395,6 +410,11 @@ fn issue60_compose_slide_part_blocks_support_show_title_in_block_and_pattern_mod
         })).unwrap();
         assert_eq!(pattern_res["document"]["parts"][0]["spec"]["layout"]["show_title"], false);
         assert_eq!(pattern_res["document"]["parts"][0]["spec"]["title"], candidate["title"]);
+        if candidate["preset"] == "interactive/summary" {
+            // The design body is shorter than the titled interactive minimum (480), so this placement relies on the 400 minimum.
+            let height = pattern_res["document"]["parts"][0]["spec"]["layout"]["height"].as_f64().unwrap();
+            assert!((400.0..480.0).contains(&height), "{height}");
+        }
     }
 
     // Interactive parts still require a nonempty title when the band is hidden.

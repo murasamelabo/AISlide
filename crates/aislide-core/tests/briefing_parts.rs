@@ -641,6 +641,7 @@ fn issue61_graph_icon_schema_tracks_the_struct_and_core_rejects_mcp_asset_handle
     documented.sort_unstable();
     assert_eq!(core_fields, documented);
     assert!(schema.get("required").is_none(), "required fields live in the oneOf alternatives");
+    assert_eq!(schema["properties"]["asset_id"]["x-mcp-only"], true, "direct callers can tell the handle is MCP-only");
     assert!(schema["description"].as_str().is_some_and(|text| text.contains("asset_id") && text.contains("base64")), "the schema says which form MCP and direct callers use");
 
     // MCP resolves `asset_id` to base64 before calling core, which has no asset registry and must not accept the handle.

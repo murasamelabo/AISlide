@@ -337,7 +337,14 @@ test('issue60 compose_slide part blocks accept show_title in block and pattern m
     assert.deepEqual(calls.at(-1).request.operations, [{ op: 'compose_slide', slide_id: 'slide-1', id: 'pattern-part', spec: patternSpec }]);
 
     const composeSchema = registrations.get('compose_slide').config.inputSchema;
-    assert.equal(composeSchema.safeParse({ deck_id: created.deck_id, expected_revision: 2, slide_id: 'slide-1', id: 'bad-part', spec: { title: 'Slide', blocks: [{ kind: 'part', show_title: 'no', spec: partSpecValue }] } }).success, false);
+    const accepted = spec => composeSchema.safeParse({ deck_id: created.deck_id, expected_revision: 2, slide_id: 'slide-1', id: 'checked-part', spec }).success;
+    assert.equal(accepted({ title: 'Slide', blocks: [{ kind: 'part', show_title: false, spec: partSpecValue }] }), true);
+    assert.equal(accepted({ title: 'Slide', blocks: [{ kind: 'part', show_title: 'no', spec: partSpecValue }] }), false);
+    assert.equal(accepted({ title: 'Slide', blocks: [{ kind: 'part', show_title: false, unknown_field: true, spec: partSpecValue }] }), false, 'part blocks stay strict');
+    const inSlot = block => ({ title: 'Slide', pattern: { id: 'focus/full' }, slots: { primary: block } });
+    assert.equal(accepted(inSlot({ kind: 'part', show_title: false, spec: partSpecValue })), true);
+    assert.equal(accepted(inSlot({ kind: 'part', show_title: 'no', spec: partSpecValue })), false);
+    assert.equal(accepted(inSlot({ kind: 'part', show_title: false, unknown_field: true, spec: partSpecValue })), false, 'slot parts stay strict');
   });
 });
 

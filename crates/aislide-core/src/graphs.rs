@@ -191,7 +191,7 @@ pub struct GraphBadge {
     #[serde(default = "ink")] pub color: String,
 }
 
-/// Prepared PNG/JPEG icon or image. In MCP, pass the {asset_id, mime_type, alt} object returned by lucide_icon_assets, architecture_icon_assets, create_graph_icon or register_asset unchanged; direct core/CLI calls require {base64, mime_type, alt?}.
+/// Prepared PNG/JPEG icon or image. In MCP, pass the {asset_id, mime_type, alt} object returned by lucide_icon_assets, architecture_icon_assets, create_graph_icon or register_asset unchanged (mime_type and alt may be omitted when asset_id is given); direct core/CLI calls require {base64, mime_type, alt?}.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(transform = add_mcp_asset_handle_schema)]
@@ -202,17 +202,19 @@ pub struct GraphIcon {
 }
 
 /// The derived schema describes the core form. `asset_id` exists only in MCP, which resolves it to `base64`
-/// before calling core, so the MCP-accepted alternative is added here and the core deserializer still rejects it.
+/// before calling core, so the MCP-accepted alternative is added here (marked `x-mcp-only`) and the core
+/// deserializer still rejects it. Tests pin the resulting shape instead of this function panicking on a layout change.
 fn add_mcp_asset_handle_schema(schema: &mut schemars::Schema) {
-    let object = schema.as_object_mut().expect("generated icon schema must be an object");
+    let Some(object) = schema.as_object_mut() else { return };
     object.remove("required");
-    let properties = object.get_mut("properties").and_then(serde_json::Value::as_object_mut)
-        .expect("generated icon schema must have object properties");
-    properties.insert("asset_id".into(), serde_json::json!({
-        "type": "string",
-        "format": "uuid",
-        "description": "MCP process-local asset handle returned by lucide_icon_assets, architecture_icon_assets, create_graph_icon or register_asset (resolved by MCP before calling core)."
-    }));
+    if let Some(properties) = object.entry("properties").or_insert_with(|| serde_json::json!({})).as_object_mut() {
+        properties.insert("asset_id".into(), serde_json::json!({
+            "type": "string",
+            "format": "uuid",
+            "x-mcp-only": true,
+            "description": "MCP process-local asset handle returned by lucide_icon_assets, architecture_icon_assets, create_graph_icon or register_asset (resolved by MCP before calling core)."
+        }));
+    }
     object.insert("oneOf".into(), serde_json::json!([
         { "required": ["base64", "mime_type"], "not": { "required": ["asset_id"] } },
         { "required": ["asset_id"], "not": { "required": ["base64"] } }

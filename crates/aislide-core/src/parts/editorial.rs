@@ -54,18 +54,17 @@ impl<'de> Deserialize<'de> for IconColumn {
 }
 
 fn add_legacy_icon_column_schema(schema: &mut schemars::Schema) {
-    let object = schema.as_object_mut()
-        .expect("generated icon-column schema must be an object");
+    let Some(object) = schema.as_object_mut() else { return };
     object.insert("additionalProperties".into(), serde_json::Value::Bool(false));
-    let properties = object.get_mut("properties").and_then(serde_json::Value::as_object_mut)
-        .expect("generated icon-column schema must have object properties");
-    properties.insert("detail_emphasis".into(), serde_json::json!({
-        "type": "array",
-        "items": { "type": "string" },
-        "maxItems": 0,
-        "deprecated": true,
-        "description": "Legacy compatibility only; only an empty array is accepted. Omit for new parts."
-    }));
+    if let Some(properties) = object.entry("properties").or_insert_with(|| serde_json::json!({})).as_object_mut() {
+        properties.insert("detail_emphasis".into(), serde_json::json!({
+            "type": "array",
+            "items": { "type": "string" },
+            "maxItems": 0,
+            "deprecated": true,
+            "description": "Legacy compatibility only; only an empty array is accepted. Omit for new parts."
+        }));
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
