@@ -10,6 +10,8 @@ pub const HEIGHT: f64 = 512.0;
 pub const CONTENT_TOP: f64 = 88.0;
 pub const MAX_GROUPS: usize = 16;
 pub const MAX_GROUP_DEPTH: usize = 4;
+/// Longest `GraphIcon.alt` in Unicode scalars; every validator and the schema share it.
+pub const ICON_ALT_MAX: usize = 500;
 const RENDER_LAYOUT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -195,13 +197,13 @@ pub struct GraphBadge {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GraphIcon {
-    #[schemars(length(min = 1, max = 1398104))] pub base64: String,
+    #[schemars(length(min = 1, max = crate::media::MAX_IMAGE_BASE64_LEN))] pub base64: String,
     #[schemars(extend("enum" = ["image/png", "image/jpeg"]))] pub mime_type: String,
-    #[serde(default)] #[schemars(length(max = 500))] pub alt: String,
+    #[serde(default)] #[schemars(length(max = ICON_ALT_MAX))] pub alt: String,
 }
 
 pub fn create_icon(base64: String, mime_type: &str, alt: &str) -> Result<GraphIcon> {
-    valid_text(alt, 500)?;
+    valid_text(alt, ICON_ALT_MAX)?;
     let (base64, mime_type) = crate::media::icon_raster(base64, mime_type)?;
     Ok(GraphIcon { base64, mime_type, alt: alt.into() })
 }
@@ -369,7 +371,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
             if !contains(ancestor, [region.x, region.y, region.width, region.height]) { return Err(containment_error("group", &region.id, ancestor, [region.x, region.y, region.width, region.height])); }
         }
         if let Some(icon) = &region.icon {
-            valid_text(&icon.alt, 500)?;
+            valid_text(&icon.alt, ICON_ALT_MAX)?;
             crate::media::inspect_raster(&icon.base64, &icon.mime_type)?;
         }
     }
@@ -390,7 +392,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
         }
         if node.presentation == GraphPresentation::Icon && (node.icon.is_none() || icon_height(node) <= 0.0) { return Err(Error::Invalid("icon presentation requires an icon and room for an image, gap and two-line label".into())); }
         if let Some(icon) = &node.icon {
-            valid_text(&icon.alt, 500)?;
+            valid_text(&icon.alt, ICON_ALT_MAX)?;
             crate::media::inspect_raster(&icon.base64, &icon.mime_type)?;
         }
         if let Some(parent) = &node.group {

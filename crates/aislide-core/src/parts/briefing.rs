@@ -258,12 +258,12 @@ pub(super) fn colors(values: &[&Option<String>]) -> Result<()> {
 }
 
 fn body_size(value: Option<f64>) -> Result<()> {
-    if value.is_some_and(|size| !size.is_finite() || !(BODY_SIZE_MIN..=BODY_SIZE_MAX).contains(&size)) { return Err(Error::Invalid("body_size must be 14-22px".into())); }
+    if value.is_some_and(|size| !size.is_finite() || !(BODY_SIZE_MIN..=BODY_SIZE_MAX).contains(&size)) { return Err(Error::Invalid(format!("body_size must be {BODY_SIZE_MIN}-{BODY_SIZE_MAX}px"))); }
     Ok(())
 }
 
 fn picture(value: &Option<GraphIcon>) -> Result<()> {
-    if let Some(value) = value { valid_text(&value.alt, 500)?; }
+    if let Some(value) = value { valid_text(&value.alt, crate::graphs::ICON_ALT_MAX)?; }
     Ok(())
 }
 
@@ -329,7 +329,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
         PartData::ScreenshotCallouts { image, callouts, detail_views, accent, body_size: size, message: band } => {
             count(callouts.len(), 1, 6)?;
             if *detail_views && callouts.len() > 3 { return Err(Error::Invalid("screenshot detail views require 1-3 callouts; split overview and detail pages".into())); }
-            valid_text(&image.alt, 500)?;
+            valid_text(&image.alt, crate::graphs::ICON_ALT_MAX)?;
             for callout in callouts {
                 if ![callout.x, callout.y].iter().all(|value| value.is_finite() && (0.0..=1.0).contains(value)) {
                     return Err(Error::Invalid("callout x/y must be 0-1 fractions of the source image".into()));

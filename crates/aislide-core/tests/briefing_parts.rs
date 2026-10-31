@@ -654,6 +654,12 @@ fn issue61_graph_icon_schema_tracks_the_struct_and_core_rejects_asset_handles() 
     documented.sort_unstable();
     assert_eq!(core_fields, documented);
     assert_eq!(schema["required"], json!(["base64", "mime_type"]));
+    // The advertised bounds are the constants the validators use.
+    assert_eq!(schema["properties"]["base64"]["maxLength"], aislide_core::media::MAX_IMAGE_BASE64_LEN);
+    assert_eq!(schema["properties"]["alt"]["maxLength"], aislide_core::graphs::ICON_ALT_MAX);
+    let mut oversized = example("list-horizontal/icon-cards");
+    oversized["data"]["cards"][0]["icon"] = json!({"base64":"A".repeat(aislide_core::media::MAX_IMAGE_BASE64_LEN + 1),"mime_type":"image/png"});
+    assert!(create(&oversized).unwrap_err().contains("1 MiB"));
 
     // MCP resolves `asset_id` to base64 before calling core, which has no asset registry and must not accept the handle.
     let mut spec = example("list-horizontal/icon-cards");
@@ -687,18 +693,25 @@ fn issue61_schema_text_limits_match_what_the_validators_enforce() {
         (&defs["ImageColumn"], "list-horizontal/image-columns", "/data/items/0"),
         (&defs["ComparisonPanel"], "contrast/panels", "/data/panels/0"),
         (&defs["ComparisonPanelItem"], "contrast/panels", "/data/panels/0/items/0"),
+        (&defs["GraphIcon"], "list-horizontal/icon-cards", "/data/cards/0/icon"),
+        (&defs["GraphIcon"], "list-horizontal/icon-columns", "/data/items/0/icon"),
+        (&defs["GraphIcon"], "list-horizontal/image-columns", "/data/items/0/image"),
+        (&defs["GraphIcon"], "list-enumeration/screenshot-callouts", "/data/image"),
     ];
+    let seed_icon = icon(32, 32);
     // JSON Schema and the validators both count Unicode scalar values, whatever their UTF-8 width.
     for unit in ["x", "あ", "😀"] {
         for (owner, preset, pointer) in probes {
             for (property, schema) in owner["properties"].as_object().unwrap() {
                 let Some(maximum) = schema["maxLength"].as_u64() else { continue };
+                // The base64 bound is the decoder's byte limit, which the GraphIcon test checks separately.
+                if property == "base64" { continue; }
                 let probe = |length: u64| {
                     let mut spec = example_of(preset);
                     if spec.pointer(pointer).is_none() {
-                        // Optional objects such as `message` are absent from the example; seed the smallest valid one.
+                        // Optional objects such as `message` or `icon` are absent from the example; seed the smallest valid one.
                         let (parent, key) = pointer.rsplit_once('/').unwrap();
-                        spec.pointer_mut(parent).unwrap()[key] = json!({"text":"Message"});
+                        spec.pointer_mut(parent).unwrap()[key] = if key == "icon" { seed_icon.clone() } else { json!({"text":"Message"}) };
                     }
                     spec.pointer_mut(pointer).unwrap()[property] = json!(unit.repeat(length as usize));
                     create(&spec)

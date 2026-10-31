@@ -146,7 +146,7 @@ fn interactive_minimum_frame_follows_the_visible_title_band() {
         assert!(at(960.0,480.0,true).is_ok(),"{template}: title shown at the minimum");
         assert!(at(960.0,400.0,false).is_ok(),"{template}: title hidden at the minimum");
         let titled=at(960.0,479.0,true).unwrap_err();
-        assert!(titled.contains("at least 960x480") && titled.contains("960x400 when show_title is false"),"{template}: {titled}");
+        assert!(titled.contains("at least 960x480") && titled.contains("960x400 when layout.show_title is false"),"{template}: {titled}");
         let hidden=at(960.0,399.0,false).unwrap_err();
         assert!(hidden.contains("at least 960x400") && !hidden.contains("960x480"),"{template}: {hidden}");
         for show_title in [true,false] {

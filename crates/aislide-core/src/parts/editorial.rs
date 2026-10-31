@@ -79,7 +79,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
                 field(&item.label, 48, "icon column label", true)?;
                 field(&item.detail, 200, "icon column detail", false)?;
                 if !item.detail_emphasis.is_empty() { return Err(Error::Unsupported("icon columns do not draw detail_emphasis; use list/icon-rows to emphasize a phrase".into())); }
-                if let Some(icon) = &item.icon { valid_text(&icon.alt, 500)?; }
+                if let Some(icon) = &item.icon { valid_text(&icon.alt, crate::graphs::ICON_ALT_MAX)?; }
                 colors(&[&item.accent])?;
             }
         }
@@ -101,7 +101,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
         PartData::ImageColumns { items } => {
             if !(2..=4).contains(&items.len()) { return Err(Error::Invalid("image columns require 2-4 items".into())); }
             for item in items {
-                valid_text(&item.image.alt, 500)?;
+                valid_text(&item.image.alt, crate::graphs::ICON_ALT_MAX)?;
                 field(&item.label, 48, "image column label", true)?;
                 field(&item.detail, 160, "image column detail", false)?;
                 field(&item.caption, 80, "image caption", false)?;

@@ -207,7 +207,7 @@ fn validate_data(data: &PartData) -> Result<()> {
                 count(panel.items.len(), 1, 5)?;
                 for item in &panel.items { bounded_text(&item.text, 240)?; if item.text.trim().is_empty() { return Err(Error::Invalid("comparison panel row text is required".into())); } }
                 for color in [&panel.fill, &panel.heading_fill, &panel.heading_color, &panel.accent, &panel.icon_fill].into_iter().flatten() { crate::model::valid_color(color)?; }
-                if panel.body_size.is_some_and(|size| !size.is_finite() || !(PANEL_BODY_SIZE_MIN..=PANEL_BODY_SIZE_MAX).contains(&size)) { return Err(Error::Invalid("comparison body size must be 16-28px".into())); }
+                if panel.body_size.is_some_and(|size| !size.is_finite() || !(PANEL_BODY_SIZE_MIN..=PANEL_BODY_SIZE_MAX).contains(&size)) { return Err(Error::Invalid(format!("comparison body size must be {PANEL_BODY_SIZE_MIN}-{PANEL_BODY_SIZE_MAX}px"))); }
             }
         }
         PartData::IconCards { .. } | PartData::IconRows { .. } | PartData::ShiftRows { .. } | PartData::StepCards { .. } | PartData::Agenda { .. } | PartData::ScreenshotCallouts { .. }
