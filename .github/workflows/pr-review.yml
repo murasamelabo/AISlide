@@ -1,35 +1,130 @@
 ﻿name: PR Review
 
+# Enable Settings > Actions > General > "Allow GitHub Actions to create and approve pull requests".
+# COPILOT_GITHUB_TOKEN requires Copilot Requests permission.
+# Optional PR_MERGE_TOKEN PAT (contents/pull requests: write, actions/checks/statuses: read) is used
+# instead of GITHUB_TOKEN, allowing merge pushes to trigger Verify on main.
+# AI_AUTO_MERGE=false disables automatic approval/merge. AUTO_MERGE_ALLOWED_AUTHORS is a
+# comma/space-separated login list (default: murasamelabo and Copilot bot logins).
+# Protected branches should require reviews, dismiss stale approvals on new commits,
+# and enable repository auto-merge. --match-head-commit checks the head when scheduling;
+# GitHub's auto-merge and branch rules govern later pushes while a merge is pending.
+# Without PR_MERGE_TOKEN, GITHUB_TOKEN merges do not trigger subsequent push workflows.
 on:
   pull_request_target:
-    types: [opened, reopened, ready_for_review, synchronize]
+    types: [review_requested]
+  workflow_run:
+    workflows: [Verify]
+    types: [completed]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
   checks: read
   statuses: read
   actions: read
 
-concurrency:
-  group: pr-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 jobs:
+  resolve:
+    if: ${{ github.event_name == 'pull_request_target' || github.event.workflow_run.event == 'pull_request' }}
+    runs-on: ubuntu-latest
+    outputs:
+      prs: ${{ steps.resolve.outputs.prs }}
+    steps:
+      - name: Resolve requested pull requests
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.PR_MERGE_TOKEN || github.token }}
+          HAS_MERGE_TOKEN: ${{ secrets.PR_MERGE_TOKEN != '' }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = pull_request_target ]; then
+            prs="$(jq -c '[.pull_request.number]' "$GITHUB_EVENT_PATH")"
+          else
+            sha="$(jq -r '.workflow_run.head_sha' "$GITHUB_EVENT_PATH")"
+            prs="$(gh api --paginate "repos/$REPO/commits/$sha/pulls" \
+              --jq '.[].number' | jq -sc '.')"
+            prs="$(jq -c --argjson fallback "$prs" \
+              '[.workflow_run.pull_requests[].number] + $fallback | unique' "$GITHUB_EVENT_PATH")"
+          fi
+          candidates='[]'
+          for number in $(jq -r '.[]' <<< "$prs"); do
+            pr="$(gh api "repos/$REPO/pulls/$number")"
+            if ! jq -e '.state == "open" and (.draft | not) and
+              ((.requested_reviewers | length) + (.requested_teams | length) > 0)' <<< "$pr" > /dev/null; then
+              continue
+            fi
+            sha="$(jq -r '.head.sha' <<< "$pr")"
+            event_sha="$(jq -r '.pull_request.head.sha // .workflow_run.head_sha' "$GITHUB_EVENT_PATH")"
+            if [ "$sha" != "$event_sha" ]; then
+              echo "::notice::PR #$number head moved; ignoring stale event."
+              continue
+            fi
+            candidates="$(jq -c --argjson number "$number" '. + [$number]' <<< "$candidates")"
+          done
+          echo "prs=$candidates" >> "$GITHUB_OUTPUT"
+
   review:
-    if: ${{ !github.event.pull_request.draft }}
+    needs: resolve
+    if: ${{ needs.resolve.outputs.prs != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.resolve.outputs.prs) }}
+    concurrency:
+      group: pr-review-${{ matrix.pr }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       AI_MODEL: ${{ vars.AI_MODEL || 'claude-opus-5.5' }}
+      PR_REVIEW_MODEL: claude-opus-5.5
       COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-      GH_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ secrets.PR_MERGE_TOKEN || github.token }}
       REPO: ${{ github.repository }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_NUMBER: ${{ matrix.pr }}
+      AI_AUTO_MERGE: ${{ vars.AI_AUTO_MERGE }}
+      AUTO_MERGE_ALLOWED_AUTHORS: ${{ vars.AUTO_MERGE_ALLOWED_AUTHORS || 'murasamelabo,copilot[bot],copilot-swe-agent[bot],Copilot' }}
       DEVELOPER: murasamelabo
     steps:
+      - name: Wait for Verify and skip reviewed heads
+        id: gate
+        run: |
+          set -euo pipefail
+          pr="$(gh api "repos/$REPO/pulls/$PR_NUMBER")"
+          if ! jq -e '.state == "open" and (.draft | not) and
+            ((.requested_reviewers | length) + (.requested_teams | length) > 0)' <<< "$pr" > /dev/null; then
+            exit 0
+          fi
+          sha="$(jq -r '.head.sha' <<< "$pr")"
+          event_sha="$(jq -r '.pull_request.head.sha // .workflow_run.head_sha' "$GITHUB_EVENT_PATH")"
+          [ "$sha" = "$event_sha" ] || { echo "::notice::PR head moved; skipping stale event."; exit 0; }
+          reviewer='github-actions[bot]'
+          if [ "$HAS_MERGE_TOKEN" = true ]; then reviewer="$(gh api user --jq .login)"; fi
+          marker="<!-- ai-pr-review head=$sha -->"
+          comments="$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[] | {body, user}')"
+          if jq -se --arg marker "$marker" --arg reviewer "$reviewer" \
+            'any(.[]; (.user.login == $reviewer or .user.login == "github-actions[bot]") and
+              (.body | contains($marker)))' <<< "$comments" > /dev/null; then
+            echo "::notice::This head already has an AI review."
+            exit 0
+          fi
+          run="$(gh api --paginate "repos/$REPO/actions/workflows/verify.yml/runs?head_sha=$sha&event=pull_request&per_page=100" \
+            --jq '.workflow_runs[]' | jq -sc 'sort_by(.run_number, .run_attempt) | last')"
+          if [ "$(jq -r '.status' <<< "$run")" != completed ]; then
+            echo "::notice::Verify 完了後にレビューします。"
+            exit 0
+          fi
+          {
+            echo "HEAD_SHA=$sha"
+            echo "VERIFY_ID=$(jq -r '.id' <<< "$run")"
+            echo "VERIFY_CONCLUSION=$(jq -r '.conclusion' <<< "$run")"
+            echo "VERIFY_URL=$(jq -r '.html_url' <<< "$run")"
+          } >> "$GITHUB_ENV"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
       - name: Check Copilot token
+        if: steps.gate.outputs.ready == 'true'
         run: |
           if [ -z "${COPILOT_GITHUB_TOKEN}" ]; then
             echo "::error::Secret COPILOT_GITHUB_TOKEN is not set. Register a fine-grained PAT with the Copilot Requests permission."
@@ -37,17 +132,23 @@ jobs:
           fi
       # Checks out the base branch only, to read .github/copilot-instructions.md. PR head code is never checked out or executed.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: steps.gate.outputs.ready == 'true'
         with:
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        if: steps.gate.outputs.ready == 'true'
         with:
           node-version: '24'
       - name: Install Copilot CLI
+        if: steps.gate.outputs.ready == 'true'
         run: npm install -g @github/copilot
       - name: Review pull request
+        if: steps.gate.outputs.ready == 'true'
         run: |
           set -euo pipefail
           work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
           limit=80000
 
           check_head() {
@@ -86,10 +187,13 @@ jobs:
 
           gh pr checks "$PR_NUMBER" --repo "$REPO" > "$work/checks.txt" 2>&1 || true
           [ -s "$work/checks.txt" ] || echo "チェック結果を取得できませんでした。" > "$work/checks.txt"
+          printf 'Verify conclusion: %s\nVerify URL: %s\n' "$VERIFY_CONCLUSION" "$VERIFY_URL" > "$work/verify.txt"
+          gh api --paginate "repos/$REPO/actions/runs/$VERIFY_ID/jobs?per_page=100" \
+            --jq '.jobs[] | "\(.name): \(.conclusion // .status)"' >> "$work/verify.txt"
 
           check_head
 
-          for f in meta diff checks; do
+          for f in meta diff checks verify; do
             sed -i -e 's/PR_BEGIN/PR-BEGIN/g' -e 's/PR_END/PR-END/g' "$work/$f.txt"
           done
 
@@ -130,12 +234,14 @@ jobs:
             cat "$work/meta.txt"
             printf '\n### チェック結果\n'
             cat "$work/checks.txt"
+            printf '\n### Verify 結論とジョブ結果\n'
+            cat "$work/verify.txt"
             printf '\n### 差分\n'
             cat "$work/diff.txt"
             printf '\nPR_END\n'
           } > "$work/prompt.txt"
 
-          timeout 1200 copilot -p "$(cat "$work/prompt.txt")" --model "$AI_MODEL" --silent \
+          timeout 1200 copilot -p "$(cat "$work/prompt.txt")" --model "$PR_REVIEW_MODEL" --silent \
             --deny-tool=shell --deny-tool=write --deny-tool=url --deny-tool=read --deny-tool=memory \
             --disable-builtin-mcps --no-ask-user --no-auto-update \
             > "$work/answer.md"
@@ -144,17 +250,72 @@ jobs:
             echo "::error::Copilot CLI returned no review output."
             exit 1
           fi
-          case "$(head -n 1 "$work/answer.md")" in
+          verdict="$(head -n 1 "$work/answer.md")"
+          case "$verdict" in
             '判定: マージ可'|'判定: 修正後マージ可'|'判定: マージ不可') ;;
             *) echo "::warning::The first line of the review is not a recognized verdict." ;;
           esac
 
           check_head
 
+          action="保留"
+          pr="$(gh api "repos/$REPO/pulls/$PR_NUMBER")"
+          author="$(jq -r '.user.login' <<< "$pr")"
+          allowed=false
+          while IFS= read -r login; do
+            if [ "$author" = "$login" ]; then allowed=true; fi
+          done < <(printf '%s\n' "$AUTO_MERGE_ALLOWED_AUTHORS" | tr ',[:space:]' '\n' | sed '/^$/d')
+          eligible=false
+          if [ "$AI_AUTO_MERGE" != false ] && [ "$allowed" = true ] &&
+            jq -e --arg repo "$REPO" --arg sha "$HEAD_SHA" \
+              '.state == "open" and (.draft | not) and .head.repo.full_name == $repo and .head.sha == $sha' \
+              <<< "$pr" > /dev/null; then
+            eligible=true
+          fi
+          if [ "$eligible" = true ]; then
+            case "$verdict" in
+              '判定: マージ可')
+                # Recheck Verify immediately before approval, including reruns of this head.
+                latest="$(gh api --paginate "repos/$REPO/actions/workflows/verify.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=100" \
+                  --jq '.workflow_runs[]' | jq -sc 'sort_by(.run_number, .run_attempt) | last')"
+                if [ "$VERIFY_CONCLUSION" = success ] &&
+                  jq -e --argjson id "$VERIFY_ID" '.id == $id and .status == "completed" and .conclusion == "success"' <<< "$latest" > /dev/null &&
+                  [ "$(jq -r '.mergeable' <<< "$pr")" = true ] && [ -z "$diff_note" ]; then
+                  check_head
+                  # Unlike gh pr review, the API binds approval to the reviewed commit.
+                  if gh api --method POST "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+                    -f event=APPROVE -f commit_id="$HEAD_SHA" -F body=@"$work/answer.md" --silent; then
+                    action="承認 / マージ保留"
+                    check_head
+                    base="$(jq -r '.base.ref | @uri' <<< "$pr")"
+                    if protected="$(gh api "repos/$REPO/branches/$base" --jq .protected)"; then
+                      merge_args=(--squash --match-head-commit "$HEAD_SHA")
+                      if [ "$protected" = true ]; then merge_args+=(--auto); fi
+                      if gh pr merge "$PR_NUMBER" --repo "$REPO" "${merge_args[@]}"; then
+                        action="承認 / マージ実行（保護ブランチでは自動マージ予約）"
+                      fi
+                    fi
+                  fi
+                fi
+                ;;
+              '判定: 修正後マージ可'|'判定: マージ不可')
+                check_head
+                if gh api --method POST "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+                  -f event=REQUEST_CHANGES -f commit_id="$HEAD_SHA" -F body=@"$work/answer.md" --silent; then
+                  action="変更要求 / マージ保留"
+                fi
+                ;;
+            esac
+          fi
+          check_head
           {
-            printf '@%s AI レビュー結果です(助言のみ)。\n\n' "$DEVELOPER"
+            printf '<!-- ai-pr-review head=%s -->\n@%s AI レビュー結果です。\n\n' "$HEAD_SHA" "$DEVELOPER"
             cat "$work/answer.md"
+            if [ "$VERIFY_CONCLUSION" != success ]; then
+              printf '\n\nVerify が success ではないためマージしません（%s）。\n' "$VERIFY_CONCLUSION"
+            fi
             # shellcheck disable=SC2016 # Markdown backticks are literal.
-            printf '\n\n---\n<sub>モデル: `%s` / レビュー対象 head: `%s`。これは助言のみで、承認・変更要求・マージは行いません。</sub>\n' "$AI_MODEL" "$HEAD_SHA"
+            printf '\n\n---\n<sub>モデル: `%s` / レビュー対象 head: `%s` / Verify: %s / アクション: %s</sub>\n' \
+              "$PR_REVIEW_MODEL" "$HEAD_SHA" "$VERIFY_URL" "$action"
           } > "$work/comment.md"
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$work/comment.md" --edit-last --create-if-none
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$work/comment.md"
