@@ -614,7 +614,7 @@ function boundDifferences(core, coreRoot, mcp, mcpRoot) {
   const bounded = value => typeof value.const === 'number' ? { ...value, minimum: value.const, maximum: value.const } : value;
   const walk = (left, right, path, depth) => {
     if (depth > 24) return;
-    // GraphSpec carries its own bounds, which graph_catalog publishes; the wrapper in the part schema is not compared here.
+    // The core schema publishes few GraphSpec bounds (murasamelabo/AISlide#68), so the diagram wrapper in the part schema is not compared yet.
     if (path === 'spec.data<diagram>.graph') return;
     const a = bounded(open(left, coreRoot));
     const b = bounded(open(right, mcpRoot));
