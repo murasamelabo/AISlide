@@ -458,7 +458,7 @@ fn map(drawing: &mut Drawing, variant: usize, data: &PartData) -> Result<()> {
     let maximum=points.iter().filter_map(|point|point.value).fold(0.0,f64::max).max(1.0);
     for (index,point) in points.iter().enumerate() {let position=project(point.longitude,point.latitude);let size=if variant==1 {48.0*(point.value.ok_or_else(||Error::Invalid("proportional markers require values".into()))?/maximum).sqrt()} else {12.0};if size>0.0 {drawing.shape("ellipse",[position[0]-size/2.0,position[1]-size/2.0,size,size],"@lt1",&accent(index));}
         if variant==2 {let row=96.0+index as f64*46.0;drawing.text(&format!("{}  {}",index+1,point.label),[824.0,row,296.0,40.0],18.0,&accent(index),true,TextAlign::Left);drawing.text(&(index+1).to_string(),[position[0]-12.0,position[1]-12.0,24.0,26.0],14.0,"@dk1",true,TextAlign::Center);}
-        else {drawing.text(&point.label,[(position[0]-60.0).clamp(24.0,992.0),position[1]+size/2.0+8.0,136.0,34.0],16.0,&accent(index),true,TextAlign::Center);}
+        else {let below=position[1]+size/2.0+8.0;let top=if below+34.0>512.0 {position[1]-size/2.0-8.0-34.0} else {below};drawing.text(&point.label,[(position[0]-60.0).clamp(24.0,992.0),top,136.0,34.0],16.0,&accent(index),true,TextAlign::Center);}
     }
     drawing.text("Natural Earth 1:110m / equirectangular / land outlines",[24.0,484.0,1096.0,24.0],12.0,"@dk2",false,TextAlign::Left);Ok(())
 }

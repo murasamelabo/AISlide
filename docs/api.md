@@ -8,7 +8,7 @@ Every operation is strict JSON with a discriminator `op`. Unknown JSON request p
 
 Requests default to fixed `large`: 256 slides, 8192 total elements, 32 MiB complete UTF-8 document including immutable origin, 96 MiB JSON request/response, and 16 MiB raw archive. `capacity_profile: "standard"` retains 128 slides / 8 MiB document / 16 MiB wire / 8 MiB archive; `legacy` retains 32 slides / 2048 elements / 2 MiB document / 4 MiB wire. All limits apply together. Profiles are request-local, including intermediate transactions and responses, not a Deck field or global mutable context. SDK creation/open options accept `capacityProfile`; sessions retain it, and `setCapacityProfile()` validates current document and both history chains before committing a change. Unknown/null/custom/unlimited profiles reject. Capacity profiles do not themselves expand model/guided input grammar; guided authoring has a separate explicit `authoring.slide_limit` opt-in described below. Independent image/source/static-output limits remain unchanged.
 
-MCP defaults to the lightweight `compact` tool profile: JSON appears once in `content[0].text`, without a duplicate `structuredContent`. `--tool-profile full` retains legacy duplication for results up to 64 KiB. Both profiles retain the fully serialized response budget; tool profiles are independent of document capacity profiles.
+MCP defaults to the lightweight `compact` tool profile: JSON appears once in `content[0].text`, without a duplicate `structuredContent`. `--tool-profile full` retains legacy duplication for results up to 64 KiB. `authoring_capabilities` embeds the complete part schema and now exceeds that size, so it carries its JSON in `content[0].text` only under both profiles; read the text, not `structuredContent`, for it. Both profiles retain the fully serialized response budget; tool profiles are independent of document capacity profiles.
 
 ## Single-file PPTX
 
@@ -177,10 +177,19 @@ title band (88px, or 80px for `interactive/*`); pattern-mode `slots` accept the
 same field. It defaults to `false` when `spec.title` is empty or whitespace-only
 and to `true` otherwise. Pass `show_title:false` to omit the band, for example
 under the slide title, while `spec.title` stays as metadata. Explicit
-`show_title:true` requires a nonempty title; managed `add_part` and
-`insert_part` take `layout.show_title` as given and do not. `interactive/*`
-still requires a nonempty title when the band is hidden, and then needs a frame
-of at least 960×400 instead of 960×480.
+`show_title:true` requires a nonempty title, and so does a managed part whose
+`layout.show_title` is true, which is its default: `create_part`, `add_part`,
+`insert_part` and `update_part`, including their batch forms, reject a blank
+title with the same message, so give a part without a title
+`layout.show_title:false`. A part without `layout` has no `show_title`, and its
+placement is unchanged. A diagram draws its band only while its own
+`GraphSpec.show_title` is true, and only then needs a title. A saved document
+whose stored part has a blank title and a visible band still opens as a managed
+part and saves unchanged. `update_part` may keep that combination but cannot
+introduce it, and `preflight_presentation` reports the saved part as
+`PART_TITLE_BAND_EMPTY` (warning). `interactive/*` still requires a nonempty
+title when the band is hidden, and then needs a frame of at least 960×400
+instead of 960×480.
 
 Pattern mode replaces `blocks` with `pattern:{id,count?,mirror?,message_band?}`
 and `slots:{<slot id>:block}`. Core resolves the [layout pattern](#layout-patterns)
@@ -1150,7 +1159,9 @@ New parts normally use theme-linked native objects at `{x:64,y:144,width:1152,he
 An explicit `layout:{x,y,width,height,show_title?}` bypasses automatic preset
 region fitting. Coordinates must be finite and nonnegative, dimensions
 positive, and both the frame values and right/bottom edges within 4096px;
-insertion must also fit the actual slide. `show_title` defaults true. False
+insertion must also fit the actual slide. `show_title` defaults true and then
+needs a nonempty `spec.title`, because a blank title would only reserve an empty
+band (see the `part` block above). False
 removes the part title/subtitle and maps its body below the former 88px band
 into the requested frame. Geometry and absolute table tracks are normalized;
 text fitting enforces a 12px floor and rejects measured overflow or missing
@@ -1189,6 +1200,8 @@ row; they do not promise one line for arbitrary magnitudes or silently abbreviat
 the data to force one. Focus/KPI magnitude formatting remains separate.
 
 `Document.parts` is optional when empty. An instance contains `slide_id`, `element_id`, `spec`, `render_sha256`, optional `native_sha256`, and `stale`. Hashes cover rendered children and original native group/resources, including chart workbooks. Root-only movement/resizing in Studio is allowed; mismatched manual/native edits mark the part stale and block semantic update. Missing fingerprints on existing native roots also mark stale. There is no automatic regeneration, no cryptographic authentication, and benign external XML reserialization can conservatively mark stale. Ordinary native objects remain available even without metadata.
+
+The `schema` that `part_catalog` returns publishes the limits that the validators enforce for every preset, as `minLength`/`maxLength` (Unicode scalar values), `minItems`/`maxItems` and `minimum`/`maximum`, so a caller can build an input that passes. Presets share a variant and can narrow its limits (`set/*` takes two or three `groups` where the other group presets take up to six, and the frame limits how many rows or cards fit), so each published range is the widest any preset accepts, and the validation error names the narrower one. Some rules cannot be expressed in the schema and are enforced by the validators only: a list whose length must equal another list's (`values` of each row for `columns`, `cells` for `stages`), uniqueness of IDs, cross-references between IDs, indexes and their order, the frame a preset needs, and the other fields of one record. Part values (`value`, `values`, `plan`, `actual`, `midpoint` and the like) must also be finite and within ±1e15, and the schema publishes that range on each of those fields. Wherever the schema publishes a `minLength` of 1, the validators also reject whitespace-only text, which `minLength` cannot say. Tests probe every published bound against the validators and compare the MCP input schema with the core schema, so a bound that moves in one place and not in the other fails.
 
 SDK: `client.partCatalog()`, `client.createPart({id,spec,theme?})`, `session.addPart(slideId,{id,spec},options?)`, `session.updatePart(slideId,{id,spec},options?)`, `session.detachPart(slideId,{id},options?)`. Session options accept `expectedRevision` and cancellation; detach additionally accepts `expectedHash` through `AuthoringOptions`. Late transport success after cancellation cannot commit. MCP: `part_catalog`, `create_part`, `add_part`, `update_part`, `detach_part`; mutations require `deck_id`, `expected_revision`, `slide_id`, `id` and optional `expected_hash`; add/update also require `spec`. Detach removes only metadata, retaining the native figures, manual edits and source bindings in one undoable transaction, including stale records. Protected native packages reject detach.
 
@@ -1240,7 +1253,13 @@ Rendering uses native-sized text and rejects insufficient space instead of
 silently shrinking labels. The default frame is 1152×512; minimum 960×480, or
 960×400 when `layout.show_title` is false (the 80px title band is not drawn, so
 the body keeps the same height). Explicit JavaScript labs (below) keep their own
-960×480 canvas minimum and reject shorter frames.
+960×480 canvas minimum and reject shorter frames. The rejection names the slide
+ID, the element ID and the frame (for example `slide slide-1 element short is
+960x400`). Before any export, `preflight_presentation` reports
+`INTERACTIVE_LAB_FRAME_TOO_SMALL` (info) for each interactive part below
+960×480; it is information only, because the export decides whether a lab is
+wanted. Enlarge the frame to at least 960×480, or leave the part out of
+`javascript_labs` and export its typed content.
 
 The separate experimental `export_copilot_interactive` operation uses the
 observed `fa000000210` / `sdxcatalog` / `en-US` reference with a JSON-string

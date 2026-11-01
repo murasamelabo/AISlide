@@ -24,21 +24,22 @@ pub const PANEL_BODY_SIZE_MAX: f64 = 28.0;
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PartSpec {
-    pub version: u32,
+    #[schemars(range(min = 1, max = 1))] pub version: u32,
     pub preset: String,
-    pub title: String,
-    #[serde(default)] pub subtitle: String,
+    #[schemars(length(max = 80))] pub title: String,
+    #[serde(default)] #[schemars(length(max = 120))] pub subtitle: String,
     pub data: PartData,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub layout: Option<PartLayout>,
 }
 
+/// `x + width` and `y + height` also stay within 4096.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PartLayout {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
+    #[schemars(range(min = 0, max = 4096))] pub x: f64,
+    #[schemars(range(min = 0, max = 4096))] pub y: f64,
+    #[schemars(range(max = 4096), extend("exclusiveMinimum" = 0))] pub width: f64,
+    #[schemars(range(max = 4096), extend("exclusiveMinimum" = 0))] pub height: f64,
     #[serde(default = "show_part_title")] pub show_title: bool,
     #[serde(default, skip_serializing_if = "PartFit::is_stretch")] pub fit: PartFit,
 }
@@ -52,6 +53,21 @@ impl PartFit {
 }
 
 fn show_part_title() -> bool { true }
+
+pub(crate) const TITLE_BAND_MESSAGE: &str = "part show_title:true requires a nonempty part title; set a title or show_title:false";
+
+/// Whether the layout reserves a title band that the blank title leaves empty. A diagram draws the band only while its own `show_title` allows it,
+/// and an interactive part requires its title whether or not the band is drawn, with an error of its own.
+pub(crate) fn title_band_empty(spec: &PartSpec) -> bool {
+    let Some(layout) = &spec.layout else { return false };
+    let drawn = layout.show_title && match &spec.data { PartData::Diagram { graph } => graph.show_title, PartData::Interactive { .. } => false, _ => true };
+    drawn && spec.title.trim().is_empty()
+}
+
+/// New and changed parts must not reserve an empty band. `validate_spec` leaves this out so that saved parts that already do stay managed.
+pub(crate) fn validate_title_band(spec: &PartSpec) -> Result<()> {
+    if title_band_empty(spec) { Err(Error::Invalid(TITLE_BAND_MESSAGE.into())) } else { Ok(()) }
+}
 
 impl PartLayout {
     fn validate(&self) -> Result<()> {
@@ -80,83 +96,110 @@ pub enum PartData {
     ImageColumns { #[schemars(length(min = 2, max = 4))] items: Vec<ImageColumn> },
     Agenda { #[schemars(length(min = 2, max = 7))] items: Vec<AgendaItem>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
     ScreenshotCallouts { image: crate::graphs::GraphIcon, #[schemars(length(min = 1, max = 6))] callouts: Vec<Callout>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] detail_views: bool, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
-    KpiCards { cards: Vec<KpiCard>, #[serde(default, skip_serializing_if = "Option::is_none")] columns: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
-    BulletGraphs { rows: Vec<BulletRow>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    KpiCards { #[schemars(length(min = 1, max = 8))] cards: Vec<KpiCard>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = 1, max = 4))] columns: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    BulletGraphs { #[schemars(length(min = 1, max = 6))] rows: Vec<BulletRow>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     Variance {
-        rows: Vec<VarianceRow>,
-        #[serde(default, skip_serializing_if = "String::is_empty")] unit: String,
-        #[serde(default, skip_serializing_if = "String::is_empty")] plan_label: String,
-        #[serde(default, skip_serializing_if = "String::is_empty")] actual_label: String,
-        #[serde(default, skip_serializing_if = "String::is_empty")] variance_label: String,
-        #[serde(default, skip_serializing_if = "String::is_empty")] total_label: String,
+        #[schemars(length(min = 2, max = 10))] rows: Vec<VarianceRow>,
+        #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 8))] unit: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 16))] plan_label: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 16))] actual_label: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 16))] variance_label: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 24))] total_label: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")] lower_is_better: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
     },
-    HarveyMatrix { columns: Vec<String>, rows: Vec<HarveyRow>, #[serde(default, skip_serializing_if = "Vec::is_empty")] legend: Vec<String>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    HarveyMatrix {
+        #[schemars(length(min = 2, max = 6), inner(length(min = 1, max = 24)))] columns: Vec<String>,
+        #[schemars(length(min = 2, max = 8))] rows: Vec<HarveyRow>,
+        /// Empty, or exactly 5 entries.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 5), inner(length(min = 1, max = 20)))] legend: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
+    },
     Heatmap {
-        columns: Vec<String>,
-        rows: Vec<HeatmapRow>,
-        #[serde(default, skip_serializing_if = "String::is_empty")] unit: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")] midpoint: Option<f64>,
+        #[schemars(length(min = 2, max = 12), inner(length(min = 1, max = 16)))] columns: Vec<String>,
+        #[schemars(length(min = 2, max = 10))] rows: Vec<HeatmapRow>,
+        #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 4))] unit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = -1e15, max = 1e15))] midpoint: Option<f64>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")] lower_is_better: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
     },
-    Raci { roles: Vec<String>, tasks: Vec<RaciTask>, #[serde(default, skip_serializing_if = "Vec::is_empty")] legend: Vec<String>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    Raci {
+        #[schemars(length(min = 2, max = 8), inner(length(min = 1, max = 20)))] roles: Vec<String>,
+        #[schemars(length(min = 2, max = 10))] tasks: Vec<RaciTask>,
+        /// Empty, or exactly 4 entries.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4), inner(length(min = 1, max = 24)))] legend: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
+    },
     RiskMatrix {
-        risks: Vec<Risk>,
-        #[serde(default, skip_serializing_if = "String::is_empty")] likelihood_label: String,
-        #[serde(default, skip_serializing_if = "String::is_empty")] impact_label: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")] zone_labels: Vec<String>,
+        #[schemars(length(min = 1, max = 10))] risks: Vec<Risk>,
+        #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 24))] likelihood_label: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 24))] impact_label: String,
+        /// Empty, or exactly 4 entries.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4), inner(length(min = 1, max = 16)))] zone_labels: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
     },
     Pareto {
-        items: Vec<ParetoItem>,
-        #[serde(default, skip_serializing_if = "String::is_empty")] value_label: String,
-        #[serde(default, skip_serializing_if = "String::is_empty")] cumulative_label: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")] threshold: Option<f64>,
+        #[schemars(length(min = 3, max = 12))] items: Vec<ParetoItem>,
+        #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 24))] value_label: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 24))] cumulative_label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(extend("exclusiveMinimum" = 0, "exclusiveMaximum" = 1))] threshold: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
     },
     ControlChart {
-        labels: Vec<String>,
-        values: Vec<f64>,
-        #[serde(default, skip_serializing_if = "String::is_empty")] series_label: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")] center: Option<f64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")] upper: Option<f64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")] lower: Option<f64>,
+        /// One label per value.
+        #[schemars(length(min = 5, max = 32), inner(length(min = 1, max = 12)))] labels: Vec<String>,
+        #[schemars(length(min = 5, max = 32), inner(range(min = -1e15, max = 1e15)))] values: Vec<f64>,
+        #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 24))] series_label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = -1e15, max = 1e15))] center: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = -1e15, max = 1e15))] upper: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = -1e15, max = 1e15))] lower: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
     },
-    Fishbone { effect: String, categories: Vec<FishboneCategory>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
-    Swimlane { lanes: Vec<String>, steps: Vec<SwimlaneStep>, flows: Vec<SwimlaneFlow> },
-    Sankey { nodes: Vec<SankeyNode>, links: Vec<SankeyLink>, #[serde(default, skip_serializing_if = "String::is_empty")] unit: String, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    Fishbone { #[schemars(length(min = 1, max = 60))] effect: String, #[schemars(length(min = 2, max = 6))] categories: Vec<FishboneCategory>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
+    Swimlane {
+        #[schemars(length(min = 2, max = 5), inner(length(min = 1, max = 24)))] lanes: Vec<String>,
+        #[schemars(length(min = 2, max = 16))] steps: Vec<SwimlaneStep>,
+        #[schemars(length(min = 1, max = 24))] flows: Vec<SwimlaneFlow>,
+    },
+    Sankey { #[schemars(length(min = 2, max = 16))] nodes: Vec<SankeyNode>, #[schemars(length(min = 1, max = 32))] links: Vec<SankeyLink>, #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 8))] unit: String, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     Journey {
-        stages: Vec<String>,
-        rows: Vec<JourneyRow>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")] emotions: Vec<i8>,
-        #[serde(default, skip_serializing_if = "String::is_empty")] emotion_label: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")] emotion_notes: Vec<String>,
+        #[schemars(length(min = 2, max = 6), inner(length(min = 1, max = 20)))] stages: Vec<String>,
+        #[schemars(length(min = 1, max = 4))] rows: Vec<JourneyRow>,
+        /// Empty, or one value from -2 to 2 per stage.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 6), inner(range(min = -2, max = 2)))] emotions: Vec<i8>,
+        #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 16))] emotion_label: String,
+        /// Empty, or one note per stage (which requires emotions).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 6), inner(length(max = 32)))] emotion_notes: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")] highlight: Option<usize>,
         #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage>,
     },
-    Architecture { system: String, elements: Vec<ArchitectureElement>, relations: Vec<ArchitectureRelation> },
-    Chart { categories: Vec<String>, series: Vec<PartSeries>, #[serde(default)] x_axis: String, #[serde(default)] y_axis: String },
-    Items { items: Vec<PartItem>, #[serde(default)] center: String },
-    Tree { nodes: Vec<TreeNode> },
-    Network { nodes: Vec<PartItem>, edges: Vec<PartEdge> },
-    Matrix { rows: Vec<String>, columns: Vec<String>, cells: Vec<Vec<String>>, #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 48))] corner_label: String },
-    Groups { groups: Vec<PartGroup> },
-    Timeline { periods: Vec<String>, tasks: Vec<PartTask> },
-    Waterfall { steps: Vec<WaterfallStep>, #[serde(default)] unit: String },
-    Map { points: Vec<MapPoint> },
+    Architecture { #[schemars(length(min = 1, max = 40))] system: String, #[schemars(length(min = 2, max = 12))] elements: Vec<ArchitectureElement>, #[schemars(length(min = 1, max = 16))] relations: Vec<ArchitectureRelation> },
+    Chart { #[schemars(length(min = 1, max = 12), inner(length(max = 32)))] categories: Vec<String>, #[schemars(length(min = 1, max = 4))] series: Vec<PartSeries>, #[serde(default)] #[schemars(length(max = 60))] x_axis: String, #[serde(default)] #[schemars(length(max = 60))] y_axis: String },
+    Items { #[schemars(length(min = 2, max = 12))] items: Vec<PartItem>, #[serde(default)] #[schemars(length(max = 48))] center: String },
+    Tree { #[schemars(length(min = 2, max = 12))] nodes: Vec<TreeNode> },
+    Network { #[schemars(length(min = 2, max = 6))] nodes: Vec<PartItem>, #[schemars(length(min = 1, max = 12))] edges: Vec<PartEdge> },
+    Matrix {
+        #[schemars(length(min = 2, max = 4), inner(length(max = 48)))] rows: Vec<String>,
+        #[schemars(length(min = 2, max = 4), inner(length(max = 48)))] columns: Vec<String>,
+        /// One row per row label, each with one cell per column label.
+        #[schemars(length(min = 2, max = 4), extend("items" = {"type": "array", "minItems": 2, "maxItems": 4, "items": {"type": "string", "maxLength": 48}}))] cells: Vec<Vec<String>>,
+        #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 48))] corner_label: String,
+    },
+    Groups { #[schemars(length(min = 2, max = 6))] groups: Vec<PartGroup> },
+    Timeline { #[schemars(length(min = 2, max = 12), inner(length(max = 16)))] periods: Vec<String>, #[schemars(length(min = 1, max = 8))] tasks: Vec<PartTask> },
+    Waterfall { #[schemars(length(min = 2, max = 10))] steps: Vec<WaterfallStep>, #[serde(default)] #[schemars(length(max = 24))] unit: String },
+    Map { #[schemars(length(min = 1, max = 8))] points: Vec<MapPoint> },
     Diagram { graph: crate::graphs::GraphSpec },
 }
 
+/// `values` holds one number per category.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct PartSeries { pub name: String, pub values: Vec<f64> }
+pub struct PartSeries { #[schemars(length(max = 32))] pub name: String, #[schemars(length(min = 1, max = 12), inner(range(min = -1e15, max = 1e15)))] pub values: Vec<f64> }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct PartItem { pub label: String, #[serde(default)] pub detail: String, #[serde(default, skip_serializing_if = "Option::is_none")] pub value: Option<f64> }
+pub struct PartItem { #[schemars(length(max = 48))] pub label: String, #[serde(default)] #[schemars(length(max = 120))] pub detail: String, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = -1e15, max = 1e15))] pub value: Option<f64> }
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ComparisonPanel {
@@ -174,22 +217,24 @@ pub struct ComparisonPanel {
 pub struct ComparisonPanelItem { #[schemars(length(min = 1, max = 240))] pub text: String, #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<crate::graphs::GraphIcon> }
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct TreeNode { pub id: String, pub label: String, #[serde(default)] pub parent: Option<String> }
+pub struct TreeNode { #[schemars(length(min = 1, max = 32))] pub id: String, #[schemars(length(max = 40))] pub label: String, #[serde(default)] pub parent: Option<String> }
+/// `from` and `to` index `nodes` and differ.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct PartEdge { pub from: usize, pub to: usize, #[serde(default)] pub label: String }
+pub struct PartEdge { pub from: usize, pub to: usize, #[serde(default)] #[schemars(length(max = 24))] pub label: String }
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct PartGroup { pub label: String, pub items: Vec<String> }
+pub struct PartGroup { #[schemars(length(max = 32))] pub label: String, #[schemars(length(min = 1, max = 5), inner(length(max = 40)))] pub items: Vec<String> }
+/// `start` and `end` index `periods`: `end` may equal the number of periods and has to exceed `start`.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct PartTask { pub label: String, pub start: usize, pub end: usize, #[serde(default)] pub progress: f64 }
+pub struct PartTask { #[schemars(length(max = 32))] pub label: String, pub start: usize, #[schemars(range(min = 1))] pub end: usize, #[serde(default)] #[schemars(range(min = 0, max = 1))] pub progress: f64 }
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct WaterfallStep { pub label: String, pub value: f64, #[serde(default)] pub total: bool }
+pub struct WaterfallStep { #[schemars(length(max = 32))] pub label: String, #[schemars(range(min = -1e15, max = 1e15))] pub value: f64, #[serde(default)] pub total: bool }
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MapPoint { pub label: String, pub longitude: f64, pub latitude: f64, #[serde(default)] pub value: Option<f64> }
+pub struct MapPoint { #[schemars(length(max = 32))] pub label: String, #[schemars(range(min = -180, max = 180))] pub longitude: f64, #[schemars(range(min = -85, max = 85))] pub latitude: f64, #[serde(default)] #[schemars(range(min = 0, max = 1e15))] pub value: Option<f64> }
 
 fn bounded_text(value: &str, maximum: usize) -> Result<()> { valid_text(value, maximum) }
 fn finite(value: f64) -> Result<()> { if !value.is_finite() || value.abs() > 1e15 { Err(Error::Invalid("part values must be finite and within +/-1e15".into())) } else { Ok(()) } }
