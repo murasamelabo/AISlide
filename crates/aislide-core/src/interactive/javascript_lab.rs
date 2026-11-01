@@ -14,9 +14,19 @@ pub struct Selection {
     pub kind:Kind,
 }
 
+/// The runtime is verified from 960x480, which is taller than the 960x400 that a typed interactive export accepts without its title band.
+pub(crate) const MIN_WIDTH: f64 = 960.0;
+pub(crate) const MIN_HEIGHT: f64 = 480.0;
+pub(crate) const MAX_SIDE: f64 = 4096.0;
+pub(crate) const CANVAS_REQUIREMENT: &str = "JavaScript lab canvas requires finite native dimensions of at least 960x480 and at most 4096x4096";
+
+pub(crate) fn supports_frame(width: f64, height: f64) -> bool {
+    width.is_finite() && height.is_finite() && (MIN_WIDTH..=MAX_SIDE).contains(&width) && (MIN_HEIGHT..=MAX_SIDE).contains(&height)
+}
+
 pub(super) fn html(kind:Kind,title:&str,source:&str,width:f64,height:f64)->Result<String> {
-    if !width.is_finite() || !height.is_finite() || !(960.0..=4096.0).contains(&width) || !(480.0..=4096.0).contains(&height) {
-        return Err(Error::Invalid("JavaScript lab canvas requires finite native dimensions of at least 960x480 and at most 4096x4096".into()));
+    if !supports_frame(width,height) {
+        return Err(Error::Invalid(CANVAS_REQUIREMENT.into()));
     }
     let runtime=include_str!("../../../../apps/office-content/lab-runtime.mjs").trim_start_matches('\u{feff}');
     let css=include_str!("../../../../apps/office-content/lab.css").trim_start_matches('\u{feff}');

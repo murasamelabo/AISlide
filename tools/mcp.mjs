@@ -338,7 +338,7 @@ const comparisonPanel = z.object({
 	items: z.array(z.object({ text: z.string().min(1).max(480).refine(value => value.trim().length > 0 && Array.from(value).length <= 240, 'Panel text requires 1-240 Unicode scalars').meta({ maxLength: 240 }), icon: optional(graphIcon) }).strict()).min(1).max(5),
 	fill: optional(colorSchema), heading_fill: optional(colorSchema), heading_color: optional(colorSchema), accent: optional(colorSchema), icon_fill: optional(colorSchema), body_size: optional(z.number().min(16).max(28)),
 }).strict();
-const briefingText = (maximum, name, required = false) => z.string().max(maximum * 2).refine(value => Array.from(value).length <= maximum && (!required || value.trim().length > 0), required ? `${name} requires 1-${maximum} Unicode scalars` : `${name} exceeds ${maximum} Unicode scalars`).refine(value => !value.includes('\r') && value.split('\n').length <= 3, `${name} allows at most three LF-separated lines`).meta({ maxLength: maximum });
+const briefingText = (maximum, name, required = false) => z.string().max(maximum * 2).refine(value => Array.from(value).length <= maximum && (!required || value.trim().length > 0), required ? `${name} requires 1-${maximum} Unicode scalars` : `${name} exceeds ${maximum} Unicode scalars`).refine(value => !value.includes('\r') && value.split('\n').length <= 3, `${name} allows at most three LF-separated lines`).meta(required ? { minLength: 1, maxLength: maximum } : { maxLength: maximum });
 const briefingPoints = z.array(briefingText(80, 'Point', true)).max(4);
 const briefingBody = optional(z.number().min(14).max(22));
 const briefingMessage = optional(z.object({ text: briefingText(120, 'Message text', true), detail: briefingText(160, 'Message detail').optional(), fill: optional(colorSchema), color: optional(colorSchema) }).strict());
@@ -424,10 +424,10 @@ const partData = z.discriminatedUnion('kind', [
 	z.object({ kind: z.literal('groups'), groups: z.array(z.object({ label: z.string().max(32), items: z.array(z.string().max(40)).min(1).max(5) }).strict()).min(2).max(6) }).strict(),
 	z.object({ kind: z.literal('timeline'), periods: z.array(z.string().max(16)).min(2).max(12), tasks: z.array(z.object({ label: z.string().max(32), start: z.number().int().min(0).max(11), end: z.number().int().min(1).max(12), progress: z.number().min(0).max(1).optional() }).strict()).min(1).max(8) }).strict(),
 	z.object({ kind: z.literal('waterfall'), steps: z.array(z.object({ label: z.string().max(32), value: partValue, total: z.boolean().optional() }).strict()).min(2).max(10), unit: z.string().max(24).optional() }).strict(),
-	z.object({ kind: z.literal('map'), points: z.array(z.object({ label: z.string().max(32), longitude: z.number().min(-180).max(180), latitude: z.number().min(-85).max(85), value: partValue.nullable().optional() }).strict()).min(1).max(8) }).strict(),
+	z.object({ kind: z.literal('map'), points: z.array(z.object({ label: z.string().max(32), longitude: z.number().min(-180).max(180), latitude: z.number().min(-85).max(85), value: z.number().min(0).max(1e15).nullable().optional() }).strict()).min(1).max(8) }).strict(),
 	z.object({ kind: z.literal('diagram'), graph: graphSpec }).strict(),
 ]);
-const partLayout = frameSchema.extend({ show_title: z.boolean().optional(), fit: z.enum(['stretch', 'contain']).optional().describe('stretch (default) scales each axis to the frame; contain scales uniformly and centers, keeping circles round') }).strict();
+const partLayout = frameSchema.extend({ show_title: z.boolean().optional().describe('Default true. With true the part draws its title band, so spec.title must be nonempty: create_part, add_part, insert_part and update_part reject a blank title with show_title true, as compose_slide does. Set false to give the band to the body (spec.title is still kept). Saved parts that already have an empty band stay readable and editable, and preflight_presentation reports them as PART_TITLE_BAND_EMPTY.'), fit: z.enum(['stretch', 'contain']).optional().describe('stretch (default) scales each axis to the frame; contain scales uniformly and centers, keeping circles round') }).strict();
 const partSpec = z.object({ version: z.literal(1), preset: z.string().min(1).max(100), title: z.string().max(80), subtitle: z.string().max(120).optional(), data: partData, layout: optional(partLayout) }).strict();
 const compositionBlocks = [
 	z.object({ kind: z.literal('cards'), items: z.array(z.object({ label: z.string().max(80), detail: z.string().max(400).optional() }).strict()).min(1).max(6), columns: z.number().int().min(1).max(3).optional() }).strict(),
@@ -435,7 +435,7 @@ const compositionBlocks = [
 	z.object({ kind: z.literal('text'), paragraphs: paragraphsSchema }).strict(),
 	z.object({ kind: z.literal('steps'), items: z.array(partItem).min(2).max(12) }).strict(),
 	z.object({ kind: z.literal('comparison'), rows: z.array(partLabel).min(2).max(4), columns: z.array(partLabel).min(2).max(4), cells: z.array(z.array(partLabel).min(2).max(4)).min(2).max(4), corner_label: partLabel.optional() }).strict(),
-	z.object({ kind: z.literal('part'), spec: partSpec.omit({ layout: true }), show_title: z.boolean().optional().describe('Set false to omit the internal part title band (88px; 80px for interactive parts) when the slide already has a title; spec.title is still kept in the part metadata. Defaults to false for an empty or whitespace-only title, otherwise true.') }).strict(),
+	z.object({ kind: z.literal('part'), spec: partSpec.omit({ layout: true }), show_title: z.boolean().optional().describe('Set false to omit the internal part title band (88px; 80px for interactive parts) when the slide already has a title; spec.title is still kept in the part metadata. Defaults to false for an empty or whitespace-only title, otherwise true. True with an empty or whitespace-only title is rejected, as it is by add_part and create_part.') }).strict(),
 	z.object({ kind: z.literal('graph'), input: graphLayoutInput }).strict(),
 ];
 const patternBlocks = [

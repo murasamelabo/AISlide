@@ -11,11 +11,11 @@ const CANVAS_HEIGHT: f64 = 424.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct FishboneCategory { pub label: String, pub causes: Vec<FishboneCause> }
+pub struct FishboneCategory { #[schemars(length(min = 1, max = 20))] pub label: String, #[schemars(length(min = 1, max = 3))] pub causes: Vec<FishboneCause> }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct FishboneCause { pub text: String, #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub focus: bool }
+pub struct FishboneCause { #[schemars(length(min = 1, max = 28))] pub text: String, #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub focus: bool }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -23,55 +23,60 @@ pub enum StepShape { #[default] Task, Decision, Event }
 
 fn task(shape: &StepShape) -> bool { *shape == StepShape::Task }
 
-/// `lane` indexes `lanes`; `column` pins the step to a 0-7 column, otherwise the longest forward path decides.
+/// `id` is 1-24 ASCII letters, digits, `-` or `_`. `lane` indexes `lanes`; `column` pins the step to a 0-6 column, otherwise the longest forward path decides.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SwimlaneStep {
-    pub id: String,
-    pub label: String,
+    #[schemars(length(min = 1, max = 24))] pub id: String,
+    #[schemars(length(min = 1, max = 40))] pub label: String,
     pub lane: usize,
     #[serde(default, skip_serializing_if = "task")] pub shape: StepShape,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub column: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = 0, max = 6))] pub column: Option<usize>,
 }
 
-/// `exception` marks returns and rework; they are dashed, routed below the steps and excluded from column ordering.
+/// `from` and `to` are step IDs. `exception` marks returns and rework; they are dashed, routed below the steps and excluded from column ordering.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SwimlaneFlow {
     pub from: String,
     pub to: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 16))] pub label: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub exception: bool,
 }
 
+/// `id` is 1-24 ASCII letters, digits, `-` or `_`.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SankeyNode { pub id: String, pub label: String, #[serde(default, skip_serializing_if = "Option::is_none")] pub color: Option<String> }
+pub struct SankeyNode { #[schemars(length(min = 1, max = 24))] pub id: String, #[schemars(length(min = 1, max = 24))] pub label: String, #[serde(default, skip_serializing_if = "Option::is_none")] pub color: Option<String> }
 
+/// `from` and `to` are node IDs of two different nodes, once per pair; `value` is positive.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SankeyLink { pub from: String, pub to: String, pub value: f64 }
+pub struct SankeyLink { pub from: String, pub to: String, #[schemars(range(max = 1e15), extend("exclusiveMinimum" = 0))] pub value: f64 }
 
+/// `cells` holds one cell per stage.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct JourneyRow { pub label: String, pub cells: Vec<String>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub boxed: bool }
+pub struct JourneyRow { #[schemars(length(min = 1, max = 16))] pub label: String, #[schemars(length(min = 2, max = 6), inner(length(max = 60)))] pub cells: Vec<String>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub boxed: bool }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArchitectureKind { Person, Container, Database, External }
 
+/// `id` is 1-24 ASCII letters, digits, `-` or `_`.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArchitectureElement {
-    pub id: String,
-    pub label: String,
+    #[schemars(length(min = 1, max = 24))] pub id: String,
+    #[schemars(length(min = 1, max = 32))] pub label: String,
     pub kind: ArchitectureKind,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub detail: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 48))] pub detail: String,
 }
 
+/// `from` and `to` are element IDs.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ArchitectureRelation { pub from: String, pub to: String, #[serde(default, skip_serializing_if = "String::is_empty")] pub label: String }
+pub struct ArchitectureRelation { pub from: String, pub to: String, #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 24))] pub label: String }
 
 fn identifier(value: &str, name: &str) -> Result<()> {
     if value.is_empty() || value.len() > 24 || !value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {

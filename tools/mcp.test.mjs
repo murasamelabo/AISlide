@@ -591,6 +591,136 @@ test('issue61 every GraphIcon site accepts a prepared asset handle through MCP a
   }
 });
 
+// Keywords of JSON Schema that bound what a caller may send; the MCP zod schema and the core schema must agree on each of them.
+const boundKeywords = ['minLength', 'maxLength', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'minItems', 'maxItems'];
+// zod publishes the safe integer range for an unbounded `.int()`, which is not a bound that anyone chose.
+const zodIntegerRange = { minimum: -9007199254740991, maximum: 9007199254740991 };
+
+/** Differences in bounds between two schemas that describe the same input: `core` as published by part_catalog and `mcp` as published by an MCP tool. */
+function boundDifferences(core, coreRoot, mcp, mcpRoot) {
+  const found = [];
+  const open = (schema, root) => {
+    let value = resolveSchemaRef(root, schema);
+    // An optional or nullable value is a union with null; only the other branch carries bounds.
+    for (let depth = 0; depth < 8; depth += 1) {
+      const branches = (value.anyOf ?? value.oneOf)?.filter(branch => branch.type !== 'null');
+      if (branches?.length !== 1) break;
+      value = resolveSchemaRef(root, branches[0]);
+    }
+    return value;
+  };
+  const alternatives = (value, root) => (value.anyOf ?? value.oneOf)?.map(branch => resolveSchemaRef(root, branch));
+  // `const: 1` and `minimum: 1, maximum: 1` bound a number in the same way.
+  const bounded = value => typeof value.const === 'number' ? { ...value, minimum: value.const, maximum: value.const } : value;
+  const walk = (left, right, path, depth) => {
+    if (depth > 24) return;
+    // GraphSpec carries its own bounds, which graph_catalog publishes; the wrapper in the part schema is not compared here.
+    if (path === 'spec.data<diagram>.graph') return;
+    const a = bounded(open(left, coreRoot));
+    const b = bounded(open(right, mcpRoot));
+    const aBranches = alternatives(a, coreRoot);
+    const bBranches = alternatives(b, mcpRoot);
+    // A tagged union pairs its variants by `kind`; a variant on only one side is a difference of its own.
+    if (aBranches?.length > 1 && aBranches.every(branch => branch.properties?.kind?.const !== undefined)) {
+      for (const branch of aBranches) {
+        const kind = branch.properties.kind.const;
+        const match = bBranches?.find(candidate => candidate.properties?.kind?.const === kind);
+        if (match) walk(branch, match, `${path}<${kind}>`, depth + 1);
+        else found.push({ path: `${path}<${kind}>`, keyword: 'variant', detail: 'missing from the MCP schema' });
+      }
+      for (const branch of bBranches ?? []) {
+        if (!aBranches.some(candidate => candidate.properties?.kind?.const === branch.properties?.kind?.const)) found.push({ path: `${path}<${branch.properties?.kind?.const}>`, keyword: 'variant', detail: 'only in the MCP schema' });
+      }
+      return;
+    }
+    // Other unions (such as an inline icon or an asset handle) contribute their properties but no bounds of their own.
+    const shape = (value, branches) => ({ ...(branches ?? []).reduce((all, branch) => ({ ...all, ...branch.properties }), {}), ...value.properties });
+    const union = value => (value.anyOf ?? value.oneOf)?.length > 1;
+    if (!union(a) && !union(b)) {
+      for (const keyword of boundKeywords) {
+        const normalize = value => value === zodIntegerRange[keyword] ? undefined : value;
+        const core = a[keyword];
+        const mcp = normalize(b[keyword]);
+        if (core !== mcp) found.push({ path, keyword, detail: `core ${core ?? 'none'}, MCP ${mcp ?? 'none'}` });
+      }
+      if (a.items && b.items) walk(a.items, b.items, `${path}[]`, depth + 1);
+    }
+    const aProperties = shape(a, aBranches);
+    const bProperties = shape(b, bBranches);
+    for (const name of Object.keys(aProperties)) {
+      if (bProperties[name]) walk(aProperties[name], bProperties[name], `${path}.${name}`, depth + 1);
+      else found.push({ path: `${path}.${name}`, keyword: 'property', detail: 'missing from the MCP schema' });
+    }
+    for (const name of Object.keys(bProperties)) if (!aProperties[name]) found.push({ path: `${path}.${name}`, keyword: 'property', detail: 'only in the MCP schema' });
+  };
+  walk(core, mcp, 'spec', 0);
+  return found;
+}
+
+// Intentional differences, by path and keyword. An entry that no longer matches fails the test, so the list cannot rot.
+const partSchemaDrift = [
+  {
+    reason: 'A reference is matched against the IDs that exist (a part preset against the catalog), so core publishes no length for it; MCP adds the ID bounds as a hint.',
+    paths: {
+      'spec.preset': ['minLength', 'maxLength'],
+      'spec.data<interactive>.spec.initial_state.group_id': ['minLength', 'maxLength'],
+      'spec.data<interactive>.spec.initial_state.selected_id': ['minLength', 'maxLength'],
+      'spec.data<interactive>.spec.items[].group_id': ['minLength', 'maxLength'],
+      'spec.data<swimlane>.flows[].from': ['minLength', 'maxLength'],
+      'spec.data<swimlane>.flows[].to': ['minLength', 'maxLength'],
+      'spec.data<sankey>.links[].from': ['minLength', 'maxLength'],
+      'spec.data<sankey>.links[].to': ['minLength', 'maxLength'],
+      'spec.data<architecture>.relations[].from': ['minLength', 'maxLength'],
+      'spec.data<architecture>.relations[].to': ['minLength', 'maxLength'],
+      'spec.data<tree>.nodes[].parent': ['maxLength'],
+    },
+  },
+  {
+    reason: 'An index is checked against the length of the list it points into; MCP publishes the largest index that any list length allows.',
+    paths: {
+      'spec.data<interactive>.spec.initial_state.dimension': ['maximum'],
+      'spec.data<swimlane>.steps[].lane': ['maximum'],
+      'spec.data<journey>.highlight': ['maximum'],
+      'spec.data<network>.edges[].from': ['maximum'],
+      'spec.data<network>.edges[].to': ['maximum'],
+      'spec.data<timeline>.tasks[].start': ['maximum'],
+      'spec.data<timeline>.tasks[].end': ['maximum'],
+    },
+  },
+  {
+    reason: 'Core also accepts an explicit empty list, which is the default; MCP asks for the whole set or none.',
+    paths: {
+      'spec.data<harvey_matrix>.legend': ['minItems'],
+      'spec.data<raci>.legend': ['minItems'],
+      'spec.data<risk_matrix>.zone_labels': ['minItems'],
+    },
+  },
+];
+const allowedPartSchemaDrift = difference => partSchemaDrift.some(entry => entry.paths[difference.path]?.includes(difference.keyword));
+
+test('issue67 the MCP part input schema publishes the bounds that the core part schema publishes', async () => {
+  const client = new Client({ name: 'aislide-issue67-drift', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  let core;
+  try {
+    await client.connect(transport);
+    const result = await client.callTool({ name: 'part_catalog', arguments: { detail: 'full' } });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    core = JSON.parse(result.content[0].text).schema;
+  } finally {
+    await client.close();
+  }
+  await feedbackMcpFixture(async ({ registrations }) => {
+    // apply_operations, compose_slide and the other tools reuse the same part spec, so create_part stands for all of them.
+    const input = z.toJSONSchema(registrations.get('create_part').config.inputSchema, { io: 'input' });
+    const found = boundDifferences(core, core, input.properties.spec, input);
+    const unexplained = found.filter(difference => !allowedPartSchemaDrift(difference));
+    assert.equal(unexplained.length, 0, `${unexplained.length} bounds differ between the MCP and core part schemas:\n${unexplained.map(difference => `${difference.path} ${difference.keyword}: ${difference.detail}`).join('\n')}`);
+    const stale = partSchemaDrift.flatMap(entry => Object.entries(entry.paths).flatMap(([path, keywords]) => keywords.filter(keyword => !found.some(difference => difference.path === path && difference.keyword === keyword)).map(keyword => `${path} ${keyword}`)));
+    assert.deepEqual(stale, [], 'every allowed difference still exists');
+  });
+});
+
 test('recipe MCP discovers semantic candidates and uses strict bounded input schemas', async () => {
   await feedbackMcpFixture(async ({ registrations, call, fixture }) => {
     for (const name of ['recipe_catalog', 'recommend_recipes', 'preview_recipe', 'apply_recipe']) assert.ok(registrations.has(name), `Missing ${name}`);

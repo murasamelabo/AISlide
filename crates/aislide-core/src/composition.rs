@@ -103,7 +103,7 @@ impl CompositionBlock {
 
 pub(crate) fn resolve_part_show_title(explicit: Option<bool>, part: &PartSpec) -> Result<bool> {
     if explicit == Some(true) && part.title.trim().is_empty() {
-        return Err(Error::Invalid("part show_title:true requires a nonempty part title".into()));
+        return Err(Error::Invalid(crate::parts::TITLE_BAND_MESSAGE.into()));
     }
     Ok(explicit.unwrap_or(!part.title.trim().is_empty()))
 }

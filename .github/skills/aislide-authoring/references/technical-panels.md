@@ -196,7 +196,11 @@ In `compose_slide`, the `comparison` block remains a matrix. To request these
 visuals, use a `part` block with the preset, or insert it with managed
 `add_part`. Pass `show_title: false` on the `part` block to omit its internal
 title band (88px, or 80px for `interactive/*`). `spec.title` stays as metadata,
-and `interactive/*` still requires it.
+and `interactive/*` still requires it. `add_part`, `create_part`, `insert_part`
+and `update_part` apply the same rule to `layout.show_title` (default true): a
+blank `spec.title` with a visible band is rejected, so set
+`layout.show_title:false` when the slide already has a title. Preflight reports
+older saved parts as `PART_TITLE_BAND_EMPTY`.
 
 When the server exposes `layout_patterns` and the user has not asked for free
 placement, no layout patterns or an existing template, choose the body pattern
