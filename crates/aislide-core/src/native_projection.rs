@@ -93,7 +93,7 @@ fn part(package: &Package, binding: &NativePart, elements: &[Element], design: b
     Ok(ProjectionPart {
         path: binding.path.clone(), missing: missing.into_iter().collect(),
         hide_master_graphics: matches!(root.attribute("showMasterSp"), Some("0" | "false")),
-        unsupported_color_mapping: native::unsupported_color_mapping(root),
+        unsupported_color_mapping: native::part_color_map_unsupported(package, &binding.path),
     })
 }
 
