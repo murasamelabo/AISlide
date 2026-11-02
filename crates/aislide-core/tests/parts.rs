@@ -1477,3 +1477,17 @@ fn pr21_small_panel_frames_report_public_field_in_floor_errors() {
         assert!(!error.contains("p-"), "internal identity must not leak in the diagnostic: {error}");
     }
 }
+
+#[test]
+fn map_labels_stay_on_the_canvas_at_the_supported_latitude_limits() {
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let maps: Vec<&Value> = catalog["presets"].as_array().unwrap().iter().filter(|entry| entry["example"]["data"]["kind"] == "map").collect();
+    assert!(!maps.is_empty());
+    for entry in maps {
+        for latitude in [-85.0, -80.0, 0.0, 85.0] {
+            let mut spec = entry["example"].clone();
+            for point in spec["data"]["points"].as_array_mut().unwrap() { point["latitude"] = json!(latitude); }
+            if let Err(error) = execute_request(json!({"op":"create_part","id":"map","spec":spec})) { panic!("{} at latitude {latitude}: {error}", entry["id"]); }
+        }
+    }
+}

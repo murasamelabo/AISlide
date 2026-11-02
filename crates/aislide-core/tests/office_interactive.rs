@@ -97,19 +97,57 @@ fn javascript_lab_export_accepts_only_explicit_trusted_kinds_and_preserves_sourc
 #[test]
 fn hidden_title_minimum_frame_exports_typed_content_but_javascript_labs_keep_their_own_canvas_minimum() {
     let catalog=execute_request(json!({"op":"part_catalog"})).unwrap();
-    let mut spec=catalog["presets"].as_array().unwrap().iter().find(|entry|entry["id"]=="interactive/summary").unwrap()["example"].clone();
-    spec["layout"]=json!({"x":0,"y":0,"width":960,"height":400,"show_title":false});
-    let document=execute_request(json!({"op":"create_presentation","id":"short-frame","title":"Synthetic short interactive"})).unwrap();
-    let inserted=execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":"short","spec":spec})).unwrap();
-    let document=&inserted["document"];
-    // The typed export recompiles the part from its native frame and keeps show_title, so the 960x400 minimum holds there.
-    let typed=execute_request(json!({"op":"export_copilot_interactive","document":document,"acknowledged_experimental":true})).unwrap();
-    let package=Package::open(STANDARD.decode(typed["base64"].as_str().unwrap()).unwrap()).unwrap();
-    assert!(package.part("ppt/media/aislide-interactive-1.png").is_ok());
-    // The JavaScript lab runtime is verified from 960x480, so it rejects the shorter frame instead of running unverified.
-    let error=execute_request(json!({"op":"export_copilot_interactive","document":document,"acknowledged_experimental":true,
-        "javascript_labs":[{"slide_id":"slide-1","element_id":"short","kind":"simulator"}]})).unwrap_err().to_string();
-    assert!(error.contains("JavaScript lab canvas requires"),"{error}");
+    let example=catalog["presets"].as_array().unwrap().iter().find(|entry|entry["id"]=="interactive/summary").unwrap()["example"].clone();
+    let lab=|document:&serde_json::Value|json!({"op":"export_copilot_interactive","document":document,"acknowledged_experimental":true,
+        "javascript_labs":[{"slide_id":"slide-1","element_id":"short","kind":"simulator"}]});
+    let found=|report:&serde_json::Value|report["findings"].as_array().unwrap().iter().filter(|finding|finding["code"]=="INTERACTIVE_LAB_FRAME_TOO_SMALL").cloned().collect::<Vec<_>>();
+    for (height,lab_fits) in [(400,false),(479,false),(480,true)] {
+        let mut spec=example.clone();
+        spec["layout"]=json!({"x":0,"y":0,"width":960,"height":height,"show_title":false});
+        let document=execute_request(json!({"op":"create_presentation","id":"short-frame","title":"Synthetic short interactive"})).unwrap();
+        let inserted=execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":"short","spec":spec})).unwrap();
+        let document=&inserted["document"];
+        // The typed export recompiles the part from its native frame and keeps show_title, so the 960x400 minimum holds there.
+        let typed=execute_request(json!({"op":"export_copilot_interactive","document":document,"acknowledged_experimental":true})).unwrap();
+        let package=Package::open(STANDARD.decode(typed["base64"].as_str().unwrap()).unwrap()).unwrap();
+        assert!(package.part("ppt/media/aislide-interactive-1.png").is_ok());
+        // Preflight tells before the export, as information because only the export decides whether a lab is wanted.
+        let report=execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+        assert!(report["checks"].as_array().unwrap().iter().any(|check|check=="interactive_lab_frame"),"{report}");
+        let findings=found(&report);
+        if lab_fits {
+            assert!(findings.is_empty(),"{report}");
+            assert_eq!(execute_request(lab(document)).unwrap()["javascript_lab_components"],1);
+        } else {
+            assert_eq!(findings.len(),1,"{report}");
+            assert_eq!(findings[0]["severity"],"info");
+            assert_eq!(findings[0]["element_ids"],json!(["short"]));
+            let message=findings[0]["message"].as_str().unwrap();
+            assert!(message.contains(&format!("960x{height}")) && message.contains("960x480") && message.contains("layout.show_title is false"),"{message}");
+            // The runtime is verified from 960x480, so it rejects the shorter frame instead of running unverified, naming where and how large.
+            let error=execute_request(lab(document)).unwrap_err().to_string();
+            for expected in ["JavaScript lab canvas requires finite native dimensions of at least 960x480 and at most 4096x4096","slide slide-1","element short",&format!("is 960x{height}"),"enlarge its frame to at least 960x480","javascript_labs"] {
+                assert!(error.contains(expected),"missing {expected:?}: {error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn lab_frame_finding_only_concerns_interactive_parts_below_the_lab_minimum() {
+    let catalog=execute_request(json!({"op":"part_catalog"})).unwrap();
+    let entry=|id:&str|catalog["presets"].as_array().unwrap().iter().find(|entry|entry["id"]==id).unwrap()["example"].clone();
+    let mut titled=entry("interactive/summary");
+    titled["layout"]=json!({"x":0,"y":0,"width":1280,"height":720,"show_title":true});
+    let mut small_static=entry("list/icon-rows");
+    small_static["layout"]=json!({"x":48,"y":120,"width":400,"height":300,"show_title":false});
+    let mut document=execute_request(json!({"op":"create_presentation","id":"lab-frame","title":"Synthetic frames"})).unwrap();
+    for (id,spec) in [("titled",titled),("small",small_static)] {
+        let revision=document["revision"].clone();
+        document=execute_request(json!({"op":"insert_part","document":document,"expected_revision":revision,"slide_id":"slide-1","id":id,"spec":spec})).unwrap()["document"].clone();
+    }
+    let report=execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+    assert!(report["findings"].as_array().unwrap().iter().all(|finding|finding["code"]!="INTERACTIVE_LAB_FRAME_TOO_SMALL"),"{report}");
 }
 
 #[test]

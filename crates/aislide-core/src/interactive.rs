@@ -37,36 +37,37 @@ pub struct State {
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Group { pub id: String, pub label: String }
+pub struct Group { #[schemars(length(min = 1, max = 32))] pub id: String, #[schemars(length(min = 1, max = 32))] pub label: String }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Metric { pub label: String, pub value: String, pub qualifier: String }
+pub struct Metric { #[schemars(length(min = 1, max = 32))] pub label: String, #[schemars(length(min = 1, max = 24))] pub value: String, #[schemars(length(min = 1, max = 80))] pub qualifier: String }
 
+/// `id` is 1-32 ASCII letters, digits, `-` or `_`. `values` holds one text per dimension of the view.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Item {
-    pub id: String,
-    pub label: String,
-    pub detail: String,
-    #[serde(default)] pub action: String,
+    #[schemars(length(min = 1, max = 32))] pub id: String,
+    #[schemars(length(min = 1, max = 48))] pub label: String,
+    #[schemars(length(min = 1, max = 300))] pub detail: String,
+    #[serde(default)] #[schemars(length(max = 160))] pub action: String,
     #[serde(default, skip_serializing_if="Option::is_none")] pub group_id: Option<String>,
-    #[serde(default, skip_serializing_if="Option::is_none")] pub value: Option<f64>,
-    #[serde(default)] pub unit: String,
-    #[serde(default)] pub values: Vec<String>,
-    #[serde(default)] pub metrics: Vec<Metric>,
+    #[serde(default, skip_serializing_if="Option::is_none")] #[schemars(range(min = 0, max = 1e15))] pub value: Option<f64>,
+    #[serde(default)] #[schemars(length(max = 16))] pub unit: String,
+    #[serde(default)] #[schemars(length(max = 4), inner(length(min = 1, max = 96)))] pub values: Vec<String>,
+    #[serde(default)] #[schemars(length(max = 3))] pub metrics: Vec<Metric>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
-    pub version: u32,
+    #[schemars(range(min = 1, max = 1))] pub version: u32,
     pub template: Template,
     #[serde(default,skip_serializing_if="Appearance::is_plain")] pub appearance: Appearance,
-    pub source: String,
-    #[serde(default)] pub groups: Vec<Group>,
-    #[serde(default)] pub dimensions: Vec<String>,
-    pub items: Vec<Item>,
+    #[schemars(length(min = 1, max = 240))] pub source: String,
+    #[serde(default)] #[schemars(length(max = 4))] pub groups: Vec<Group>,
+    #[serde(default)] #[schemars(length(max = 4), inner(length(min = 1, max = 32)))] pub dimensions: Vec<String>,
+    #[schemars(length(min = 2, max = 8))] pub items: Vec<Item>,
     pub initial_state: State,
 }
 
@@ -280,7 +281,7 @@ pub(crate) fn presets() -> Vec<Value> {
             }).collect(),initial_state:State{selected_id:"identity".into(),group_id:None,dimension:0,scale:Scale::Linear}};
         let preset=format!("interactive/{}",template.name());
         json!({"id":preset,"category":"interactive","category_name":"Interactive prototypes","name":template.name(),"family":"Diagrams",
-            "use_when":"Explore approved data using selection, grouping or staged detail in AISlide.",
+            "use_when":"Explore approved data using selection, grouping or staged detail in AISlide. The frame needs at least 960x480, or 960x400 when layout.show_title is false; a JavaScript lab export needs 960x480 either way.",
             "avoid_when":"PowerPoint interactivity or arbitrary HTML/JavaScript execution is required.",
             "example":{"version":1,"preset":preset,"title":format!("Interactive {}",template.name()),"subtitle":"Synthetic example",
                 "data":{"kind":"interactive","spec":data}}})

@@ -379,7 +379,7 @@ test('MCP saves and reopens one source-bound PPTX with native graphics and trans
 test('phase6 MCP modern threads and masked manual candidates use strict typed operations', async () => {
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'phase6-review', version: '1.0.0' });
-  const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`); return result.structuredContent; };
+  const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`); return result.structuredContent ?? JSON.parse(result.content[0].text); };
   try {
     await client.connect(transport);
     const tools = (await client.listTools()).tools;
@@ -403,7 +403,7 @@ test('MCP review schema and local lifecycle preserve native visuals and explicit
   const directory = await mkdtemp(join(tmpdir(), 'aislide-review-mcp-'));
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'review-proof', version: '1.0.0' });
-  const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`); return result.structuredContent; };
+  const call = async (name, args = {}) => { const result = await client.callTool({ name, arguments: args }); assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`); return result.structuredContent ?? JSON.parse(result.content[0].text); };
   const rejected = async (name, args) => assert.equal((await client.callTool({ name, arguments: args })).isError, true, `${name} must reject`);
   try {
     await client.connect(transport);

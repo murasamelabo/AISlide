@@ -315,6 +315,18 @@ title band only when its own `GraphSpec.show_title` is true and the layout
 removes it; with `GraphSpec.show_title:false` the part keeps its full 512px
 height whatever `layout.show_title` says, and preflight measures that height.
 
+A part whose `layout.show_title` is true (the default) must have a nonempty
+`spec.title`: `add_part`, `create_part`, `insert_part` and `update_part`, and a
+graph through `add_graph` with a `layout` or `update_graph`, reject a blank one
+with the message `compose_slide` already gives for `show_title:true`, because the
+band would only push the body down. Give a part without a title
+`layout.show_title:false`; a graph with `GraphSpec.show_title:false` has no band
+and needs none. Saved parts that already have an empty band stay readable and
+editable, and preflight reports each as `PART_TITLE_BAND_EMPTY`. A part without
+a `layout` keeps its legacy placement, which always draws the band, and is
+outside both the rule and the finding; give it a title or a `layout` with
+`show_title:false` to remove an empty strip.
+
 For graphs, `GraphSpec.show_title:false` allows content at y=0 instead of
 reserving the 88px title band on the 1152x512 graph canvas. Node `detail`
 accepts a nonblank description up to 240 characters. `detail_font_size` is

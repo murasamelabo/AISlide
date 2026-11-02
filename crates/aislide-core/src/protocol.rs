@@ -257,7 +257,7 @@ fn execute(request: Request, profile: crate::limits::CapacityProfile) -> Result<
         Request::ObjectCatalog {} => Ok(crate::objects::catalog()),
         Request::ComputeChartPresentation { kind, categories, series, options } => Ok(serde_json::to_value(crate::model::chart_format::compute_chart_presentation(kind, &categories, &series, &options)?)?),
         Request::RenderElementPreview { element, theme } => crate::render::render_element_preview(&element, theme.as_ref()),
-        Request::CreatePart { id, spec, theme } => Ok(serde_json::to_value(crate::parts::create_with_theme(&id, &spec, &theme.unwrap_or_default())?)?),
+        Request::CreatePart { id, spec, theme } => { crate::parts::validate_title_band(&spec)?; Ok(serde_json::to_value(crate::parts::create_with_theme(&id, &spec, &theme.unwrap_or_default())?)?) }
         Request::PartCatalog {} => Ok(crate::parts::catalog()),
         Request::PreviewInteractive { id, spec, state, theme } => crate::interactive::preview(&id,&spec,state,theme),
         Request::CompileInteractive { id, spec, theme } => crate::interactive::office::compile(&id, &spec, theme),

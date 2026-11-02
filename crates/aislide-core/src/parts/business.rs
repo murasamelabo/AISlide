@@ -17,58 +17,68 @@ fn neutral(status: &KpiStatus) -> bool { *status == KpiStatus::Neutral }
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct KpiCard {
-    pub label: String,
-    pub value: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub unit: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub delta: String,
+    #[schemars(length(min = 1, max = 48))] pub label: String,
+    /// One line.
+    #[schemars(length(min = 1, max = 16))] pub value: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 12))] pub unit: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 40))] pub delta: String,
     #[serde(default, skip_serializing_if = "neutral")] pub status: KpiStatus,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub comparison: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 60))] pub comparison: String,
 }
 
 /// `ranges` are ascending qualitative band limits; the last one is the axis maximum.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BulletRow {
-    pub label: String,
-    pub actual: f64,
-    pub target: f64,
-    pub ranges: Vec<f64>,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub unit: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub note: String,
+    #[schemars(length(min = 1, max = 40))] pub label: String,
+    #[schemars(range(min = 0, max = 1e15))] pub actual: f64,
+    #[schemars(range(min = 0, max = 1e15))] pub target: f64,
+    #[schemars(schema_with = "bullet_ranges")] pub ranges: Vec<f64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 8))] pub unit: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 80))] pub note: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub lower_is_better: bool,
+}
+
+fn bullet_ranges(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "number", "exclusiveMinimum": 0, "maximum": 1e15}})
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct VarianceRow { pub label: String, pub plan: f64, pub actual: f64 }
+pub struct VarianceRow { #[schemars(length(min = 1, max = 32))] pub label: String, #[schemars(range(min = -1e15, max = 1e15))] pub plan: f64, #[schemars(range(min = -1e15, max = 1e15))] pub actual: f64 }
 
 /// `levels` holds one 0-4 quarter count per column.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct HarveyRow { pub label: String, pub levels: Vec<u8> }
+pub struct HarveyRow { #[schemars(length(min = 1, max = 40))] pub label: String, #[schemars(length(min = 2, max = 6), inner(range(min = 0, max = 4)))] pub levels: Vec<u8> }
 
+/// `values` holds one value per column.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct HeatmapRow { pub label: String, pub values: Vec<f64> }
+pub struct HeatmapRow { #[schemars(length(min = 1, max = 32))] pub label: String, #[schemars(length(min = 2, max = 12), inner(range(min = -1e15, max = 1e15)))] pub values: Vec<f64> }
 
 /// `assignments` holds one of "", "R", "A", "C", "I" or "A/R" per role.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct RaciTask { pub label: String, pub assignments: Vec<String> }
+pub struct RaciTask { #[schemars(length(min = 1, max = 48))] pub label: String, #[schemars(schema_with = "raci_assignments")] pub assignments: Vec<String> }
 
-#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Risk {
-    pub id: String,
-    pub label: String,
-    pub likelihood: u8,
-    pub impact: u8,
-    #[serde(default, skip_serializing_if = "String::is_empty")] pub action: String,
+fn raci_assignments(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type": "array", "minItems": 2, "maxItems": 8, "items": {"type": "string", "enum": RACI_CODES}})
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ParetoItem { pub label: String, pub value: f64 }
+pub struct Risk {
+    #[schemars(length(min = 1, max = 3))] pub id: String,
+    #[schemars(length(min = 1, max = 48))] pub label: String,
+    #[schemars(range(min = 1, max = 5))] pub likelihood: u8,
+    #[schemars(range(min = 1, max = 5))] pub impact: u8,
+    #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 80))] pub action: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ParetoItem { #[schemars(length(min = 1, max = 24))] pub label: String, #[schemars(range(min = 0, max = 1e15))] pub value: f64 }
 
 pub(super) fn single(value: &str, maximum: usize, name: &str, required: bool) -> Result<()> {
     field(value, maximum, name, required)?;

@@ -127,7 +127,7 @@ pub struct IconRow {
     #[schemars(length(min = 1, max = 60))] pub label: String,
     #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 200))] pub detail: String,
     /// Phrases of `detail` shown in bold with the emphasis color; each must occur verbatim and phrases may not overlap.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4))] pub detail_emphasis: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] #[schemars(length(max = 4), inner(length(min = 1, max = 200)))] pub detail_emphasis: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<GraphIcon>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub accent: Option<String>,
 }
@@ -194,9 +194,15 @@ pub struct Callout {
     #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 200))] pub detail: String,
 }
 
+/// A 0-1 rectangle of the source image: `x + width` and `y + height` stay within 1, and the callout's own `x` and `y` lie inside it.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct CalloutRegion { pub x: f64, pub y: f64, pub width: f64, pub height: f64 }
+pub struct CalloutRegion {
+    #[schemars(range(min = 0, max = 1))] pub x: f64,
+    #[schemars(range(min = 0, max = 1))] pub y: f64,
+    #[schemars(range(max = 1), extend("exclusiveMinimum" = 0))] pub width: f64,
+    #[schemars(range(max = 1), extend("exclusiveMinimum" = 0))] pub height: f64,
+}
 
 impl CalloutRegion {
     fn validate(&self, point: [f64; 2]) -> Result<()> {

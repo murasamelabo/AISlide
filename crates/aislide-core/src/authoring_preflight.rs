@@ -315,6 +315,29 @@ fn numbered_sequence_findings(report: &mut PreflightReport, page: usize, slide: 
 	Ok(())
 }
 
+fn part_title_band_findings(report: &mut PreflightReport, document: &Document, page: usize, slide: &str, objects: &[Object<'_>]) -> Result<()> {
+	for part in document.parts.iter().filter(|part| part.slide_id == slide && crate::parts::title_band_empty(&part.spec)) {
+		let evidence: Vec<&Object<'_>> = objects.iter().filter(|object| object.id == part.element_id).collect();
+		push_finding(report, page, slide, &evidence, "PART_TITLE_BAND_EMPTY", "warning", "geometry",
+			&format!("Part {} reserves an empty title band: layout.show_title is true and the part title is blank, so the band only pushes the body down", part.element_id),
+			&["Set layout.show_title to false with update_part so the body uses the band", "Or give the part a nonempty title"])?;
+	}
+	Ok(())
+}
+
+fn interactive_lab_frame_findings(report: &mut PreflightReport, document: &Document, page: usize, slide: &str, objects: &[Object<'_>]) -> Result<()> {
+	let Some(slide_elements) = document.deck.slides.iter().find(|candidate| candidate.id == slide).map(|candidate| &candidate.elements) else { return Ok(()) };
+	for part in document.parts.iter().filter(|part| part.slide_id == slide && matches!(part.spec.data, crate::parts::PartData::Interactive { .. })) {
+		let Some((_, _, _, width, height)) = slide_elements.iter().map(|element| element.bounds()).find(|bounds| bounds.0 == part.element_id) else { continue };
+		if crate::interactive::javascript_lab::supports_frame(width, height) { continue; }
+		let evidence: Vec<&Object<'_>> = objects.iter().filter(|object| object.id == part.element_id).collect();
+		push_finding(report, page, slide, &evidence, "INTERACTIVE_LAB_FRAME_TOO_SMALL", "info", "geometry",
+			&format!("Interactive part {} is {width}x{height}; a JavaScript lab needs at least 960x480, although the typed export accepts 960x400 when layout.show_title is false", part.element_id),
+			&["Enlarge the frame to at least 960x480 if the part may be exported as a JavaScript lab", "Otherwise leave it out of javascript_labs and export its typed content"])?;
+	}
+	Ok(())
+}
+
 fn part_aspect_findings(report: &mut PreflightReport, document: &Document, page: usize, slide: &str, objects: &[Object<'_>]) -> Result<()> {
 	for part in document.parts.iter().filter(|part| part.slide_id == slide) {
 		let Some((distortion, profile)) = crate::parts::aspect::excessive_distortion(&part.spec)? else { continue };
@@ -341,7 +364,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed shaped-glyph metric bounds with alignment, padding and clipping, not exact ink intersection; warped text conservatively uses its content frame", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices are summarized per page as info; specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
 		office_visual_parity: false, semantic_truth_verified: false, include_inherited: options.include_inherited };
 	report.limitations.push("Template-owned SMALL_TEXT and FONT_FALLBACK are informational and aggregated by owner and element before the finding limit; affected_page_indices and affected_slide_ids retain coverage. include_inherited:false omits inherited-only findings, not interactions with slide objects or unprojected native content.".into());
-	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into(), "numbered_sequence_spacing".into(), "part_aspect".into()]);
+	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into(), "numbered_sequence_spacing".into(), "part_aspect".into(), "part_title_band".into(), "interactive_lab_frame".into()]);
 	report.limitations.push("Over-budget shadow, glow, soft-edge and reflection are omitted only from the diagnostic view at scale 1, with an EFFECT_APPROXIMATION finding; native content is unchanged and other renderer failures still reject.".into());
 	report.limitations.push("Reference URL detection uses normalized HTTP(S) tokens terminated by CJK prose; percent-encode CJK URL paths. Warnings do not echo private note URLs. Fixed-reference collisions require explicit repair, not automatic reflow.".into());
 	let projection_warnings = crate::native_projection::warnings(document, &selected)?;
@@ -403,6 +426,8 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		container_findings(&mut report, page, &slide.id, &objects)?;
 		numbered_sequence_findings(&mut report, page, &slide.id, &objects)?;
 		part_aspect_findings(&mut report, document, page, &slide.id, &objects)?;
+		part_title_band_findings(&mut report, document, page, &slide.id, &objects)?;
+		interactive_lab_frame_findings(&mut report, document, page, &slide.id, &objects)?;
 		if let Some(references) = &document.references {
 			let managed: BTreeSet<_> = references.elements.iter().filter(|owned| owned.slide_id == slide.id).map(|owned| owned.id.as_str()).collect();
 			for object in objects.iter().filter(|object| object.scope == "slide" && managed.contains(object.id)) {
