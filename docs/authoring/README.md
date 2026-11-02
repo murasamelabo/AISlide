@@ -147,7 +147,7 @@ The default connection is lightweight: ten common tools are initially exposed. `
 
 Layout patterns are opt-in. Starting the server with `--layout-patterns on` exposes `layout_patterns` alongside the common tools and adds one server instruction: choose a body pattern by information relationship, resolve it for the deck and use the returned slot frames unchanged. Without the flag (default `off`) the tool is absent and discovery does not list it. The flag only sets the initial state. Authors can also turn the guide on or off from the prompt, for example by asking to use patterns, or for free placement or an existing template: the agent calls `set_layout_patterns` (`on`, `off` or `status`), which publishes or hides `layout_patterns` and returns the instruction to follow. That choice is deterministic for the running server, lasts until it restarts and is not saved; a request the agent does not turn into a call still depends on the model.
 
-For ordinary freeform authoring, use `create_presentation`, `edit_slides`, and bounded `apply_operations` batches with final content/geometry. Compact mutation replies carry the next revision/hash. `list_decks` restores lost handles and last successful operations/exports; `get_deck_summary` returns small paginated slide or element indexes without core calls, image/source bytes, notes or rendering. This removes the need for a manual progress file or repeated full-document reads just to continue working. It does not persist across server restarts or determine whether content is complete.
+For ordinary freeform authoring, use `create_presentation`, `edit_slides`, and bounded `apply_operations` batches with final content/geometry. Compact mutation replies carry the next revision/hash. `list_decks` restores lost handles and last successful operations/exports and reports `max_decks`, the 8 decks that can stay open at once; `close_deck` frees a slot after the deck is exported. `get_deck_summary` returns small paginated slide or element indexes without core calls, image/source bytes, notes or rendering. This removes the need for a manual progress file or repeated full-document reads just to continue working. It does not persist across server restarts or determine whether content is complete.
 
 With operator-approved `--asset-dir` roots, `register_asset({path:"image.png"})` reads the file once. Use its `asset_id` in binary tools, `apply_operations` with `add_picture`, or graph `icon` values. Prepared graph icons and catalog icon assets already return handles by default (unless `detail:"full"` is passed). `list_assets` recovers them and `close_asset` releases unused registry bytes. No arbitrary paths, external relationship fetching or source overwrite is enabled. See [local asset bounds and contracts](../api.md#local-asset-handles).
 
@@ -837,6 +837,14 @@ source notes/handout masters reject. Target compiled-report metadata is
 cleared. A successful import is one Undo and leaves the source unchanged.
 This is slide reuse, not the separate master-import workflow below; MCP
 accepts handles, not source paths or arbitrary source document JSON.
+
+The source handle stays open after an import and counts toward the MCP limit
+of 8 open decks (`list_decks` reports it as `max_decks`). When a deck is built
+in parts and merged, set `close_source_deck:true` to release the source after
+a successful import, or release it later with `close_deck`. The option needs a
+source other than the target, closes nothing when the import fails, and drops
+the source's Undo history and any unsaved work, so export the source first if
+you still need it.
 
 ## Import Masters From PPTX Or POTX
 

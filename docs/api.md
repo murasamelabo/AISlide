@@ -989,9 +989,13 @@ no longer that report. Review retained notes/evidence before redistribution.
 
 SDK: `session.importSlides(sourceDocument,{source_slide_ids,prefix,after?},options?)`
 uses `AuthoringOptions`. MCP requires
-`{deck_id,expected_revision,expected_hash,source_deck_id,source_slide_ids,prefix,after?}`.
+`{deck_id,expected_revision,expected_hash,source_deck_id,source_slide_ids,prefix,after?,close_source_deck?}`.
 `source_deck_id` must be an existing authored session handle; MCP accepts
-neither a source file path nor arbitrary source document JSON. This is
+neither a source file path nor arbitrary source document JSON. The handle stays
+open and counts toward the 8 open decks of an MCP session; with
+`close_source_deck:true` the server releases it after a successful import (a
+failed import closes nothing, and the source must differ from the target). The
+option is MCP-only: the SDK has no deck registry. This is
 separate from master import. Opening a native PPTX does not make it an
 authored source: native cross-package slide copying remains unsupported.
 Native targets retain their immutable origin and ordinary preservation
@@ -1678,7 +1682,7 @@ The default `compact` profile initially advertises ten tools: `discover_tools`, 
 
 Published schemas use local `$defs`/`$ref` within each tool, generated lazily and cached. No cross-tool schema registry is assumed. The official SDK still validates calls against the original Zod schema. The follow-up regression measurement is about 1.26MB for an expanded full list, 627KB for the referenced full list and 32KB for the default ten-tool list (previously 54KB). The initial batch schema is about 20KB; its explicitly requested full form is about 44KB. These are serialized JSON bytes, not token counts or an end-to-end timing guarantee.
 
-`list_decks()` returns current IDs, titles, revisions/hashes, slide counts, Undo/Redo state, last successful operation and last presentation export. `get_deck_summary({deck_id,offset?,limit?,slide_id?})` returns up to 32 slides (16 by default); selecting a slide instead returns paginated element IDs, parent IDs, parent-local frames and at most 160 Unicode scalars of text per element. `next_offset` identifies more entries. Neither call clones the complete document, calls core, renders, writes files or includes image bytes, original packages, source text or notes. SDK consumers can use `session.getSummary({offset?,limit?,slideId?})`. Summaries do not prove a slide is finished or visually correct.
+`list_decks()` returns current IDs, titles, revisions/hashes, slide counts, Undo/Redo state, last successful operation and last presentation export, plus `max_decks`, the number of decks that can stay open at once (8). Every tool that adds a deck (`create_presentation`, `create_guided_presentation`, `open_pptx`, `import_pptx`, `import_template`, `open_project`, `recover_presentation`, `recover_session`, `generate_report`, `compile_report`, `compile_data_report`) fails with the same message once that many are open: `At most 8 open decks per session (8 open). Use list_decks to find handles you no longer need and close_deck to release one; export unsaved work first.` `close_deck` releases a handle and its Undo history; `authoring_capabilities` reports the limit as `limits.open_decks`. `get_deck_summary({deck_id,offset?,limit?,slide_id?})` returns up to 32 slides (16 by default); selecting a slide instead returns paginated element IDs, parent IDs, parent-local frames and at most 160 Unicode scalars of text per element. `next_offset` identifies more entries. Neither call clones the complete document, calls core, renders, writes files or includes image bytes, original packages, source text or notes. SDK consumers can use `session.getSummary({offset?,limit?,slideId?})`. Summaries do not prove a slide is finished or visually correct.
 
 Summaries also include `masters:[{id,name}]` and
 `layouts:[{id,name,master_id,source_id?}]`. These bounded metadata lists are

@@ -2877,6 +2877,97 @@ test('feedback MCP stub schemas expose bounded typed authoring and source handle
   });
 });
 
+test('issue72 every deck-creating tool reports the same open-deck limit and how to free a slot', async () => {
+  await feedbackMcpFixture(async ({ registrations, call, calls, fixture }) => {
+    fixture.onRequest = request => ({ limits: { request_bytes: 100663296 }, op: request.op });
+    const capabilities = await call('authoring_capabilities');
+    assert.deepEqual(capabilities.limits, { request_bytes: 100663296, open_decks: 8 }, 'the core limits stay and the open-deck limit joins them');
+    fixture.onRequest = undefined;
+    const empty = await call('list_decks');
+    assert.equal(empty.max_decks, 8);
+    assert.equal(empty.decks.length, 0);
+    for (const name of ['list_decks', 'close_deck', 'authoring_capabilities']) assert.match(registrations.get(name).config.description, /\b8\b|max_decks|open_decks/, name);
+    assert.match(registrations.get('import_slides').config.description, /close_source_deck/);
+
+    const handles = [];
+    for (let index = 1; index <= 8; index += 1) handles.push((await call('create_presentation', { title: `Synthetic ${index}` })).deck_id);
+    assert.equal((await call('list_decks')).decks.length, 8);
+
+    const report = { title: 'Synthetic', subtitle: '', period: '', source: 'Synthetic fixture', sections: [{ title: 'Statement', layout: 'statement', body: ['Synthetic'] }] };
+    const mapping = { title: 'Synthetic', period: 'Synthetic', table_index: 0, category_column: 0, value_columns: [1], row_start: 0, row_count: 1, chart_kind: 'column' };
+    const checkpoint = { format: 'aislide.project', version: 1, pptx_sha256: 'a'.repeat(64), document: {} };
+    const attempts = {
+      create_presentation: { title: 'Synthetic 9' },
+      create_guided_presentation: { input: guidedExamples()[0] },
+      generate_report: { prompt: 'Synthetic', slide_count: 3 },
+      compile_report: { report },
+      compile_data_report: { source_id: randomUUID(), mapping },
+      open_pptx: { base64: 'UEs=' },
+      import_pptx: { base64: 'UEs=' },
+      import_template: { kind: 'potx', base64: 'UEs=' },
+      open_project: { base64: 'UEs=', checkpoint },
+      recover_presentation: { document_json: '{}' },
+      recover_session: { recovery_json: '{}' },
+    };
+    const message = 'At most 8 open decks per session (8 open). Use list_decks to find handles you no longer need and close_deck to release one; export unsaved work first.';
+    const requests = calls.length;
+    for (const [name, input] of Object.entries(attempts)) {
+      const tool = registrations.get(name);
+      assert.equal(tool.config.inputSchema.safeParse(input).success, true, `${name}: a valid input leaves the limit as the only reason to fail`);
+      const result = await tool.callback(tool.config.inputSchema.parse(input), { signal: new AbortController().signal });
+      assert.equal(result.isError, true, name);
+      assert.equal(result.content[0].text, message, name);
+    }
+    assert.equal(calls.length, requests, 'the limit is checked before any core request');
+    assert.equal((await call('list_decks')).decks.length, 8);
+
+    await call('close_deck', { deck_id: handles[0] });
+    assert.equal((await call('list_decks')).decks.length, 7);
+    await call('create_presentation', { title: 'Synthetic 10' });
+    assert.equal((await call('list_decks')).decks.length, 8);
+  });
+});
+
+test('issue72 import_slides releases its source deck only when asked, after a successful import', async () => {
+  await feedbackMcpFixture(async ({ registrations, call, calls, fixture }) => {
+    const target = (await call('create_presentation', { title: 'Synthetic target' })).deck_id;
+    const sources = [];
+    for (let index = 1; index <= 7; index += 1) sources.push((await call('create_presentation', { title: `Synthetic part ${index}` })).deck_id);
+    await assert.rejects(() => call('create_presentation', { title: 'Synthetic blocked' }), /At most 8 open decks per session \(8 open\)/);
+
+    const guard = (revision, hash) => ({ deck_id: target, expected_revision: revision, expected_hash: hash, source_slide_ids: ['slide-1'] });
+    const schema = registrations.get('import_slides').config.inputSchema;
+    const input = { ...guard(0, 'a'.repeat(64)), source_deck_id: sources[0], prefix: 'one' };
+    for (const close_source_deck of ['yes', 1, null]) assert.equal(schema.safeParse({ ...input, close_source_deck }).success, false, String(close_source_deck));
+    assert.equal(schema.safeParse({ ...input, close_source_deck: false }).success, true);
+
+    const kept = await call('import_slides', { ...input, close_source_deck: false });
+    assert.equal('closed_source_deck' in kept, false);
+    assert.equal((await call('list_decks')).decks.length, 8, 'the source stays open unless the caller asks');
+
+    const merged = await call('import_slides', { ...guard(1, 'b'.repeat(64)), source_deck_id: sources[1], prefix: 'two', close_source_deck: true });
+    assert.equal(merged.closed_source_deck, sources[1]);
+    assert.equal(merged.revision, 2);
+    assert.equal('close_source_deck' in calls.at(-1).request, false, 'the option is not forwarded to core');
+    const listed = await call('list_decks');
+    assert.deepEqual(listed.decks.map(deck => deck.deck_id).sort(), [target, ...sources.filter(id => id !== sources[1])].sort());
+    assert.equal(listed.decks.find(deck => deck.deck_id === target).last_operation.name, 'import_slides');
+    await assert.rejects(() => call('get_session_recovery', { deck_id: sources[1] }), /Unknown deck handle/);
+    await call('create_presentation', { title: 'Synthetic fits again' });
+
+    // Neither a same-deck import nor a failed one closes anything.
+    const before = calls.length;
+    await assert.rejects(() => call('import_slides', { ...guard(2, 'b'.repeat(64)), source_deck_id: target, prefix: 'self', close_source_deck: true }), /close_source_deck needs a source deck other than the target/);
+    assert.equal(calls.length, before);
+    fixture.onRequest = async () => { throw new Error('Synthetic import failure'); };
+    await assert.rejects(() => call('import_slides', { ...guard(2, 'b'.repeat(64)), source_deck_id: sources[2], prefix: 'three', close_source_deck: true }), /Synthetic import failure/);
+    fixture.onRequest = undefined;
+    const remaining = (await call('list_decks')).decks.map(deck => deck.deck_id);
+    assert.ok(remaining.includes(target) && remaining.includes(sources[2]));
+    assert.equal(remaining.length, 8);
+  });
+});
+
 test('managed batch MCP stub accepts strict parts and graphs with one guarded request', async () => {
   await feedbackMcpFixture(async ({ registrations, calls, call }) => {
     const { deck_id } = await call('create_presentation', { title: 'Synthetic managed batch' });
