@@ -71,6 +71,8 @@ mod native_design;
 mod provenance;
 pub use protocol::execute_request;
 
+pub const GIT_COMMIT: &str = env!("AISLIDE_GIT_COMMIT");
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
 	#[error("Invalid input: {0}")]

@@ -962,6 +962,24 @@ test('issue36 MCP mutation warnings distinguish matching IDs in different owners
   });
 });
 
+test('issue58 MCP returns cascaded removals from apply_operations and remove_elements', async () => {
+  await feedbackMcpFixture(async ({ call, registrations, fixture }) => {
+    const created = await call('create_presentation', { title: 'Synthetic cascade' });
+    const removal = { slide_id: 'slide-1', requested: ['rect'], cascaded: ['connector'] };
+    fixture.onRequest = async request => ({ document: { ...request.document, revision: request.document.revision + 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] }, removed: [removal] });
+    const batch = await call('apply_operations', { deck_id: created.deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), operations: [{ op: 'remove_elements', slide_id: 'slide-1', ids: ['rect'] }] });
+    assert.deepEqual(batch.removedElements, { revision: 1, hash: 'b'.repeat(64), status: 'complete', removed: [removal] });
+    const single = await call('remove_elements', { deck_id: created.deck_id, expected_revision: 1, slide_id: 'slide-1', ids: ['rect'] });
+    assert.equal(single.removedElements.revision, 2);
+    assert.deepEqual(single.removedElements.removed, [removal]);
+    fixture.onRequest = async request => ({ document: { ...request.document, revision: request.document.revision + 1, hash: 'c'.repeat(64) }, receipt: { inverse: [] } });
+    const untouched = await call('apply_operations', { deck_id: created.deck_id, expected_revision: 2, expected_hash: 'b'.repeat(64), operations: [{ op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' }] });
+    assert.equal(untouched.removedElements, undefined);
+    for (const name of ['apply_operations', 'remove_elements']) assert.match(registrations.get(name).config.description, /removedElements/);
+    assert.match(registrations.get('remove_elements').config.description, /children of a removed group.*connectors attached/);
+  });
+});
+
 test('issue18 MCP exposes bounded template inspection and selection', async () => {
   await feedbackMcpFixture(async ({ call, calls, registrations, fixture }) => {
     assert.ok(registrations.has('inspect_template'));
@@ -1739,6 +1757,9 @@ test('lightweight MCP defaults to a bounded tool surface with on-demand schemas'
       assert.equal(catalog.tools.length, 4);
       assert.ok(catalog.total > 4);
       assert.equal(catalog.tools.some(tool => Object.hasOwn(tool, 'inputSchema')), false);
+      assert.match(catalog.next_action, /get_tool_schema.*4 most recent/);
+      assert.match(catalog.hint, /loaded:false.*get_tool_schema/);
+      assert.ok(catalog.tools.filter(tool => !tool.loaded).every(tool => tool.expose_with?.tool === 'get_tool_schema' && tool.expose_with?.arguments?.name === tool.name));
       assert.ok(Buffer.byteLength(JSON.stringify(search)) < 4096);
       const detail = await client.callTool({ name: 'get_tool_schema', arguments: { name: 'add_graph' } });
       const definition = JSON.parse(detail.content[0].text);
@@ -2870,7 +2891,7 @@ test('managed batch MCP stub accepts strict parts and graphs with one guarded re
     const schema = registrations.get('apply_operations').config.inputSchema;
     assert.deepEqual(schema.parse(guarded), guarded);
     const published = z.toJSONSchema(schema, { io: 'input' });
-    assert.equal(published.properties.operations.items.oneOf.length, 21);
+    assert.equal(published.properties.operations.items.oneOf.length, 23);
     for (const operation of operations) {
       assert.equal(schema.safeParse({ ...guarded, operations: [operation] }).success, true);
       assert.equal(schema.safeParse({ ...guarded, operations: [{ ...operation, unknown: true }] }).success, false);
@@ -3130,8 +3151,8 @@ test('managed batch MCP live 39 slides and 21 managed roots retain metadata thro
     const items = resolveSchemaRef(batchSchema, resolveSchemaRef(batchSchema, batchSchema.properties.operations).items);
     const variants = items.oneOf ?? items.anyOf;
     const operations = variants.map(variant => resolveSchemaRef(batchSchema, resolveSchemaRef(batchSchema, variant).properties.op).const).sort();
-    assert.equal(operations.length, 21);
-    for (const name of ['set_surface', 'set_effects']) assert.ok(operations.includes(name));
+    assert.equal(operations.length, 23);
+    for (const name of ['set_surface', 'set_effects', 'update_chart', 'remove_elements']) assert.ok(operations.includes(name));
     const capabilities = await call('authoring_capabilities');
     assert.deepEqual([...capabilities.typed_authoring.operations].sort(), operations);
     assert.equal(capabilities.typed_authoring.batch_limit, 128);
@@ -3740,7 +3761,7 @@ test('master import MCP POTX inspection, preview, apply and one Undo preserve th
 test('P1 MCP finalization publishes a traceable new bundle without changing the session', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-finalize-mcp-'));
   const client = new Client({ name: 'finalization-test', version: '1.0.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], cwd: directory, stderr: 'pipe', env: coreEnvironment });
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result.content)); return result;
@@ -3765,6 +3786,9 @@ test('P1 MCP finalization publishes a traceable new bundle without changing the 
     assert.equal(manifest.document.hash, before.document.hash);
     assert.equal(manifest.producer.name, 'aislide');
     assert.equal(manifest.producer.transport, 'mcp-stdio');
+    assert.match(manifest.producer.git_commit, /^[0-9a-f]{7,40}$/);
+    assert.match(manifest.producer.core_git_commit, /^[0-9a-f]{7,40}$/);
+    assert.match(manifest.producer.mcp_git_commit, /^[0-9a-f]{7,40}$/);
     assert.equal(manifest.checks.office_visual_parity, false);
     assert.deepEqual(manifest.checks.preflight_page_indices, [0]);
     assert.equal(manifest.multi_file_atomic, false);

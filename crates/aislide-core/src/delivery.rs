@@ -126,7 +126,7 @@ pub fn prepare_delivery(document: &Document, expected_revision: u64, expected_ha
     }
     let files: Vec<_> = bundle.files.iter().map(|file| json!({"kind":file.kind,"suffix":file.suffix,"mime_type":file.mime_type,"page_indices":file.page_indices,"byte_length":file.byte_length,"sha256":file.sha256,"width":file.width,"height":file.height})).collect();
     let mut manifest = json!({"format":"aislide.delivery","version":1,
-        "producer":{"name":"aislide-core","version":env!("CARGO_PKG_VERSION"),"engine":"aislide-core","contract_version":1},
+        "producer":{"name":"aislide-core","version":env!("CARGO_PKG_VERSION"),"git_commit":crate::GIT_COMMIT,"engine":"aislide-core","contract_version":1},
         "document":{"id":document.id,"revision":document.revision,"hash":document.hash,"title":document.deck.title,"slide_count":document.deck.slides.len()},
         "options":options,"files":files,"preview_pages":preview_pages,"multi_file_atomic":false,
         "checks":{"document_verified":true,"pptx_exported":true,"native_preservation_checked":document.origin.is_some(),"source_bindings_current":true,
