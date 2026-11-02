@@ -246,7 +246,7 @@ fn item_count(length: usize, maximum: usize) -> Result<()> {
 }
 
 fn part(preset: &str, data: PartData) -> CompositionBlock {
-    CompositionBlock::Part { spec: PartSpec { version: 1, preset: preset.into(), title: String::new(), subtitle: String::new(), data, layout: None } }
+    CompositionBlock::Part { spec: PartSpec { version: 1, preset: preset.into(), title: String::new(), subtitle: String::new(), data, layout: None }, show_title: None }
 }
 
 fn reading_paragraphs(readings: &[Reading]) -> Vec<RichParagraph> {

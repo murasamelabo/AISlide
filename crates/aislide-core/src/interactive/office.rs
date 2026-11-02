@@ -201,6 +201,9 @@ fn export_target(document:&Document,own_addin:Option<(&str,&str)>,labs:&[super::
             // The observed Copilot property contains a JSON string, not raw HTML or a settings object.
             let html=if let Some(lab)=labs.iter().find(|lab|lab.slide_id==part.slide_id && lab.element_id==part.element_id) {
                 let PartData::Interactive{spec:interactive}=&part.spec.data else {return Err(Error::Invalid("JavaScript lab source metadata missing".into()));};
+                if !super::javascript_lab::supports_frame(width,height) {
+                    return Err(Error::Invalid(format!("{}; slide {} element {} is {width}x{height}: enlarge its frame to at least 960x480, or leave it out of javascript_labs to export its typed content",super::javascript_lab::CANVAS_REQUIREMENT,part.slide_id,part.element_id)));
+                }
                 super::javascript_lab::html(lab.kind,&part.spec.title,&interactive.source,width,height)?
             } else {standalone_html(&payload)?};
             let encoded=serde_json::to_string(&html)?;

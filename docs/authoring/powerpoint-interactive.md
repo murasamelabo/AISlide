@@ -199,6 +199,13 @@ canvas in the WebView. Resizing a WebView does not turn a slide into a long
 responsive web page. Canvas backing stores are refreshed when this display
 scale changes.
 
+An interactive part with `layout.show_title:false` can be 960×400 to 960×479 tall,
+and its typed export works at that size, but a JavaScript lab rejects it. The
+rejection names the slide ID, the element ID and the frame, and
+`preflight_presentation` reports `INTERACTIVE_LAB_FRAME_TOO_SMALL` (info) for the
+part before any export. Enlarge the frame to at least 960×480 before choosing a
+lab, or leave the part out of `javascript_labs`.
+
 Do not merely hide a scrollbar, clip the lower controls, or individually shrink
 all fonts to conceal overflow. The runtime budgets header, body and footer:
 long descriptions, full sources and calculation formulas are retained on

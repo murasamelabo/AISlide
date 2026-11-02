@@ -108,6 +108,619 @@ test('issue36 preflight schema exposes the inherited-only finding switch', async
   });
 });
 
+test('issue51 full tool-profile defaults detail to summary, omits filtered part_catalog schema and explains page_indices/detail on 9-page full requests', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-issue51-'));
+  try {
+    await feedbackMcpFixture(async ({ call, registrations, fixture }) => {
+      const slides = Array.from({ length: 9 }, (_, index) => ({ id: `slide-${index + 1}`, title: `Slide ${index + 1}`, background: 'FFFFFF', elements: [], notes: '' }));
+      const presets = [
+        { id: 'vertical-flow/rail', category: 'vertical-flow', category_name: 'Vertical flow', name: 'Vertical rail steps', use_when: 'Ordered stages', avoid_when: 'Unordered topics', example: { version: 1, preset: 'vertical-flow/rail' } },
+        ...Array.from({ length: 14 }, (_, index) => ({ id: `list/${index}`, category: 'list', category_name: 'List', name: `List ${index}`, use_when: 'Peers', avoid_when: 'Flows', example: { version: 1, preset: `list/${index}` } })),
+      ];
+      const pptxBytes = Buffer.from('PK\x03\x04synthetic');
+      const pptxSha = createHash('sha256').update(pptxBytes).digest('hex');
+      fixture.onRequest = async request => {
+        if (request.op === 'create_presentation') return { version: 1, id: request.id, revision: 0, hash: 'a'.repeat(64), sources: [], bindings: [], parts: [], deck: { version: 1, title: request.title, width: 1280, height: 720, slides } };
+        if (request.op === 'preview_presentation') {
+          const selected = request.options?.page_indices ?? slides.map((_, index) => index);
+          if (selected.length === 0 || selected.length > 8 || new Set(selected).size !== selected.length || selected.some(index => index < 0 || index >= slides.length)) {
+            throw new Error('Invalid input: preview requires 1-8 unique existing page indices; select a smaller batch with options.page_indices');
+          }
+          return { revision: 0, hash: request.document.hash, pages: selected.map(page_index => ({ page_index, slide_id: `slide-${page_index + 1}`, image_index: 0 })), images: [{ base64: 'aW1hZ2U=', mime_type: `image/${request.options?.format ?? 'png'}`, width: 10, height: 10, byte_length: 5, sha256: 'b'.repeat(64) }], warnings: [], office_visual_parity: false };
+        }
+        if (request.op === 'prepare_delivery') {
+          const selected = request.options?.page_indices ?? slides.map((_, index) => index);
+          if (selected.length === 0 || selected.length > 8 || new Set(selected).size !== selected.length || selected.some(index => index < 0 || index >= slides.length)) {
+            throw new Error('Invalid input: delivery visual selection requires 1-8 unique existing page indices (use options.page_indices); PPTX always contains the whole deck');
+          }
+          return {
+            revision: 0, hash: request.document.hash,
+            files: [{ kind: 'pptx', suffix: '.pptx', mime_type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', page_indices: slides.map((_, index) => index), byte_length: pptxBytes.length, sha256: pptxSha, base64: pptxBytes.toString('base64') }],
+            manifest: { format: 'aislide.delivery', version: 1, producer: { name: 'aislide', version: '0.1.0', engine: 'aislide-core', contract_version: 1 }, document: { id: request.document.id, revision: 0, hash: request.document.hash, title: 'repro', slide_count: 9 }, options: { page_indices: selected }, files: [], preview_pages: [], multi_file_atomic: false, checks: { preflight_page_indices: selected, static_render_page_indices: selected, office_visual_parity: false }, preflight: null, render_warnings: [], privacy: {}, limitations: [] },
+          };
+        }
+        if (request.op === 'part_catalog') return { version: 1, presets, schema: { marker: 'FULL_SCHEMA' }, style: 'Synthetic', default_bounds: {} };
+        throw new Error(`Unexpected request: ${request.op}`);
+      };
+      const { deck_id } = await call('create_presentation', { title: 'repro' });
+      const preview = await call('preview_presentation', { deck_id, include_images: false });
+      assert.deepEqual(preview.page_scope, { total: 9, selected: 8, unselected: 1 });
+      const finalizedDefault = await call('finalize_presentation', { deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), name: 'bundle-default', include_images: false });
+      assert.deepEqual(finalizedDefault.page_scope, { total: 9, selected: 8, unselected: 1 });
+      const finalizedOptions = await call('finalize_presentation', { deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), name: 'bundle-options', options: {}, include_images: false });
+      assert.deepEqual(finalizedOptions.page_scope, { total: 9, selected: 8, unselected: 1 });
+
+      const previewTool = registrations.get('preview_presentation');
+      const previewError = await previewTool.callback(previewTool.config.inputSchema.parse({ deck_id, detail: 'full', include_images: false }), { signal: new AbortController().signal });
+      assert.equal(previewError.isError, true);
+      assert.match(previewError.content[0].text, /options\.page_indices/);
+      assert.match(previewError.content[0].text, /omit detail or set detail:"summary"/);
+
+      const finalizeTool = registrations.get('finalize_presentation');
+      const finalizeError = await finalizeTool.callback(finalizeTool.config.inputSchema.parse({ deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), name: 'bundle-full', detail: 'full', include_images: false }), { signal: new AbortController().signal });
+      assert.equal(finalizeError.isError, true);
+      assert.match(finalizeError.content[0].text, /options\.page_indices/);
+      assert.match(finalizeError.content[0].text, /omit detail or set detail:"summary"/);
+      assert.match(finalizeError.content[0].text, /PPTX always contains the whole deck/);
+
+      for (const badArgs of [
+        { deck_id, detail: 'full', options: { page_indices: [0, 0] }, include_images: false },
+        { deck_id, detail: 'full', options: { page_indices: [99] }, include_images: false },
+        { deck_id, detail: 'summary', options: { page_indices: [0, 0] }, include_images: false },
+        { deck_id, detail: 'summary', options: { page_indices: [99] }, include_images: false },
+      ]) {
+        const badPreview = await previewTool.callback(previewTool.config.inputSchema.parse(badArgs), { signal: new AbortController().signal });
+        assert.equal(badPreview.isError, true);
+        assert.match(badPreview.content[0].text, /options\.page_indices/);
+        assert.doesNotMatch(badPreview.content[0].text, /detail:"summary"|omit detail/);
+      }
+      for (const badArgs of [
+        { deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), name: 'bundle-dup', detail: 'full', options: { page_indices: [0, 0] }, include_images: false },
+        { deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), name: 'bundle-range', detail: 'summary', options: { page_indices: [99] }, include_images: false },
+      ]) {
+        const badFinalize = await finalizeTool.callback(finalizeTool.config.inputSchema.parse(badArgs), { signal: new AbortController().signal });
+        assert.equal(badFinalize.isError, true);
+        assert.match(badFinalize.content[0].text, /options\.page_indices/);
+        assert.doesNotMatch(badFinalize.content[0].text, /detail:"summary"|omit detail/);
+      }
+
+      const defaultCatalog = await call('part_catalog', { query: 'vertical rail', limit: 5 });
+      assert.equal(defaultCatalog.schema, undefined);
+      assert.equal(defaultCatalog.presets[0].example, undefined);
+      const filteredFullCatalog = await call('part_catalog', { query: 'vertical rail', detail: 'full' });
+      assert.equal(filteredFullCatalog.schema, undefined);
+      assert.ok(filteredFullCatalog.presets[0].example);
+      const unfilteredFullCatalog = await call('part_catalog', { detail: 'full' });
+      assert.deepEqual(unfilteredFullCatalog.schema, { marker: 'FULL_SCHEMA' });
+    }, ['--tool-profile', 'full', '--output-dir', directory]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('issue52 catalog and tool search queries match all whitespace-separated terms in any order and return zero-match diagnostics', async () => {
+  await feedbackMcpFixture(async ({ call, fixture }) => {
+    const presets = [
+      { id: 'vertical-flow/rail', category: 'vertical-flow', category_name: 'Vertical flow', name: 'Vertical rail steps', use_when: '2-5 ordered stages with one numbered vertical rail', avoid_when: 'Unordered topics', example: { version: 1, preset: 'vertical-flow/rail' } },
+      { id: 'list/icon-rows', category: 'list', category_name: 'List', name: 'Icon explanation rows', use_when: '2-6 stacked statements', avoid_when: 'Sequences with handoffs; use vertical-flow/rail instead', example: { version: 1, preset: 'list/icon-rows' } },
+      { id: 'flow/open-steps', category: 'flow', category_name: 'Flow', name: 'Open horizontal steps', use_when: '2-5 ordered stages', avoid_when: 'Branching processes', example: { version: 1, preset: 'flow/open-steps' } },
+    ];
+    const icons = [
+      { id: 'azure/microsoft-sentinel', name: 'Azure Sentinel', provider: 'azure', categories: ['security', 'analytics'], aliases: ['microsoft sentinel', 'siem'] },
+      { id: 'azure/key-vaults', name: 'Key Vaults', provider: 'azure', categories: ['security'], aliases: ['secrets'] },
+      { id: 'azure/defender', name: 'Defender for Cloud', provider: 'azure', categories: ['security'], aliases: ['cspm'] },
+      { id: 'azure/firewall', name: 'Azure Firewall', provider: 'azure', categories: ['security', 'networking'], aliases: ['fw'] },
+      { id: 'azure/bastion', name: 'Azure Bastion', provider: 'azure', categories: ['security'], aliases: ['jumpbox'] },
+      { id: 'azure/ddos', name: 'DDoS Protection', provider: 'azure', categories: ['security'], aliases: ['mitigation'] },
+    ];
+    const patterns = [
+      { id: 'split/1-1', name: 'Balanced two-column split', ratio: '1:1', relationships: ['contrast', 'peers'], use_when: 'Compare two equal alternatives side by side', avoid_when: 'More than two peers' },
+      { id: 'sequence/steps-h', name: 'Horizontal step sequence', ratio: 'equal', relationships: ['sequence'], use_when: 'Ordered process steps', avoid_when: 'Unordered peers' },
+    ];
+    fixture.onRequest = async request => {
+      if (request.op === 'part_catalog') return { version: 1, presets, schema: { marker: 'FULL_SCHEMA' }, style: 'Synthetic', default_bounds: {} };
+      if (request.op === 'architecture_icons') return { version: 1, release: 'synthetic', configured: true, message: 'Ready', providers: ['azure'], icons };
+      if (request.op === 'layout_patterns') return { version: 1, patterns, guidance: ['Use frames unchanged'], tokens: {} };
+      if (request.op === 'rank_layout_patterns') return { part: { preset: request.part, sensitivity: 'strict' }, patterns: [{ pattern_id: 'split/1-1', fit: 'stretch', distortion: 0, area_used: 0.8 }] };
+      throw new Error(`Unexpected request: ${request.op}`);
+    };
+
+    const reorderedParts = await call('part_catalog', { query: 'rail steps vertical flow', detail: 'summary', limit: 5 });
+    assert.equal(reorderedParts.total, 1);
+    assert.equal(reorderedParts.presets[0].id, 'vertical-flow/rail');
+    const verticalRailParts = await call('part_catalog', { query: 'vertical rail', detail: 'summary', limit: 5 });
+    const railParts = await call('part_catalog', { query: 'rail', detail: 'summary', limit: 5 });
+    assert.equal(verticalRailParts.total, 2);
+    assert.equal(verticalRailParts.total, railParts.total);
+    assert.equal((await call('part_catalog', { query: '  RAIL   STEPS ', detail: 'summary' })).total, 1);
+    const blankQueryParts = await call('part_catalog', { query: '   ', detail: 'summary' });
+    assert.equal(blankQueryParts.total, presets.length);
+    assert.equal(blankQueryParts.match_mode, undefined);
+    const blankFullParts = await call('part_catalog', { query: '   ', detail: 'full' });
+    assert.deepEqual(blankFullParts.schema, { marker: 'FULL_SCHEMA' });
+
+    const sentinelA = await call('architecture_icons', { provider: 'azure', query: 'security sentinel', detail: 'summary' });
+    const sentinelB = await call('architecture_icons', { provider: 'azure', query: 'sentinel azure', detail: 'summary' });
+    assert.equal(sentinelA.total, 1);
+    assert.equal(sentinelA.icons[0].id, 'azure/microsoft-sentinel');
+    assert.deepEqual(sentinelA.icons, sentinelB.icons);
+
+    const patternsA = await call('layout_patterns', { query: 'contrast split', detail: 'summary' });
+    const patternsB = await call('layout_patterns', { query: 'split contrast', detail: 'summary' });
+    assert.equal(patternsA.total, 1);
+    assert.deepEqual(patternsA.patterns, patternsB.patterns);
+
+    const zeroParts = await call('part_catalog', { query: 'rail zzzz', detail: 'summary' });
+    assert.equal(zeroParts.total, 0);
+    assert.equal(zeroParts.match_mode, 'all_terms');
+    assert.deepEqual(zeroParts.terms, ['rail', 'zzzz']);
+    assert.deepEqual(zeroParts.unmatched_terms, ['zzzz']);
+    assert.ok(zeroParts.partial_matches.length > 0 && zeroParts.partial_matches.length <= 5);
+    assert.deepEqual(zeroParts.partial_matches[0], { id: 'vertical-flow/rail', name: 'Vertical rail steps', matched_terms: ['rail'] });
+
+    const zeroIcons = await call('architecture_icons', { provider: 'azure', query: 'security sentinel zzzz', detail: 'summary' });
+    assert.equal(zeroIcons.total, 0);
+    assert.equal(zeroIcons.match_mode, 'all_terms');
+    assert.deepEqual(zeroIcons.unmatched_terms, ['zzzz']);
+    assert.equal(zeroIcons.partial_matches.length, 5);
+    assert.deepEqual(zeroIcons.partial_matches.map(entry => [entry.id, entry.matched_terms]), [
+      ['azure/microsoft-sentinel', ['security', 'sentinel']],
+      ['azure/key-vaults', ['security']],
+      ['azure/defender', ['security']],
+      ['azure/firewall', ['security']],
+      ['azure/bastion', ['security']],
+    ]);
+
+    const zeroPatterns = await call('layout_patterns', { query: 'contrast zzzz', detail: 'summary' });
+    assert.equal(zeroPatterns.total, 0);
+    assert.equal(zeroPatterns.match_mode, 'all_terms');
+    assert.deepEqual(zeroPatterns.unmatched_terms, ['zzzz']);
+    assert.deepEqual(zeroPatterns.partial_matches[0], { id: 'split/1-1', name: 'Balanced two-column split', matched_terms: ['contrast'] });
+
+    const zeroRankedPatterns = await call('layout_patterns', { part_preset: 'cycle/balanced', query: 'sequence', detail: 'summary' });
+    assert.equal(zeroRankedPatterns.total, 0);
+    assert.equal(zeroRankedPatterns.match_mode, 'all_terms');
+    assert.deepEqual(zeroRankedPatterns.unmatched_terms, ['sequence']);
+    assert.deepEqual(zeroRankedPatterns.partial_matches, []);
+
+    const zeroRankedPartial = await call('layout_patterns', { part_preset: 'cycle/balanced', query: 'contrast zzzz', detail: 'summary' });
+    assert.equal(zeroRankedPartial.total, 0);
+    assert.equal(zeroRankedPartial.match_mode, 'all_terms');
+    assert.deepEqual(zeroRankedPartial.unmatched_terms, ['zzzz']);
+    assert.deepEqual(zeroRankedPartial.partial_matches, [{ id: 'split/1-1', name: 'Balanced two-column split', matched_terms: ['contrast'] }]);
+
+    const zeroTools = await call('discover_tools', { query: 'part_catalog zzzz' });
+    assert.equal(zeroTools.total, 0);
+    assert.equal(zeroTools.match_mode, 'all_terms');
+    assert.deepEqual(zeroTools.unmatched_terms, ['zzzz']);
+    assert.ok(zeroTools.partial_matches.some(entry => entry.name === 'part_catalog'));
+  }, ['--tool-profile', 'full', '--layout-patterns', 'on']);
+});
+
+test('issue60 compose_slide part blocks accept show_title in block and pattern modes', async () => {
+  await feedbackMcpFixture(async ({ call, calls, registrations }) => {
+    const created = await call('create_presentation', { title: 'Synthetic compose part show_title' });
+    const partSpecValue = {
+      version: 1,
+      preset: 'interactive/summary',
+      title: 'Interactive summary',
+      subtitle: '',
+      data: {
+        kind: 'interactive',
+        spec: {
+          version: 1,
+          template: 'summary',
+          source: 'Synthetic source',
+          groups: [],
+          dimensions: [],
+          items: [
+            { id: 'item-1', label: 'Item 1', detail: 'First item detail.', action: 'Review item 1' },
+            { id: 'item-2', label: 'Item 2', detail: 'Second item detail.', action: 'Review item 2' },
+          ],
+          initial_state: { selected_id: 'item-1', dimension: 0, scale: 'linear' },
+        },
+      },
+    };
+    const blockSpec = {
+      title: 'Slide Title',
+      blocks: [{ kind: 'part', show_title: false, spec: partSpecValue }],
+    };
+    await call('compose_slide', { deck_id: created.deck_id, expected_revision: 0, slide_id: 'slide-1', id: 'block-part', spec: blockSpec });
+    assert.deepEqual(calls.at(-1).request.operations, [{ op: 'compose_slide', slide_id: 'slide-1', id: 'block-part', spec: blockSpec }]);
+
+    const patternSpec = {
+      title: 'Pattern Slide Title',
+      pattern: { id: 'focus/full' },
+      slots: { primary: { kind: 'part', show_title: false, spec: partSpecValue } },
+    };
+    await call('compose_slide', { deck_id: created.deck_id, expected_revision: 1, slide_id: 'slide-1', id: 'pattern-part', spec: patternSpec });
+    assert.deepEqual(calls.at(-1).request.operations, [{ op: 'compose_slide', slide_id: 'slide-1', id: 'pattern-part', spec: patternSpec }]);
+
+    const composeSchema = registrations.get('compose_slide').config.inputSchema;
+    const accepted = spec => composeSchema.safeParse({ deck_id: created.deck_id, expected_revision: 2, slide_id: 'slide-1', id: 'checked-part', spec }).success;
+    assert.equal(accepted({ title: 'Slide', blocks: [{ kind: 'part', show_title: false, spec: partSpecValue }] }), true);
+    assert.equal(accepted({ title: 'Slide', blocks: [{ kind: 'part', show_title: 'no', spec: partSpecValue }] }), false);
+    assert.equal(accepted({ title: 'Slide', blocks: [{ kind: 'part', show_title: false, unknown_field: true, spec: partSpecValue }] }), false, 'part blocks stay strict');
+    const inSlot = block => ({ title: 'Slide', pattern: { id: 'focus/full' }, slots: { primary: block } });
+    assert.equal(accepted(inSlot({ kind: 'part', show_title: false, spec: partSpecValue })), true);
+    assert.equal(accepted(inSlot({ kind: 'part', show_title: 'no', spec: partSpecValue })), false);
+    assert.equal(accepted(inSlot({ kind: 'part', show_title: false, unknown_field: true, spec: partSpecValue })), false, 'slot parts stay strict');
+  });
+});
+
+test('issue61 part_catalog schema matches MCP input validation and core constraints for IconColumn, GraphIcon and body_size', async () => {
+  const client = new Client({ name: 'aislide-issue61-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const catalog = await call('part_catalog', { detail: 'full' });
+    const defs = catalog.schema.$defs ?? catalog.schema.definitions;
+    assert.ok(defs.IconColumn, 'schema defines IconColumn');
+    assert.equal(defs.IconColumn.properties.detail_emphasis.maxItems, 0, 'IconColumn accepts only legacy empty detail_emphasis');
+    assert.equal(defs.IconColumn.properties.label.minLength, 1);
+    assert.equal(defs.IconColumn.properties.label.maxLength, 48);
+    assert.equal(defs.IconColumn.properties.detail.maxLength, 200);
+    const iconColumnsVariant = defs.PartData.oneOf.find(variant => variant.properties?.kind?.const === 'icon_columns');
+    assert.equal(iconColumnsVariant.properties.items.items.$ref, '#/$defs/IconColumn');
+    assert.equal(iconColumnsVariant.properties.items.minItems, 2);
+    assert.equal(iconColumnsVariant.properties.items.maxItems, 4);
+
+    // Core describes the inline form only; every catalog schema this server republishes offers the asset handle as well.
+    const graphCatalog = await call('graph_catalog', {});
+    const guide = await call('best_practice_guide', { profile_id: 'technical-explainer' });
+    for (const [source, schema] of [['part_catalog', catalog.schema], ['graph_catalog', graphCatalog.schema], ['graph_catalog operation_schema', graphCatalog.operation_schema], ['best_practice_guide', guide.input_schema]]) {
+      const icon = (schema.$defs ?? schema.definitions).GraphIcon;
+      assert.ok(icon.properties.asset_id, `${source}: GraphIcon schema documents asset_id`);
+      assert.equal(icon.properties.asset_id.format, 'uuid', source);
+      assert.equal(icon.properties.base64.minLength, 1, source);
+      assert.equal(icon.properties.base64.maxLength, 1398104, source);
+      assert.deepEqual(icon.properties.mime_type.enum, ['image/png', 'image/jpeg'], source);
+      assert.equal(icon.properties.alt.maxLength, 500, source);
+      assert.equal(icon.additionalProperties, false, source);
+      assert.equal(icon.required, undefined, `${source}: the required fields live in the oneOf alternatives`);
+      assert.equal(icon.oneOf.length, 2, source);
+    }
+
+    assert.equal(defs.ComparisonPanel.properties.body_size.minimum, 16);
+    assert.equal(defs.ComparisonPanel.properties.body_size.maximum, 28);
+    for (const kind of ['icon_cards', 'icon_rows', 'shift_rows', 'step_cards', 'screenshot_callouts']) {
+      const variant = defs.PartData.oneOf.find(entry => entry.properties?.kind?.const === kind);
+      assert.equal(variant.properties.body_size.minimum, 14, `${kind} minimum`);
+      assert.equal(variant.properties.body_size.maximum, 22, `${kind} maximum`);
+    }
+
+    const legacy = await call('create_part', {
+      id: 'repro-icon-col',
+      spec: {
+        version: 1,
+        preset: 'list-horizontal/icon-columns',
+        title: 'Icon Columns',
+        subtitle: '',
+        data: {
+          kind: 'icon_columns',
+          items: [
+            { label: 'Item 1', detail: 'First item detail.', detail_emphasis: [] },
+            { label: 'Item 2', detail: 'Second item detail.', detail_emphasis: [] },
+          ],
+        },
+      },
+    });
+    assert.equal(legacy.type, 'group');
+    const rejected = await client.callTool({
+      name: 'create_part',
+      arguments: {
+        id: 'unsupported-icon-col',
+        spec: {
+          version: 1,
+          preset: 'list-horizontal/icon-columns',
+          title: 'Icon Columns',
+          subtitle: '',
+          data: {
+            kind: 'icon_columns',
+            items: [
+              { label: 'Item 1', detail: 'First item detail.', detail_emphasis: ['phrase'] },
+              { label: 'Item 2', detail: 'Second item detail.' },
+            ],
+          },
+        },
+      },
+    });
+    assert.equal(rejected.isError, true);
+    assert.match(rejected.content[0].text, /detail_emphasis/);
+
+    const validColumns = await call('create_part', {
+      id: 'valid-icon-col',
+      spec: {
+        version: 1,
+        preset: 'list-horizontal/icon-columns',
+        title: 'Icon Columns',
+        subtitle: '',
+        data: {
+          kind: 'icon_columns',
+          items: [
+            { label: 'Item 1', detail: 'First item detail.' },
+            { label: 'Item 2', detail: 'Second item detail.' },
+          ],
+        },
+      },
+    });
+    assert.equal(validColumns.type, 'group');
+
+    const preparedIcons = await call('lucide_icon_assets', { icons: [{ name: 'ShieldCheck' }, { name: 'Bot' }] });
+    const withIconHandles = await call('create_part', {
+      id: 'icon-col-handles',
+      spec: {
+        version: 1,
+        preset: 'list-horizontal/icon-columns',
+        title: 'Icon Columns With Handles',
+        subtitle: '',
+        data: {
+          kind: 'icon_columns',
+          items: [
+            { label: 'Item 1', detail: 'First item detail.', icon: preparedIcons.icons[0].icon },
+            { label: 'Item 2', detail: 'Second item detail.', icon: preparedIcons.icons[1].icon },
+          ],
+        },
+      },
+    });
+    assert.equal(withIconHandles.type, 'group');
+
+    const created = await call('create_presentation', { title: 'Live compose part show_title' });
+    await call('compose_slide', {
+      deck_id: created.deck_id,
+      expected_revision: 0,
+      slide_id: 'slide-1',
+      id: 'repro-part',
+      spec: {
+        title: 'Slide Title',
+        blocks: [
+          {
+            kind: 'part',
+            show_title: false,
+            spec: {
+              version: 1,
+              preset: 'interactive/summary',
+              title: 'Interactive Summary',
+              subtitle: '',
+              data: {
+                kind: 'interactive',
+                spec: {
+                  version: 1,
+                  template: 'summary',
+                  source: 'Synthetic source',
+                  groups: [],
+                  dimensions: [],
+                  items: [
+                    { id: 'item-1', label: 'Item 1', detail: 'First item detail.', action: 'Review item 1' },
+                    { id: 'item-2', label: 'Item 2', detail: 'Second item detail.', action: 'Review item 2' },
+                  ],
+                  initial_state: { selected_id: 'item-1', dimension: 0, scale: 'linear' },
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+    const doc = await call('get_document', { deck_id: created.deck_id });
+    assert.equal(doc.parts[0].spec.title, 'Interactive Summary');
+    assert.equal(doc.parts[0].spec.layout.show_title, false);
+
+    await feedbackMcpFixture(async ({ registrations }) => {
+      const createPartSchema = registrations.get('create_part').config.inputSchema;
+      for (const preset of catalog.presets) {
+        const parsed = createPartSchema.safeParse({ id: 'catalog-ex', spec: preset.example });
+        assert.equal(parsed.success, true, `preset ${preset.id} example failed MCP Zod validation: ${parsed.error?.message}`);
+      }
+      // MCP's own input schema rejects a nonempty legacy emphasis before any core call; the empty array stays accepted.
+      const columns = catalog.presets.find(preset => preset.example.data.kind === 'icon_columns').example;
+      const withEmphasis = phrases => ({ id: 'legacy', spec: { ...columns, data: { ...columns.data, items: columns.data.items.map((item, index) => index === 0 ? { ...item, detail_emphasis: phrases } : item) } } });
+      assert.equal(createPartSchema.safeParse(withEmphasis([])).success, true);
+      assert.equal(createPartSchema.safeParse(withEmphasis(['phrase'])).success, false);
+      // zod v4 `.meta()` must reach the published JSON Schema so clients see the legacy property as deprecated.
+      const advertised = [];
+      const visit = node => {
+        if (Array.isArray(node)) node.forEach(visit);
+        else if (node && typeof node === 'object') {
+          if (node.detail_emphasis?.maxItems === 0) advertised.push(node.detail_emphasis);
+          Object.values(node).forEach(visit);
+        }
+      };
+      visit(z.toJSONSchema(createPartSchema, { io: 'input' }));
+      assert.ok(advertised.length > 0, 'create_part publishes the legacy detail_emphasis property');
+      for (const schema of advertised) assert.equal(schema.deprecated, true, 'the legacy property is marked deprecated');
+    });
+  } finally {
+    await client.close();
+  }
+});
+
+test('issue61 every GraphIcon site accepts a prepared asset handle through MCP and core lists no other site', async () => {
+  const client = new Client({ name: 'aislide-issue61-sites', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const catalog = await call('part_catalog', { detail: 'full' });
+    const defs = catalog.schema.$defs ?? catalog.schema.definitions;
+    const mentionsIcon = node => Boolean(node) && typeof node === 'object' && (node.$ref === '#/$defs/GraphIcon' || Object.values(node).some(mentionsIcon));
+    const advertised = new Set();
+    for (const [name, definition] of Object.entries(defs)) {
+      if (name === 'GraphIcon') continue;
+      for (const owner of [definition, ...(definition.oneOf ?? [])]) {
+        for (const [property, schema] of Object.entries(owner.properties ?? {})) if (mentionsIcon(schema)) advertised.add(`${name}.${property}`);
+      }
+    }
+    // The schema offers the asset handle at every property typed GraphIcon, so each one must be resolved by MCP.
+    // A new site in core fails the comparison below until it is added here and exercised.
+    const partSites = {
+      'ComparisonPanelItem.icon': ['comparison_panels', data => [data.panels[0].items[0], 'icon']],
+      'IconCard.icon': ['icon_cards', data => [data.cards[0], 'icon']],
+      'IconColumn.icon': ['icon_columns', data => [data.items[0], 'icon']],
+      'IconRow.icon': ['icon_rows', data => [data.rows[0], 'icon']],
+      'ImageColumn.image': ['image_columns', data => [data.items[0], 'image']],
+      'PartData.image': ['screenshot_callouts', data => [data, 'image']],
+      'StepCard.icon': ['step_cards', data => [data.steps[0], 'icon']],
+      'StepCard.image': ['step_cards', data => [data.steps[0], 'image']],
+    };
+    assert.deepEqual([...advertised].sort(), [...Object.keys(partSites), 'GraphGroup.icon', 'GraphNode.icon'].sort());
+
+    const handle = (await call('lucide_icon_assets', { icons: [{ name: 'ShieldCheck' }] })).icons[0].icon;
+    assert.ok(handle.asset_id && !handle.base64, 'the prepared icon is a handle, not inline data');
+    for (const [site, [kind, locate]] of Object.entries(partSites)) {
+      const spec = structuredClone(catalog.presets.find(preset => preset.example.data.kind === kind).example);
+      const [holder, property] = locate(spec.data);
+      holder[property] = { ...handle };
+      assert.equal((await call('create_part', { id: 'site', spec })).type, 'group', site);
+    }
+    const node = { id: 'node', label: 'Node', x: 40, y: 140, width: 160, height: 80 };
+    const graph = (nodes, groups) => ({ version: 1, title: '', nodes, edges: [], groups });
+    await call('create_graph', { id: 'node-site', spec: graph([{ ...node, icon: { ...handle } }], []) });
+    await call('create_graph', { id: 'group-site', spec: graph([node], [{ id: 'group', label: 'Group', x: 0, y: 88, width: 300, height: 200, icon: { ...handle } }]) });
+  } finally {
+    await client.close();
+  }
+});
+
+// Keywords of JSON Schema that bound what a caller may send; the MCP zod schema and the core schema must agree on each of them.
+const boundKeywords = ['minLength', 'maxLength', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'minItems', 'maxItems'];
+// zod publishes the safe integer range for an unbounded `.int()`, which is not a bound that anyone chose.
+const zodIntegerRange = { minimum: -9007199254740991, maximum: 9007199254740991 };
+
+/** Differences in bounds between two schemas that describe the same input: `core` as published by part_catalog and `mcp` as published by an MCP tool. */
+function boundDifferences(core, coreRoot, mcp, mcpRoot) {
+  const found = [];
+  const open = (schema, root) => {
+    let value = resolveSchemaRef(root, schema);
+    // An optional or nullable value is a union with null; only the other branch carries bounds.
+    for (let depth = 0; depth < 8; depth += 1) {
+      const branches = (value.anyOf ?? value.oneOf)?.filter(branch => branch.type !== 'null');
+      if (branches?.length !== 1) break;
+      value = resolveSchemaRef(root, branches[0]);
+    }
+    return value;
+  };
+  const alternatives = (value, root) => (value.anyOf ?? value.oneOf)?.map(branch => resolveSchemaRef(root, branch));
+  // `const: 1` and `minimum: 1, maximum: 1` bound a number in the same way.
+  const bounded = value => typeof value.const === 'number' ? { ...value, minimum: value.const, maximum: value.const } : value;
+  const walk = (left, right, path, depth) => {
+    if (depth > 24) return;
+    // The core schema publishes few GraphSpec bounds (murasamelabo/AISlide#68), so the diagram wrapper in the part schema is not compared yet.
+    if (path === 'spec.data<diagram>.graph') return;
+    const a = bounded(open(left, coreRoot));
+    const b = bounded(open(right, mcpRoot));
+    const aBranches = alternatives(a, coreRoot);
+    const bBranches = alternatives(b, mcpRoot);
+    // A tagged union pairs its variants by `kind`; a variant on only one side is a difference of its own.
+    if (aBranches?.length > 1 && aBranches.every(branch => branch.properties?.kind?.const !== undefined)) {
+      for (const branch of aBranches) {
+        const kind = branch.properties.kind.const;
+        const match = bBranches?.find(candidate => candidate.properties?.kind?.const === kind);
+        if (match) walk(branch, match, `${path}<${kind}>`, depth + 1);
+        else found.push({ path: `${path}<${kind}>`, keyword: 'variant', detail: 'missing from the MCP schema' });
+      }
+      for (const branch of bBranches ?? []) {
+        if (!aBranches.some(candidate => candidate.properties?.kind?.const === branch.properties?.kind?.const)) found.push({ path: `${path}<${branch.properties?.kind?.const}>`, keyword: 'variant', detail: 'only in the MCP schema' });
+      }
+      return;
+    }
+    // Other unions (such as an inline icon or an asset handle) contribute their properties but no bounds of their own.
+    const shape = (value, branches) => ({ ...(branches ?? []).reduce((all, branch) => ({ ...all, ...branch.properties }), {}), ...value.properties });
+    const union = value => (value.anyOf ?? value.oneOf)?.length > 1;
+    if (!union(a) && !union(b)) {
+      for (const keyword of boundKeywords) {
+        const normalize = value => value === zodIntegerRange[keyword] ? undefined : value;
+        const core = a[keyword];
+        const mcp = normalize(b[keyword]);
+        if (core !== mcp) found.push({ path, keyword, detail: `core ${core ?? 'none'}, MCP ${mcp ?? 'none'}` });
+      }
+      if (a.items && b.items) walk(a.items, b.items, `${path}[]`, depth + 1);
+    }
+    const aProperties = shape(a, aBranches);
+    const bProperties = shape(b, bBranches);
+    for (const name of Object.keys(aProperties)) {
+      if (bProperties[name]) walk(aProperties[name], bProperties[name], `${path}.${name}`, depth + 1);
+      else found.push({ path: `${path}.${name}`, keyword: 'property', detail: 'missing from the MCP schema' });
+    }
+    for (const name of Object.keys(bProperties)) if (!aProperties[name]) found.push({ path: `${path}.${name}`, keyword: 'property', detail: 'only in the MCP schema' });
+  };
+  walk(core, mcp, 'spec', 0);
+  return found;
+}
+
+// Intentional differences, by path and keyword. An entry that no longer matches fails the test, so the list cannot rot.
+const partSchemaDrift = [
+  {
+    reason: 'A reference is matched against the IDs that exist (a part preset against the catalog), so core publishes no length for it; MCP adds the ID bounds as a hint.',
+    paths: {
+      'spec.preset': ['minLength', 'maxLength'],
+      'spec.data<interactive>.spec.initial_state.group_id': ['minLength', 'maxLength'],
+      'spec.data<interactive>.spec.initial_state.selected_id': ['minLength', 'maxLength'],
+      'spec.data<interactive>.spec.items[].group_id': ['minLength', 'maxLength'],
+      'spec.data<swimlane>.flows[].from': ['minLength', 'maxLength'],
+      'spec.data<swimlane>.flows[].to': ['minLength', 'maxLength'],
+      'spec.data<sankey>.links[].from': ['minLength', 'maxLength'],
+      'spec.data<sankey>.links[].to': ['minLength', 'maxLength'],
+      'spec.data<architecture>.relations[].from': ['minLength', 'maxLength'],
+      'spec.data<architecture>.relations[].to': ['minLength', 'maxLength'],
+      'spec.data<tree>.nodes[].parent': ['maxLength'],
+    },
+  },
+  {
+    reason: 'An index is checked against the length of the list it points into; MCP publishes the largest index that any list length allows.',
+    paths: {
+      'spec.data<interactive>.spec.initial_state.dimension': ['maximum'],
+      'spec.data<swimlane>.steps[].lane': ['maximum'],
+      'spec.data<journey>.highlight': ['maximum'],
+      'spec.data<network>.edges[].from': ['maximum'],
+      'spec.data<network>.edges[].to': ['maximum'],
+      'spec.data<timeline>.tasks[].start': ['maximum'],
+      'spec.data<timeline>.tasks[].end': ['maximum'],
+    },
+  },
+  {
+    reason: 'Core also accepts an explicit empty list, which is the default; MCP asks for the whole set or none.',
+    paths: {
+      'spec.data<harvey_matrix>.legend': ['minItems'],
+      'spec.data<raci>.legend': ['minItems'],
+      'spec.data<risk_matrix>.zone_labels': ['minItems'],
+    },
+  },
+];
+const allowedPartSchemaDrift = difference => partSchemaDrift.some(entry => entry.paths[difference.path]?.includes(difference.keyword));
+
+test('issue67 the MCP part input schema publishes the bounds that the core part schema publishes', async () => {
+  const client = new Client({ name: 'aislide-issue67-drift', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  let core;
+  try {
+    await client.connect(transport);
+    const result = await client.callTool({ name: 'part_catalog', arguments: { detail: 'full' } });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    core = JSON.parse(result.content[0].text).schema;
+  } finally {
+    await client.close();
+  }
+  await feedbackMcpFixture(async ({ registrations }) => {
+    // apply_operations, compose_slide and the other tools reuse the same part spec, so create_part stands for all of them.
+    const input = z.toJSONSchema(registrations.get('create_part').config.inputSchema, { io: 'input' });
+    const found = boundDifferences(core, core, input.properties.spec, input);
+    const unexplained = found.filter(difference => !allowedPartSchemaDrift(difference));
+    assert.equal(unexplained.length, 0, `${unexplained.length} bounds differ between the MCP and core part schemas:\n${unexplained.map(difference => `${difference.path} ${difference.keyword}: ${difference.detail}`).join('\n')}`);
+    const stale = partSchemaDrift.flatMap(entry => Object.entries(entry.paths).flatMap(([path, keywords]) => keywords.filter(keyword => !found.some(difference => difference.path === path && difference.keyword === keyword)).map(keyword => `${path} ${keyword}`)));
+    assert.deepEqual(stale, [], 'every allowed difference still exists');
+  });
+});
+
 test('recipe MCP discovers semantic candidates and uses strict bounded input schemas', async () => {
   await feedbackMcpFixture(async ({ registrations, call, fixture }) => {
     for (const name of ['recipe_catalog', 'recommend_recipes', 'preview_recipe', 'apply_recipe']) assert.ok(registrations.has(name), `Missing ${name}`);
@@ -1920,7 +2533,7 @@ test('MCP preview accepts bounded JPEG and overflow policy without losing metada
     const tool = registrations.get('preview_presentation');
     for (const format of ['png', 'jpeg']) {
       fixture.onRequest = async request => ({ revision: 0, hash: request.document.hash, requested_max_dimension: 1280, actual_max_dimension: 960, quality_reduced: true, pages: [], warnings: [{ code: 'PREVIEW_DOWNSCALED', page_index: 0, element_id: '', message: 'Synthetic reduced preview' }], images: [{ base64: 'aW1hZ2U=', mime_type: `image/${format}`, width: 960, height: 540, byte_length: 5, sha256: 'a'.repeat(64) }], office_visual_parity: false });
-      const input = { deck_id, options: { format, overflow: 'shrink', page_indices: [0] } };
+      const input = { deck_id, detail: 'full', options: { format, overflow: 'shrink', page_indices: [0] } };
       const result = await tool.callback(tool.config.inputSchema.parse(input), { signal: new AbortController().signal });
       assert.ok(!result.isError, JSON.stringify(result));
       assert.deepEqual(calls.at(-1).request.options, input.options);
@@ -2534,7 +3147,7 @@ test('managed batch MCP live 39 slides and 21 managed roots retain metadata thro
     await call('apply_transaction', { deck_id, expected_revision: blank.revision, operations: [{ op: 'add', path: '/sources/-', value: ingested.source }] });
     await call('close_source', { source_id: ingested.source_id });
     const before = await call('get_session_recovery', { deck_id });
-    const catalog = await call('part_catalog');
+    const catalog = await call('part_catalog', { detail: 'full' });
     const presetIds = [
       ...['matrix', 'contrast'].flatMap(category => ['balanced', 'focus', 'labeled'].map(variant => `${category}/${variant}`)),
       ...['list-horizontal', 'vertical-bar-graph', 'horizontal-bar-graph', 'line-graph', 'pie-chart', 'tree', 'flow', 'vertical-flow', 'cycle', 'before-after', 'layer'].map(category => `${category}/balanced`),
@@ -2696,7 +3309,7 @@ test('feedback MCP live typed batches and authored slide import preserve content
       assert.deepEqual(initial.past, []);
     }
     const slide_id = sourceInitial.document.deck.slides[0].id;
-    const picture = await call('create_asset', { id: 'pixel', mime_type: 'image/svg+xml', size: 40, alt: 'Synthetic square', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="red"/></svg>').toString('base64') });
+    const picture = await call('create_asset', { id: 'pixel', mime_type: 'image/svg+xml', size: 40, alt: 'Synthetic square', base64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="red"/></svg>').toString('base64'), detail: 'full' });
     assert.equal(Buffer.from(picture.base64, 'base64').subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
     const elements = [
       { type: 'text', id: 'text', x: 40, y: 40, width: 600, height: 140, text: 'One\nTwo', font_size: 28, color: '202525', bold: false, format: { paragraphs: [
@@ -3281,7 +3894,7 @@ test('MCP open list recommendations render native text and keep failed edits ato
   };
   try {
     await client.connect(transport);
-    const catalog = await call('part_catalog');
+    const catalog = await call('part_catalog', { detail: 'full' });
     assert.equal(catalog.presets.length, 143);
     for (const id of ['list/rows', 'list-horizontal/columns', 'list-enumeration/grid']) {
       const preset = catalog.presets.find(entry => entry.id === id);
@@ -3643,7 +4256,7 @@ test('P0 MCP previews return bounded images without changing documents or writin
     await call('edit_slides', { deck_id, expected_revision: 0, operations: [{ op: 'duplicate', slide_id: 'slide-1', id: 'second' }] });
     const before = await call('get_session_recovery', { deck_id });
     const options = { page_indices: [1, 0], max_dimension: 640, layout: 'contact_sheet' };
-    const result = await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options } });
+    const result = await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options, detail: 'full' } });
     assert.ok(!result.isError, JSON.stringify(result.content));
     const metadata = JSON.parse(result.content[0].text);
     assert.equal(metadata.revision, before.document.revision);
@@ -3660,7 +4273,7 @@ test('P0 MCP previews return bounded images without changing documents or writin
     assert.equal(decoded.height, metadata.images[0].height);
     assert.ok(decoded.width <= 640 && decoded.height <= 640);
     assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 4 * 1048576);
-    const plain = await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options, include_images: false } });
+    const plain = await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options, include_images: false, detail: 'full' } });
     assert.ok(!plain.isError, JSON.stringify(plain.content));
     assert.equal(plain.content.length, 1);
     for (const invalid of [
@@ -3669,7 +4282,7 @@ test('P0 MCP previews return bounded images without changing documents or writin
       { options: { ...options, page_indices: Array.from({ length: 9 }, (_, index) => index) } },
       { options: { ...options, max_dimension: 4096 } },
       { filename: '../preview.png' },
-    ]) assert.equal((await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options, ...invalid } })).isError, true);
+    ]) assert.equal((await client.callTool({ name: 'preview_presentation', arguments: { deck_id, options, detail: 'full', ...invalid } })).isError, true);
     assert.deepEqual(await call('get_session_recovery', { deck_id }), before);
     assert.deepEqual(await readdir(directory), []);
     const tools = (await client.listTools()).tools;
@@ -3887,7 +4500,8 @@ test('MCP generates, edits and saves with the GUI closed', async () => {
 });
 
 test('MCP validate_deck omits the validated deck unless detail is full', async () => {
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-validate-mcp-'));
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
   const client = new Client({ name: 'aislide-validate-test', version: '1.0.0' });
   const raw = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
@@ -3902,6 +4516,7 @@ test('MCP validate_deck omits the validated deck unless detail is full', async (
     const compiled = JSON.parse(await raw('compile_report', { report: JSON.parse(await raw('sample_report')) }));
     assert.equal(compiled.slides, 12);
     const deck_id = compiled.deck_id;
+    const summary12 = JSON.parse(await raw('get_deck_summary', { deck_id, limit: 1 }));
 
     const defaultText = await raw('validate_deck', { deck_id });
     const summaryText = await raw('validate_deck', { deck_id, detail: 'summary' });
@@ -3920,7 +4535,39 @@ test('MCP validate_deck omits the validated deck unless detail is full', async (
 
     const invalid = await client.callTool({ name: 'validate_deck', arguments: { deck_id, detail: 'everything' } });
     assert.equal(invalid.isError, true, 'an unknown detail value is rejected');
+
+    const fullPreview12 = await client.callTool({ name: 'preview_presentation', arguments: { deck_id, detail: 'full', include_images: false } });
+    assert.equal(fullPreview12.isError, true);
+    assert.match(fullPreview12.content[0].text, /options\.page_indices/);
+    assert.match(fullPreview12.content[0].text, /omit detail or set detail:"summary"/);
+
+    const fullFinalize12 = await client.callTool({ name: 'finalize_presentation', arguments: { deck_id, expected_revision: summary12.revision, expected_hash: summary12.hash, name: 'full12', detail: 'full', include_images: false } });
+    assert.equal(fullFinalize12.isError, true);
+    assert.match(fullFinalize12.content[0].text, /options\.page_indices/);
+    assert.match(fullFinalize12.content[0].text, /PPTX always contains the whole deck/);
+    assert.match(fullFinalize12.content[0].text, /omit detail or set detail:"summary"/);
+
+    for (const badPreviewArgs of [
+      { deck_id, detail: 'full', options: { page_indices: [0, 0] }, include_images: false },
+      { deck_id, detail: 'summary', options: { page_indices: [99] }, include_images: false },
+    ]) {
+      const badPreview = await client.callTool({ name: 'preview_presentation', arguments: badPreviewArgs });
+      assert.equal(badPreview.isError, true);
+      assert.match(badPreview.content[0].text, /options\.page_indices/);
+      assert.doesNotMatch(badPreview.content[0].text, /detail:"summary"|omit detail/);
+    }
+    for (const badFinalizeArgs of [
+      { deck_id, expected_revision: summary12.revision, expected_hash: summary12.hash, name: 'bad-dup', detail: 'full', options: { page_indices: [0, 0] }, include_images: false },
+      { deck_id, expected_revision: summary12.revision, expected_hash: summary12.hash, name: 'bad-range', detail: 'summary', options: { page_indices: [99] }, include_images: false },
+    ]) {
+      const badFinalize = await client.callTool({ name: 'finalize_presentation', arguments: badFinalizeArgs });
+      assert.equal(badFinalize.isError, true);
+      assert.match(badFinalize.content[0].text, /options\.page_indices/);
+      assert.doesNotMatch(badFinalize.content[0].text, /detail:"summary"|omit detail/);
+    }
+    assert.deepEqual(await readdir(directory), []);
   } finally {
     await client.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });

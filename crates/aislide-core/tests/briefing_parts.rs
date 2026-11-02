@@ -209,6 +209,17 @@ fn screenshot_callouts_reject_unbounded_positions_and_counts() {
     let item = |x: f64| json!({"x":x,"y":0.5,"label":"Item"});
     assert!(create(&screenshot_spec(json!([item(1.2)]))).unwrap_err().contains("0-1 fractions"));
     assert!(create(&screenshot_spec(json!([item(-0.1)]))).unwrap_err().contains("0-1 fractions"));
+    // The published schema advertises the same closed 0-1 range the validator enforces, for both axes.
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let position = &catalog["schema"]["$defs"]["Callout"]["properties"];
+    for axis in ["x", "y"] {
+        assert_eq!((position[axis]["minimum"].as_f64(), position[axis]["maximum"].as_f64()), (Some(0.0), Some(1.0)), "{axis}");
+    }
+    for edge in [0.0, 1.0] {
+        assert!(create(&screenshot_spec(json!([{"x":edge,"y":0.5,"label":"Item"}]))).is_ok(), "x={edge} is inside the closed range");
+        assert!(create(&screenshot_spec(json!([{"x":0.5,"y":edge,"label":"Item"}]))).is_ok(), "y={edge} is inside the closed range");
+    }
+    assert!(create(&screenshot_spec(json!([{"x":0.5,"y":1.2,"label":"Item"}]))).unwrap_err().contains("0-1 fractions"));
     assert!(create(&screenshot_spec(json!((0..7).map(|_| item(0.5)).collect::<Vec<_>>()))).unwrap_err().contains("1-6 items"));
     for region in [
         json!({"x": 0.9, "y": 0.4, "width": 0.2, "height": 0.2}),
@@ -536,4 +547,183 @@ fn issue18_a_floor_above_the_default_body_makes_it_an_author_choice() {
     spec["data"]["body_size"] = json!(18);
     let raised = preflight_spec(spec, "raised", 18.0);
     assert!(severities(&raised).iter().all(|severity| *severity == "info"), "raising body_size to the floor clears the warning: {raised}");
+}
+
+#[test]
+fn issue61_part_catalog_schema_matches_icon_column_graph_icon_and_body_size_limits() {
+    // Compile-time check: IconColumn is public and constructible, including its legacy field, from outside the crate.
+    let _column = aislide_core::parts::IconColumn {
+        label: "Item".into(),
+        detail: String::new(),
+        detail_emphasis: Vec::new(),
+        icon: None,
+        accent: None,
+    };
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let defs = catalog["schema"].get("$defs").or_else(|| catalog["schema"].get("definitions")).unwrap();
+
+    // 1. IconColumn is distinct from IconRow, accepts only the legacy empty detail_emphasis, and bounds label to 1..=48 scalars.
+    assert!(defs.get("IconColumn").is_some(), "missing IconColumn in part_catalog schema");
+    assert_eq!(defs["IconColumn"]["additionalProperties"], false);
+    assert_eq!(defs["IconColumn"]["properties"]["detail_emphasis"]["maxItems"], 0);
+    assert_eq!(defs["IconColumn"]["properties"]["detail_emphasis"]["deprecated"], true);
+    assert_eq!(defs["IconColumn"]["properties"]["label"]["minLength"], 1);
+    assert_eq!(defs["IconColumn"]["properties"]["label"]["maxLength"], 48);
+    assert_eq!(defs["IconColumn"]["properties"]["detail"]["maxLength"], 200);
+    let icon_columns_variant = defs["PartData"]["oneOf"].as_array().unwrap().iter()
+        .find(|variant| variant["properties"]["kind"]["const"] == "icon_columns").unwrap();
+    assert_eq!(icon_columns_variant["properties"]["items"]["items"]["$ref"], "#/$defs/IconColumn");
+    assert_eq!(icon_columns_variant["properties"]["items"]["minItems"], 2);
+    assert_eq!(icon_columns_variant["properties"]["items"]["maxItems"], 4);
+
+    let mut valid_col = example("list-horizontal/icon-columns");
+    valid_col["data"]["items"][0]["label"] = json!("a".repeat(48));
+    assert!(create(&valid_col).is_ok());
+    valid_col["data"]["items"][0]["label"] = json!("a".repeat(49));
+    assert!(create(&valid_col).unwrap_err().contains("48"));
+    let mut with_empty_emphasis = example("list-horizontal/icon-columns");
+    with_empty_emphasis["data"]["items"][0]["detail_emphasis"] = json!([]);
+    assert!(create(&with_empty_emphasis).is_ok(), "legacy empty detail_emphasis remains readable");
+    let parsed: aislide_core::parts::PartSpec = serde_json::from_value(with_empty_emphasis.clone()).unwrap();
+    let normalized = serde_json::to_value(parsed).unwrap();
+    assert!(normalized["data"]["items"][0].get("detail_emphasis").is_none(), "legacy detail_emphasis is removed when serialized");
+    let mut with_emphasis = example("list-horizontal/icon-columns");
+    with_emphasis["data"]["items"][0]["detail_emphasis"] = json!(["phrase"]);
+    assert!(create(&with_emphasis).unwrap_err().contains("Unsupported: icon columns do not draw detail_emphasis"), "the rejection keeps its Unsupported category");
+
+    // 2. The catalogs core returns describe the inline GraphIcon only; MCP adds the asset handle to the schema it republishes.
+    let graph_catalog = execute_request(json!({"op":"graph_catalog"})).unwrap();
+    let guide = execute_request(json!({"op":"best_practice_guide","profile_id":"technical-explainer"})).unwrap();
+    for schema in [&catalog["schema"], &graph_catalog["schema"], &graph_catalog["operation_schema"], &guide["input_schema"]] {
+        let schema_defs = schema.get("$defs").or_else(|| schema.get("definitions")).unwrap();
+        let graph_icon = &schema_defs["GraphIcon"];
+        assert_eq!(graph_icon["additionalProperties"], false);
+        assert_eq!(graph_icon["required"], json!(["base64", "mime_type"]));
+        assert!(graph_icon["properties"].get("asset_id").is_none() && graph_icon.get("oneOf").is_none(), "core does not accept asset handles");
+        assert_eq!(graph_icon["properties"]["base64"]["minLength"], 1);
+        assert_eq!(graph_icon["properties"]["base64"]["maxLength"], 1398104);
+        assert_eq!(graph_icon["properties"]["mime_type"]["enum"], json!(["image/png", "image/jpeg"]));
+        assert_eq!(graph_icon["properties"]["alt"]["maxLength"], 500);
+    }
+
+    // 3. body_size bounds in schema match core validation constants and boundary checks.
+    assert_eq!(defs["ComparisonPanel"]["properties"]["body_size"]["minimum"], aislide_core::parts::PANEL_BODY_SIZE_MIN);
+    assert_eq!(defs["ComparisonPanel"]["properties"]["body_size"]["maximum"], aislide_core::parts::PANEL_BODY_SIZE_MAX);
+    for kind in ["icon_cards", "icon_rows", "shift_rows", "step_cards", "screenshot_callouts"] {
+        let variant = defs["PartData"]["oneOf"].as_array().unwrap().iter()
+            .find(|variant| variant["properties"]["kind"]["const"] == kind).unwrap();
+        assert_eq!(variant["properties"]["body_size"]["minimum"], aislide_core::parts::BODY_SIZE_MIN, "{kind}");
+        assert_eq!(variant["properties"]["body_size"]["maximum"], aislide_core::parts::BODY_SIZE_MAX, "{kind}");
+    }
+    for (size, ok) in [(13.9, false), (14.0, true), (22.0, true), (22.1, false)] {
+        let mut cards = example("list-horizontal/icon-cards");
+        cards["data"]["body_size"] = json!(size);
+        assert_eq!(create(&cards).is_ok(), ok, "icon_cards body_size={size}");
+    }
+    for (size, ok) in [(15.9, false), (16.0, true), (28.0, true), (28.1, false)] {
+        let mut panels = example("contrast/panels");
+        panels["data"]["panels"][0]["body_size"] = json!(size);
+        assert_eq!(create(&panels).is_ok(), ok, "contrast/panels body_size={size}");
+    }
+
+    // 4. Each bullet point is bounded per item as well as per list, and the validators enforce the advertised bounds.
+    for definition in ["IconCard", "StepCard", "RoadmapPhase"] {
+        let points = &defs[definition]["properties"]["points"];
+        assert_eq!(points["maxItems"], 4, "{definition}");
+        assert_eq!(points["items"]["minLength"], 1, "{definition}");
+        assert_eq!(points["items"]["maxLength"], 80, "{definition}");
+    }
+    let mut long_point = example("list-horizontal/icon-cards");
+    long_point["data"]["cards"][0]["points"] = json!(["p".repeat(81)]);
+    assert!(create(&long_point).unwrap_err().contains("exceeds 80"));
+    let mut blank_point = example("list-horizontal/icon-cards");
+    blank_point["data"]["cards"][0]["points"] = json!([" "]);
+    assert!(create(&blank_point).unwrap_err().contains("card point is required"));
+}
+
+#[test]
+fn issue61_graph_icon_schema_tracks_the_struct_and_core_rejects_asset_handles() {
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let schema = &catalog["schema"]["$defs"]["GraphIcon"];
+
+    // Every field core serializes is documented, and nothing else is.
+    let serialized = icon(32, 32);
+    let mut core_fields: Vec<&str> = serialized.as_object().unwrap().keys().map(String::as_str).collect();
+    let mut documented: Vec<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+    core_fields.sort_unstable();
+    documented.sort_unstable();
+    assert_eq!(core_fields, documented);
+    assert_eq!(schema["required"], json!(["base64", "mime_type"]));
+    // The advertised bounds are the constants the validators use.
+    assert_eq!(schema["properties"]["base64"]["maxLength"], aislide_core::media::MAX_IMAGE_BASE64_LEN);
+    assert_eq!(schema["properties"]["alt"]["maxLength"], aislide_core::graphs::ICON_ALT_MAX);
+    let mut oversized = example("list-horizontal/icon-cards");
+    oversized["data"]["cards"][0]["icon"] = json!({"base64":"A".repeat(aislide_core::media::MAX_IMAGE_BASE64_LEN + 1),"mime_type":"image/png"});
+    assert!(create(&oversized).unwrap_err().contains("1 MiB"));
+
+    // MCP resolves `asset_id` to base64 before calling core, which has no asset registry and must not accept the handle.
+    let mut spec = example("list-horizontal/icon-cards");
+    spec["data"]["cards"][0]["icon"] = json!({"asset_id":"123e4567-e89b-42d3-a456-426614174000","mime_type":"image/png","alt":"Synthetic indicator"});
+    let error = create(&spec).unwrap_err();
+    assert!(error.contains("asset_id"), "{error}");
+}
+
+#[test]
+fn issue61_schema_text_limits_match_what_the_validators_enforce() {
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let defs = &catalog["schema"]["$defs"];
+    let variant = |kind: &str| defs["PartData"]["oneOf"].as_array().unwrap().iter()
+        .find(|variant| variant["properties"]["kind"]["const"] == kind).unwrap_or_else(|| panic!("missing {kind}"));
+    let example_of = |preset: &str| catalog["presets"].as_array().unwrap().iter().find(|entry| entry["id"] == preset).unwrap_or_else(|| panic!("missing {preset}"))["example"].clone();
+    // The schema object that owns the limits, a preset, and the JSON pointer of one such object in that preset's example.
+    let probes = [
+        (&defs["IconCard"], "list-horizontal/icon-cards", "/data/cards/0"),
+        (&defs["PartMessage"], "list-horizontal/icon-cards", "/data/message"),
+        (&defs["IconRow"], "list/icon-rows", "/data/rows/0"),
+        (&defs["ShiftRow"], "before-after/shift", "/data/rows/0"),
+        (variant("shift_rows"), "before-after/shift", "/data"),
+        (&defs["StepCard"], "flow/cards", "/data/steps/0"),
+        (variant("step_cards"), "flow/cards", "/data"),
+        (&defs["AgendaItem"], "list/agenda", "/data/items/0"),
+        (&defs["Callout"], "list-enumeration/screenshot-callouts", "/data/callouts/0"),
+        (&defs["EditorialStep"], "flow/open-steps", "/data/steps/0"),
+        (&defs["RoadmapPhase"], "flow/roadmap", "/data/phases/0"),
+        (&defs["IconColumn"], "list-horizontal/icon-columns", "/data/items/0"),
+        (&defs["FactColumn"], "list-horizontal/fact-columns", "/data/items/0"),
+        (&defs["ImageColumn"], "list-horizontal/image-columns", "/data/items/0"),
+        (&defs["ComparisonPanel"], "contrast/panels", "/data/panels/0"),
+        (&defs["ComparisonPanelItem"], "contrast/panels", "/data/panels/0/items/0"),
+        (&defs["GraphIcon"], "list-horizontal/icon-cards", "/data/cards/0/icon"),
+        (&defs["GraphIcon"], "list-horizontal/icon-columns", "/data/items/0/icon"),
+        (&defs["GraphIcon"], "list-horizontal/image-columns", "/data/items/0/image"),
+        (&defs["GraphIcon"], "list-enumeration/screenshot-callouts", "/data/image"),
+    ];
+    let seed_icon = icon(32, 32);
+    // JSON Schema and the validators both count Unicode scalar values, whatever their UTF-8 width.
+    for unit in ["x", "あ", "😀"] {
+        for (owner, preset, pointer) in probes {
+            for (property, schema) in owner["properties"].as_object().unwrap() {
+                let Some(maximum) = schema["maxLength"].as_u64() else { continue };
+                // The base64 bound is the decoder's byte limit, which the GraphIcon test checks separately.
+                if property == "base64" { continue; }
+                let probe = |length: u64| {
+                    let mut spec = example_of(preset);
+                    if spec.pointer(pointer).is_none() {
+                        // Optional objects such as `message` or `icon` are absent from the example; seed the smallest valid one.
+                        let (parent, key) = pointer.rsplit_once('/').unwrap();
+                        spec.pointer_mut(parent).unwrap()[key] = if key == "icon" { seed_icon.clone() } else { json!({"text":"Message"}) };
+                    }
+                    spec.pointer_mut(pointer).unwrap()[property] = json!(unit.repeat(length as usize));
+                    create(&spec)
+                };
+                let over = probe(maximum + 1).unwrap_err();
+                assert!(over.contains(&format!("exceeds {maximum} ")), "{preset} {pointer}.{property} advertises {maximum} for {unit}: {over}");
+                // Fitting the frame is a separate rule: at the advertised limit the length rule must pass, so the only
+                // accepted failures are the ones that name the frame, never a length or required-text error.
+                if let Err(error) = probe(maximum) {
+                    assert!(["does not fit", "too long for its panel"].iter().any(|fit| error.contains(fit)), "{preset} {pointer}.{property} at {maximum} for {unit}: {error}");
+                }
+            }
+        }
+    }
 }

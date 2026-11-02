@@ -77,7 +77,7 @@ pub fn prepare_delivery(document: &Document, expected_revision: u64, expected_ha
     let visual_requested = options.pdf || options.preflight || !matches!(options.preview, DeliveryPreview::None);
     if selected.is_empty() || selected.iter().any(|index| *index >= all_pages.len()) || selected.iter().collect::<BTreeSet<_>>().len() != selected.len()
         || (visual_requested && selected.len() > 8) || (options.page_indices.is_some() && selected.len() > 8)
-    { return Err(Error::Invalid("delivery visual selection requires 1-8 unique existing page indices; PPTX always contains the whole deck".into())); }
+    { return Err(Error::Invalid("delivery visual selection requires 1-8 unique existing page indices (use options.page_indices); PPTX always contains the whole deck".into())); }
     let presentation = document::export_presentation(document)?;
     let base64 = presentation["base64"].as_str().ok_or_else(|| Error::Invalid("PPTX export did not return bytes".into()))?;
     let mut bundle = Builder { files: Vec::new(), remaining: options.max_output_bytes };

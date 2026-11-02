@@ -143,13 +143,13 @@ reference-site slide images, branding or proprietary artwork are bundled.
 
 The short project-owned [AISlide authoring SKILL](../../.github/skills/aislide-authoring/SKILL.md) provides the normal path and failure rules; load detailed sections below only as needed. Reuse supplied ledgers; use `slide-planning` for new structure without one. It presents the Japanese specialist, reason and target slides before bounded delegation; recommendation-only requests do not start authoring. Seven Japanese specialists cover 33 purposes, while English passages keep the purpose references and English editor. For shared references and same-scope installation, see the [skill roles and setup](../../.github/skills/README.md). MCP initialization also advertises the short serialization, batching, asset and completion rules without requiring a separate guide call.
 
-The default connection is lightweight: ten common tools are initially exposed. `discover_tools({query})` searches advanced operations without their full schemas; `get_tool_schema({name})` returns the needed schema and publishes that tool. The four most recently requested advanced tools remain in the additional list. Existing direct calls are still valid; `--tool-profile full` restores full discovery and legacy response defaults.
+The default connection is lightweight: ten common tools are initially exposed. `discover_tools({query})` searches advanced operations without their full schemas; `get_tool_schema({name})` returns the needed schema and publishes that tool. The four most recently requested advanced tools remain in the additional list. Existing direct calls are still valid; `--tool-profile full` exposes all tools and `structuredContent` while keeping `detail:"summary"` as the default when `detail` is omitted (pass `detail:"full"` explicitly when legacy full responses are needed).
 
 Layout patterns are opt-in. Starting the server with `--layout-patterns on` exposes `layout_patterns` alongside the common tools and adds one server instruction: choose a body pattern by information relationship, resolve it for the deck and use the returned slot frames unchanged. Without the flag (default `off`) the tool is absent and discovery does not list it. The flag only sets the initial state. Authors can also turn the guide on or off from the prompt, for example by asking to use patterns, or for free placement or an existing template: the agent calls `set_layout_patterns` (`on`, `off` or `status`), which publishes or hides `layout_patterns` and returns the instruction to follow. That choice is deterministic for the running server, lasts until it restarts and is not saved; a request the agent does not turn into a call still depends on the model.
 
 For ordinary freeform authoring, use `create_presentation`, `edit_slides`, and bounded `apply_operations` batches with final content/geometry. Compact mutation replies carry the next revision/hash. `list_decks` restores lost handles and last successful operations/exports; `get_deck_summary` returns small paginated slide or element indexes without core calls, image/source bytes, notes or rendering. This removes the need for a manual progress file or repeated full-document reads just to continue working. It does not persist across server restarts or determine whether content is complete.
 
-With operator-approved `--asset-dir` roots, `register_asset({path:"image.png"})` reads the file once. Use its `asset_id` in binary tools, `apply_operations` with `add_picture`, or graph `icon` values. Prepared graph icons and catalog icon assets already return handles in compact mode. `list_assets` recovers them and `close_asset` releases unused registry bytes. No arbitrary paths, external relationship fetching or source overwrite is enabled. See [local asset bounds and contracts](../api.md#local-asset-handles).
+With operator-approved `--asset-dir` roots, `register_asset({path:"image.png"})` reads the file once. Use its `asset_id` in binary tools, `apply_operations` with `add_picture`, or graph `icon` values. Prepared graph icons and catalog icon assets already return handles by default (unless `detail:"full"` is passed). `list_assets` recovers them and `close_asset` releases unused registry bytes. No arbitrary paths, external relationship fetching or source overwrite is enabled. See [local asset bounds and contracts](../api.md#local-asset-handles).
 
 PNG/JPEG registration returns verified pixel `width`/`height`. Prefer `add_picture` with `fit:"contain"` for complete diagrams or `fit:"cover"` for an intentionally cropped frame; omitted fit preserves legacy stretching. `IMAGE_ASPECT_DISTORTED` warns when the local picture frame differs by over 5% from the cropped source ratio. It is a renderer warning, not a blocking error or a full audit of ancestor transforms. No visual warning is promised when all rendering/preflight is explicitly disabled.
 
@@ -314,6 +314,18 @@ the tolerance measured from its rendered geometry. A diagram reclaims the 88px
 title band only when its own `GraphSpec.show_title` is true and the layout
 removes it; with `GraphSpec.show_title:false` the part keeps its full 512px
 height whatever `layout.show_title` says, and preflight measures that height.
+
+A part whose `layout.show_title` is true (the default) must have a nonempty
+`spec.title`: `add_part`, `create_part`, `insert_part` and `update_part`, and a
+graph through `add_graph` with a `layout` or `update_graph`, reject a blank one
+with the message `compose_slide` already gives for `show_title:true`, because the
+band would only push the body down. Give a part without a title
+`layout.show_title:false`; a graph with `GraphSpec.show_title:false` has no band
+and needs none. Saved parts that already have an empty band stay readable and
+editable, and preflight reports each as `PART_TITLE_BAND_EMPTY`. A part without
+a `layout` keeps its legacy placement, which always draws the band, and is
+outside both the rule and the finding; give it a title or a `layout` with
+`show_title:false` to remove an empty strip.
 
 For graphs, `GraphSpec.show_title:false` allows content at y=0 instead of
 reserving the 88px title band on the 1152x512 graph canvas. Node `detail`
