@@ -232,6 +232,8 @@ pub(crate) fn change_in_deck(deck:&mut Deck,parts:&mut Vec<PartInstance>,slide_i
             }
         }
     }
+    // An update may keep a band that is already empty, but must not introduce one.
+    if !(update && existing.is_some_and(|index| super::title_band_empty(&parts[index].spec))) { super::validate_title_band(spec)?; }
     let mut element=super::create_with_theme(id,&effective_spec,crate::design::slide_theme(slide,deck.design.as_ref()).unwrap_or(&fallback))?;
     if !update && effective_spec.layout.is_none() {
         let region = deck.design.as_ref().and_then(|design| design.layouts.iter().find(|layout| Some(&layout.id) == slide.layout_id.as_ref() && layout.id == "preset-visual-content"))

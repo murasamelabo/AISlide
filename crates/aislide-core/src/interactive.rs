@@ -37,36 +37,37 @@ pub struct State {
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Group { pub id: String, pub label: String }
+pub struct Group { #[schemars(length(min = 1, max = 32))] pub id: String, #[schemars(length(min = 1, max = 32))] pub label: String }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Metric { pub label: String, pub value: String, pub qualifier: String }
+pub struct Metric { #[schemars(length(min = 1, max = 32))] pub label: String, #[schemars(length(min = 1, max = 24))] pub value: String, #[schemars(length(min = 1, max = 80))] pub qualifier: String }
 
+/// `id` is 1-32 ASCII letters, digits, `-` or `_`. `values` holds one text per dimension of the view.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Item {
-    pub id: String,
-    pub label: String,
-    pub detail: String,
-    #[serde(default)] pub action: String,
+    #[schemars(length(min = 1, max = 32))] pub id: String,
+    #[schemars(length(min = 1, max = 48))] pub label: String,
+    #[schemars(length(min = 1, max = 300))] pub detail: String,
+    #[serde(default)] #[schemars(length(max = 160))] pub action: String,
     #[serde(default, skip_serializing_if="Option::is_none")] pub group_id: Option<String>,
-    #[serde(default, skip_serializing_if="Option::is_none")] pub value: Option<f64>,
-    #[serde(default)] pub unit: String,
-    #[serde(default)] pub values: Vec<String>,
-    #[serde(default)] pub metrics: Vec<Metric>,
+    #[serde(default, skip_serializing_if="Option::is_none")] #[schemars(range(min = 0, max = 1e15))] pub value: Option<f64>,
+    #[serde(default)] #[schemars(length(max = 16))] pub unit: String,
+    #[serde(default)] #[schemars(length(max = 4), inner(length(min = 1, max = 96)))] pub values: Vec<String>,
+    #[serde(default)] #[schemars(length(max = 3))] pub metrics: Vec<Metric>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
-    pub version: u32,
+    #[schemars(range(min = 1, max = 1))] pub version: u32,
     pub template: Template,
     #[serde(default,skip_serializing_if="Appearance::is_plain")] pub appearance: Appearance,
-    pub source: String,
-    #[serde(default)] pub groups: Vec<Group>,
-    #[serde(default)] pub dimensions: Vec<String>,
-    pub items: Vec<Item>,
+    #[schemars(length(min = 1, max = 240))] pub source: String,
+    #[serde(default)] #[schemars(length(max = 4))] pub groups: Vec<Group>,
+    #[serde(default)] #[schemars(length(max = 4), inner(length(min = 1, max = 32)))] pub dimensions: Vec<String>,
+    #[schemars(length(min = 2, max = 8))] pub items: Vec<Item>,
     pub initial_state: State,
 }
 
@@ -152,8 +153,11 @@ pub(crate) fn create(id: &str, part: &PartSpec, spec: &Spec, state: &State, them
     field(id,40,"interactive part ID",true)?;
     crate::design::validate_theme(theme)?;
     let frame=part.layout.as_ref().map_or([64.0,144.0,1152.0,512.0],|l|[l.x,l.y,l.width,l.height]);
-    if frame[2]<960.0 || frame[3]<480.0 { return Err(Error::Invalid("interactive part requires a frame of at least 960x480; enlarge it rather than shrinking text".into())); }
-    let width=frame[2]; let height=frame[3]; let top=if part.layout.as_ref().is_none_or(|l|l.show_title) {80.0} else {0.0};
+    let show_title=part.layout.as_ref().is_none_or(|l|l.show_title);
+    // The 80px title band is not drawn when hidden, so the body keeps the same 340px at either minimum.
+    let (min_height,requirement)=if show_title {(480.0,"960x480 (960x400 when layout.show_title is false)")} else {(400.0,"960x400 (layout.show_title is false)")};
+    if frame[2]<960.0 || frame[3]<min_height { return Err(Error::Invalid(format!("interactive part requires a frame of at least {requirement}; enlarge it rather than shrinking text"))); }
+    let width=frame[2]; let height=frame[3]; let top=if show_title {80.0} else {0.0};
     let bottom=height-48.0; let body_height=bottom-top-12.0;
     let mut drawing=Drawing::new(&format!("{id}-interactive"));
     if spec.appearance==Appearance::Showcase {
@@ -277,7 +281,7 @@ pub(crate) fn presets() -> Vec<Value> {
             }).collect(),initial_state:State{selected_id:"identity".into(),group_id:None,dimension:0,scale:Scale::Linear}};
         let preset=format!("interactive/{}",template.name());
         json!({"id":preset,"category":"interactive","category_name":"Interactive prototypes","name":template.name(),"family":"Diagrams",
-            "use_when":"Explore approved data using selection, grouping or staged detail in AISlide.",
+            "use_when":"Explore approved data using selection, grouping or staged detail in AISlide. The frame needs at least 960x480, or 960x400 when layout.show_title is false; a JavaScript lab export needs 960x480 either way.",
             "avoid_when":"PowerPoint interactivity or arbitrary HTML/JavaScript execution is required.",
             "example":{"version":1,"preset":preset,"title":format!("Interactive {}",template.name()),"subtitle":"Synthetic example",
                 "data":{"kind":"interactive","spec":data}}})
