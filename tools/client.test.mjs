@@ -445,6 +445,52 @@ test('issue36 SDK warning snapshots retain validated owner scopes', async () => 
   }
 });
 
+test('issue58 SDK reports cascaded removals bound to the accepted revision', async () => {
+  const original = { id: 'removals', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
+  const removal = { slide_id: 'slide-1', requested: ['rect'], cascaded: ['connector'] };
+  const accepted = (revision, extra = {}) => ({ document: { ...original, revision, hash: String(revision).repeat(64) }, receipt: { inverse: [] }, ...extra });
+  let result = accepted(1, { removed: [removal] });
+  const session = new DocumentSession(async () => { if (result instanceof Error) throw result; return result; }, original);
+  const operations = [{ op: 'remove_elements', slide_id: 'slide-1', ids: ['rect'] }];
+  assert.equal(session.removedElements, null);
+  await session.removeElements('slide-1', ['rect']);
+  const snapshot = { revision: 1, hash: '1'.repeat(64), status: 'complete', removed: [removal] };
+  assert.deepEqual(session.removedElements, snapshot);
+  session.removedElements.removed[0].cascaded.push('Must not leak');
+  assert.deepEqual(session.removedElements, snapshot);
+  assert.equal(session.document.removed, undefined);
+  result = new Error('Rejected edit');
+  await assert.rejects(session.applyOperations(operations), /Rejected edit/);
+  assert.deepEqual(session.removedElements, snapshot);
+  result = accepted(2);
+  await session.undo();
+  assert.equal(session.removedElements, null);
+  result = accepted(3, { removed: [removal] });
+  await session.applyOperations(operations);
+  assert.equal(session.removedElements.revision, 3);
+  result = accepted(4);
+  await session.applyOperations([{ op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' }]);
+  assert.equal(session.removedElements, null, 'only the latest accepted edit is reported');
+});
+
+test('issue58 SDK degrades malformed removal reports to unavailable without failing the edit', async () => {
+  const original = { id: 'removals-invalid', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
+  const removal = { slide_id: 'slide-1', requested: ['rect'], cascaded: ['connector'] };
+  const accessor = { ...removal };
+  Object.defineProperty(accessor, 'cascaded', { enumerable: true, get() { throw new Error('Accessor must not run'); } });
+  const invalid = ['invalid', [{ ...removal, cascaded: 'connector' }], [{ ...removal, slide_id: 'x'.repeat(81) }], [{ ...removal, requested: [7] }],
+    [{ ...removal, requested: Array.from({ length: 129 }, (_, index) => `e${index}`) }], [{ ...removal, cascaded: Array.from({ length: 257 }, (_, index) => `e${index}`) }],
+    Array.from({ length: 129 }, () => removal), [accessor], [{ ...removal, cascaded: [, 'connector'] }]];
+  let result;
+  const session = new DocumentSession(async () => result, original);
+  for (const [index, removed] of invalid.entries()) {
+    result = { document: { ...original, revision: index + 1, hash: String(index + 1).repeat(64) }, receipt: { inverse: [] }, removed };
+    await session.applyOperations([{ op: 'remove_elements', slide_id: 'slide-1', ids: ['rect'] }]);
+    assert.equal(session.revision, index + 1);
+    assert.deepEqual(session.removedElements, { revision: index + 1, hash: String(index + 1).repeat(64), status: 'unavailable', removed: [] });
+  }
+});
+
 test('reference SDK forwards guarded core mutation and records undo', async () => {
   const original = { id: 'references-sdk', revision: 0, hash: 'a'.repeat(64), deck: { slides: [] } };
   const calls = [];

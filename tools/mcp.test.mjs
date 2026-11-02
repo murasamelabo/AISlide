@@ -962,6 +962,24 @@ test('issue36 MCP mutation warnings distinguish matching IDs in different owners
   });
 });
 
+test('issue58 MCP returns cascaded removals from apply_operations and remove_elements', async () => {
+  await feedbackMcpFixture(async ({ call, registrations, fixture }) => {
+    const created = await call('create_presentation', { title: 'Synthetic cascade' });
+    const removal = { slide_id: 'slide-1', requested: ['rect'], cascaded: ['connector'] };
+    fixture.onRequest = async request => ({ document: { ...request.document, revision: request.document.revision + 1, hash: 'b'.repeat(64) }, receipt: { inverse: [] }, removed: [removal] });
+    const batch = await call('apply_operations', { deck_id: created.deck_id, expected_revision: 0, expected_hash: 'a'.repeat(64), operations: [{ op: 'remove_elements', slide_id: 'slide-1', ids: ['rect'] }] });
+    assert.deepEqual(batch.removedElements, { revision: 1, hash: 'b'.repeat(64), status: 'complete', removed: [removal] });
+    const single = await call('remove_elements', { deck_id: created.deck_id, expected_revision: 1, slide_id: 'slide-1', ids: ['rect'] });
+    assert.equal(single.removedElements.revision, 2);
+    assert.deepEqual(single.removedElements.removed, [removal]);
+    fixture.onRequest = async request => ({ document: { ...request.document, revision: request.document.revision + 1, hash: 'c'.repeat(64) }, receipt: { inverse: [] } });
+    const untouched = await call('apply_operations', { deck_id: created.deck_id, expected_revision: 2, expected_hash: 'b'.repeat(64), operations: [{ op: 'set_slide_background', slide_id: 'slide-1', color: 'FFFFFF' }] });
+    assert.equal(untouched.removedElements, undefined);
+    for (const name of ['apply_operations', 'remove_elements']) assert.match(registrations.get(name).config.description, /removedElements/);
+    assert.match(registrations.get('remove_elements').config.description, /children of a removed group.*connectors attached/);
+  });
+});
+
 test('issue18 MCP exposes bounded template inspection and selection', async () => {
   await feedbackMcpFixture(async ({ call, calls, registrations, fixture }) => {
     assert.ok(registrations.has('inspect_template'));

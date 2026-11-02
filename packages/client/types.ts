@@ -407,6 +407,9 @@ export type GraphFinding = { code: string; severity: 'warning' | 'info'; graph_i
 export type GraphDiagnostics = { status: 'complete' | 'partial' | 'unavailable'; findings: GraphFinding[] }
 export type GraphDiagnosticsSnapshot = GraphDiagnostics & { revision: number; hash: string }
 export type RenderWarningsSnapshot = { revision: number; hash: string; status: 'complete' | 'unavailable'; warnings: StaticExport['warnings'] }
+/** One remove_elements operation: the IDs it named, plus the group children and attached connectors removed with them (document order). */
+export type RemovedElements = { slide_id: string; requested: string[]; cascaded: string[] }
+export type RemovedElementsSnapshot = { revision: number; hash: string; status: 'complete' | 'unavailable'; removed: RemovedElements[] }
 export type GraphCreation = { element: Element; diagnostics: GraphDiagnostics }
 export type GraphAlignment = 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom'
 export type GraphOperation =

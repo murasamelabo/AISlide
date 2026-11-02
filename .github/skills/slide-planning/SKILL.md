@@ -24,7 +24,7 @@ Recommendation-only work permits selection, not editing or rendering.
 3. Read only selected purpose sections. Aliases aid discovery, not deterministic
   classification. Ask if ambiguity matters. If none fits, disclose the gap;
   never force an ID or expand the taxonomy.
-4. Specify delivery separately: live talk, read-alone PDF, hands-on or recorded talk;
+4. Specify delivery separately: live talk, read-alone PDF, hands-on session or recorded talk;
   viewport, time and interaction matter. Language and brand do not set purpose.
 
 ## Selection and delegation
@@ -55,8 +55,8 @@ If no purpose fits, propose a custom outline only when planning was requested.
 - Give each slide one role: orientation, claim, comparison, evidence, instruction,
   discussion or decision. Questions and tasks are valid titles. Keep axes, sources
   and limits visible, not hidden in notes.
-- Per slide, add question, relation, primary visual (`native chart` / `native table` /
-  `part:<preset>` / `graph` / `picture` / `text` / `hand-drawn shapes` with reason),
+- Per slide, add question, relation, primary visual (`native chart`/`native table`/
+  `part:<preset>`/`graph`/`picture`/`text`/`hand-drawn shapes` with reason),
   rejected native alternative, emphasis and shared roles to the ledger (no global
   "draw charts with shapes" rule).
   Follow [visual defaults](../aislide-authoring/references/visual-selection.md).

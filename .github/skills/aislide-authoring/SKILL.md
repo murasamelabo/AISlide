@@ -33,8 +33,8 @@ Skills do not connect MCP. Label synthetic data.
 5. For icon-led briefings, read `references/technical-panels.md`. Prefer managed
 	parts/graphs and native charts/tables; avoid hand-drawn data charts unless no
 	native/managed option fits. Composition graph `input` is coordinate-free.
-	`layout_graph` is a grid: 1-48 nodes, 64 edges, 1-8 columns (default 3), no groups
-	or node resizing.
+	`layout_graph` is a grid: 1-48 nodes, 64 edges, 1-8 columns (default 3),
+	no groups or node resizing.
 6. Register approved local images with `register_asset` / `register_assets` (1-32).
 	Use `asset_id` and dimensions; never output base64. `prepare_assets` batches
 	edits, keeping originals. Use `fit:"contain"` or `fit:"cover"`; omitting `fit`
@@ -42,7 +42,8 @@ Skills do not connect MCP. Label synthetic data.
 7. Batch 1-128 `apply_operations` (`update_chart` / `remove_elements` adjust in
 	place); after targets exist include `update_notes`, `set_table_headers`,
 	`set_accessibility`. One Undo; atomic rejection. Use planned revision/hash;
-	never force a stale plan.
+	never force a stale plan. `remove_elements` also removes group children and
+	attached connectors; check `removedElements[].cascaded`.
 8. `set_text_padding` leaves positive space; `null` resets defaults. `set_rich_text`
 	takes paragraphs; empty input clears. Use dynamic-field ops; keep validation.
 9. Serialize core-backed AISlide calls, including reads/previews. Await each batch;

@@ -1172,6 +1172,10 @@ function renderWarningMetadata(state) {
 	const renderWarnings = state.renderWarnings;
 	return renderWarnings === null ? {} : { renderWarnings };
 }
+function removalMetadata(state) {
+	const removedElements = state.removedElements;
+	return removedElements === null ? {} : { removedElements };
+}
 const graphDiagnosticDescription = ' Returns optional revision/hash-bound graphDiagnostics from the accepted operation, including no-ops: complete/partial/unavailable, at most 64 findings and 32 KiB. Diagnostic failure does not undo a successful commit; no extra render request. Diagnostics are not persisted. Label warnings are nonblocking unless on_overlap=error.';
 for (const name of ['add_graph', 'update_graph', 'apply_graph']) {
 	register(name, (name === 'add_graph' ? 'Insert an architecture graph as native shapes and attached connectors in one undoable revision. Does not rearrange existing slide objects.' : 'Update a managed architecture graph in one undoable revision. Preserves root placement and rejects stale metadata rather than overwriting external/manual changes.') + graphDiagnosticDescription, { deck_id: handle, expected_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), slide_id: z.string().min(1).max(80), id: z.string().min(1).max(40), ...(name === 'apply_graph' ? { operations: graphOperations } : { spec: graphSpec }) }, false, async ({ deck_id, expected_revision, slide_id, ...input }, signal) => {
@@ -1305,10 +1309,10 @@ register('assign_layout', 'Apply or reset a native slide layout using a document
 	const state = getDeck(deck_id); await state.assignLayout(slide_id, layout_id, { signal, expectedRevision: expected_revision, preserveFreeform: preserve_freeform }); return { deck_id, revision: state.revision };
 });
 register('create_object', 'Create a typed default object without inserting it. Charts contain synthetic examples. Supply final content and geometry through add_elements or apply_operations; core validates complete elements there.', objectInput, true, async (input, signal) => client.createObject(input, { signal }));
-register('apply_operations', 'Apply 1-128 typed operations across slides with one Undo and revision/hash checks. Default discovery shows text/rect/shape/connector elements, picture placement and metadata. For tables/charts/polygons/groups or managed add_part/add_graph, fetch get_tool_schema(name="apply_operations") for the complete schema. Runtime validation always retains all strict types. Includes update_notes (8000 scalars), set_table_headers and set_accessibility after target creation. Plain notes never flatten incompatible rich notes. Managed graphs retain PartLayout/stale guards. Core retains locks, native/source safety and capacity limits. Serialize AISlide calls; never blindly retry. No raw Patch paths.' + graphDiagnosticDescription, { ...mutationInput, expected_hash: contentHash, operations: authoringOperations }, false, async ({ deck_id, expected_revision, expected_hash, operations }, signal) => {
+register('apply_operations', 'Apply 1-128 typed operations across slides with one Undo and revision/hash checks. Default discovery shows text/rect/shape/connector elements, picture placement and metadata. For tables/charts/polygons/groups or managed add_part/add_graph, fetch get_tool_schema(name="apply_operations") for the complete schema. Runtime validation always retains all strict types. Includes update_notes (8000 scalars), set_table_headers and set_accessibility after target creation. Plain notes never flatten incompatible rich notes. remove_elements also removes group children and attached connectors and returns them as removedElements[].cascaded. Managed graphs retain PartLayout/stale guards. Core retains locks, native/source safety and capacity limits. Serialize AISlide calls; never blindly retry. No raw Patch paths.' + graphDiagnosticDescription, { ...mutationInput, expected_hash: contentHash, operations: authoringOperations }, false, async ({ deck_id, expected_revision, expected_hash, operations }, signal) => {
 	const state = getDeck(deck_id);
 	await state.applyOperations(operations, { signal, expectedRevision: expected_revision, expectedHash: expected_hash });
-	return { deck_id, revision: state.revision, hash: state.document.hash, can_undo: state.canUndo, ...graphDiagnosticMetadata(state), ...renderWarningMetadata(state) };
+	return { deck_id, revision: state.revision, hash: state.document.hash, can_undo: state.canUndo, ...graphDiagnosticMetadata(state), ...renderWarningMetadata(state), ...removalMetadata(state) };
 });
 const authoringDescriptions = {
 	add_elements: 'Append 1-128 complete typed native elements in one Undo. Includes rich text, geometry, visual styles, tables, charts and groups. Core validates all content; no external fetches.',
@@ -1325,8 +1329,8 @@ const authoringDescriptions = {
 	set_hyperlink: 'Set or clear a text/shape hyperlink in one Undo. Core validates allowed link targets without fetching them.',
 	set_shape_adjustment: 'Set the existing adj guide of a supported roundRect, chevron or triangle in one Undo. Core rejects unsupported presets and values.',
 	add_picture: 'Decode and append embedded PNG/JPEG bytes with optional final frame/crop in one core transaction and Undo. No linked images or execution. Optional revision retains legacy calls; supply it for stale-edit protection.',
-	update_chart: 'Update an existing native chart element in place (kind, categories, series, options, optional replace_options and frame) without rebuilding the slide, in one Undo. Omitted fields are preserved (options merges non-empty fields by default; set replace_options:true to replace/reset options); chartEx constraints are re-validated.',
-	remove_elements: 'Remove 1-128 distinct top-level elements on one slide in one Undo, cleaning up attached connectors, managed part records, bindings and review metadata.',
+	update_chart: 'Update an existing native chart element in place (kind, categories, series, options, optional replace_options and frame) without rebuilding the slide, in one Undo. Omitted fields are preserved (options merges non-empty fields by default, so a set flag such as primary_axis.reverse stays until replace_options:true replaces/resets options); chartEx constraints are re-validated. Data or style changes to an imported native chart are applied only when the chart and its workbook match what AISlide generates; otherwise the edit is rejected.',
+	remove_elements: 'Remove 1-128 distinct top-level elements on one slide in one Undo, cleaning up managed part records, bindings and review metadata. Elements that depend on them are removed too without being named: the children of a removed group and the connectors attached to a removed element. The response lists, per operation, the requested IDs and the cascaded IDs in removedElements; check cascaded before continuing and undo if it is not intended.',
 };
 for (const variant of authoringVariants) {
 	const name = variant.shape.op.value;
@@ -1334,7 +1338,7 @@ for (const variant of authoringVariants) {
 	register(name, authoringDescriptions[name], { ...mutationInput, ...(name === 'add_picture' ? { expected_revision: mutationInput.expected_revision.optional() } : {}), expected_hash: contentHash.optional(), ...variant.omit({ op: true }).shape }, false, async ({ deck_id, expected_revision, expected_hash, ...input }, signal) => {
 		const state = getDeck(deck_id);
 		await state.applyOperations([{ ...input, op: name }], { signal, expectedRevision: expected_revision, expectedHash: expected_hash });
-		return { deck_id, revision: state.revision, hash: state.document.hash, ...(input.id === undefined ? {} : { element_id: input.id }), ...renderWarningMetadata(state) };
+		return { deck_id, revision: state.revision, hash: state.document.hash, ...(input.id === undefined ? {} : { element_id: input.id }), ...renderWarningMetadata(state), ...removalMetadata(state) };
 	});
 }
 register('set_frames', 'Set 1-128 frames on one slide in one Undo. Geometry only; fonts and strokes remain unchanged. Core validates the whole batch.', { ...mutationInput, expected_hash: contentHash.optional(), slide_id: slideId, frames: z.array(z.object({ id: slideId, frame: frameSchema }).strict()).min(1).max(128) }, false, async ({ deck_id, expected_revision, expected_hash, slide_id, frames }, signal) => {

@@ -561,7 +561,25 @@ Every operation has `op` and `slide_id`, plus the following fields:
 | `set_shape_adjustment` | `id`, `adjustment` | Set a supported typed shape adjustment; not arbitrary DrawingML formulas |
 | `add_picture` | `id`, `base64`, `mime_type`, `alt`, optional `frame`, `crop` | Decode PNG/JPEG and insert at the supplied frame/crop in the same transaction; omission retains the fitted picture defaults |
 | `update_chart` | `id`, optional `kind`, `categories`, `series`, `options`, `replace_options`, `frame` | Update an existing native `Element::Chart` in place without rebuilding the slide; omitted fields are preserved (`options` merges non-empty fields unless `replace_options: true` resets/replaces `options`) and `chartEx` rules are re-validated |
-| `remove_elements` | `ids` | Remove 1-128 distinct top-level elements on one slide, cleaning up attached connectors, managed part metadata, source bindings and review metadata |
+| `remove_elements` | `ids` | Remove 1-128 distinct top-level elements on one slide, cleaning up managed part metadata, source bindings and review metadata. The children of a removed group and the connectors attached to a removed element go with it and are reported, not silent |
+
+`update_chart` replaces `categories` and `series` as whole lists and merges
+`options` field by field, so a flag that was set (for example
+`primary_axis.reverse`) is cleared only with `replace_options: true` plus the
+options to keep. Any data or style change marks source bindings on the chart
+stale. On an imported presentation, a data or style change rewrites the chart part
+and its embedded workbook together, and only when both match what AISlide
+generates for the current chart; custom chart XML, custom workbook content and
+chart/`chartEx` conversion are rejected rather than dropped.
+
+`remove_elements` removes more than it is asked to when other elements depend on
+a target. The transaction result carries `removed:[{slide_id,requested,cascaded}]`,
+one entry per operation and omitted when nothing was removed: `requested` repeats
+the IDs supplied and `cascaded` lists every other removed ID in document order.
+SDK `session.removedElements` and the MCP `apply_operations` and `remove_elements`
+responses expose it as `removedElements:{revision,hash,status,removed}`. Status
+is `complete` or `unavailable`; later accepted edits and Undo/Redo clear the
+snapshot. Undo restores the whole batch, including the cascaded elements.
 
 `Frame` is `{x,y,width,height}`: finite nonnegative coordinates, positive
 dimensions, each bounded by 4096 scene pixels, with final page/group bounds
@@ -806,7 +824,7 @@ Options: `page_indices?`, `pdf:false`, `preview:"contact_sheet"` (`pages` / `non
 
 MCP `finalize_presentation({deck_id,expected_revision,expected_hash,name,options?,include_images?,detail?})` prepares the same bundle, binds safe filenames, verifies hashes and budgets, then exclusively publishes beneath the startup-approved output root. By default (`detail:"summary"` in all tool profiles), supplemental previews/checks use 640px and the first eight pages, disclosed by `page_scope` and the manifest; the PPTX always contains every slide. Explicit options override defaults; `detail:"full"` restores core defaults. At most 13 files including the manifest; 32MiB decoded total and at most 4MiB MCP response (capacity limits also apply). A thumbnail plus actual paths, hashes, sizes, check scope and manifest path are returned. `include_images:false` suppresses only the response image. Every destination is checked, all temporary files staged, and the manifest published last. Existing files are never replaced. No directory, URL or arbitrary file path is accepted from the request.
 
-The manifest format is `aislide.delivery`, version 1. It records actual producer/core versions and MCP transport, document revision/hash, file hashes, visual page scope, checks, findings and limitations. `complete` is publication success, not quality approval; preflight can report findings. No source authenticity/freshness, semantic truth, accessibility certification or Office parity is asserted. Files are not a crash-atomic group. A structured `BUNDLE_PUBLICATION_FAILED` result lists exact successful paths and pending filenames with a `not_published`, `partially_published` or `published_with_error` status. Published files are never cleaned up automatically; only owned temporary paths are removed. Cancellation after a link may leave outputs; inspect the manifest and hashes before retrying with a new name. Root checks do not establish hard immunity to hostile local path races. See [delivery workflow and example](authoring/README.md#delivery-bundles).
+The manifest format is `aislide.delivery`, version 1. It records actual producer/core versions and MCP transport, document revision/hash, file hashes, visual page scope, checks, findings and limitations. `producer.git_commit`, `core_git_commit` and `mcp_git_commit` are the HEAD short SHAs recorded at build or start (`unknown` when unavailable, or an `AISLIDE_GIT_COMMIT` override); they do not distinguish uncommitted working-tree changes, so they do not prove a clean build. `complete` is publication success, not quality approval; preflight can report findings. No source authenticity/freshness, semantic truth, accessibility certification or Office parity is asserted. Files are not a crash-atomic group. A structured `BUNDLE_PUBLICATION_FAILED` result lists exact successful paths and pending filenames with a `not_published`, `partially_published` or `published_with_error` status. Published files are never cleaned up automatically; only owned temporary paths are removed. Cancellation after a link may leave outputs; inspect the manifest and hashes before retrying with a new name. Root checks do not establish hard immunity to hostile local path races. See [delivery workflow and example](authoring/README.md#delivery-bundles).
 
 ### Office Text And Rendering
 

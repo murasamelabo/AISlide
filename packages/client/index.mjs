@@ -154,6 +154,7 @@ export class DocumentSession {
   #fieldWarnings = [];
   #graphDiagnostics = null;
   #renderWarnings = null;
+  #removedElements = null;
   #referencePublication = null;
   #profile;
   #historyBoundary = null;
@@ -196,6 +197,7 @@ export class DocumentSession {
   get fieldWarnings() { return [...this.#fieldWarnings]; }
   get graphDiagnostics() { return structuredClone(this.#graphDiagnostics); }
   get renderWarnings() { return structuredClone(this.#renderWarnings); }
+  get removedElements() { return structuredClone(this.#removedElements); }
   get referencePublication() { return structuredClone(this.#referencePublication); }
 
   getSummary({ offset = 0, limit = 16, slideId } = {}) {
@@ -280,6 +282,7 @@ export class DocumentSession {
     this.#document = result.document;
     this.#graphDiagnostics = graphDiagnosticsSnapshot(result, this.#document);
     this.#renderWarnings = renderWarningsSnapshot(result, this.#document);
+    this.#removedElements = removedElementsSnapshot(result, this.#document);
     const publication = result.publication;
     this.#referencePublication = publication && [publication.supplied, publication.published, publication.excluded].every(value => Number.isInteger(value) && value >= 0 && value <= 64)
       && publication.supplied === publication.published + publication.excluded
@@ -482,6 +485,7 @@ export class DocumentSession {
       from.pop(); this.#retain(to, result.receipt); this.#document = result.document;
       this.#graphDiagnostics = null;
       this.#renderWarnings = null;
+      this.#removedElements = null;
       return this.document;
     }, options);
   }
@@ -523,6 +527,39 @@ function renderWarningsSnapshot(result, document) {
     return { ...binding, status: 'complete', warnings };
   } catch {
     return { ...binding, status: 'unavailable', warnings: [] };
+  }
+}
+
+// Reports what remove_elements deleted beyond the requested IDs (group children, attached connectors).
+function removedElementsSnapshot(result, document) {
+  const binding = { revision: document.revision, hash: document.hash };
+  try {
+    const data = (value, key) => {
+      if (!value || typeof value !== 'object') throw new Error('Removed element object');
+      const property = Object.getOwnPropertyDescriptor(value, key);
+      if (!property) return undefined;
+      if (!Object.hasOwn(property, 'value')) throw new Error('Removed element accessor');
+      return property.value;
+    };
+    const id = value => {
+      if (typeof value !== 'string' || value.length > 80) throw new Error('Removed element ID limit');
+      return value;
+    };
+    const ids = (value, limit) => {
+      if (!Array.isArray(value) || value.length > limit) throw new Error('Removed element ID array limit');
+      return Array.from({ length: value.length }, (_, index) => id(data(value, String(index))));
+    };
+    const source = data(result, 'removed');
+    if (source === undefined) return null;
+    if (!Array.isArray(source) || source.length > 128) throw new Error('Removed element array limit');
+    const removed = [];
+    for (let index = 0; index < source.length; index += 1) {
+      const item = data(source, String(index));
+      removed.push({ slide_id: id(data(item, 'slide_id')), requested: ids(data(item, 'requested'), 128), cascaded: ids(data(item, 'cascaded'), 256) });
+    }
+    return { ...binding, status: 'complete', removed };
+  } catch {
+    return { ...binding, status: 'unavailable', removed: [] };
   }
 }
 

@@ -1,4 +1,4 @@
-﻿use aislide_core::{editing, execute_request};
+﻿use aislide_core::{editing, execute_request, package::Package};
 use serde_json::{json, Value};
 
 fn canonical_element(value: Value) -> Value {
@@ -1407,4 +1407,132 @@ fn issue58_update_chart_remove_elements_and_chartex_validation_guidance() {
     assert!(removed["deck"]["slides"][0]["review"].is_null(), "slide review entries for removed elements must be cleaned up");
     let undone = execute_request(json!({"op":"undo_transaction","document":removed,"expected_revision":removed["revision"],"receipt":removed_res["receipt"]})).unwrap();
     assert_eq!(undone["document"]["hash"], with_part["hash"]);
+}
+
+#[test]
+fn issue58_remove_elements_reports_group_children_and_attached_connectors() {
+    let before = populated();
+    let remaining = |result: &Value| -> Vec<String> {
+        result["document"]["deck"]["slides"][0]["elements"].as_array().unwrap().iter().map(|element| element["id"].as_str().unwrap().to_owned()).collect()
+    };
+
+    // A connector attached to a removed element goes with it, and the result names it instead of leaving the removal silent.
+    let attached = execute_request(request(&before, json!([{"op":"remove_elements","slide_id":"slide-1","ids":["rect"]}]))).unwrap();
+    assert_eq!(attached["removed"], json!([{"slide_id":"slide-1","requested":["rect"],"cascaded":["connector"]}]));
+    assert!(!remaining(&attached).contains(&"connector".to_owned()));
+    let restored = execute_request(json!({"op":"undo_transaction","document":attached["document"],"expected_revision":attached["document"]["revision"],"receipt":attached["receipt"]})).unwrap();
+    assert_eq!(restored["document"]["hash"], before["hash"], "Undo restores the cascaded connector with its target");
+
+    // A removed group takes its descendants with it: listed in document order, without the requested root.
+    let group = execute_request(request(&before, json!([{"op":"remove_elements","slide_id":"slide-1","ids":["group"]}]))).unwrap();
+    assert_eq!(group["removed"], json!([{"slide_id":"slide-1","requested":["group"],"cascaded":["nested-group","nested-text","nested-table"]}]));
+    for gone in ["group", "nested-group", "nested-text", "nested-table"] {
+        assert!(!remaining(&group).contains(&gone.to_owned()), "{gone} must be removed");
+    }
+
+    // One entry per operation; naming a connector explicitly leaves nothing to cascade, so it is requested rather than cascaded.
+    let batch = execute_request(request(&before, json!([
+        {"op":"remove_elements","slide_id":"slide-1","ids":["shape","connector"]},
+        {"op":"remove_elements","slide_id":"slide-1","ids":["group"]}
+    ]))).unwrap();
+    assert_eq!(batch["removed"], json!([
+        {"slide_id":"slide-1","requested":["shape","connector"],"cascaded":[]},
+        {"slide_id":"slide-1","requested":["group"],"cascaded":["nested-group","nested-text","nested-table"]}
+    ]));
+
+    // A connector between two removed elements is reported once.
+    let both_ends = execute_request(request(&before, json!([{"op":"remove_elements","slide_id":"slide-1","ids":["rect","shape"]}]))).unwrap();
+    assert_eq!(both_ends["removed"][0]["cascaded"], json!(["connector"]));
+
+    // Operations that remove nothing carry no removal report.
+    let untouched = execute_request(request(&before, json!([{"op":"set_slide_background","slide_id":"slide-1","color":"ABCDEF"}]))).unwrap();
+    assert!(untouched.get("removed").is_none());
+}
+
+const RELATIONSHIPS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+fn exported_package(document: &Value) -> Package {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let exported = execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+    Package::open(STANDARD.decode(exported["base64"].as_str().unwrap()).unwrap()).unwrap()
+}
+
+fn reopened(package: &Package) -> Value {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    execute_request(json!({"op":"open_presentation","id":"native-chart","base64":STANDARD.encode(package.save().unwrap())})).unwrap()["document"].clone()
+}
+
+// Resolves a relationship target against the directory of the part that owns the relationship.
+fn related_part(package: &Package, source: &str, id: &str) -> String {
+    let (directory, name) = source.rsplit_once('/').unwrap();
+    let relationships = roxmltree::Document::parse(package.text(&format!("{directory}/_rels/{name}.rels")).unwrap()).unwrap();
+    let target = relationships.descendants().find(|node| node.attribute("Id") == Some(id)).unwrap().attribute("Target").unwrap();
+    if let Some(absolute) = target.strip_prefix('/') { return absolute.to_owned(); }
+    let mut path: Vec<&str> = directory.split('/').collect();
+    for segment in target.split('/') {
+        match segment { ".." => { path.pop(); } "." => {} segment => path.push(segment) }
+    }
+    path.join("/")
+}
+
+// The chart XML and embedded workbook that the first slide actually references; replaced chart parts may remain in the package unreferenced.
+fn first_chart(package: &Package) -> (String, Package) {
+    let slide = roxmltree::Document::parse(package.text("ppt/slides/slide1.xml").unwrap()).unwrap();
+    let chart_id = slide.descendants().find(|node| node.tag_name().name() == "chart" && node.attribute((RELATIONSHIPS, "id")).is_some()).unwrap().attribute((RELATIONSHIPS, "id")).unwrap();
+    let chart = related_part(package, "ppt/slides/slide1.xml", chart_id);
+    let xml = package.text(&chart).unwrap().to_owned();
+    let workbook_id = roxmltree::Document::parse(&xml).unwrap().descendants().find(|node| node.tag_name().name() == "externalData").unwrap().attribute((RELATIONSHIPS, "id")).unwrap().to_owned();
+    let workbook = related_part(package, &chart, &workbook_id);
+    (xml, Package::open(package.part(&workbook).unwrap().to_vec()).unwrap())
+}
+
+fn chart_cache(xml: &str, container: &str) -> Vec<String> {
+    let document = roxmltree::Document::parse(xml).unwrap();
+    let container = document.descendants().find(|node| node.tag_name().name() == container).unwrap();
+    container.descendants().filter(|node| node.tag_name().name() == "v").map(|node| node.text().unwrap().to_owned()).collect()
+}
+
+fn workbook_column(workbook: &Package, column: &str, rows: std::ops::RangeInclusive<usize>) -> Vec<String> {
+    let sheet = roxmltree::Document::parse(workbook.text("xl/worksheets/sheet1.xml").unwrap()).unwrap();
+    rows.map(|row| {
+        let reference = format!("{column}{row}");
+        let cell = sheet.descendants().find(|node| node.attribute("r") == Some(reference.as_str())).unwrap();
+        cell.children().find(|node| node.tag_name().name() == "v").unwrap().text().unwrap().to_owned()
+    }).collect()
+}
+
+#[test]
+fn issue58_update_chart_on_imported_native_deck_rewrites_chart_and_workbook_and_roundtrips() {
+    let series = |values: Value| json!([{"name":"Revenue","color":"1F4E8C","values":values}]);
+    let values = |document: &Value| -> Vec<f64> { element(document, "revenue")["series"][0]["values"].as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect() };
+    let authored = execute_request(request(&original(), json!([
+        {"op":"add_elements","slide_id":"slide-1","elements":[{"type":"chart","id":"revenue","x":40,"y":120,"width":600,"height":320,"kind":"column","categories":["Q1","Q2","Q3"],"series":series(json!([10, 20, 30]))}]}
+    ]))).unwrap()["document"].clone();
+    let native = reopened(&exported_package(&authored));
+    assert_eq!(values(&native), [10.0, 20.0, 30.0]);
+
+    // Same-kind update of the imported chart: more categories and different values, applied to the imported package rather than a regenerated deck.
+    let updated = execute_request(request(&native, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"revenue","categories":["Q1","Q2","Q3","Q4"],"series":series(json!([11, 22, 33, 44]))}
+    ]))).unwrap()["document"].clone();
+    let package = exported_package(&updated);
+    let (chart, workbook) = first_chart(&package);
+    assert_eq!(chart_cache(&chart, "cat"), ["Q1", "Q2", "Q3", "Q4"]);
+    assert_eq!(chart_cache(&chart, "val"), ["11", "22", "33", "44"]);
+    assert_eq!(workbook_column(&workbook, "B", 2..=5), ["11", "22", "33", "44"], "the embedded workbook must carry the same data as the chart cache");
+
+    // Reopening the exported deck yields the updated model, so nothing was lost between update, export and import.
+    let roundtrip = reopened(&package);
+    assert_eq!(element(&roundtrip, "revenue")["categories"], json!(["Q1", "Q2", "Q3", "Q4"]));
+    assert_eq!(values(&roundtrip), [11.0, 22.0, 33.0, 44.0]);
+    assert_eq!(element(&roundtrip, "revenue")["x"], element(&native, "revenue")["x"]);
+    assert_eq!(element(&roundtrip, "revenue")["width"], element(&native, "revenue")["width"]);
+
+    // A second update on the reopened deck is only allowed when the chart and workbook written by the first one can be regenerated from the model.
+    let again = execute_request(request(&roundtrip, json!([
+        {"op":"update_chart","slide_id":"slide-1","id":"revenue","series":series(json!([12, 22, 33, 44]))}
+    ]))).unwrap()["document"].clone();
+    let (chart, workbook) = first_chart(&exported_package(&again));
+    assert_eq!(chart_cache(&chart, "val"), ["12", "22", "33", "44"]);
+    assert_eq!(workbook_column(&workbook, "B", 2..=5), ["12", "22", "33", "44"]);
 }
