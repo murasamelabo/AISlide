@@ -76,7 +76,10 @@ Explicit user exclusions override this default.
 - 高度な操作は `discover_tools` で探し、`get_tool_schema` で現在の仕様を確認する。parts / graphs と rich text を含むバッチの前には完全な `apply_operations` スキーマを取得する。存在しない合成 API の引数を推測しない。
 - `set_text_padding` があれば本文領域を確保し、余白適用後に診断する。`set_rich_text` があれば段落・runs を単一の入力とし、正規テキストは core の導出に任せる。動的フィールドには専用編集操作を使う。未公開の操作を呼び出さない。
 - 実行時のバッチ上限、逐次呼び出し、revision/hash ガード、画像登録上限、エラー回復、納品は `aislide-authoring` の手順に従う。
-- 量・分布・構成比・推移・増減は `add_elements` / `update_chart` のネイティブ グラフ `type:"chart"`（`bar` / `stacked_bar` / `stacked_column` / `column` / `line` / `area` / `pie` / `doughnut` / `waterfall`）または管理パーツ・ネイティブ表を使う。矩形（`rect` / `shape`）とテキストで棒・積み上げ棒・ウォーターフォール・ゲージ・KPI タイルを手描き再現しない。`waterfall`（`chartEx`）は単一系列でカスタム軸・`data_labels` は指定せず、合計位置を `options.waterfall_totals`（0 始まり配列）で指定する。`CHART_PREVIEW` 等の近似差でネイティブ グラフを棄却せず、実機未確認なら「実機描画は未確認」と報告する。パーツ容量超過時は (1) 要点へ絞り詳細をノート・付録表へ移す → (2) スライド分割 → (3) ネイティブ表 → (4) 理由を台帳に記録して自作図形、の順で対応する。対話用ツール未公開時は章扉の問いかけ→次ページの答え合わせ、優先順位づけ演習、別添 HTML 参照を代替案とする。
+- 量・分布・構成比・推移・増減は `add_elements` / `update_chart` のネイティブ グラフ `type:"chart"`（`bar` / `stacked_bar` / `stacked_column` / `column` / `line` / `area` / `pie` / `doughnut` / `waterfall`）または管理パーツ・ネイティブ表を使う。矩形（`rect` / `shape`）とテキストで棒・積み上げ棒・ウォーターフォール・ゲージ・KPI タイルを手描き再現しない。
+- `waterfall`（`chartEx`）は単一系列でカスタム軸・`data_labels` は指定せず、合計位置を `options.waterfall_totals`（0 始まり配列）で指定する。`CHART_PREVIEW` 等の近似差でネイティブ グラフを棄却せず、実機未確認なら「実機描画は未確認」と報告する。
+- パーツ容量超過時は (1) 要点へ絞り詳細をノート・付録表へ移す → (2) スライド分割 → (3) ネイティブ表 → (4) 理由を台帳に記録して自作図形、の順で対応する。
+- 対話用ツール未公開時は章扉の問いかけ→次ページの答え合わせ、優先順位づけ演習、別添 HTML 参照を代替案とする。
 
 ## 完了条件
 

@@ -355,6 +355,8 @@ pub(super) fn validate_spec(spec: &PartSpec) -> Result<(&str, usize)> {
 pub(crate) fn fixed_typography(spec: &PartSpec, floor: f64) -> bool {
     if briefing::kind(&spec.data).is_none() { return false; }
     // Presets with a body_size lever draw the body at `body_size` (default 16px); the other presets have no body lever.
+    // Agenda alone defaults to 14px, below the default 16px floor. That default is the preset's own size, so it stays information
+    // (see issue18_reported_presets_keep_their_finding_as_information); only an explicit `body_size` is checked against the floor.
     let body = match &spec.data {
         PartData::IconCards { body_size, .. } | PartData::IconRows { body_size, .. } | PartData::ShiftRows { body_size, .. }
         | PartData::StepCards { body_size, .. } | PartData::ScreenshotCallouts { body_size, .. }

@@ -144,7 +144,7 @@ export class DocumentSession {
   setHyperlink(slideId: string, input: { id: string; link: string | null }, options?: AuthoringOptions): Promise<AislideDocument>
   setShapeAdjustment(slideId: string, input: { id: string; adjustment: ShapeAdjustment }, options?: AuthoringOptions): Promise<AislideDocument>
   addPicture(slideId: string, input: PictureInput, options?: AuthoringOptions): Promise<AislideDocument>
-  updateChart(slideId: string, input: { id: string; kind?: import('./types').ChartKind | null; categories?: string[] | null; series?: import('./types').ChartSeries[] | null; options?: import('./types').ChartOptions | null; frame?: Frame | null }, options?: AuthoringOptions): Promise<AislideDocument>
+  updateChart(slideId: string, input: { id: string; kind?: import('./types').ChartKind | null; categories?: string[] | null; series?: import('./types').ChartSeries[] | null; options?: import('./types').ChartOptions | null; replace_options?: boolean | null; frame?: Frame | null }, options?: AuthoringOptions): Promise<AislideDocument>
   /** Removes top-level elements. Group children and connectors attached to a removed element go with them; read the full list from removedElements. */
   removeElements(slideId: string, ids: string[], options?: AuthoringOptions): Promise<AislideDocument>
   /** Imports selected authored source slides with matching canvas in one Undo. Native source documents fail closed. */
