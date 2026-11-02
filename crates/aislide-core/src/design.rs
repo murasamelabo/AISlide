@@ -3,9 +3,48 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const COLOR_KEYS: [&str; 12] = ["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
+pub(crate) const COLOR_MAP_KEYS: [&str; 12] = ["bg1", "tx1", "bg2", "tx2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ColorMap([&'static str; 12]);
+thread_local! { static ACTIVE_COLOR_MAP: std::cell::Cell<(ColorMap, bool, usize)> = Default::default(); }
+#[must_use]
+pub(crate) struct ColorMapGuard((ColorMap, bool, usize), std::marker::PhantomData<*const ()>);
+impl Drop for ColorMapGuard { fn drop(&mut self) { ACTIVE_COLOR_MAP.with(|a| { if !std::thread::panicking() { debug_assert_eq!(a.get().2, self.0.2 + 1); } a.set(self.0); }); } }
+
+impl Default for ColorMap {
+    fn default() -> Self { Self(["lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"]) }
+}
+
+impl ColorMap {
+    pub(crate) fn scoped() -> Result<Self> {
+        ACTIVE_COLOR_MAP.with(|a| match a.get() { (m, true, d) if d > 0 => Ok(m), (_, false, d) if d > 0 => Err(Error::Unsupported("native color map hierarchy".into())), _ => Err(Error::Invalid("color map scope missing".into())) })
+    }
+    #[must_use]
+    pub(crate) fn enter(self) -> ColorMapGuard { Self::enter_opt(Some((self, false))) }
+    #[must_use]
+    pub(crate) fn enter_opt(s: Option<(Self, bool)>) -> ColorMapGuard { ColorMapGuard(ACTIVE_COLOR_MAP.with(|a| { let p = a.get(); a.set((s.map(|(m, _)| m).unwrap_or_default(), s.is_some_and(|(_, u)| !u), p.2 + 1)); p }), std::marker::PhantomData) }
+    pub(crate) fn scope<R>(self, run: impl FnOnce() -> R) -> R { let _g = self.enter(); run() }
+    pub(crate) fn resolve<'a>(&self, v: &'a str) -> &'a str { COLOR_MAP_KEYS.iter().position(|k| *k == v).map_or(v, |i| self.0[i]) }
+    pub(crate) fn set(&mut self, name: &str, value: &str) -> bool {
+        let (Some(i), Some(s)) = (COLOR_MAP_KEYS.iter().position(|k| *k == name), COLOR_KEYS.iter().copied().find(|k| *k == value)) else { return false };
+        self.0[i] = s; true
+    }
+    pub(crate) fn encode<'a>(&self, slot: &'a str) -> Option<&'a str> {
+        let s = COLOR_KEYS.iter().copied().find(|k| *k == slot)?;
+        (self.resolve(s) == s).then_some(s).or_else(|| COLOR_MAP_KEYS.iter().copied().find(|k| self.resolve(k) == s))
+    }
+}
+
+/// Resolves a scheme color name through the active color map. Callers must be inside a scope (`enter`, `scope` or `enter_part_color_map`);
+/// content that has no color map of its own, such as modern comments, enters `ColorMap::default().scope` explicitly.
+/// Debug builds assert on a missing scope so that a read path added without one fails in tests; release builds resolve with the default map.
 pub(crate) fn color_slot(value: &str) -> &str {
-    match value { "tx1" => "dk1", "bg1" => "lt1", "tx2" => "dk2", "bg2" => "lt2", other => other }
+    ACTIVE_COLOR_MAP.with(|active| {
+        let (map, _, depth) = active.get();
+        debug_assert!(depth > 0, "color_slot requires an active ColorMap scope; wrap content without a color map in ColorMap::default().scope");
+        map.resolve(value)
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -243,4 +282,24 @@ pub fn set_master_theme(mut deck: Deck, master_id: &str, theme: Option<Theme>) -
     master.theme = theme;
     validate_deck(&deck)?;
     Ok(deck)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_slot_resolves_through_the_active_scope() {
+        let mut map = ColorMap::default();
+        assert!(map.set("bg1", "dk1"));
+        map.scope(|| assert_eq!(color_slot("bg1"), "dk1"));
+        ColorMap::default().scope(|| assert_eq!(color_slot("bg1"), "lt1"));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "active ColorMap scope")]
+    fn color_slot_without_a_scope_is_a_programming_error() {
+        color_slot("bg1");
+    }
 }
