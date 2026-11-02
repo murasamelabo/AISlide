@@ -143,8 +143,29 @@ pub(crate) fn has_remapped_owned(pkg: &Package, path: &str, om: crate::design::C
     doc(pkg, &relations_path(path)).is_some_and(|d| d.root_element().children().filter(|n| n.attribute("TargetMode") != Some("External") && n.attribute("Type").and_then(|t| t.rsplit_once('/')).is_some_and(|(_, k)| matches!(k, "chart" | "chartEx") || k.starts_with("diagram"))).filter_map(|n| crate::pptx::resolve(path, n.attribute("Target")?).ok()).any(|p| doc(pkg, &p).is_some_and(|d| d.descendants().any(|n| n.tag_name().name() == "clrMapOvr" || remaps(n, om, cm)))))
 }
 
+/// Whether `root` (the part at `path`) draws artwork whose scheme colors resolve differently under `cm` than under `om`.
+/// Placeholders and hidden shapes are not artwork; charts and diagrams the part owns are checked through their own parts.
 fn has_remapped_shapes(package: &Package, path: &str, root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
-    om != cm && (child(root, P, "cSld").and_then(|n| child(n, P, "spTree")).is_some_and(|t| t.children().filter(|n| n.is_element()).map(|n| crate::interactive::office::static_fallback(n).unwrap_or(n)).any(|c| c.descendants().filter(|n| is_shape(*n) && placeholder(*n).is_none() && !n.ancestors().filter(|a| is_shape(*a)).any(|a| properties(a).is_some_and(|p| matches!(p.attribute("hidden"), Some("1" | "true"))))).any(|n| n.descendants().any(|d| remaps(d, om, cm) && !d.ancestors().take_while(|a| *a != n).any(|a| is_shape(a)))))) || has_remapped_owned(package, path, om, cm))
+    om != cm && (tree_has_remapped_artwork(root, om, cm) || has_remapped_owned(package, path, om, cm))
+}
+
+fn tree_has_remapped_artwork(root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
+    let Some(tree) = child(root, P, "cSld").and_then(|node| child(node, P, "spTree")) else { return false };
+    tree.children().filter(|node| node.is_element())
+        .map(|node| crate::interactive::office::static_fallback(node).unwrap_or(node))
+        .any(|top| top.descendants().filter(|shape| is_visible_artwork(*shape)).any(|shape| shape_has_own_remapped_color(shape, om, cm)))
+}
+
+fn is_hidden_shape(node: Node<'_, '_>) -> bool { properties(node).is_some_and(|props| matches!(props.attribute("hidden"), Some("1" | "true"))) }
+
+/// A shape that is not a placeholder and is not hidden, neither itself nor through an enclosing shape.
+fn is_visible_artwork(shape: Node<'_, '_>) -> bool {
+    is_shape(shape) && placeholder(shape).is_none() && !shape.ancestors().filter(|ancestor| is_shape(*ancestor)).any(is_hidden_shape)
+}
+
+/// A remapped scheme color in the subtree of `shape`. A color inside a nested shape belongs to that shape, which is visited on its own.
+fn shape_has_own_remapped_color(shape: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool {
+    shape.descendants().any(|node| remaps(node, om, cm) && !node.ancestors().take_while(|ancestor| *ancestor != shape).any(is_shape))
 }
 
 fn has_remapped_non_solid_bg(root: Node<'_, '_>, om: crate::design::ColorMap, cm: crate::design::ColorMap) -> bool { om != cm && has_non_solid_bg(root) && bg_node(root).is_some_and(|bg| bg.descendants().any(|n| remaps(n, om, cm))) }

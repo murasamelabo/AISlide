@@ -1,4 +1,4 @@
-﻿use crate::{model::{Deck, Element}, native::{A, P, NativeDeck, NativePart, child, is_shape, properties, relations_path}, package::Package, pptx::parse, Error, Result};
+﻿use crate::{design::{Design, SlideLayout}, model::{Deck, Element, Slide}, native::{A, P, NativeDeck, NativePart, child, is_shape, properties, relations_path}, native_design::Topology, package::Package, pptx::parse, Error, Result};
 use roxmltree::Node;
 use std::{collections::{BTreeMap, BTreeSet}, ops::Range};
 
@@ -1316,13 +1316,13 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
     if let Some(slide) = deck.slides.iter().find(|slide| !slide.notes.is_empty() && slide.native_source_id.is_none() && !original.slides.iter().any(|binding| binding.id == slide.id)) {
         ensure_notes_master(package, main, &crate::design::ColorMap::default().scope(|| notes_template(slide, deck))?)?;
     }
-    let no_bg = |p: &Package, k: &str| !crate::native::doc(p, k).is_some_and(|d| crate::native::bg_node(d.root_element()).is_some());
-    let m_art = |id: &str| old.masters.iter().find(|m| m.id == id).zip(design.masters.iter().find(|m| m.id == id)).is_none_or(|(bm, am)| bm.background != am.background || !equal(&bm.elements, &am.elements).unwrap_or(false));
     for (after, binding) in design.layouts.iter().zip(&topology.layouts) {
-        if (after.background.is_none() && crate::native::synthesized_bg(package, &binding.path).is_some()) || (m_art(&after.master_id) && topology.masters.iter().find(|m| m.id == after.master_id).is_some_and(|mb| crate::native::layout_remaps_master_artwork(package, &binding.path, &mb.path))) {
+        if (after.background.is_none() && crate::native::synthesized_bg(package, &binding.path).is_some())
+            || (master_artwork_changed(old, design, &after.master_id)
+                && topology.masters.iter().find(|m| m.id == after.master_id).is_some_and(|master| crate::native::layout_remaps_master_artwork(package, &binding.path, &master.path))) {
             return Err(Error::Unsupported("native color map override remaps the inherited background or artwork".into()));
         }
-        if after.background.is_some() && no_bg(package, &binding.path) && old.masters.iter().find(|m| m.id == after.master_id).zip(design.masters.iter().find(|m| m.id == after.master_id)).is_some_and(|(bm, am)| bm.background != am.background) {
+        if after.background.is_some() && lacks_own_background(package, &binding.path) && master_background_changed(old, design, &after.master_id) {
             patch_part(package, binding, &after.elements, &after.elements, crate::design::master_theme(design, &after.master_id), None, Some(after.background.as_deref()), scale)?;
         }
     }
@@ -1342,17 +1342,14 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
             let _notes_scope = crate::pptx::relationship_targets(package, &binding.path, "notesSlide")?.into_values().next().or_else(|| crate::pptx::relationship_targets(package, main, "notesMaster").ok()?.into_values().next()).map_or_else(|| crate::design::ColorMap::default().enter(), |p| crate::native::enter_part_color_map(package, &p));
             patch_notes(package, main, &binding.path, after, deck)?;
         }
-        let p_bg = lid.and_then(|id| old.layouts.iter().find(|l| &l.id == id).zip(design.layouts.iter().find(|l| &l.id == id))).is_some_and(|(bl, al)| bl.background != al.background || old.masters.iter().find(|m| m.id == al.master_id).zip(design.masters.iter().find(|m| m.id == al.master_id)).is_some_and(|(bm, am)| bm.background != am.background));
-        let background = (before.background != after.background || before.inherit_background != after.inherit_background || (!after.inherit_background && no_bg(package, &binding.path) && (before.layout_id != after.layout_id || p_bg))).then_some(if after.inherit_background { None } else { Some(after.background.as_str()) });
+        let background_changed = before.background != after.background || before.inherit_background != after.inherit_background
+            || (!after.inherit_background && lacks_own_background(package, &binding.path) && (before.layout_id != after.layout_id || layout_background_changed(old, design, lid)));
+        let background = background_changed.then_some(if after.inherit_background { None } else { Some(after.background.as_str()) });
         patch_part(package, binding, &before.elements, &after.elements, crate::design::slide_theme(after, Some(design)).unwrap_or(&design.theme), (before.title != after.title).then_some(after.title.as_str()), background, scale)?;
         if before.hide_master_graphics != after.hide_master_graphics {
             let xml = package.text(&binding.path)?.to_owned(); let document = parse(&xml)?; let mut edits = Vec::new(); set_attribute(&xml, document.root_element(), "showMasterSp", if after.hide_master_graphics { "0" } else { "1" }, &mut edits)?; package.replace_part(&binding.path, apply(xml, edits)?)?;
         }
-        let anc_art = lid.and_then(|id| design.layouts.iter().find(|l| &l.id == id).zip(topology.layouts.iter().find(|l| &l.id == id))).is_some_and(|(al, lb)| {
-            let l_art = old.layouts.iter().find(|l| l.id == al.id).is_none_or(|bl| (&bl.master_id, &bl.background) != (&al.master_id, &al.background) || !equal(&bl.elements, &al.elements).unwrap_or(false));
-            ((before.layout_id.as_ref(), before.inherit_background, before.hide_master_graphics) != (after.layout_id.as_ref(), after.inherit_background, after.hide_master_graphics) || l_art || m_art(&al.master_id)) && topology.masters.iter().find(|m| m.id == al.master_id).is_some_and(|mb| crate::native::slide_remaps_ancestor_artwork(package, &binding.path, &lb.path, &mb.path))
-        });
-        if (after.inherit_background && crate::native::synthesized_bg(package, &binding.path).is_some()) || anc_art {
+        if (after.inherit_background && crate::native::synthesized_bg(package, &binding.path).is_some()) || slide_inherits_remapped_artwork(package, binding, before, after, old, design, &topology, lid) {
             return Err(Error::Unsupported("native color map override remaps the inherited background or artwork".into()));
         }
     }
@@ -1361,6 +1358,45 @@ pub(crate) fn save(package: &mut Package, original: &NativeDeck, deck: &Deck) ->
     crate::fonts::write_native(package, main, &original.deck.embedded_fonts, deck)?;
     crate::review::remove_unused_hyperlinks(package)?;
     package.save()
+}
+
+/// Whether the part at `path` has no `p:bg` of its own, so its background is inherited from an ancestor.
+fn lacks_own_background(package: &Package, path: &str) -> bool {
+    !crate::native::doc(package, path).is_some_and(|document| crate::native::bg_node(document.root_element()).is_some())
+}
+
+fn master_background_changed(old: &Design, new: &Design, master_id: &str) -> bool {
+    old.masters.iter().find(|m| m.id == master_id).zip(new.masters.iter().find(|m| m.id == master_id))
+        .is_some_and(|(before, after)| before.background != after.background)
+}
+
+/// A master that is unmatched or whose background or elements differ counts as changed, so callers fail closed.
+fn master_artwork_changed(old: &Design, new: &Design, master_id: &str) -> bool {
+    old.masters.iter().find(|m| m.id == master_id).zip(new.masters.iter().find(|m| m.id == master_id))
+        .is_none_or(|(before, after)| before.background != after.background || !equal(&before.elements, &after.elements).unwrap_or(false))
+}
+
+/// A layout that is new, or whose master, background or elements differ, counts as changed.
+fn layout_artwork_changed(old: &Design, layout: &SlideLayout) -> bool {
+    old.layouts.iter().find(|l| l.id == layout.id)
+        .is_none_or(|before| (&before.master_id, &before.background) != (&layout.master_id, &layout.background) || !equal(&before.elements, &layout.elements).unwrap_or(false))
+}
+
+/// Whether the background of the slide's layout, or of that layout's master, differs from before this save.
+fn layout_background_changed(old: &Design, new: &Design, layout_id: Option<&String>) -> bool {
+    layout_id.and_then(|id| old.layouts.iter().find(|l| &l.id == id).zip(new.layouts.iter().find(|l| &l.id == id)))
+        .is_some_and(|(before, after)| before.background != after.background || master_background_changed(old, new, &after.master_id))
+}
+
+fn slide_inheritance(slide: &Slide) -> (Option<&String>, bool, bool) { (slide.layout_id.as_ref(), slide.inherit_background, slide.hide_master_graphics) }
+
+/// Whether this save changes what the slide inherits (its layout, background or master-graphics setting, or the layout or master artwork)
+/// while the slide's color map remaps that inherited artwork. The saved colors would then differ from the model, so the save is rejected.
+fn slide_inherits_remapped_artwork(package: &Package, binding: &NativePart, before: &Slide, after: &Slide, old: &Design, design: &Design, topology: &Topology, layout_id: Option<&String>) -> bool {
+    let Some((layout, layout_part)) = layout_id.and_then(|id| design.layouts.iter().find(|l| &l.id == id).zip(topology.layouts.iter().find(|l| &l.id == id))) else { return false };
+    (slide_inheritance(before) != slide_inheritance(after) || layout_artwork_changed(old, layout) || master_artwork_changed(old, design, &layout.master_id))
+        && topology.masters.iter().find(|m| m.id == layout.master_id)
+            .is_some_and(|master_part| crate::native::slide_remaps_ancestor_artwork(package, &binding.path, &layout_part.path, &master_part.path))
 }
 
 fn rebase_slide_color_map(package: &mut Package, binding: &NativePart, elements: &[Element], new_parent_map: crate::design::ColorMap) -> Result<()> {
