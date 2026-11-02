@@ -10,20 +10,39 @@ pub const HEIGHT: f64 = 512.0;
 pub const CONTENT_TOP: f64 = 88.0;
 pub const MAX_GROUPS: usize = 16;
 pub const MAX_GROUP_DEPTH: usize = 4;
+pub const MAX_NODES: usize = 48;
+pub const MAX_EDGES: usize = 64;
+pub const MAX_WAYPOINTS: usize = 16;
 /// Longest `GraphIcon.alt` in Unicode scalars; every validator and the schema share it.
 pub const ICON_ALT_MAX: usize = 500;
+/// Text limits in Unicode scalars and the ID length in bytes; the validator, the schema and the catalog share them.
+pub const ID_MAX: usize = 24;
+pub const TITLE_MAX: usize = 80;
+pub const SUBTITLE_MAX: usize = 120;
+pub const NODE_LABEL_MAX: usize = 160;
+pub const DETAIL_MAX: usize = 240;
+pub const EDGE_LABEL_MAX: usize = 64;
+pub const GROUP_LABEL_MAX: usize = 64;
+/// Smallest node or group. A left or top edge may not exceed the canvas minus this size, so the shape still fits.
+pub const MIN_WIDTH: f64 = 64.0;
+pub const MIN_HEIGHT: f64 = 40.0;
+const MAX_X: f64 = WIDTH - MIN_WIDTH;
+const MAX_Y: f64 = HEIGHT - MIN_HEIGHT;
 const RENDER_LAYOUT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GraphSpec {
-    pub version: u32,
-    pub title: String,
-    #[serde(default)] pub subtitle: String,
+    #[schemars(range(min = 1, max = 1))] pub version: u32,
+    #[schemars(length(max = TITLE_MAX))] pub title: String,
+    #[serde(default)]
+    #[schemars(length(max = SUBTITLE_MAX))] pub subtitle: String,
     #[serde(default = "enabled", skip_serializing_if = "is_true")] pub show_title: bool,
-    pub nodes: Vec<GraphNode>,
-    #[serde(default)] pub edges: Vec<GraphEdge>,
-    #[serde(default)] pub groups: Vec<GraphGroup>,
+    #[schemars(length(min = 1, max = MAX_NODES))] pub nodes: Vec<GraphNode>,
+    #[serde(default)]
+    #[schemars(length(max = MAX_EDGES))] pub edges: Vec<GraphEdge>,
+    #[serde(default)]
+    #[schemars(length(max = MAX_GROUPS))] pub groups: Vec<GraphGroup>,
 }
 
 impl GraphSpec {
@@ -39,9 +58,9 @@ pub struct GraphLayoutInput {
     #[serde(default = "enabled")] pub show_title: bool,
     #[serde(default = "grid_columns")]
     #[schemars(range(min = 1, max = 8))] pub columns: usize,
-    #[schemars(length(min = 1, max = 48))] pub nodes: Vec<GraphLayoutNode>,
+    #[schemars(length(min = 1, max = MAX_NODES))] pub nodes: Vec<GraphLayoutNode>,
     #[serde(default)]
-    #[schemars(length(max = 64))] pub edges: Vec<GraphEdge>,
+    #[schemars(length(max = MAX_EDGES))] pub edges: Vec<GraphEdge>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -67,7 +86,7 @@ pub struct GraphLayoutNode {
 fn grid_columns() -> usize { 3 }
 
 pub fn layout_graph(input: &GraphLayoutInput) -> Result<GraphSpec> {
-    if input.nodes.is_empty() || input.nodes.len() > 48 || input.edges.len() > 64 {
+    if input.nodes.is_empty() || input.nodes.len() > MAX_NODES || input.edges.len() > MAX_EDGES {
         return Err(Error::Limit("graph requires 1-48 nodes and at most 64 edges".into()));
     }
     if !(1..=8).contains(&input.columns) { return Err(Error::Invalid("grid layout requires 1-8 columns".into())); }
@@ -211,9 +230,10 @@ pub fn create_icon(base64: String, mime_type: &str, alt: &str) -> Result<GraphIc
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
-    pub id: String, pub label: String,
+    #[schemars(length(min = 1, max = ID_MAX))] pub id: String,
+    #[schemars(length(max = NODE_LABEL_MAX))] pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 240))] pub detail: Option<String>,
+    #[schemars(length(max = DETAIL_MAX))] pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 12, max = 40))] pub detail_font_size: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub text_align: Option<GraphTextAlign>,
@@ -221,13 +241,19 @@ pub struct GraphNode {
     #[serde(default, skip_serializing_if = "GraphLabelFit::is_wrap")] pub label_fit: GraphLabelFit,
     #[serde(default)] pub kind: NodeKind,
     #[serde(default, skip_serializing_if = "GraphPresentation::is_card")] pub presentation: GraphPresentation,
-    pub x: f64, pub y: f64,
-    #[serde(default = "node_width")] pub width: f64,
-    #[serde(default = "node_height")] pub height: f64,
+    /// Left edge; `x + width` may not exceed the canvas width of 1152.
+    #[schemars(range(min = 0, max = MAX_X))] pub x: f64,
+    /// Top edge; at least 88 (the title band) unless `show_title` is false, and `y + height` may not exceed the canvas height of 512.
+    #[schemars(range(min = 0, max = MAX_Y))] pub y: f64,
+    #[serde(default = "node_width")]
+    #[schemars(range(min = MIN_WIDTH, max = WIDTH))] pub width: f64,
+    #[serde(default = "node_height")]
+    #[schemars(range(min = MIN_HEIGHT, max = HEIGHT))] pub height: f64,
     #[serde(default = "paper")] pub fill: String,
     #[serde(default = "accent")] pub stroke: String,
     #[serde(default = "ink")] pub color: String,
-    #[serde(default = "font_size")] pub font_size: f64,
+    #[serde(default = "font_size")]
+    #[schemars(range(min = 12, max = 40))] pub font_size: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub icon: Option<GraphIcon>,
 }
@@ -235,17 +261,19 @@ pub struct GraphNode {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GraphEdge {
-    pub id: String, pub source: String, pub target: String,
+    #[schemars(length(min = 1, max = ID_MAX))] pub id: String,
+    pub source: String, pub target: String,
     #[serde(default)] pub source_port: Port,
     #[serde(default)] pub target_port: Port,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = -0.5, max = 0.5))] pub source_offset: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = -0.5, max = 0.5))] pub target_offset: Option<f64>,
-    #[serde(default)] pub label: String,
+    #[serde(default)]
+    #[schemars(length(max = EDGE_LABEL_MAX))] pub label: String,
     #[serde(default)] pub route: Route,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[schemars(length(max = 16))] pub waypoints: Vec<[f64; 2]>,
+    #[schemars(schema_with = "waypoints_schema")] pub waypoints: Vec<[f64; 2]>,
     #[serde(default = "muted")] pub color: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0.5, max = 12))] pub stroke_width: Option<f64>,
@@ -262,8 +290,14 @@ pub struct GraphEdge {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GraphGroup {
-    pub id: String, pub label: String,
-    pub x: f64, pub y: f64, pub width: f64, pub height: f64,
+    #[schemars(length(min = 1, max = ID_MAX))] pub id: String,
+    #[schemars(length(max = GROUP_LABEL_MAX))] pub label: String,
+    /// Left edge; `x + width` may not exceed the canvas width of 1152.
+    #[schemars(range(min = 0, max = MAX_X))] pub x: f64,
+    /// Top edge; at least 88 (the title band) unless `show_title` is false, and `y + height` may not exceed the canvas height of 512.
+    #[schemars(range(min = 0, max = MAX_Y))] pub y: f64,
+    #[schemars(range(min = MIN_WIDTH, max = WIDTH))] pub width: f64,
+    #[schemars(range(min = MIN_HEIGHT, max = HEIGHT))] pub height: f64,
     #[serde(default = "surface")] pub fill: String,
     #[serde(default = "muted")] pub stroke: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -283,15 +317,26 @@ impl GraphGroup {
     fn header_font_size(&self) -> f64 { self.header_font_size.unwrap_or(18.0) }
 }
 
+/// Manual route points in graph coordinates: x within the canvas width and y within the canvas height (from 88 while the title band is shown).
+fn waypoints_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "array", "maxItems": MAX_WAYPOINTS,
+        "items": {
+            "type": "array", "minItems": 2, "maxItems": 2, "items": false,
+            "prefixItems": [{"type": "number", "minimum": 0, "maximum": WIDTH}, {"type": "number", "minimum": 0, "maximum": HEIGHT}]
+        }
+    })
+}
+
 fn identity(id: &str) -> Result<()> {
-    if id.is_empty() || id.len() > 24 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) {
+    if id.is_empty() || id.len() > ID_MAX || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) {
         return Err(Error::Invalid("graph IDs require 1-24 ASCII letters, digits, hyphens or underscores".into()));
     }
     Ok(())
 }
 
 fn bounds(x: f64, y: f64, width: f64, height: f64, content_top: f64) -> Result<()> {
-    if [x, y, width, height].iter().any(|value| !value.is_finite()) || x < 0.0 || y < content_top || width < 64.0 || height < 40.0 || x + width > WIDTH || y + height > HEIGHT {
+    if [x, y, width, height].iter().any(|value| !value.is_finite()) || x < 0.0 || y < content_top || width < MIN_WIDTH || height < MIN_HEIGHT || x + width > WIDTH || y + height > HEIGHT {
         return Err(Error::Invalid(format!("graph bounds must fit 1152x512 at y >= {content_top}, with minimum size 64x40")));
     }
     Ok(())
@@ -343,14 +388,14 @@ fn detail_size(node: &GraphNode) -> f64 { node.detail_font_size.unwrap_or((node.
 
 pub fn validate(spec: &GraphSpec) -> Result<()> {
     if spec.version != 1 { return Err(Error::Unsupported("graph version".into())); }
-    valid_text(&spec.title, 80)?; valid_text(&spec.subtitle, 120)?;
-    if spec.nodes.is_empty() || spec.nodes.len() > 48 || spec.edges.len() > 64 || spec.groups.len() > MAX_GROUPS { return Err(Error::Limit("graph requires 1-48 nodes, at most 64 edges and 16 groups".into())); }
+    valid_text(&spec.title, TITLE_MAX)?; valid_text(&spec.subtitle, SUBTITLE_MAX)?;
+    if spec.nodes.is_empty() || spec.nodes.len() > MAX_NODES || spec.edges.len() > MAX_EDGES || spec.groups.len() > MAX_GROUPS { return Err(Error::Limit("graph requires 1-48 nodes, at most 64 edges and 16 groups".into())); }
     if spec.nodes.iter().filter_map(|node| node.icon.as_ref()).chain(spec.groups.iter().filter_map(|group| group.icon.as_ref())).fold(0usize, |total, icon| total.saturating_add(icon.base64.len())) > 3 * 1024 * 1024 {
         return Err(Error::Limit("graph icon data exceeds the 3 MiB encoded image budget".into()));
     }
     let mut ids = BTreeSet::new();
     for region in &spec.groups {
-        identity(&region.id)?; valid_text(&region.label, 64)?;
+        identity(&region.id)?; valid_text(&region.label, GROUP_LABEL_MAX)?;
         if !ids.insert(&region.id) { return Err(Error::Invalid("duplicate graph ID".into())); }
         bounds(region.x, region.y, region.width, region.height, spec.content_top())?;
         valid_color(&region.fill)?; valid_color(&region.stroke)?;
@@ -376,13 +421,13 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
         }
     }
     for node in &spec.nodes {
-        identity(&node.id)?; valid_text(&node.label, 160)?;
+        identity(&node.id)?; valid_text(&node.label, NODE_LABEL_MAX)?;
         if !ids.insert(&node.id) { return Err(Error::Invalid("duplicate graph ID".into())); }
         bounds(node.x, node.y, node.width, node.height, spec.content_top())?;
         valid_color(&node.fill)?; valid_color(&node.stroke)?; valid_color(&node.color)?;
         if !node.font_size.is_finite() || !(12.0..=40.0).contains(&node.font_size) { return Err(Error::Invalid("graph font size must be 12-40".into())); }
         if let Some(detail) = &node.detail {
-            valid_text(detail, 240)?;
+            valid_text(detail, DETAIL_MAX)?;
             if detail.trim().is_empty() { return Err(Error::Invalid("graph detail must be nonempty when supplied".into())); }
         }
         if let Some(size) = node.detail_font_size {
@@ -401,7 +446,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
         }
     }
     for edge in &spec.edges {
-        identity(&edge.id)?; valid_text(&edge.label, 64)?; valid_color(&edge.color)?;
+        identity(&edge.id)?; valid_text(&edge.label, EDGE_LABEL_MAX)?; valid_color(&edge.color)?;
         if let Some(color) = &edge.label_color { valid_color(color)?; }
         if edge.stroke_width.is_some_and(|value| !value.is_finite() || !(0.5..=12.0).contains(&value)) {
             return Err(Error::Invalid("graph edge stroke_width must be finite and 0.5-12".into()));
@@ -435,7 +480,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
                 }
             }
         }
-        if edge.waypoints.len() > 16 || (edge.route == Route::Manual) == edge.waypoints.is_empty()
+        if edge.waypoints.len() > MAX_WAYPOINTS || (edge.route == Route::Manual) == edge.waypoints.is_empty()
             || edge.waypoints.iter().any(|point| !point[0].is_finite() || !point[1].is_finite() || !(0.0..=WIDTH).contains(&point[0]) || !(spec.content_top()..=HEIGHT).contains(&point[1])) {
             return Err(Error::Invalid("graph manual route requires 1-16 finite waypoints inside the content area; other routes cannot have waypoints".into()));
         }
@@ -1202,7 +1247,7 @@ pub fn catalog() -> Value {
         json!({"id":"approval","name":"Approval flow","spec":{"version":1,"title":"Approval flow","subtitle":"Editable example","nodes":[{"id":"input","label":"Request","x":40,"y":220},{"id":"review","label":"Review","kind":"diamond","x":390,"y":190,"width":200,"height":140},{"id":"approve","label":"Approved","kind":"rounded_rectangle","x":830,"y":120},{"id":"revise","label":"Revise","x":830,"y":340}],"edges":[{"id":"submit","source":"input","target":"review"},{"id":"yes","source":"review","target":"approve","label":"Yes"},{"id":"no","source":"review","target":"revise","label":"No"}],"groups":[]}}),
         json!({"id":"boundary","name":"Network boundary","spec":{"version":1,"title":"Network boundary","subtitle":"Editable example","nodes":[{"id":"client","label":"Client","x":40,"y":210},{"id":"app","label":"Application","x":430,"y":210,"group":"private"},{"id":"store","label":"Storage","kind":"cylinder","x":800,"y":210,"group":"private"}],"edges":[{"id":"access","source":"client","target":"app","label":"Authorized"},{"id":"data","source":"app","target":"store"}],"groups":[{"id":"private","label":"Private network","x":370,"y":120,"width":680,"height":300}]}}),
     ];
-    json!({"version":1,"shapes":["rectangle","rounded_rectangle","ellipse","diamond","cylinder","cloud"],"ports":["auto","top","left","bottom","right"],"routes":["straight","elbow","manual"],"limits":{"nodes":48,"edges":64,"groups":MAX_GROUPS,"group_depth":MAX_GROUP_DEPTH,"rendered_elements":256,"waypoints_per_edge":16},"canvas":{"width":WIDTH,"height":HEIGHT,"content_top":CONTENT_TOP,"content_top_without_title":0.0},"node_text":{"detail_max_length":240,"detail_font_size_min":12,"detail_font_size_max":40,"detail_font_size_default":"max(12, font_size * 0.8)","detail_font_size_ceiling":"font_size","text_align":["left","center","right"],"default_alignment":"left with detail, center without detail","heading_bold_default":true},"edge_layout":{"position":"fraction of path length from semantic source to target","label_side":"above/below the segment; right/left for vertical segments","offset":"source_offset/target_offset are -0.5..0.5 of side length from center, increasing right/down","offset_shapes":["rectangle","rounded_rectangle","ellipse","diamond"],"manual":"1-16 graph-coordinate waypoints, including diagonal segments; nodes are not moved","move":"waypoints move with both endpoints, or when the edge itself is selected; otherwise intermediate points stay fixed"},"schema":schemars::schema_for!(GraphSpec),"operation_schema":schemars::schema_for!(GraphOperation),"examples":examples})
+    json!({"version":1,"shapes":["rectangle","rounded_rectangle","ellipse","diamond","cylinder","cloud"],"ports":["auto","top","left","bottom","right"],"routes":["straight","elbow","manual"],"limits":{"nodes":MAX_NODES,"edges":MAX_EDGES,"groups":MAX_GROUPS,"group_depth":MAX_GROUP_DEPTH,"rendered_elements":256,"waypoints_per_edge":MAX_WAYPOINTS},"canvas":{"width":WIDTH,"height":HEIGHT,"content_top":CONTENT_TOP,"content_top_without_title":0.0},"node_text":{"detail_max_length":DETAIL_MAX,"detail_font_size_min":12,"detail_font_size_max":40,"detail_font_size_default":"max(12, font_size * 0.8)","detail_font_size_ceiling":"font_size","text_align":["left","center","right"],"default_alignment":"left with detail, center without detail","heading_bold_default":true},"edge_layout":{"position":"fraction of path length from semantic source to target","label_side":"above/below the segment; right/left for vertical segments","offset":"source_offset/target_offset are -0.5..0.5 of side length from center, increasing right/down","offset_shapes":["rectangle","rounded_rectangle","ellipse","diamond"],"manual":"1-16 graph-coordinate waypoints, including diagonal segments; nodes are not moved","move":"waypoints move with both endpoints, or when the edge itself is selected; otherwise intermediate points stay fixed"},"schema":schemars::schema_for!(GraphSpec),"operation_schema":schemars::schema_for!(GraphOperation),"examples":examples})
 }
 
 pub fn change(document: &crate::document::Document, expected_revision: u64, slide_id: &str, id: &str, spec: &GraphSpec, update: bool) -> Result<crate::document::TransactionResult> {
@@ -1311,7 +1356,7 @@ pub fn transform(spec: &GraphSpec, operations: &[GraphOperation]) -> Result<Grap
                 }
             }
         }
-        if next.nodes.len() > 48 || next.edges.len() > 64 || next.groups.len() > MAX_GROUPS { return Err(Error::Limit("graph entity count exceeded".into())); }
+        if next.nodes.len() > MAX_NODES || next.edges.len() > MAX_EDGES || next.groups.len() > MAX_GROUPS { return Err(Error::Limit("graph entity count exceeded".into())); }
     }
     validate(&next)?;
     Ok(next)

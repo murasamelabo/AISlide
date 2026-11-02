@@ -614,8 +614,6 @@ function boundDifferences(core, coreRoot, mcp, mcpRoot) {
   const bounded = value => typeof value.const === 'number' ? { ...value, minimum: value.const, maximum: value.const } : value;
   const walk = (left, right, path, depth) => {
     if (depth > 24) return;
-    // The core schema publishes few GraphSpec bounds (murasamelabo/AISlide#68), so the diagram wrapper in the part schema is not compared yet.
-    if (path === 'spec.data<diagram>.graph') return;
     const a = bounded(open(left, coreRoot));
     const b = bounded(open(right, mcpRoot));
     const aBranches = alternatives(a, coreRoot);
@@ -673,6 +671,10 @@ const partSchemaDrift = [
       'spec.data<architecture>.relations[].from': ['minLength', 'maxLength'],
       'spec.data<architecture>.relations[].to': ['minLength', 'maxLength'],
       'spec.data<tree>.nodes[].parent': ['maxLength'],
+      'spec.data<diagram>.graph.edges[].source': ['minLength', 'maxLength'],
+      'spec.data<diagram>.graph.edges[].target': ['minLength', 'maxLength'],
+      'spec.data<diagram>.graph.nodes[].group': ['minLength', 'maxLength'],
+      'spec.data<diagram>.graph.groups[].parent': ['minLength', 'maxLength'],
     },
   },
   {
