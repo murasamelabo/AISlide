@@ -79,6 +79,8 @@ fn xml_value_with_hyperlinks(node: Node<'_, '_>, normalize_links: bool) -> serde
 }
 
 pub(crate) fn chart_is_representable(package: &Package, binding: &NativePart, id: &str, kind: crate::model::ChartKind, categories: &[String], series: &[crate::model::ChartSeries], options: &crate::model::ChartOptions) -> Result<bool> {
+    // The regeneration guard calls this outside patch_part, so no caller scope can be assumed. Chart style parts have no color map of their own.
+    let _s = crate::design::ColorMap::default().enter();
     let document = parse(package.text(&binding.path)?)?;
     let numeric = binding.nodes.get(id).ok_or_else(|| Error::Invalid("native chart identity missing".into()))?;
     let node = document.descendants().find(|node| is_shape(*node) && properties(*node).and_then(|node| node.attribute("id")) == Some(numeric)).ok_or_else(|| Error::Invalid("native chart missing".into()))?;
@@ -109,7 +111,6 @@ pub(crate) fn chart_is_representable(package: &Package, binding: &NativePart, id
     let actual = parse(package.text(path)?)?;
     let expected = crate::charts::chart(kind, categories, series, options);
     let expected = parse(std::str::from_utf8(&expected).map_err(|_| Error::Invalid("chart XML encoding".into()))?)?;
-    let _s = crate::design::ColorMap::default().enter();
     let act_val = || crate::native::part_color_map(package, &binding.path).scope(|| xml_value(actual.root_element()));
     if crate::native::try_part_color_map(package, &binding.path).is_err() && [actual.root_element(), expected.root_element()].into_iter().any(|r| r.descendants().any(|n| n.has_tag_name((A, "schemeClr")))) { return Ok(false); }
     if act_val() != xml_value(expected.root_element()) {
