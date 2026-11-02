@@ -22,7 +22,7 @@ fn change(document: &Document, deck: aislide_core::model::Deck) -> document::Tra
 }
 
 #[test]
-fn issue32_custom_color_maps_warn_in_native_and_template_diagnostics_without_rewriting_source() {
+fn issue32_incomplete_and_extension_color_maps_warn_in_native_and_template_diagnostics_without_rewriting_source() {
     const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
     const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
     for master in [false, true] {

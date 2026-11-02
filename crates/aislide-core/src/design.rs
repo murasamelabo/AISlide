@@ -36,7 +36,16 @@ impl ColorMap {
     }
 }
 
-pub(crate) fn color_slot(value: &str) -> &str { ACTIVE_COLOR_MAP.with(|a| a.get().0.resolve(value)) }
+/// Resolves a scheme color name through the active color map. Callers must be inside a scope (`enter`, `scope` or `enter_part_color_map`);
+/// content that has no color map of its own, such as modern comments, enters `ColorMap::default().scope` explicitly.
+/// Debug builds assert on a missing scope so that a read path added without one fails in tests; release builds resolve with the default map.
+pub(crate) fn color_slot(value: &str) -> &str {
+    ACTIVE_COLOR_MAP.with(|active| {
+        let (map, _, depth) = active.get();
+        debug_assert!(depth > 0, "color_slot requires an active ColorMap scope; wrap content without a color map in ColorMap::default().scope");
+        map.resolve(value)
+    })
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -273,4 +282,24 @@ pub fn set_master_theme(mut deck: Deck, master_id: &str, theme: Option<Theme>) -
     master.theme = theme;
     validate_deck(&deck)?;
     Ok(deck)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_slot_resolves_through_the_active_scope() {
+        let mut map = ColorMap::default();
+        assert!(map.set("bg1", "dk1"));
+        map.scope(|| assert_eq!(color_slot("bg1"), "dk1"));
+        ColorMap::default().scope(|| assert_eq!(color_slot("bg1"), "lt1"));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "active ColorMap scope")]
+    fn color_slot_without_a_scope_is_a_programming_error() {
+        color_slot("bg1");
+    }
 }

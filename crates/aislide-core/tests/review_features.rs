@@ -99,6 +99,22 @@ fn modern_independent_xml_reads_three_states_and_preserves_noop_bytes() {
 }
 
 #[test]
+fn modern_comment_scheme_colors_resolve_with_the_default_map_not_the_slide_override() {
+    let mut package = Package::open(modern_fixture()).unwrap();
+    let comments = package.text("ppt/comments/modern.xml").unwrap().replace("<a:rPr b=\"1\"/>", "<a:rPr b=\"1\"><a:solidFill><a:schemeClr val=\"bg1\"/></a:solidFill></a:rPr>");
+    assert!(comments.contains("schemeClr"), "the fixture comment must carry a scheme color");
+    package.replace_part("ppt/comments/modern.xml", comments.into_bytes()).unwrap();
+    let slide = package.text("ppt/slides/slide1.xml").unwrap().replace("<a:masterClrMapping/>", "<a:overrideClrMapping bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/>");
+    assert!(slide.contains("overrideClrMapping"), "the fixture slide must remap bg1");
+    package.replace_part("ppt/slides/slide1.xml", slide.into_bytes()).unwrap();
+    let bytes = package.save().unwrap();
+    let document = open(&bytes);
+    let value = serde_json::to_value(&document.deck.slides[0].review).unwrap();
+    assert_eq!(value["modern_threads"][0]["body"][0]["runs"][0]["style"]["color"], "@lt1", "a comment belongs to no color map, so bg1 resolves through the default map");
+    assert_eq!(save(&document), bytes);
+}
+
+#[test]
 fn modern_status_reply_save_preserves_unknown_and_other_parts() {
     let bytes = modern_fixture();
     let original = open(&bytes);

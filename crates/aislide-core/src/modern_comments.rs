@@ -211,7 +211,9 @@ fn authors(package: &Package) -> Result<BTreeMap<String, Author>> {
 fn read_entry(node: roxmltree::Node<'_, '_>, authors: &BTreeMap<String, Author>) -> Result<ModernReply> {
     let author = authors.get(&guid(&required(node, "authorId")?)?).ok_or_else(invalid)?.clone();
     let status = match node.attribute("status").unwrap_or("active") { "active" => Status::Active, "resolved" => Status::Resolved, "closed" => Status::Closed, _ => return Err(invalid()) };
-    let body = crate::native::child(node, NS, "txBody").map(|body| crate::native::read_rich_paragraphs_with_limit(body, &Default::default(), &Default::default(), 8000)).transpose()?.unwrap_or_default();
+    let body = crate::native::child(node, NS, "txBody")
+        .map(|body| crate::design::ColorMap::default().scope(|| crate::native::read_rich_paragraphs_with_limit(body, &Default::default(), &Default::default(), 8000)))
+        .transpose()?.unwrap_or_default();
     Ok(ModernReply { id: required(node, "id")?, author, created: required(node, "created")?, status, body })
 }
 
