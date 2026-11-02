@@ -177,19 +177,29 @@ title band (88px, or 80px for `interactive/*`); pattern-mode `slots` accept the
 same field. It defaults to `false` when `spec.title` is empty or whitespace-only
 and to `true` otherwise. Pass `show_title:false` to omit the band, for example
 under the slide title, while `spec.title` stays as metadata. Explicit
-`show_title:true` requires a nonempty title, and so does a managed part whose
-`layout.show_title` is true, which is its default: `create_part`, `add_part`,
-`insert_part` and `update_part`, including their batch forms, reject a blank
-title with the same message, so give a part without a title
-`layout.show_title:false`. A part without `layout` has no `show_title`, and its
-placement is unchanged. A diagram draws its band only while its own
-`GraphSpec.show_title` is true, and only then needs a title. A saved document
-whose stored part has a blank title and a visible band still opens as a managed
-part and saves unchanged. `update_part` may keep that combination but cannot
-introduce it, and `preflight_presentation` reports the saved part as
-`PART_TITLE_BAND_EMPTY` (warning). `interactive/*` still requires a nonempty
-title when the band is hidden, and then needs a frame of at least 960×400
-instead of 960×480.
+`show_title:true` requires a nonempty title. `interactive/*` still requires a
+nonempty title when the band is hidden, and then needs a frame of at least
+960×400 instead of 960×480.
+
+A managed part that stores a `layout` follows the same rule, because
+`layout.show_title` defaults to true. `create_part`, `add_part`, `insert_part`,
+`update_part`, `add_graph` with a `layout`, `update_graph` and the `update_part`
+and `update_graph` edits of a slide revision reject a blank or whitespace-only
+title with the `compose_slide` message, so give a part without a title
+`layout.show_title:false`. A diagram draws its band only while its own
+`GraphSpec.show_title` is true, and only then needs a title. The rule has this
+scope:
+
+- A part without `layout` has no `show_title` to change. It keeps its legacy
+  placement, which always draws the band, so an empty title leaves an empty
+  strip there; the part is neither rejected nor reported. This includes
+  `insert_graph`, which takes no layout. Give such a part a title, or a
+  `layout` with `show_title:false` and an explicit frame, to remove the strip.
+- A saved document whose stored part has a layout, a visible band and a blank
+  title still opens as a managed part and saves unchanged. `update_part` and
+  `update_graph` may keep that combination but cannot introduce it, and
+  `preflight_presentation` reports the saved part as `PART_TITLE_BAND_EMPTY`
+  (warning). The finding concerns parts that have a layout, for the same reason.
 
 Pattern mode replaces `blocks` with `pattern:{id,count?,mirror?,message_band?}`
 and `slots:{<slot id>:block}`. Core resolves the [layout pattern](#layout-patterns)
@@ -535,8 +545,8 @@ Every operation has `op` and `slide_id`, plus the following fields:
 | `add_elements` | `elements` | Append 1-128 complete typed `Element` roots with final content, geometry and supported formatting; normal scene budgets still apply |
 | `add_part` | `id`, `spec: PartSpec` | Insert editable objects and managed metadata; use `spec.layout` for final placement |
 | `update_part` | `id`, `spec: PartSpec` | Replace a current managed part's specification and rendering atomically; stale metadata rejects |
-| `add_graph` | `id`, `spec: GraphSpec`, optional `layout: PartLayout \| null` | Insert a managed `diagram/custom` part with the requested placement |
-| `update_graph` | `id`, `spec: GraphSpec` | Regenerate a current managed graph, preserving its existing `PartLayout`; a `layout` field is not accepted |
+| `add_graph` | `id`, `spec: GraphSpec`, optional `layout: PartLayout \| null` | Insert a managed `diagram/custom` part with the requested placement; a visible title band (`layout.show_title` and `GraphSpec.show_title` both true) needs a nonempty `spec.title` |
+| `update_graph` | `id`, `spec: GraphSpec` | Regenerate a current managed graph, preserving its existing `PartLayout`; a `layout` field is not accepted, and a blank title cannot newly introduce an empty band |
 | `set_frame` | `id`, `frame` | Set geometry without changing font or stroke sizes |
 | `set_text_style` | `ids`, `style` | Overlay a nonempty partial `RunStyle` on 1-128 distinct text/shape targets, their defaults and existing runs; retain unspecified run and paragraph attributes |
 | `set_surface` | `ids`, `surface` | Overlay supplied fill/outline/opacity/gradient on 1-128 rect/shape/polygon targets without changing rich text; outlines require shape/polygon |
@@ -1480,6 +1490,13 @@ Managed graphs use `Document.parts` with preset `diagram/custom` and data `{kind
 The recommended mixed-batch `add_graph` accepts top-level
 `layout?: PartLayout | null`; `update_graph` accepts no layout and preserves
 the existing part layout. This is distinct from `GraphSpec.show_title`.
+When the stored layout shows the band (its `show_title` defaults to true) and
+`GraphSpec.show_title` is true, the graph needs a nonempty `title`: `add_graph`
+rejects a blank one, and `update_graph` cannot introduce one, with the message
+that `add_part` gives. `GraphSpec.show_title:false` and `layout.show_title:false`
+leave no band to reserve. A graph without a layout (core `insert_graph`, which the
+standalone MCP `add_graph` tool calls, takes none) keeps its legacy placement and
+is not checked.
 Use `get_document({deck_id})` and its `parts` array to inspect `spec.layout`, since
 `get_graph` returns the graph specification and stale status, not PartLayout.
 Legacy individual graph tools keep their existing payloads without a layout

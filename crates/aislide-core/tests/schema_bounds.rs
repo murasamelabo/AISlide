@@ -363,6 +363,10 @@ fn probe(world: &Walker, site: &Site, examples: &[&Value]) -> Vec<Flag> {
         }
         Kind::Number { min, max, excluded_min, excluded_max, integer } => {
             let number = |value: f64| if *integer { json!(value as i64) } else { json!(value) };
+            // The nearest value outside a bound: the next integer, or the next representable number. A step of 1.0 would miss a validator
+            // that accepts less than one unit beyond the bound, such as 0.5 for a range published as 0 to 1.
+            let above = |value: f64| if *integer { value + 1.0 } else { value.next_up() };
+            let below = |value: f64| if *integer { value - 1.0 } else { value.next_down() };
             let at = |value: f64| run(site, examples, |example, occurrence| if occurrence.seed { None } else { Some(with_value(example, &occurrence.pointer, number(value))) });
             let beyond = |value: f64| run(site, examples, |example, occurrence| Some(with_value(example, &occurrence.pointer, number(value))));
             // Part numbers are finite and within +/-1e15; the validators name that limit, so the schema has to publish both sides.
@@ -375,11 +379,13 @@ fn probe(world: &Walker, site: &Site, examples: &[&Value]) -> Vec<Flag> {
                 }
             }
             if let Some(max) = *max {
-                beyond_bound(&mut flags, "number-over", &beyond(max + 1.0), |_| true, format!("accepted {} although maximum is {max}", max + 1.0), String::new());
+                let over = above(max);
+                beyond_bound(&mut flags, "number-over", &beyond(over), |_| true, format!("accepted {over} although maximum is {max}"), String::new());
                 at_bound(&mut flags, "number-at-max", &at(max), format!("rejected the published maximum {max}"));
             }
             if let Some(min) = *min {
-                beyond_bound(&mut flags, "number-under", &beyond(min - 1.0), |_| true, format!("accepted {} although minimum is {min}", min - 1.0), String::new());
+                let under = below(min);
+                beyond_bound(&mut flags, "number-under", &beyond(under), |_| true, format!("accepted {under} although minimum is {min}"), String::new());
                 at_bound(&mut flags, "number-at-min", &at(min), format!("rejected the published minimum {min}"));
             }
             for (bound, keyword) in [(*excluded_min, "exclusiveMinimum"), (*excluded_max, "exclusiveMaximum")] {
