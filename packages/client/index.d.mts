@@ -123,6 +123,8 @@ export class DocumentSession {
   readonly fieldWarnings: string[]
   readonly graphDiagnostics: GraphDiagnosticsSnapshot | null
   readonly renderWarnings: import('./types').RenderWarningsSnapshot | null
+  /** Set by the latest accepted operation only: null unless remove_elements removed something. Lists group children and attached connectors removed in addition to the requested IDs. */
+  readonly removedElements: import('./types').RemovedElementsSnapshot | null
   getSummary(options?: { offset?: number; limit?: number; slideId?: string }): SessionSummary
   transact(operations: PatchOperation[], options?: TransactionOptions): Promise<AislideDocument>
   /** 1..128 typed operations, one core transaction and Undo per changed batch. Prefer add_part/add_graph for regenerable metadata; add_elements is unmanaged. add_graph accepts layout here only; update_graph retains its existing PartLayout. Core capacity and 128 total metadata entries still apply. */
@@ -142,6 +144,9 @@ export class DocumentSession {
   setHyperlink(slideId: string, input: { id: string; link: string | null }, options?: AuthoringOptions): Promise<AislideDocument>
   setShapeAdjustment(slideId: string, input: { id: string; adjustment: ShapeAdjustment }, options?: AuthoringOptions): Promise<AislideDocument>
   addPicture(slideId: string, input: PictureInput, options?: AuthoringOptions): Promise<AislideDocument>
+  updateChart(slideId: string, input: { id: string; kind?: import('./types').ChartKind | null; categories?: string[] | null; series?: import('./types').ChartSeries[] | null; options?: import('./types').ChartOptions | null; replace_options?: boolean | null; frame?: Frame | null }, options?: AuthoringOptions): Promise<AislideDocument>
+  /** Removes top-level elements. Group children and connectors attached to a removed element go with them; read the full list from removedElements. */
+  removeElements(slideId: string, ids: string[], options?: AuthoringOptions): Promise<AislideDocument>
   /** Imports selected authored source slides with matching canvas in one Undo. Native source documents fail closed. */
   importSlides(source: AislideDocument, input: SlideImportInput, options?: AuthoringOptions): Promise<AislideDocument>
   replaceDeck(deck: Deck, options?: ReplaceOptions): Promise<AislideDocument>

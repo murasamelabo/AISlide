@@ -181,7 +181,19 @@ pub struct PreviewImage {
     pub height: u32,
     pub byte_length: usize,
     pub sha256: String,
+    #[serde(default = "default_preview_scale")]
+    pub canvas_scale: f64,
+    #[serde(default)]
+    pub downscaled_from_canvas: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tile_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tile_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tile_scale: Option<f64>,
 }
+
+fn default_preview_scale() -> f64 { 1.0 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreviewPage {
@@ -198,6 +210,14 @@ pub struct PreviewPage {
 pub struct PresentationPreview {
     pub revision: u64,
     pub hash: String,
+    #[serde(default)]
+    pub canvas_width: u32,
+    #[serde(default)]
+    pub canvas_height: u32,
+    #[serde(default = "default_preview_scale")]
+    pub canvas_scale: f64,
+    #[serde(default)]
+    pub downscaled_from_canvas: bool,
     pub requested_max_dimension: u32,
     pub actual_max_dimension: u32,
     pub quality_reduced: bool,
@@ -279,6 +299,10 @@ fn preview_attempt(
             width: artifact.width, height: artifact.height,
         });
     }
+    let (tile_width, tile_height) = pages.first().map_or((deck.width, deck.height), |page| (page.width, page.height));
+    let raw_scale = (f64::from(tile_width) / f64::from(deck.width)).min(f64::from(tile_height) / f64::from(deck.height));
+    let canvas_scale = (raw_scale * 10000.0).round() / 10000.0;
+    let downscaled_from_canvas = canvas_scale < 1.0 - 1e-6;
     if montage {
         let width = artifacts[0].width * columns + gap * (columns + 1);
         let height = artifacts[0].height * rows + gap * (rows + 1);
@@ -295,6 +319,11 @@ fn preview_attempt(
         sha256: format!("{:x}", Sha256::digest(&artifact.bytes)), byte_length: artifact.bytes.len(),
         base64: base64::engine::general_purpose::STANDARD.encode(artifact.bytes),
         mime_type: artifact.mime_type, width: artifact.width, height: artifact.height,
+        canvas_scale,
+        downscaled_from_canvas,
+        tile_width: montage.then_some(tile_width),
+        tile_height: montage.then_some(tile_height),
+        tile_scale: montage.then_some(canvas_scale),
     }).collect();
     let mut warnings = output.warnings;
     warnings.extend(crate::native_projection::warnings(document, selected)?);
@@ -308,6 +337,7 @@ fn preview_attempt(
             message: format!("Preview max_dimension reduced from requested {} to actual {max_dimension} pixels to fit the encoded image budget; all {} selected pages are preserved in their requested order", options.max_dimension, pages.len()) });
     }
     let result = PresentationPreview { revision: document.revision, hash: document.hash.clone(),
+        canvas_width: deck.width, canvas_height: deck.height, canvas_scale, downscaled_from_canvas,
         requested_max_dimension: options.max_dimension, actual_max_dimension: max_dimension, quality_reduced,
         pages, images, warnings, office_visual_parity: false };
     if serde_json::to_vec(&result).map_err(Error::from)?.len() > 4 * 1024 * 1024 - 65536 {

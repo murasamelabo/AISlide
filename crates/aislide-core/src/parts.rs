@@ -89,12 +89,12 @@ pub enum PartData {
     ShiftRows { #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 24))] from_label: String, #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 24))] to_label: String, #[schemars(length(min = 2, max = 5))] rows: Vec<ShiftRow>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     StepCards { #[schemars(length(min = 2, max = 4))] steps: Vec<StepCard>, #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 12))] step_label: String, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     OpenSteps { #[schemars(length(min = 2, max = 5))] steps: Vec<EditorialStep>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
-    RailSteps { #[schemars(length(min = 2, max = 5))] steps: Vec<EditorialStep>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    RailSteps { #[schemars(length(min = 2, max = 5))] steps: Vec<EditorialStep>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64> },
     Roadmap { #[schemars(length(min = 2, max = 4))] phases: Vec<RoadmapPhase>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
     IconColumns { #[schemars(length(min = 2, max = 4))] items: Vec<IconColumn> },
-    FactColumns { #[schemars(length(min = 2, max = 6))] items: Vec<FactColumn>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = 2, max = 3))] columns: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    FactColumns { #[schemars(length(min = 2, max = 6))] items: Vec<FactColumn>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = 2, max = 3))] columns: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64> },
     ImageColumns { #[schemars(length(min = 2, max = 4))] items: Vec<ImageColumn> },
-    Agenda { #[schemars(length(min = 2, max = 7))] items: Vec<AgendaItem>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String> },
+    Agenda { #[schemars(length(min = 2, max = 7))] items: Vec<AgendaItem>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64> },
     ScreenshotCallouts { image: crate::graphs::GraphIcon, #[schemars(length(min = 1, max = 6))] callouts: Vec<Callout>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] detail_views: bool, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     KpiCards { #[schemars(length(min = 1, max = 8))] cards: Vec<KpiCard>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = 1, max = 4))] columns: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     BulletGraphs { #[schemars(length(min = 1, max = 6))] rows: Vec<BulletRow>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
@@ -331,7 +331,10 @@ pub(super) fn validate_spec(spec: &PartSpec) -> Result<(&str, usize)> {
         validate_data(&spec.data)?;
         return Ok((preset.id.split_once('/').map_or(preset.id, |(category, _)| category), 4));
     }
-    if let Some(kind) = briefing::kind(&spec.data) { return Err(Error::Invalid(format!("{kind} data requires its matching briefing preset"))); }
+    if let Some(kind) = briefing::kind(&spec.data) {
+        let preset_id = briefing::PRESETS.iter().find(|preset| preset.kind == kind).map_or(kind, |preset| preset.id);
+        return Err(Error::Invalid(format!("{kind} data requires its matching briefing preset \"{preset_id}\"")));
+    }
     if spec.preset == "diagram/custom" {
         let PartData::Diagram { graph } = &spec.data else { return Err(Error::Invalid("diagram requires graph data".into())); };
         if graph.title != spec.title || graph.subtitle != spec.subtitle { return Err(Error::Invalid("graph titles must match part metadata".into())); }
@@ -352,9 +355,13 @@ pub(super) fn validate_spec(spec: &PartSpec) -> Result<(&str, usize)> {
 pub(crate) fn fixed_typography(spec: &PartSpec, floor: f64) -> bool {
     if briefing::kind(&spec.data).is_none() { return false; }
     // Presets with a body_size lever draw the body at `body_size` (default 16px); the other presets have no body lever.
+    // Agenda alone defaults to 14px, below the default 16px floor. That default is the preset's own size, so it stays information
+    // (see issue18_reported_presets_keep_their_finding_as_information); only an explicit `body_size` is checked against the floor.
     let body = match &spec.data {
         PartData::IconCards { body_size, .. } | PartData::IconRows { body_size, .. } | PartData::ShiftRows { body_size, .. }
-        | PartData::StepCards { body_size, .. } | PartData::ScreenshotCallouts { body_size, .. } => Some(body_size.unwrap_or(briefing::BODY)),
+        | PartData::StepCards { body_size, .. } | PartData::ScreenshotCallouts { body_size, .. }
+        | PartData::RailSteps { body_size, .. } | PartData::FactColumns { body_size, .. } => Some(body_size.unwrap_or(briefing::BODY)),
+        PartData::Agenda { body_size: Some(size), .. } => Some(*size),
         _ => None,
     };
     body.is_none_or(|size| size + 0.01 >= floor)
@@ -603,14 +610,31 @@ fn measured_slack(element: &Element, theme: &crate::design::Theme, ids: &[String
     Ok(if slack.is_finite() { slack.max(0.0) } else { 0.0 })
 }
 
-pub(crate) fn layout_overflow(element: &Element, theme: &crate::design::Theme) -> Result<Option<(String, bool)>> {
+pub(crate) struct LayoutOverflow {
+    pub element_id: String,
+    pub text: String,
+    pub missing_glyphs: bool,
+    pub measured_height: u32,
+    pub available_height: f64,
+}
+
+pub(crate) fn layout_overflow(element: &Element, theme: &crate::design::Theme) -> Result<Option<LayoutOverflow>> {
     let measured = crate::layout::measure_layout(&measurement_deck(element, theme))?;
+    let elements = crate::model::element_list(std::slice::from_ref(element));
     Ok(measured.measurements.iter().find(|measurement| measurement.overflow || measurement.missing_glyphs > 0).map(|measurement| {
-        let text = crate::model::element_list(std::slice::from_ref(element)).into_iter().find_map(|candidate| match candidate {
-            Element::Text { id, text, .. } | Element::Shape { id, text, .. } if *id == measurement.element_id => Some(text.chars().take(40).collect::<String>()),
+        let text = elements.iter().find_map(|candidate| match candidate {
+            Element::Text { id, text, .. } | Element::Shape { id, text, .. } if *id == measurement.element_id => {
+                Some(text.replace('\n', " ").chars().take(40).collect::<String>())
+            }
             _ => None,
         }).unwrap_or_else(|| measurement.element_id.clone());
-        (text, !measurement.overflow)
+        LayoutOverflow {
+            element_id: measurement.element_id.clone(),
+            text,
+            missing_glyphs: !measurement.overflow,
+            measured_height: measurement.measured_height.ceil() as u32,
+            available_height: measurement.height,
+        }
     }))
 }
 

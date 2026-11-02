@@ -3,10 +3,12 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { randomUUID, createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdir, readFile, realpath, lstat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { requestCore as runCore, MAX_REQUEST_BYTES } from './core-client.mjs';
 import { CAPACITY_PROFILES, FONT_LIMITS } from '../packages/client/index.mjs';
 import { publishNewFile, publishNewBundle, BundlePublicationError } from './atomic-output.mjs';
@@ -15,6 +17,22 @@ import { AislideClient } from '../packages/client/index.mjs';
 import { McpAssets } from './mcp-assets.mjs';
 import { searchLucideIcons, resolveLucideIcon } from './lucide-search.mjs';
 
+function resolveMcpGitCommit() {
+	const envCommit = process.env.AISLIDE_GIT_COMMIT?.trim();
+	if (envCommit && (/^[0-9a-fA-F]{7,40}$/.test(envCommit) || envCommit === 'unknown')) return envCommit.toLowerCase();
+	try {
+		const out = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+			cwd: dirname(fileURLToPath(import.meta.url)),
+			encoding: 'utf8',
+			timeout: 2000,
+			stdio: ['ignore', 'pipe', 'ignore'],
+		}).trim();
+		if (/^[0-9a-fA-F]{7,40}$/.test(out)) return out.toLowerCase();
+	} catch {}
+	return 'unknown';
+}
+const mcpGitCommit = resolveMcpGitCommit();
+const MAX_EXPOSED_COMPACT_TOOLS = 4;
 const serverInfo = { name: 'aislide', version: '0.1.0' };
 const { values: args } = parseArgs({ options: { 'output-dir': { type: 'string' }, 'tool-profile': { type: 'string', default: 'compact' }, 'asset-dir': { type: 'string', multiple: true, default: [] }, 'layout-patterns': { type: 'string', default: 'off' } }, allowPositionals: false });
 const toolProfile = z.enum(['compact', 'full']).parse(args['tool-profile']);
@@ -64,7 +82,7 @@ const labelsSchema = z.object({ show_value: z.boolean().optional(), show_categor
 const histogramOptionsSchema = z.object({ samples: z.array(numeric).min(1).max(4096), binning: z.discriminatedUnion('rule', [z.object({ rule: z.literal('count'), count: z.number().int().min(1).max(128) }).strict(), z.object({ rule: z.literal('width'), width: numeric.positive() }).strict()]), interval_closed: z.enum(['left', 'right']), underflow: optional(numeric), overflow: optional(numeric) }).strict();
 const boxWhiskerOptionsSchema = z.object({ samples: z.array(z.array(numeric).min(4).max(4096)).min(1).max(32).refine((groups) => groups.reduce((total, group) => total + group.length, 0) <= 4096, 'At most 4096 total samples'), quartile_method: z.enum(['inclusive', 'exclusive']), mean_line: z.boolean(), mean_marker: z.boolean(), nonoutliers: z.boolean(), outliers: z.boolean() }).strict();
 const hierarchyOptionsSchema = z.object({ paths: z.array(z.array(z.string().min(1).max(80)).min(2).max(4)).min(1).max(32), parent_labels: optional(z.enum(['none', 'banner', 'overlapping'])) }).strict();
-const chartOptionsSchema = z.object({ primary_axis: axisSchema.optional(), secondary_axis: axisSchema.optional(), category_axis: axisSchema.optional(), legend: optional(z.enum(['bottom', 'top', 'left', 'right', 'top_right', 'hidden'])), data_labels: optional(labelsSchema), waterfall_totals: optional(z.array(z.number().int().min(0).max(31)).max(32)), histogram: optional(histogramOptionsSchema), box_whisker: optional(boxWhiskerOptionsSchema), hierarchy: optional(hierarchyOptionsSchema) }).strict();
+const chartOptionsSchema = z.object({ primary_axis: axisSchema.optional(), secondary_axis: axisSchema.optional(), category_axis: axisSchema.optional(), legend: optional(z.enum(['bottom', 'top', 'left', 'right', 'top_right', 'hidden'])), data_labels: optional(labelsSchema), waterfall_totals: optional(z.array(z.number().int().min(0).max(31)).max(32).describe('Zero-based increasing category indices marked as total/subtotal bars in a waterfall chart, e.g. [0, 3]. Required for kind="waterfall".')), histogram: optional(histogramOptionsSchema), box_whisker: optional(boxWhiskerOptionsSchema), hierarchy: optional(hierarchyOptionsSchema) }).strict().describe('Chart options. Extended chartEx kinds (waterfall, funnel, histogram, box_whisker, treemap, sunburst) allow only one plain series and legend placement; primary_axis, secondary_axis, category_axis and data_labels are not supported on chartEx (for waterfall, pass options:{legend:"hidden", waterfall_totals:[0, 3]}).');
 const trendlineSchema = z.object({ kind: z.enum(['linear', 'exponential', 'logarithmic', 'polynomial', 'power', 'moving_average']), order: optional(z.number().int().min(2).max(6)), period: optional(z.number().int().min(2).max(255)), intercept: optional(numeric), forward: optional(numeric.nonnegative()), backward: optional(numeric.nonnegative()), display_equation: z.boolean().optional(), display_r_squared: z.boolean().optional() }).strict();
 const errorBarsSchema = z.object({ kind: z.enum(['fixed_value', 'percentage', 'standard_deviation', 'standard_error', 'custom']), direction: z.enum(['x', 'y']).optional(), bar_type: z.enum(['both', 'plus', 'minus']).optional(), value: optional(numeric.nonnegative()), plus: optional(z.array(numeric.nonnegative()).max(32)), minus: optional(z.array(numeric.nonnegative()).max(32)) }).strict();
 const chartSeriesSchema = z.object({ name: z.string().max(80), values: z.array(numeric).max(32), color: colorSchema, kind: optional(chartKinds), axis: optional(z.enum(['primary', 'secondary'])), bubble_sizes: optional(z.array(numeric.positive()).min(1).max(32)), trendline: optional(trendlineSchema), error_bars: optional(errorBarsSchema) }).strict();
@@ -295,10 +313,12 @@ const authoringVariants = [
 	z.object({ op: z.literal('update_part'), slide_id: slideId, id: z.string().min(1).max(40), spec: z.lazy(() => partSpec) }).strict(),
 	z.object({ op: z.literal('add_graph'), slide_id: slideId, id: z.string().min(1).max(40), spec: z.lazy(() => graphSpec), layout: optional(z.lazy(() => partLayout)) }).strict(),
 	z.object({ op: z.literal('update_graph'), slide_id: slideId, id: z.string().min(1).max(40), spec: z.lazy(() => graphSpec) }).strict(),
+	z.object({ op: z.literal('update_chart'), slide_id: slideId, id: slideId, kind: optional(chartKinds), categories: optional(z.array(z.string().max(80)).max(32)), series: optional(z.array(chartSeriesSchema).min(1).max(6)), options: optional(chartOptionsSchema), replace_options: optional(z.boolean()), frame: optional(frameSchema) }).strict(),
+	z.object({ op: z.literal('remove_elements'), slide_id: slideId, ids: authoringIds }).strict(),
 ];
 const authoringOperations = z.array(z.discriminatedUnion('op', authoringVariants.map(variant => variant.shape.op.value === 'add_picture' ? withAssetReference(variant) : variant))).min(1).max(128);
 const basicElements = z.lazy(() => z.discriminatedUnion('type', elementSchema.unwrap().options.filter(variant => ['text', 'rect', 'shape', 'connector'].includes(variant.shape.type.value))));
-const basicAuthoringOperations = z.array(z.discriminatedUnion('op', authoringVariants.filter(variant => !['add_part', 'update_part', 'add_graph', 'update_graph', 'compose_slide', 'set_rich_text'].includes(variant.shape.op.value)).map(variant => {
+const basicAuthoringOperations = z.array(z.discriminatedUnion('op', authoringVariants.filter(variant => !['add_part', 'update_part', 'add_graph', 'update_graph', 'compose_slide', 'set_rich_text', 'update_chart'].includes(variant.shape.op.value)).map(variant => {
 	if (variant.shape.op.value === 'add_picture') return withAssetReference(variant);
 	return variant.shape.op.value === 'add_elements' ? variant.extend({ elements: z.array(basicElements).min(1).max(128) }) : variant;
 }))).min(1).max(128);
@@ -358,7 +378,7 @@ const iconColumn = iconRow.omit({ detail_emphasis: true }).extend({
 const factColumn = z.object({ value: briefingLine(24, 'Fact value', true).describe('Supplied verbatim text, never normalized or compared by area'), label: briefingText(48, 'Fact label', true), unit: briefingLine(12, 'Fact unit').optional(), detail: briefingText(160, 'Fact detail').optional(), qualifier: briefingText(100, 'Fact qualifier').optional() }).strict();
 const imageColumn = z.object({ image: graphIcon, label: briefingText(48, 'Image column label', true), detail: briefingText(160, 'Image column detail').optional(), caption: briefingText(80, 'Image caption').optional() }).strict();
 const partId = z.string().min(1).max(24).regex(/^[A-Za-z0-9_-]+$/, 'Use 1-24 ASCII letters, digits, - or _');
-const kpiCard = z.object({ label: briefingText(48, 'KPI label', true), value: briefingLine(16, 'KPI value', true), unit: briefingLine(12, 'KPI unit').optional(), delta: briefingText(40, 'KPI delta').optional(), status: z.enum(['neutral', 'good', 'bad']).optional(), comparison: briefingText(60, 'KPI comparison').optional() }).strict();
+const kpiCard = z.object({ label: briefingText(48, 'KPI label', true), value: briefingLine(16, 'KPI value', true), unit: briefingLine(12, 'KPI unit').optional(), delta: briefingText(40, 'KPI delta').optional(), status: z.enum(['neutral', 'good', 'bad']).optional(), accent: optional(colorSchema), comparison: briefingText(60, 'KPI comparison').optional() }).strict();
 const bulletRow = z.object({ label: briefingText(40, 'Bullet label', true), actual: z.number().min(0).max(1e15), target: z.number().min(0).max(1e15), ranges: z.array(z.number().gt(0).max(1e15)).min(1).max(3).describe('Ascending qualitative limits; the last is the axis maximum'), unit: briefingLine(8, 'Bullet unit').optional(), note: briefingText(80, 'Bullet note').optional(), lower_is_better: z.boolean().optional() }).strict();
 const riskItem = z.object({ id: briefingLine(3, 'Risk id', true), label: briefingLine(48, 'Risk label', true), likelihood: z.number().int().min(1).max(5), impact: z.number().int().min(1).max(5), action: briefingText(80, 'Risk action').optional() }).strict();
 const fishboneCategory = z.object({ label: briefingLine(20, 'Fishbone category', true), causes: z.array(z.object({ text: briefingLine(28, 'Fishbone cause', true), focus: z.boolean().optional() }).strict()).min(1).max(3) }).strict();
@@ -406,13 +426,13 @@ const partData = z.discriminatedUnion('kind', [
 	z.object({ kind: z.literal('icon_rows'), rows: z.array(iconRow).min(2).max(6), boxed: z.boolean().optional(), body_size: briefingBody, message: briefingMessage }).strict(),
 	z.object({ kind: z.literal('shift_rows'), from_label: briefingText(24, 'from_label').optional(), to_label: briefingText(24, 'to_label').optional(), rows: z.array(shiftRow).min(2).max(5), accent: optional(colorSchema), body_size: briefingBody, message: briefingMessage }).strict(),
 	z.object({ kind: z.literal('step_cards'), steps: z.array(stepCard).min(2).max(4), step_label: z.string().max(24).refine(value => Array.from(value).length <= 12 && !/[\r\n]/.test(value), 'step_label requires one line of at most 12 Unicode scalars').meta({ maxLength: 12 }).optional(), accent: optional(colorSchema), body_size: briefingBody, message: briefingMessage }).strict(),
-	z.object({ kind: z.literal('agenda'), items: z.array(agendaItem).min(2).max(7), accent: optional(colorSchema) }).strict(),
+	z.object({ kind: z.literal('agenda'), items: z.array(agendaItem).min(2).max(7), accent: optional(colorSchema), body_size: briefingBody }).strict(),
 	z.object({ kind: z.literal('screenshot_callouts'), image: graphIcon, callouts: z.array(callout).min(1).max(6), detail_views: z.boolean().optional().describe('Keep the complete original plus readable cropped details for 1-3 supplied locations; markers stay outside the original. Overflow requires splitting pages.'), accent: optional(colorSchema), body_size: briefingBody, message: briefingMessage }).strict(),
 	z.object({ kind: z.literal('open_steps'), steps: z.array(editorialStep).min(2).max(5), accent: optional(colorSchema) }).strict(),
-	z.object({ kind: z.literal('rail_steps'), steps: z.array(editorialStep).min(2).max(5), accent: optional(colorSchema) }).strict(),
+	z.object({ kind: z.literal('rail_steps'), steps: z.array(editorialStep).min(2).max(5), accent: optional(colorSchema), body_size: briefingBody }).strict(),
 	z.object({ kind: z.literal('roadmap'), phases: z.array(roadmapPhase).min(2).max(4), accent: optional(colorSchema) }).strict(),
 	z.object({ kind: z.literal('icon_columns'), items: z.array(iconColumn).min(2).max(4) }).strict(),
-	z.object({ kind: z.literal('fact_columns'), items: z.array(factColumn).min(2).max(6), columns: optional(z.number().int().min(2).max(3)), accent: optional(colorSchema) }).strict()
+	z.object({ kind: z.literal('fact_columns'), items: z.array(factColumn).min(2).max(6), columns: optional(z.number().int().min(2).max(3)), accent: optional(colorSchema), body_size: briefingBody }).strict()
 		.refine(value => { const count = value.items.length; const columns = value.columns ?? (count <= 3 ? count : count === 4 ? 2 : 3); return columns <= count && Math.ceil(count / columns) <= 2; }, { message: 'Fact columns require at most two rows', path: ['columns'] }),
 	z.object({ kind: z.literal('image_columns'), items: z.array(imageColumn).min(2).max(4) }).strict(),
 	...businessData,
@@ -611,7 +631,11 @@ function retainedImages(images) {
 function previewResult(result, includeImages = true) {
 	return {
 		[imageResult]: true,
-		metadata: { ...result, images: result.images.map(({ base64: _base64, ...metadata }) => metadata) },
+		metadata: {
+			...result,
+			...(result.downscaled_from_canvas ? { scale_note: `Preview is rendered at ${result.canvas_scale}x of the ${result.canvas_width}x${result.canvas_height} canvas; read font_size (px) from get_deck_summary or preflight_presentation, not from preview image pixels.` } : {}),
+			images: result.images.map(({ base64: _base64, ...metadata }) => metadata),
+		},
 		images: includeImages ? result.images.map(image => ({ type: 'image', data: image.base64, mimeType: image.mime_type })) : [],
 	};
 }
@@ -739,10 +763,31 @@ function register(name, description, inputSchema, readOnly, action) {
 	});
 }
 
-register('discover_tools', 'Search advanced AISlide tool names and concise descriptions without loading their schemas. Use get_tool_schema(name) to expose one tool. Profiles change discovery, not permissions; all existing named calls retain strict validation.' + querySearchDescription, { query: z.string().max(160).optional(), offset: z.number().int().min(0).max(1024).optional(), limit: z.number().int().min(1).max(20).optional() }, true, async ({ query = '', offset = 0, limit = 10 }) => {
+register('discover_tools', 'Search advanced AISlide tool names and concise descriptions without loading their schemas. Tools with loaded:false are available in this session: call get_tool_schema({name}) to expose one tool (compact mode retains the 4 most recent exposed tools). Profiles change discovery, not permissions; all existing named calls retain strict validation.' + querySearchDescription, { query: z.string().max(160).optional(), offset: z.number().int().min(0).max(1024).optional(), limit: z.number().int().min(1).max(20).optional() }, true, async ({ query = '', offset = 0, limit = 10 }) => {
 	const candidates = toolDefinitions.filter(tool => availableTool(tool));
 	const { matching, diagnostics } = filterByQueryTerms(candidates, query, tool => `${tool.name} ${tool.description}`, tool => ({ id: tool.name, name: tool.name }));
-	return { profile: toolProfile, total: matching.length, tools: matching.slice(offset, offset + limit).map(({ name, description, annotations }) => ({ name, description: description.slice(0, 180), read_only: annotations.readOnlyHint, loaded: loadedNow(name) })), next_offset: offset + limit < matching.length ? offset + limit : null, ...diagnostics };
+	const tools = matching.slice(offset, offset + limit).map(({ name, description, annotations }) => {
+		const loaded = loadedNow(name);
+		return {
+			name,
+			description: description.slice(0, 180),
+			read_only: annotations.readOnlyHint,
+			loaded,
+			...(loaded ? {} : { expose_with: { tool: 'get_tool_schema', arguments: { name } } }),
+		};
+	});
+	const hasUnloaded = tools.some(tool => !tool.loaded);
+	return {
+		profile: toolProfile,
+		total: matching.length,
+		tools,
+		...(hasUnloaded ? {
+			next_action: `Call get_tool_schema({name}) to expose an unloaded tool; compact mode retains the ${MAX_EXPOSED_COMPACT_TOOLS} most recent exposed tools`,
+			hint: 'Tools with loaded:false are available in this session; call get_tool_schema({name}) to add them to tools/list before invoking.',
+		} : {}),
+		next_offset: offset + limit < matching.length ? offset + limit : null,
+		...diagnostics,
+	};
 });
 register('get_tool_schema', 'Return one complete self-contained tool schema and expose it through tools/list. Use name=apply_operations for table/chart/group/managed-diagram details omitted from its initial schema. Compact mode retains four recent advanced detail requests, including this complete batch schema; notifications/tools/list_changed announces changes. Full mode retains all tools. No document or file changes.', { name: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/) }, true, async ({ name }) => {
 	const tool = toolDefinitions.find(definition => definition.name === name && availableTool(definition));
@@ -752,7 +797,7 @@ register('get_tool_schema', 'Return one complete self-contained tool schema and 
 		const changed = !loadedTools.has(name);
 		loadedTools.delete(name);
 		loadedTools.add(name);
-		if (loadedTools.size > 4) loadedTools.delete(loadedTools.values().next().value);
+		if (loadedTools.size > MAX_EXPOSED_COMPACT_TOOLS) loadedTools.delete(loadedTools.values().next().value);
 		if (changed && server.isConnected()) await server.server.sendToolListChanged();
 	}
 	return definition;
@@ -958,7 +1003,13 @@ register('finalize_presentation', 'Publish a delivery from the exact revision/ha
 		return { filename: `${name}${file.suffix}`, bytes };
 	});
 	const files = result.files.map(({ base64: _base64, suffix: _suffix, byte_length, ...file }, index) => ({ ...file, filename: items[index].filename, path: join(outputDirectory, items[index].filename), bytes: byte_length }));
-	const manifestValue = { ...result.manifest, producer: { ...result.manifest.producer, name: serverInfo.name, version: serverInfo.version, core_version: result.manifest.producer.version, transport: 'mcp-stdio' },
+	const coreGitCommit = result.manifest.producer.git_commit ?? 'unknown';
+	const gitCommit = coreGitCommit !== 'unknown' ? coreGitCommit : mcpGitCommit;
+	const limitations = Array.isArray(result.manifest.limitations) ? [...result.manifest.limitations] : [];
+	if (coreGitCommit !== 'unknown' && mcpGitCommit !== 'unknown' && coreGitCommit !== mcpGitCommit) {
+		limitations.push(`MCP JS commit (${mcpGitCommit}) differs from core binary commit (${coreGitCommit}); rebuild core binary for matching provenance`);
+	}
+	const manifestValue = { ...result.manifest, limitations, producer: { ...result.manifest.producer, name: serverInfo.name, version: serverInfo.version, git_commit: gitCommit, core_version: result.manifest.producer.version, core_git_commit: coreGitCommit, mcp_git_commit: mcpGitCommit, transport: 'mcp-stdio' },
 		files: files.map(({ path: _path, ...file }) => file) };
 	const manifestBytes = Buffer.from(JSON.stringify(manifestValue, null, 2));
 	const manifestFilename = `${name}.manifest.json`;
@@ -970,7 +1021,7 @@ register('finalize_presentation', 'Publish a delivery from the exact revision/ha
 		preflight_warnings: result.manifest.preflight?.findings.filter(finding => finding.severity === 'warning').length ?? null, render_warning_count: result.manifest.render_warnings.length };
 	const response = { [imageResult]: true, metadata: { status: 'complete', deck_id, revision: result.revision, hash: result.hash, files, manifest, checks,
 		...(compactResponse(detail) ? { page_scope: { total, selected: options.page_indices.length, unselected: total - options.page_indices.length } } : {}),
-		multi_file_atomic: false, limitations: result.manifest.limitations }, images: thumbnail && include_images !== false ? [{ type: 'image', data: thumbnail.base64, mimeType: thumbnail.mime_type }] : [] };
+		multi_file_atomic: false, limitations }, images: thumbnail && include_images !== false ? [{ type: 'image', data: thumbnail.base64, mimeType: thumbnail.mime_type }] : [] };
 	if (Buffer.byteLength(JSON.stringify(toolResponse(response))) > Math.min(4 * 1048576, CAPACITY_PROFILES[state.capacityProfile].request_bytes)) throw new Error('Delivery response exceeds budget; lower max_dimension or disable images');
 	try { await publishNewBundle(outputDirectory, items, signal); }
 	catch (error) {
@@ -1121,6 +1172,10 @@ function renderWarningMetadata(state) {
 	const renderWarnings = state.renderWarnings;
 	return renderWarnings === null ? {} : { renderWarnings };
 }
+function removalMetadata(state) {
+	const removedElements = state.removedElements;
+	return removedElements === null ? {} : { removedElements };
+}
 const graphDiagnosticDescription = ' Returns optional revision/hash-bound graphDiagnostics from the accepted operation, including no-ops: complete/partial/unavailable, at most 64 findings and 32 KiB. Diagnostic failure does not undo a successful commit; no extra render request. Diagnostics are not persisted. Label warnings are nonblocking unless on_overlap=error.';
 for (const name of ['add_graph', 'update_graph', 'apply_graph']) {
 	register(name, (name === 'add_graph' ? 'Insert an architecture graph as native shapes and attached connectors in one undoable revision. Does not rearrange existing slide objects.' : 'Update a managed architecture graph in one undoable revision. Preserves root placement and rejects stale metadata rather than overwriting external/manual changes.') + graphDiagnosticDescription, { deck_id: handle, expected_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), slide_id: z.string().min(1).max(80), id: z.string().min(1).max(40), ...(name === 'apply_graph' ? { operations: graphOperations } : { spec: graphSpec }) }, false, async ({ deck_id, expected_revision, slide_id, ...input }, signal) => {
@@ -1254,10 +1309,10 @@ register('assign_layout', 'Apply or reset a native slide layout using a document
 	const state = getDeck(deck_id); await state.assignLayout(slide_id, layout_id, { signal, expectedRevision: expected_revision, preserveFreeform: preserve_freeform }); return { deck_id, revision: state.revision };
 });
 register('create_object', 'Create a typed default object without inserting it. Charts contain synthetic examples. Supply final content and geometry through add_elements or apply_operations; core validates complete elements there.', objectInput, true, async (input, signal) => client.createObject(input, { signal }));
-register('apply_operations', 'Apply 1-128 typed operations across slides with one Undo and revision/hash checks. Default discovery shows text/rect/shape/connector elements, picture placement and metadata. For tables/charts/polygons/groups or managed add_part/add_graph, fetch get_tool_schema(name="apply_operations") for the complete schema. Runtime validation always retains all strict types. Includes update_notes (8000 scalars), set_table_headers and set_accessibility after target creation. Plain notes never flatten incompatible rich notes. Managed graphs retain PartLayout/stale guards. Core retains locks, native/source safety and capacity limits. Serialize AISlide calls; never blindly retry. No raw Patch paths.' + graphDiagnosticDescription, { ...mutationInput, expected_hash: contentHash, operations: authoringOperations }, false, async ({ deck_id, expected_revision, expected_hash, operations }, signal) => {
+register('apply_operations', 'Apply 1-128 typed operations across slides with one Undo and revision/hash checks. Default discovery shows text/rect/shape/connector elements, picture placement and metadata. For tables/charts/polygons/groups or managed add_part/add_graph, fetch get_tool_schema(name="apply_operations") for the complete schema. Runtime validation always retains all strict types. Includes update_notes (8000 scalars), set_table_headers and set_accessibility after target creation. Plain notes never flatten incompatible rich notes. remove_elements also removes group children and attached connectors and returns them as removedElements[].cascaded. Managed graphs retain PartLayout/stale guards. Core retains locks, native/source safety and capacity limits. Serialize AISlide calls; never blindly retry. No raw Patch paths.' + graphDiagnosticDescription, { ...mutationInput, expected_hash: contentHash, operations: authoringOperations }, false, async ({ deck_id, expected_revision, expected_hash, operations }, signal) => {
 	const state = getDeck(deck_id);
 	await state.applyOperations(operations, { signal, expectedRevision: expected_revision, expectedHash: expected_hash });
-	return { deck_id, revision: state.revision, hash: state.document.hash, can_undo: state.canUndo, ...graphDiagnosticMetadata(state), ...renderWarningMetadata(state) };
+	return { deck_id, revision: state.revision, hash: state.document.hash, can_undo: state.canUndo, ...graphDiagnosticMetadata(state), ...renderWarningMetadata(state), ...removalMetadata(state) };
 });
 const authoringDescriptions = {
 	add_elements: 'Append 1-128 complete typed native elements in one Undo. Includes rich text, geometry, visual styles, tables, charts and groups. Core validates all content; no external fetches.',
@@ -1274,6 +1329,8 @@ const authoringDescriptions = {
 	set_hyperlink: 'Set or clear a text/shape hyperlink in one Undo. Core validates allowed link targets without fetching them.',
 	set_shape_adjustment: 'Set the existing adj guide of a supported roundRect, chevron or triangle in one Undo. Core rejects unsupported presets and values.',
 	add_picture: 'Decode and append embedded PNG/JPEG bytes with optional final frame/crop in one core transaction and Undo. No linked images or execution. Optional revision retains legacy calls; supply it for stale-edit protection.',
+	update_chart: 'Update an existing native chart element in place (kind, categories, series, options, optional replace_options and frame) without rebuilding the slide, in one Undo. Omitted fields are preserved (options merges non-empty fields by default, so a set flag such as primary_axis.reverse stays until replace_options:true replaces/resets options); chartEx constraints are re-validated. Data or style changes to an imported native chart are applied only when the chart and its workbook match what AISlide generates; otherwise the edit is rejected.',
+	remove_elements: 'Remove 1-128 distinct top-level elements on one slide in one Undo, cleaning up managed part records, bindings and review metadata. Elements that depend on them are removed too without being named: the children of a removed group and the connectors attached to a removed element. The response lists, per operation, the requested IDs and the cascaded IDs in removedElements; check cascaded before continuing and undo if it is not intended.',
 };
 for (const variant of authoringVariants) {
 	const name = variant.shape.op.value;
@@ -1281,7 +1338,7 @@ for (const variant of authoringVariants) {
 	register(name, authoringDescriptions[name], { ...mutationInput, ...(name === 'add_picture' ? { expected_revision: mutationInput.expected_revision.optional() } : {}), expected_hash: contentHash.optional(), ...variant.omit({ op: true }).shape }, false, async ({ deck_id, expected_revision, expected_hash, ...input }, signal) => {
 		const state = getDeck(deck_id);
 		await state.applyOperations([{ ...input, op: name }], { signal, expectedRevision: expected_revision, expectedHash: expected_hash });
-		return { deck_id, revision: state.revision, hash: state.document.hash, ...(input.id === undefined ? {} : { element_id: input.id }), ...renderWarningMetadata(state) };
+		return { deck_id, revision: state.revision, hash: state.document.hash, ...(input.id === undefined ? {} : { element_id: input.id }), ...renderWarningMetadata(state), ...removalMetadata(state) };
 	});
 }
 register('set_frames', 'Set 1-128 frames on one slide in one Undo. Geometry only; fonts and strokes remain unchanged. Core validates the whole batch.', { ...mutationInput, expected_hash: contentHash.optional(), slide_id: slideId, frames: z.array(z.object({ id: slideId, frame: frameSchema }).strict()).min(1).max(128) }, false, async ({ deck_id, expected_revision, expected_hash, slide_id, frames }, signal) => {

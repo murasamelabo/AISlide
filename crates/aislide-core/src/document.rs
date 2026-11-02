@@ -91,11 +91,21 @@ pub fn verify_session_recovery(mut envelope: SessionRecovery) -> Result<SessionR
     Ok(envelope)
 }
 
+/// What one `remove_elements` operation removed from a slide: the IDs it named, and every other element that went with them.
+#[derive(Clone, Debug, Serialize)]
+pub struct RemovedElements {
+    pub slide_id: String,
+    pub requested: Vec<String>,
+    /// Descendants of a removed group and connectors attached to a removed element, in document order.
+    pub cascaded: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct TransactionResult {
     pub document: Document, pub receipt: Option<UndoReceipt>, pub changes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub diagnostics: Option<crate::graphs::GraphDiagnostics>,
     #[serde(skip_serializing_if = "Vec::is_empty")] pub render_warnings: Vec<crate::export_static::RenderWarning>,
+    #[serde(skip_serializing_if = "Vec::is_empty")] pub removed: Vec<RemovedElements>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -251,7 +261,7 @@ pub fn transact(document: &Document, transaction: Transaction) -> Result<Transac
     }
     crate::references::refresh(&mut updated)?;
     seal(&mut updated)?;
-    if updated.hash == document.hash { return Ok(TransactionResult { document: document.clone(), receipt: None, changes: Vec::new(), diagnostics: None, render_warnings: Vec::new() }); }
+    if updated.hash == document.hash { return Ok(TransactionResult { document: document.clone(), receipt: None, changes: Vec::new(), diagnostics: None, render_warnings: Vec::new(), removed: Vec::new() }); }
     updated.revision = document.revision.checked_add(1).filter(|revision| *revision <= MAX_REVISION).ok_or_else(|| Error::Limit("document revision exhausted".into()))?;
     crate::preflight::serialized_bytes(&updated, document.capacity_profile.limits().document_bytes, "complete transaction document")?;
     let updated_content = serde_json::to_value(content_ref(&updated))?;
@@ -271,7 +281,7 @@ pub fn transact(document: &Document, transaction: Transaction) -> Result<Transac
     }
     let changes = serde_json::to_value(&transaction.operations)?.as_array().into_iter().flatten().filter_map(|operation| operation["path"].as_str().map(String::from)).collect();
     let receipt = UndoReceipt { document_id: updated.id.clone(), after_hash: updated.hash.clone(), inverse };
-    Ok(TransactionResult { document: updated, receipt: Some(receipt), changes, diagnostics: None, render_warnings: Vec::new() })
+    Ok(TransactionResult { document: updated, receipt: Some(receipt), changes, diagnostics: None, render_warnings: Vec::new(), removed: Vec::new() })
 }
 
 pub fn undo(document: &Document, expected_revision: u64, receipt: UndoReceipt) -> Result<TransactionResult> {
