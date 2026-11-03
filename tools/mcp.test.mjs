@@ -642,6 +642,12 @@ function boundDifferences(core, coreRoot, mcp, mcpRoot) {
         if (core !== mcp) found.push({ path, keyword, detail: `core ${core ?? 'none'}, MCP ${mcp ?? 'none'}` });
       }
       if (a.items && b.items) walk(a.items, b.items, `${path}[]`, depth + 1);
+      // A tuple (a route point) bounds each position in prefixItems; a position that only one side publishes is a difference of its own.
+      for (let index = 0; index < Math.max(a.prefixItems?.length ?? 0, b.prefixItems?.length ?? 0); index += 1) {
+        const [coreItem, mcpItem] = [a.prefixItems?.[index], b.prefixItems?.[index]];
+        if (coreItem && mcpItem) walk(coreItem, mcpItem, `${path}[${index}]`, depth + 1);
+        else found.push({ path: `${path}[${index}]`, keyword: 'prefixItems', detail: coreItem ? 'missing from the MCP schema' : 'only in the MCP schema' });
+      }
     }
     const aProperties = shape(a, aBranches);
     const bProperties = shape(b, bBranches);
@@ -700,7 +706,8 @@ const partSchemaDrift = [
 ];
 const allowedPartSchemaDrift = difference => partSchemaDrift.some(entry => entry.paths[difference.path]?.includes(difference.keyword));
 
-test('issue67 the MCP part input schema publishes the bounds that the core part schema publishes', async () => {
+/** Runs `run(core, input)` with the part schema that part_catalog publishes and the create_part input schema that zod publishes. apply_operations, compose_slide and the other tools reuse the same part spec, so create_part stands for all of them. */
+async function withPartSchemas(run) {
   const client = new Client({ name: 'aislide-issue67-drift', version: '1.0.0' });
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   let core;
@@ -713,13 +720,44 @@ test('issue67 the MCP part input schema publishes the bounds that the core part 
     await client.close();
   }
   await feedbackMcpFixture(async ({ registrations }) => {
-    // apply_operations, compose_slide and the other tools reuse the same part spec, so create_part stands for all of them.
-    const input = z.toJSONSchema(registrations.get('create_part').config.inputSchema, { io: 'input' });
+    await run(core, z.toJSONSchema(registrations.get('create_part').config.inputSchema, { io: 'input' }));
+  });
+}
+
+test('issue67 the MCP part input schema publishes the bounds that the core part schema publishes', async () => {
+  await withPartSchemas(async (core, input) => {
     const found = boundDifferences(core, core, input.properties.spec, input);
     const unexplained = found.filter(difference => !allowedPartSchemaDrift(difference));
     assert.equal(unexplained.length, 0, `${unexplained.length} bounds differ between the MCP and core part schemas:\n${unexplained.map(difference => `${difference.path} ${difference.keyword}: ${difference.detail}`).join('\n')}`);
     const stale = partSchemaDrift.flatMap(entry => Object.entries(entry.paths).flatMap(([path, keywords]) => keywords.filter(keyword => !found.some(difference => difference.path === path && difference.keyword === keyword)).map(keyword => `${path} ${keyword}`)));
     assert.deepEqual(stale, [], 'every allowed difference still exists');
+  });
+});
+
+test('issue67 the bounds comparison reports a drift at every depth, including each position of a tuple', async () => {
+  await withPartSchemas(async (core, input) => {
+    // A manual route point is the one tuple in the part schema: its x and y bounds live in prefixItems, not in items.
+    const waypoints = root => {
+      const variant = root.properties.spec.properties.data.oneOf.find(entry => entry.properties.kind.const === 'diagram');
+      const graph = resolveSchemaRef(root, variant.properties.graph);
+      return resolveSchemaRef(root, resolveSchemaRef(root, graph.properties.edges).items).properties.waypoints;
+    };
+    const unexplained = root => boundDifferences(core, core, root.properties.spec, root).filter(difference => !allowedPartSchemaDrift(difference)).map(({ path, keyword }) => ({ path, keyword }));
+    assert.deepEqual(unexplained(input), [], 'the published schemas agree before any change');
+    const route = 'spec.data<diagram>.graph.edges[].waypoints';
+    for (const [name, change, expected] of [
+      ['the x bound of a route point', points => { points.items.prefixItems[0].maximum += 1; }, { path: `${route}[][0]`, keyword: 'maximum' }],
+      ['the y bound of a route point', points => { points.items.prefixItems[1].maximum += 1; }, { path: `${route}[][1]`, keyword: 'maximum' }],
+      ['the lower x bound of a route point', points => { points.items.prefixItems[0].minimum -= 1; }, { path: `${route}[][0]`, keyword: 'minimum' }],
+      ['the number of coordinates of a route point', points => { points.items.maxItems += 1; }, { path: `${route}[]`, keyword: 'maxItems' }],
+      ['the number of route points', points => { points.maxItems += 1; }, { path: route, keyword: 'maxItems' }],
+      ['a tuple position that MCP does not publish', points => { points.items.prefixItems.pop(); }, { path: `${route}[][1]`, keyword: 'prefixItems' }],
+      ['a tuple position that only MCP publishes', points => { points.items.prefixItems.push({ type: 'number' }); }, { path: `${route}[][2]`, keyword: 'prefixItems' }],
+    ]) {
+      const changed = structuredClone(input);
+      change(waypoints(changed));
+      assert.deepEqual(unexplained(changed), [expected], name);
+    }
   });
 });
 
