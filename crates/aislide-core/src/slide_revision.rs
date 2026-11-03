@@ -17,7 +17,7 @@ pub enum RevisionEdit {
 // A complete PartSpec or GraphSpec schema is large and part_catalog and graph_catalog already publish it. Repeating it in
 // authoring_capabilities made that response exceed the 64 KiB that MCP's full tool profile duplicates into structuredContent.
 fn part_spec_pointer(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({"type": "object", "description": "A complete PartSpec. Read its schema from the `schema` that part_catalog returns; it is not repeated here."})
+    schemars::json_schema!({"type": "object", "description": "A complete PartSpec. Its schema is the `schema` that part_catalog returns (through MCP, part_catalog with detail=full); it is not repeated here."})
 }
 
 fn graph_spec_pointer(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
