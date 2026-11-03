@@ -10,8 +10,18 @@ pub enum RevisionEdit {
     Align { ids: Vec<String>, alignment: Alignment, relative_to: RelativeTo },
     SetTextFrame { id: String, x: f64, y: f64, width: f64, height: f64 },
     ReplaceText { id: String, text: String },
-    UpdatePart { id: String, spec: crate::parts::PartSpec },
-    UpdateGraph { id: String, spec: crate::graphs::GraphSpec },
+    UpdatePart { id: String, #[schemars(schema_with = "part_spec_pointer")] spec: crate::parts::PartSpec },
+    UpdateGraph { id: String, #[schemars(schema_with = "graph_spec_pointer")] spec: crate::graphs::GraphSpec },
+}
+
+// A complete PartSpec or GraphSpec schema is large and part_catalog and graph_catalog already publish it. Repeating it in
+// authoring_capabilities made that response exceed the 64 KiB that MCP's full tool profile duplicates into structuredContent.
+fn part_spec_pointer(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type": "object", "description": "A complete PartSpec. Read its schema from the `schema` that part_catalog returns; it is not repeated here."})
+}
+
+fn graph_spec_pointer(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type": "object", "description": "A complete GraphSpec. Read its schema from the `schema` that graph_catalog returns; it is not repeated here."})
 }
 
 #[derive(Serialize)]

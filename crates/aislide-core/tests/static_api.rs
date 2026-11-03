@@ -394,6 +394,31 @@ fn visual_authoring_capabilities_publish_bounded_shared_contracts() {
 }
 
 #[test]
+fn authoring_capabilities_point_to_the_part_and_graph_catalogs_and_stay_below_the_structured_content_limit() {
+    let capabilities=execute_request(json!({"op":"authoring_capabilities"})).unwrap();
+    let schema=&capabilities["visual_authoring"]["revision_edit_schema"];
+    let definitions=schema["$defs"].as_object().unwrap();
+    for embedded in ["PartSpec","PartData","GraphSpec","GraphNode","GraphEdge","GraphGroup"] {
+        assert!(!definitions.contains_key(embedded),"{embedded} is published by part_catalog and graph_catalog, not repeated here");
+    }
+    let variants=schema["oneOf"].as_array().unwrap();
+    for (op,catalog) in [("update_part","part_catalog"),("update_graph","graph_catalog")] {
+        let variant=variants.iter().find(|variant| variant["properties"]["op"]["const"]==op).unwrap();
+        let spec=&variant["properties"]["spec"];
+        assert_eq!(spec["type"],"object","{op}");
+        assert!(spec["description"].as_str().unwrap().contains(catalog),"{op}: {spec}");
+        assert!(variant["required"].as_array().unwrap().contains(&json!("spec")),"{op} still requires spec");
+    }
+    for catalog in ["part_catalog","graph_catalog"] {
+        assert!(execute_request(json!({"op":catalog})).unwrap()["schema"].is_object(),"{catalog} publishes the schema the pointer names");
+    }
+    // MCP's full tool profile duplicates a response into structuredContent only up to 64 KiB (tools/mcp.mjs). Three quarters of that
+    // leaves room for the catalogs to grow without dropping structuredContent again.
+    let bytes=serde_json::to_vec(&capabilities).unwrap().len();
+    assert!(bytes<=48*1024,"authoring_capabilities is {bytes} bytes");
+}
+
+#[test]
 fn chart_parity_notices_are_summarized_without_hiding_specific_preview_limits() {
     let mut scene = document()["deck"].clone();
     scene["slides"][0]["elements"] = json!((0..3).map(|index| json!({
