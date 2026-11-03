@@ -432,6 +432,8 @@ export type ArchitectureIconCatalog = { version: 1; release: string; configured:
 export type ArchitectureIconAsset = { id: string; base64: string; mime_type: 'image/png'; alt: string; width: number; height: number }
 export type ArchitectureIconAssets = { icons: ArchitectureIconAsset[] }
 export type TextMatch = { path: string; start: number; end: number; expected: string; snippet: string }
+/** `matches` lists at most `max_matches` matches in document order; `truncated` is true when more exist (raise `max_matches` up to 1024 or narrow the query). */
+export type TextSearchResult = { matches: TextMatch[]; truncated: boolean }
 export type TextReplaceOptions = { search: SearchOptions; replacement: string; replace_all?: boolean; selected?: TextMatch[] | null }
 export type FormatTextInput = { id: string; start: number; end: number; style: RunStyle }
 export type ProofingDictionary = { language: string; words: string[]; synonyms?: Record<string, string[]>; translations?: Record<string, Record<string, string>> }

@@ -1495,7 +1495,9 @@ test('expanded authoring SDK integrates rich, notes, selection, table, images, c
   await session.addObject('slide-1', { id: 'text', kind: 'text' });
   await session.replaceTextContent('slide-1', { id: 'text', text: 'Alpha Beta' });
   await session.transact([{ op: 'replace', path: '/deck/slides/0/notes', value: 'Needle' }]);
-  assert.equal((await session.searchText({ query: 'Needle', include_notes: true })).length, 1);
+  const found = await session.searchText({ query: 'Needle', include_notes: true });
+  assert.equal(found.matches.length, 1);
+  assert.equal(found.truncated, false);
   await session.replaceText({ search: { query: 'Needle', include_notes: true }, replacement: 'Replaced', replace_all: true });
   assert.equal(session.document.deck.slides[0].notes, 'Replaced');
   await session.formatText('slide-1', { id: 'text', start: 0, end: 5, style: { bold: true } });
@@ -1547,6 +1549,24 @@ test('expanded authoring SDK integrates rich, notes, selection, table, images, c
   await session.applyImageEdit('slide-1', { id: 'image', image });
   assert.equal(session.document.deck.slides[0].elements.find((element) => element.id === 'image').width, picture.width);
   await session.undo(); assert.equal(session.document.hash, beforeImage.hash);
+});
+
+test('issue71 SDK searchText lists a prefix with truncated while replaceText keeps replace_all strict', async () => {
+  const client = new AislideClient(requestCore);
+  const session = await client.createPresentation('truncated-search', 'Synthetic search');
+  await session.addObject('slide-1', { id: 'text', kind: 'text' });
+  await session.replaceTextContent('slide-1', { id: 'text', text: 'page 1 / 5\npage 2 / 5\npage 3 / 5\npage 4 / 5\npage 5 / 5' });
+  const prefix = await session.searchText({ query: ' / 5', max_matches: 3 });
+  assert.equal(prefix.truncated, true);
+  assert.equal(prefix.matches.length, 3);
+  const complete = await session.searchText({ query: ' / 5', max_matches: 5 });
+  assert.equal(complete.truncated, false);
+  assert.deepEqual(complete.matches.slice(0, 3), prefix.matches);
+  const before = session.document.hash;
+  await assert.rejects(() => session.replaceText({ search: { query: ' / 5', max_matches: 3 }, replacement: ' / 6', replace_all: true }), /more than 3 text matches; raise max_matches \(up to 1024\) or narrow the query/);
+  assert.equal(session.document.hash, before);
+  await session.replaceText({ search: { query: ' / 5', max_matches: 3 }, replacement: ' / 6', selected: prefix.matches });
+  assert.equal(session.document.deck.slides[0].elements[0].text, 'page 1 / 6\npage 2 / 6\npage 3 / 6\npage 4 / 5\npage 5 / 5');
 });
 
 test('guided SDK profiles create editable documents and reject early or late cancellation', async () => {

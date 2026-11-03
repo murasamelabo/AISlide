@@ -88,6 +88,10 @@ test('MCP expanded authoring exposes strict APIs, revisions and create-new templ
     await mutate('replace_text_content', { slide_id: 'slide-1', id: 'text', text: 'Alpha Beta' });
     const matches = await call('search_text', { deck_id, options: { query: 'Alpha' } });
     assert.equal(matches.matches.length, 1);
+    assert.equal(matches.truncated, false);
+    const prefix = await call('search_text', { deck_id, options: { query: 'a', max_matches: 1 } });
+    assert.equal(prefix.truncated, true, 'a search that finds more than max_matches returns the first match instead of failing');
+    assert.equal(prefix.matches.length, 1);
     await mutate('replace_text', { options: { search: { query: 'Alpha' }, replacement: 'Omega', replace_all: true } });
     await mutate('format_text', { slide_id: 'slide-1', id: 'text', start: 0, end: 5, style: { italic: true } });
     await mutate('update_paragraphs', { slide_id: 'slide-1', id: 'text', paragraphs: [{ runs: [{ text: 'Rich', style: { bold: true } }], line_spacing: { kind: 'percent', value: 120000 }, tabs: [{ position: 1000 }] }] });

@@ -17,7 +17,7 @@ export type TextToolsPanelProps = {
   proofingSelection?: { slideId: string; id: string }
 }
 
-type SearchResult = { session: DocumentSession; revision: number; key: string; matches: TextMatch[] }
+type SearchResult = { session: DocumentSession; revision: number; key: string; matches: TextMatch[]; truncated: boolean }
 
 export function TextToolsPanel({ session, onDocument, onNavigate, onNavigatePath, onBusy, disabled = false, spellCheck = false, onSpellCheckChange, proofingSelection }: TextToolsPanelProps) {
   const [tab, setTab] = useState<'find' | 'proofing' | 'ai'>('find')
@@ -55,10 +55,10 @@ export function TextToolsPanel({ session, onDocument, onNavigate, onNavigatePath
     if (!search.query) return
     void run(async (active) => {
       const revision = session.revision
-      const matches = await session.searchText(search)
+      const found = await session.searchText(search)
       if (!active() || session.revision !== revision) return
-      setResult({ session, revision, key, matches }); setSelected([])
-      setMessage(matches.length === 200 ? '200 matches shown; additional matches may exist.' : `${matches.length} matches`)
+      setResult({ session, revision, key, matches: found.matches, truncated: found.truncated }); setSelected([])
+      setMessage(found.truncated ? `First ${found.matches.length} matches shown; more exist. Narrow the search to replace all.` : `${found.matches.length} matches`)
     })
   }
   function replace(all: boolean) {
@@ -107,7 +107,7 @@ export function TextToolsPanel({ session, onDocument, onNavigate, onNavigatePath
     </li>)}</ul>
     <fieldset disabled={busy}>
       <label className="field">Replace with<input aria-label="Replace with" value={replacement} maxLength={4000} onChange={(event) => setReplacement(event.target.value)} /></label>
-      <div className="text-tools-actions"><button type="button" disabled={busy || !current || !selected.length} onClick={() => replace(false)}><Replace size={18} aria-hidden="true" />Replace selected</button><button type="button" disabled={busy || !current?.matches.length} onClick={() => replace(true)}><ReplaceAll size={18} aria-hidden="true" />Replace all</button></div>
+      <div className="text-tools-actions"><button type="button" disabled={busy || !current || !selected.length} onClick={() => replace(false)}><Replace size={18} aria-hidden="true" />Replace selected</button><button type="button" disabled={busy || !current?.matches.length || current.truncated} onClick={() => replace(true)}><ReplaceAll size={18} aria-hidden="true" />Replace all</button></div>
     </fieldset>
     <form onSubmit={(event) => {
       event.preventDefault()
@@ -171,9 +171,9 @@ function ProofingTab({ session, onDocument, onBusy, disabled, proofingSelection 
   function correct(issue: ProofIssue, replacement: string) {
     if (!target || !current || locked || !result) return
     void run(async signal => {
-      const matches = await session.searchText({ query: issue.word, case_sensitive: true, max_matches: 1000 }, { signal })
-      const match = matches.find(match => match.path === target.path && match.start === issue.start && match.end === issue.end && match.expected === target.element.text)
-      if (!match) throw new Error('Text changed; check spelling again')
+      const found = await session.searchText({ query: issue.word, case_sensitive: true, max_matches: 1000 }, { signal })
+      const match = found.matches.find(match => match.path === target.path && match.start === issue.start && match.end === issue.end && match.expected === target.element.text)
+      if (!match) throw new Error(found.truncated ? 'Too many matches of this word to correct it here' : 'Text changed; check spelling again')
       const updated = await session.replaceText({ search: { query: issue.word, case_sensitive: true, max_matches: 1000 }, selected: [match], replacement }, { expectedRevision: result.revision, signal })
       if (signal.aborted) return
       onDocument(updated); setResult(null); setMessage('Correction applied')

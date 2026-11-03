@@ -1,5 +1,5 @@
 ﻿use aislide_core::{design::Design, model::{Deck, Element, validate_deck},
-    text_ops::{replace, replace_font, search, ReplaceOptions, SearchOptions}, Error};
+    text_ops::{replace, replace_font, search, search_limited, ReplaceOptions, SearchOptions, MAX_MATCHES}, Error};
 use serde_json::{json, Value};
 
 fn text(id: &str, value: &str) -> Value {
@@ -177,6 +177,77 @@ fn replace_all_is_nonrecursive_noops_are_exact_and_match_limits_never_truncate()
     assert_eq!(serde_json::to_value(replace(deck.clone(), &update).unwrap()).unwrap(), serde_json::to_value(&deck).unwrap());
     update.replace_all = true;
     assert!(replace(deck, &update).is_err());
+}
+
+#[test]
+fn search_limited_lists_a_prefix_and_says_when_more_exist_while_search_and_replace_all_stay_strict() {
+    let deck = deck(vec![text("body", "page 1 / 5\npage 2 / 5\npage 3 / 5\npage 4 / 5\npage 5 / 5")]);
+    let mut query = options(" / 5");
+    query.max_matches = 3;
+    let prefix = search_limited(&deck, &query).unwrap();
+    assert!(prefix.truncated);
+    assert_eq!(prefix.matches.len(), 3);
+    query.max_matches = 5;
+    let all = search_limited(&deck, &query).unwrap();
+    assert!(!all.truncated, "exactly max_matches matches is not a truncation");
+    assert_eq!(all.matches.len(), 5);
+    assert_eq!(all.matches[..3], prefix.matches[..], "the prefix is the first matches in document order");
+    query.max_matches = 4;
+    assert!(search_limited(&deck, &query).unwrap().truncated);
+    assert!(!search_limited(&deck, &options("absent")).unwrap().truncated);
+
+    // Acting on every match, or reading all of them through `search`, still fails instead of using a prefix.
+    query.max_matches = 3;
+    let error = search(&deck, &query).unwrap_err();
+    assert!(matches!(error, Error::Limit(_)));
+    assert!(error.to_string().contains("more than 3 text matches; raise max_matches (up to 1024) or narrow the query"), "{error}");
+    let update: ReplaceOptions = serde_json::from_value(json!({"search":{"query":" / 5", "max_matches":3}, "replacement":" / 6", "replace_all":true})).unwrap();
+    assert!(matches!(replace(deck.clone(), &update), Err(Error::Limit(_))));
+
+    // A selection made from the prefix applies although more matches exist.
+    let selected: Vec<Value> = prefix.matches[1..].iter().map(|found| serde_json::to_value(found).unwrap()).collect();
+    let update: ReplaceOptions = serde_json::from_value(json!({"search":{"query":" / 5", "max_matches":3}, "replacement":" / 6", "selected":selected})).unwrap();
+    let result = serde_json::to_value(replace(deck.clone(), &update).unwrap()).unwrap();
+    assert_eq!(result["slides"][0]["elements"][0]["text"], "page 1 / 5\npage 2 / 6\npage 3 / 6\npage 4 / 5\npage 5 / 5");
+    // One beyond the prefix is not part of the result, and the error says why.
+    let beyond = serde_json::to_value(&all.matches[3]).unwrap();
+    let update: ReplaceOptions = serde_json::from_value(json!({"search":{"query":" / 5", "max_matches":3}, "replacement":"x", "selected":[beyond]})).unwrap();
+    let error = replace(deck, &update).unwrap_err();
+    assert!(matches!(error, Error::Conflict(_)));
+    assert!(error.to_string().contains("lies beyond max_matches"), "{error}");
+}
+
+#[test]
+fn the_search_limit_has_one_ceiling_and_a_message_that_does_not_offer_more() {
+    let deck = deck(vec![text("body", &"a ".repeat(MAX_MATCHES + 1))]);
+    let mut query = options("a");
+    query.max_matches = MAX_MATCHES;
+    let found = search_limited(&deck, &query).unwrap();
+    assert!(found.truncated);
+    assert_eq!(found.matches.len(), MAX_MATCHES);
+    let error = search(&deck, &query).unwrap_err();
+    assert!(matches!(error, Error::Limit(_)));
+    assert!(error.to_string().contains("more than 1024 text matches; narrow the query") && !error.to_string().contains("raise"), "{error}");
+    query.max_matches = MAX_MATCHES + 1;
+    assert!(search_limited(&deck, &query).is_err());
+}
+
+#[test]
+fn search_text_answers_matches_and_truncated_and_the_schema_documents_the_limit() {
+    let deck = deck(vec![text("body", "x x x")]);
+    let value = serde_json::to_value(&deck).unwrap();
+    let limited = aislide_core::execute_request(json!({"op":"search_text", "deck":value, "options":{"query":"x", "max_matches":2}})).unwrap();
+    assert_eq!(limited["truncated"], true);
+    assert_eq!(limited["matches"].as_array().unwrap().len(), 2);
+    let complete = aislide_core::execute_request(json!({"op":"search_text", "deck":value, "options":{"query":"x"}})).unwrap();
+    assert_eq!(complete["truncated"], false);
+    assert_eq!(complete["matches"].as_array().unwrap().len(), 3);
+
+    let schema = serde_json::to_value(schemars::schema_for!(SearchOptions)).unwrap();
+    let max_matches = &schema["properties"]["max_matches"];
+    assert_eq!((max_matches["minimum"].as_u64(), max_matches["maximum"].as_u64()), (Some(1), Some(MAX_MATCHES as u64)));
+    assert!(max_matches["description"].as_str().unwrap().contains("truncated"));
+    assert_eq!((schema["properties"]["query"]["minLength"].as_u64(), schema["properties"]["query"]["maxLength"].as_u64()), (Some(1), Some(8000)));
 }
 
 #[test]

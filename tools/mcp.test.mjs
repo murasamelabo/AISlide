@@ -614,8 +614,6 @@ function boundDifferences(core, coreRoot, mcp, mcpRoot) {
   const bounded = value => typeof value.const === 'number' ? { ...value, minimum: value.const, maximum: value.const } : value;
   const walk = (left, right, path, depth) => {
     if (depth > 24) return;
-    // The core schema publishes few GraphSpec bounds (murasamelabo/AISlide#68), so the diagram wrapper in the part schema is not compared yet.
-    if (path === 'spec.data<diagram>.graph') return;
     const a = bounded(open(left, coreRoot));
     const b = bounded(open(right, mcpRoot));
     const aBranches = alternatives(a, coreRoot);
@@ -644,6 +642,12 @@ function boundDifferences(core, coreRoot, mcp, mcpRoot) {
         if (core !== mcp) found.push({ path, keyword, detail: `core ${core ?? 'none'}, MCP ${mcp ?? 'none'}` });
       }
       if (a.items && b.items) walk(a.items, b.items, `${path}[]`, depth + 1);
+      // A tuple (a route point) bounds each position in prefixItems; a position that only one side publishes is a difference of its own.
+      for (let index = 0; index < Math.max(a.prefixItems?.length ?? 0, b.prefixItems?.length ?? 0); index += 1) {
+        const [coreItem, mcpItem] = [a.prefixItems?.[index], b.prefixItems?.[index]];
+        if (coreItem && mcpItem) walk(coreItem, mcpItem, `${path}[${index}]`, depth + 1);
+        else found.push({ path: `${path}[${index}]`, keyword: 'prefixItems', detail: coreItem ? 'missing from the MCP schema' : 'only in the MCP schema' });
+      }
     }
     const aProperties = shape(a, aBranches);
     const bProperties = shape(b, bBranches);
@@ -673,6 +677,10 @@ const partSchemaDrift = [
       'spec.data<architecture>.relations[].from': ['minLength', 'maxLength'],
       'spec.data<architecture>.relations[].to': ['minLength', 'maxLength'],
       'spec.data<tree>.nodes[].parent': ['maxLength'],
+      'spec.data<diagram>.graph.edges[].source': ['minLength', 'maxLength'],
+      'spec.data<diagram>.graph.edges[].target': ['minLength', 'maxLength'],
+      'spec.data<diagram>.graph.nodes[].group': ['minLength', 'maxLength'],
+      'spec.data<diagram>.graph.groups[].parent': ['minLength', 'maxLength'],
     },
   },
   {
@@ -698,7 +706,8 @@ const partSchemaDrift = [
 ];
 const allowedPartSchemaDrift = difference => partSchemaDrift.some(entry => entry.paths[difference.path]?.includes(difference.keyword));
 
-test('issue67 the MCP part input schema publishes the bounds that the core part schema publishes', async () => {
+/** Runs `run(core, input)` with the part schema that part_catalog publishes and the create_part input schema that zod publishes. apply_operations, compose_slide and the other tools reuse the same part spec, so create_part stands for all of them. */
+async function withPartSchemas(run) {
   const client = new Client({ name: 'aislide-issue67-drift', version: '1.0.0' });
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
   let core;
@@ -711,13 +720,44 @@ test('issue67 the MCP part input schema publishes the bounds that the core part 
     await client.close();
   }
   await feedbackMcpFixture(async ({ registrations }) => {
-    // apply_operations, compose_slide and the other tools reuse the same part spec, so create_part stands for all of them.
-    const input = z.toJSONSchema(registrations.get('create_part').config.inputSchema, { io: 'input' });
+    await run(core, z.toJSONSchema(registrations.get('create_part').config.inputSchema, { io: 'input' }));
+  });
+}
+
+test('issue67 the MCP part input schema publishes the bounds that the core part schema publishes', async () => {
+  await withPartSchemas(async (core, input) => {
     const found = boundDifferences(core, core, input.properties.spec, input);
     const unexplained = found.filter(difference => !allowedPartSchemaDrift(difference));
     assert.equal(unexplained.length, 0, `${unexplained.length} bounds differ between the MCP and core part schemas:\n${unexplained.map(difference => `${difference.path} ${difference.keyword}: ${difference.detail}`).join('\n')}`);
     const stale = partSchemaDrift.flatMap(entry => Object.entries(entry.paths).flatMap(([path, keywords]) => keywords.filter(keyword => !found.some(difference => difference.path === path && difference.keyword === keyword)).map(keyword => `${path} ${keyword}`)));
     assert.deepEqual(stale, [], 'every allowed difference still exists');
+  });
+});
+
+test('issue67 the bounds comparison reports a drift at every depth, including each position of a tuple', async () => {
+  await withPartSchemas(async (core, input) => {
+    // A manual route point is the one tuple in the part schema: its x and y bounds live in prefixItems, not in items.
+    const waypoints = root => {
+      const variant = root.properties.spec.properties.data.oneOf.find(entry => entry.properties.kind.const === 'diagram');
+      const graph = resolveSchemaRef(root, variant.properties.graph);
+      return resolveSchemaRef(root, resolveSchemaRef(root, graph.properties.edges).items).properties.waypoints;
+    };
+    const unexplained = root => boundDifferences(core, core, root.properties.spec, root).filter(difference => !allowedPartSchemaDrift(difference)).map(({ path, keyword }) => ({ path, keyword }));
+    assert.deepEqual(unexplained(input), [], 'the published schemas agree before any change');
+    const route = 'spec.data<diagram>.graph.edges[].waypoints';
+    for (const [name, change, expected] of [
+      ['the x bound of a route point', points => { points.items.prefixItems[0].maximum += 1; }, { path: `${route}[][0]`, keyword: 'maximum' }],
+      ['the y bound of a route point', points => { points.items.prefixItems[1].maximum += 1; }, { path: `${route}[][1]`, keyword: 'maximum' }],
+      ['the lower x bound of a route point', points => { points.items.prefixItems[0].minimum -= 1; }, { path: `${route}[][0]`, keyword: 'minimum' }],
+      ['the number of coordinates of a route point', points => { points.items.maxItems += 1; }, { path: `${route}[]`, keyword: 'maxItems' }],
+      ['the number of route points', points => { points.maxItems += 1; }, { path: route, keyword: 'maxItems' }],
+      ['a tuple position that MCP does not publish', points => { points.items.prefixItems.pop(); }, { path: `${route}[][1]`, keyword: 'prefixItems' }],
+      ['a tuple position that only MCP publishes', points => { points.items.prefixItems.push({ type: 'number' }); }, { path: `${route}[][2]`, keyword: 'prefixItems' }],
+    ]) {
+      const changed = structuredClone(input);
+      change(waypoints(changed));
+      assert.deepEqual(unexplained(changed), [expected], name);
+    }
   });
 });
 
@@ -1585,7 +1625,7 @@ test('roundtrip feedback skill and initialization expose the short safe authorin
       await client.connect(clientTransport);
       const instructions = client.getInstructions();
       if (patterns === 'off') assert.ok(Buffer.byteLength(instructions) < 1024);
-      for (const text of ['Serialize core-backed AISlide calls', 'apply_operations', 'asset_id', 'get_deck_summary', 'unmet requirements']) assert.ok(instructions.includes(text), text);
+      for (const text of ['Serialize core-backed AISlide calls', 'apply_operations', 'asset_id', 'get_deck_summary', 'unmet requirements', 'at most 8 decks stay open']) assert.ok(instructions.includes(text), text);
       for (const text of ['Prefer explanatory visuals by default', 'Explicit user exclusions override this default', 'never force decoration']) assert.ok(instructions.includes(text), text);
       for (const text of ['bounded cross-slide', 'accessibility edits', 'revision/hash guards',
         'layers, evidence readings or activity-to-outcome mappings', 'recommend_recipes, preview_recipe and apply_recipe',
@@ -2872,6 +2912,114 @@ test('feedback MCP stub schemas expose bounded typed authoring and source handle
     assert.equal(calls.length, count);
     await call('create_object', { id: 'draft', kind: 'text' });
     assert.equal(calls.at(-1).request.op, 'create_object');
+  });
+});
+
+test('issue72 every deck-creating tool reports the same open-deck limit and how to free a slot', async () => {
+  await feedbackMcpFixture(async ({ registrations, call, calls, fixture }) => {
+    fixture.onRequest = request => ({ limits: { request_bytes: 100663296 }, op: request.op });
+    const capabilities = await call('authoring_capabilities');
+    assert.deepEqual(capabilities.limits, { request_bytes: 100663296, open_decks: 8 }, 'the core limits stay and the open-deck limit joins them');
+    fixture.onRequest = undefined;
+    const empty = await call('list_decks');
+    assert.equal(empty.max_decks, 8);
+    assert.equal(empty.decks.length, 0);
+    for (const name of ['list_decks', 'close_deck', 'authoring_capabilities']) assert.match(registrations.get(name).config.description, /\b8\b|max_decks|open_decks/, name);
+    assert.match(registrations.get('import_slides').config.description, /close_source_deck/);
+
+    const handles = [];
+    for (let index = 1; index <= 8; index += 1) handles.push((await call('create_presentation', { title: `Synthetic ${index}` })).deck_id);
+    assert.equal((await call('list_decks')).decks.length, 8);
+
+    const report = { title: 'Synthetic', subtitle: '', period: '', source: 'Synthetic fixture', sections: [{ title: 'Statement', layout: 'statement', body: ['Synthetic'] }] };
+    const mapping = { title: 'Synthetic', period: 'Synthetic', table_index: 0, category_column: 0, value_columns: [1], row_start: 0, row_count: 1, chart_kind: 'column' };
+    const checkpoint = { format: 'aislide.project', version: 1, pptx_sha256: 'a'.repeat(64), document: {} };
+    const attempts = {
+      create_presentation: { title: 'Synthetic 9' },
+      create_guided_presentation: { input: guidedExamples()[0] },
+      generate_report: { prompt: 'Synthetic', slide_count: 3 },
+      compile_report: { report },
+      compile_data_report: { source_id: randomUUID(), mapping },
+      open_pptx: { base64: 'UEs=' },
+      import_pptx: { base64: 'UEs=' },
+      import_template: { kind: 'potx', base64: 'UEs=' },
+      open_project: { base64: 'UEs=', checkpoint },
+      recover_presentation: { document_json: '{}' },
+      recover_session: { recovery_json: '{}' },
+    };
+    const message = 'At most 8 open decks per session (8 open). Use list_decks to find handles you no longer need and close_deck to release one; export unsaved work first.';
+    const requests = calls.length;
+    for (const [name, input] of Object.entries(attempts)) {
+      const tool = registrations.get(name);
+      assert.equal(tool.config.inputSchema.safeParse(input).success, true, `${name}: a valid input leaves the limit as the only reason to fail`);
+      const result = await tool.callback(tool.config.inputSchema.parse(input), { signal: new AbortController().signal });
+      assert.equal(result.isError, true, name);
+      assert.equal(result.content[0].text, message, name);
+    }
+    assert.equal(calls.length, requests, 'the limit is checked before any core request');
+    assert.equal((await call('list_decks')).decks.length, 8);
+
+    await call('close_deck', { deck_id: handles[0] });
+    assert.equal((await call('list_decks')).decks.length, 7);
+    await call('create_presentation', { title: 'Synthetic 10' });
+    assert.equal((await call('list_decks')).decks.length, 8);
+  });
+});
+
+test('issue72 import_slides releases its source deck only when asked, after a successful import', async () => {
+  await feedbackMcpFixture(async ({ registrations, call, calls, fixture }) => {
+    const target = (await call('create_presentation', { title: 'Synthetic target' })).deck_id;
+    const sources = [];
+    for (let index = 1; index <= 7; index += 1) sources.push((await call('create_presentation', { title: `Synthetic part ${index}` })).deck_id);
+    await assert.rejects(() => call('create_presentation', { title: 'Synthetic blocked' }), /At most 8 open decks per session \(8 open\)/);
+
+    const guard = (revision, hash) => ({ deck_id: target, expected_revision: revision, expected_hash: hash, source_slide_ids: ['slide-1'] });
+    const schema = registrations.get('import_slides').config.inputSchema;
+    const input = { ...guard(0, 'a'.repeat(64)), source_deck_id: sources[0], prefix: 'one' };
+    for (const close_source_deck of ['yes', 1, null]) assert.equal(schema.safeParse({ ...input, close_source_deck }).success, false, String(close_source_deck));
+    assert.equal(schema.safeParse({ ...input, close_source_deck: false }).success, true);
+
+    const kept = await call('import_slides', { ...input, close_source_deck: false });
+    assert.equal('closed_source_deck' in kept, false);
+    assert.equal((await call('list_decks')).decks.length, 8, 'the source stays open unless the caller asks');
+
+    const merged = await call('import_slides', { ...guard(1, 'b'.repeat(64)), source_deck_id: sources[1], prefix: 'two', close_source_deck: true });
+    assert.equal(merged.closed_source_deck, sources[1]);
+    assert.equal(merged.revision, 2);
+    assert.equal('close_source_deck' in calls.at(-1).request, false, 'the option is not forwarded to core');
+    const listed = await call('list_decks');
+    assert.deepEqual(listed.decks.map(deck => deck.deck_id).sort(), [target, ...sources.filter(id => id !== sources[1])].sort());
+    assert.equal(listed.decks.find(deck => deck.deck_id === target).last_operation.name, 'import_slides');
+    await assert.rejects(() => call('get_session_recovery', { deck_id: sources[1] }), /Unknown deck handle/);
+    await call('create_presentation', { title: 'Synthetic fits again' });
+
+    // Neither a same-deck import nor a failed one closes anything.
+    const before = calls.length;
+    await assert.rejects(() => call('import_slides', { ...guard(2, 'b'.repeat(64)), source_deck_id: target, prefix: 'self', close_source_deck: true }), /close_source_deck needs a source deck other than the target/);
+    assert.equal(calls.length, before);
+    fixture.onRequest = async () => { throw new Error('Synthetic import failure'); };
+    await assert.rejects(() => call('import_slides', { ...guard(2, 'b'.repeat(64)), source_deck_id: sources[2], prefix: 'three', close_source_deck: true }), /Synthetic import failure/);
+    fixture.onRequest = undefined;
+    const remaining = (await call('list_decks')).decks.map(deck => deck.deck_id);
+    assert.ok(remaining.includes(target) && remaining.includes(sources[2]));
+    assert.equal(remaining.length, 8);
+  });
+});
+
+test('issue71 search_text documents max_matches and returns the core result with truncated', async () => {
+  await feedbackMcpFixture(async ({ registrations, call, calls, fixture }) => {
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic search' });
+    const hit = { path: '/slides/0/elements/0/text', start: 6, end: 10, expected: 'page 1 / 5', snippet: 'page 1 / 5' };
+    fixture.onRequest = request => request.op === 'search_text' ? { matches: [hit], truncated: true } : { ready: true };
+    const found = await call('search_text', { deck_id, options: { query: ' / 5', max_matches: 1 } });
+    assert.deepEqual(found, { matches: [hit], truncated: true });
+    assert.deepEqual(calls.at(-1).request.options, { query: ' / 5', max_matches: 1 });
+    const tool = registrations.get('search_text');
+    assert.match(tool.config.description, /\{matches, truncated\}.*truncated=true when more exist/);
+    const published = z.toJSONSchema(tool.config.inputSchema, { io: 'input' });
+    assert.match(published.properties.options.properties.max_matches.description, /default 100.*truncated=true.*replace_all fails with a Limit error/);
+    assert.equal(published.properties.options.properties.max_matches.maximum, 1024);
+    assert.match(registrations.get('replace_text').config.description, /replace_all fails with a Limit error.*never replaces a prefix/);
   });
 });
 

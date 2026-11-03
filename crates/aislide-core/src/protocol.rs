@@ -296,7 +296,7 @@ fn execute(request: Request, profile: crate::limits::CapacityProfile) -> Result<
             source.capacity_profile = profile;
             Ok(serde_json::to_value(crate::slide_import::import(&document, expected_revision, &expected_hash, &source, &source_slide_ids, &prefix, after.as_deref())?)?)
         }
-        Request::SearchText { deck, options } => Ok(serde_json::to_value(crate::text_ops::search(&deck, &options)?)?),
+        Request::SearchText { deck, options } => Ok(serde_json::to_value(crate::text_ops::search_limited(&deck, &options)?)?),
         Request::ImportProofingDictionary { language, format, content } => Ok(serde_json::to_value(crate::proofing::import(&language, format, &content)?)?),
         Request::CopyFormat { document, slide_id, id, paragraph_index, run_index } => Ok(serde_json::to_value(crate::authoring_ops::copy_format(&document, &slide_id, &id, paragraph_index, run_index)?)?),
         Request::SampleSlidePixel { document, slide_id, x, y } => crate::visual::sample_slide_pixel(&document,&slide_id,x,y),

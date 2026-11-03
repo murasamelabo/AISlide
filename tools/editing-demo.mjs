@@ -199,7 +199,7 @@ async function qualifyFeatures(session, name, font) {
     return session.updateParagraphs('slide-2', { id: 'paragraphs', paragraphs });
   });
   const search = { query: 'Synthetic master', case_sensitive: true };
-  assert.equal((await session.searchText(search)).length, 1);
+  assert.equal((await session.searchText(search)).matches.length, 1);
   await step('G04-search-replace', () => session.replaceText({ search, replacement: 'Fictional master', replace_all: true }), () => assert.match(elementAt(session, 7, 'master-body').text, /^Fictional/));
   const ids = ['select-a', 'select-b', 'select-c'];
   await step('G05-multi-move', () => session.editSelection('slide-7', { op: 'translate', ids, dx: 10, dy: 0 }), undefined, false);
