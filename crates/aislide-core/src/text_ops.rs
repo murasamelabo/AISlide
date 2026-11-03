@@ -2,7 +2,8 @@
 //! Paths are relative to Deck; offsets count Unicode scalars and end is exclusive.
 //! Case-insensitive matching uses per-scalar Unicode lowercase, without normalization or
 //! locale-specific/full case folding. Whole words have no adjacent alphanumeric or underscore.
-//! Matches are nonoverlapping. Exceeding the match budget returns Limit, never partial success.
+//! Matches are nonoverlapping. `search_limited` lists at most `max_matches` matches and reports whether more exist; `search` and
+//! `replace` with `replace_all` return Limit instead, because an operation that acts on every match must never act on a prefix.
 //! Rich text is synchronized one match at a time; dynamic field caches are searchable but protected.
 
 use crate::{model::{Deck, Element, TextFormat, valid_text, validate_deck}, Error, Result};
@@ -20,6 +21,7 @@ fn default_max_matches() -> usize { 100 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchOptions {
+    #[schemars(length(min = 1, max = MAX_TEXT))]
     pub query: String,
     #[serde(default = "default_case_sensitive")]
     pub case_sensitive: bool,
@@ -29,7 +31,10 @@ pub struct SearchOptions {
     pub include_notes: bool,
     #[serde(default)]
     pub include_masters: bool,
+    /// The most matches to list, in document order (default 100). Further matches are not listed and `truncated` is true.
+    /// `replace_text` with `replace_all` fails with a Limit error instead of replacing a prefix.
     #[serde(default = "default_max_matches")]
+    #[schemars(range(min = 1, max = MAX_MATCHES))]
     pub max_matches: usize,
 }
 
@@ -41,6 +46,16 @@ pub struct TextMatch {
     pub end: usize,
     pub expected: String,
     pub snippet: String,
+}
+
+/// The result of `search_text`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SearchResult {
+    /// At most `max_matches` matches in document order.
+    pub matches: Vec<TextMatch>,
+    /// True when more matches exist than `matches` lists: raise `max_matches` (up to 1024) or narrow the query.
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -113,7 +128,9 @@ fn text_fields<'a>(deck: &'a Deck, options: &SearchOptions) -> Result<Vec<TextFi
 fn lowercase(value: &str) -> String { value.chars().flat_map(char::to_lowercase).collect() }
 fn word_character(character: char) -> bool { character.is_alphanumeric() || character == '_' }
 
-pub fn search(deck: &Deck, options: &SearchOptions) -> Result<Vec<TextMatch>> {
+/// The first `max_matches` matches in document order, and whether more exist. A reader that only looks at a prefix, such as `search_text`,
+/// uses this; an operation that acts on every match uses `search`.
+pub fn search_limited(deck: &Deck, options: &SearchOptions) -> Result<SearchResult> {
     check_options(options)?;
     validate_deck(deck)?;
     let needle = if options.case_sensitive { options.query.clone() } else { lowercase(&options.query) };
@@ -138,7 +155,7 @@ pub fn search(deck: &Deck, options: &SearchOptions) -> Result<Vec<TextMatch>> {
                     && (end == characters.len() || !word_character(characters[end]));
                 if !options.whole_word || whole_word {
                     if matches.len() == options.max_matches {
-                        return Err(Error::Limit("text match budget exceeded; narrow the query or raise max_matches".into()));
+                        return Ok(SearchResult { matches, truncated: true });
                     }
                     let snippet_start = start.saturating_sub(32);
                     let snippet_end = characters.len().min(snippet_start + SNIPPET_SCALARS);
@@ -151,7 +168,19 @@ pub fn search(deck: &Deck, options: &SearchOptions) -> Result<Vec<TextMatch>> {
             cursor = byte_start + haystack[byte_start..].chars().next().map_or(1, char::len_utf8);
         }
     }
-    Ok(matches)
+    Ok(SearchResult { matches, truncated: false })
+}
+
+fn overflow(max_matches: usize) -> String {
+    if max_matches == MAX_MATCHES { format!("more than {MAX_MATCHES} text matches; narrow the query") }
+    else { format!("more than {max_matches} text matches; raise max_matches (up to {MAX_MATCHES}) or narrow the query") }
+}
+
+/// Every match, or a Limit error when more than `max_matches` exist.
+pub fn search(deck: &Deck, options: &SearchOptions) -> Result<Vec<TextMatch>> {
+    let found = search_limited(deck, options)?;
+    if found.truncated { return Err(Error::Limit(overflow(options.max_matches))); }
+    Ok(found.matches)
 }
 
 pub fn replace(mut deck: Deck, options: &ReplaceOptions) -> Result<Deck> {
@@ -162,7 +191,11 @@ pub fn replace(mut deck: Deck, options: &ReplaceOptions) -> Result<Deck> {
     if options.selected.as_ref().is_some_and(|selected| selected.len() > MAX_MATCHES) {
         return Err(Error::Limit("too many selected text matches".into()));
     }
-    let available = search(&deck, &options.search)?;
+    // Selected matches come from an earlier search and may lie in the prefix of a larger result; replace_all has to see every match.
+    let (available, truncated) = if options.selected.is_some() {
+        let found = search_limited(&deck, &options.search)?;
+        (found.matches, found.truncated)
+    } else { (search(&deck, &options.search)?, false) };
     let chosen = if let Some(selected) = &options.selected {
         let indexed: BTreeMap<_, _> = available.iter().map(|found| ((found.path.as_str(), found.start, found.end), found)).collect();
         let mut seen = BTreeSet::new();
@@ -170,7 +203,9 @@ pub fn replace(mut deck: Deck, options: &ReplaceOptions) -> Result<Deck> {
         for requested in selected {
             let key = (requested.path.as_str(), requested.start, requested.end);
             let actual = indexed.get(&key).filter(|found| found.expected == requested.expected)
-                .ok_or_else(|| Error::Conflict("selected text path, range, or expected value changed".into()))?;
+                .ok_or_else(|| Error::Conflict(if truncated {
+                    "selected text path, range, or expected value changed, or lies beyond max_matches; search again with a larger max_matches".into()
+                } else { "selected text path, range, or expected value changed".into() }))?;
             if !seen.insert(key) { return Err(Error::Conflict("duplicate selected text match".into())); }
             chosen.push((*actual).clone());
         }

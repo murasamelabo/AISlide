@@ -354,7 +354,8 @@ fn public_text_operations_are_revision_checked_candidates() {
     let before = serde_json::to_value(&original).unwrap();
     let search = json!({"query":"Alpha", "include_notes":true});
     let found = execute_request(json!({"op":"search_text", "deck":original.deck, "options":search})).unwrap();
-    assert_eq!(found.as_array().unwrap().len(), 2);
+    assert_eq!(found["matches"].as_array().unwrap().len(), 2);
+    assert_eq!(found["truncated"], false);
     let request = json!({"op":"replace_text", "document":original, "expected_revision":0,
         "options":{"search":search,"replacement":"Beta","replace_all":true}});
     let result = execute_request(request.clone()).unwrap();

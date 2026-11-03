@@ -5,7 +5,7 @@ import type { RecipeCatalog, RecipeIntent, RecipeSelection, RecipeRecommendation
 import type { ArchitectureIconCatalog, ArchitectureIconAssets } from './types'
 import type { MasterSourceInput, MasterSourceInspection, MasterImportInput, MasterImportPreview } from './types'
 import type { AuthoringOperation, Frame, Crop, ConnectorSettings, PictureInput, RunStyle, ShapeAdjustment, SlideImportInput } from './types'
-import type { AuthoringCapabilities, SearchOptions, TextMatch, TextReplaceOptions, FormatTextInput, ReplaceTextContentInput, UpdateParagraphsInput, CanvasResizeInput, TemplateKind, TemplateInput, TemplateExport, ImageEditInput, EditedImage, ApplyImageEditInput, EditTableInput, SelectionOperation, ElementBundle, SelectionEditResult } from './types'
+import type { AuthoringCapabilities, SearchOptions, TextSearchResult, TextReplaceOptions, FormatTextInput, ReplaceTextContentInput, UpdateParagraphsInput, CanvasResizeInput, TemplateKind, TemplateInput, TemplateExport, ImageEditInput, EditedImage, ApplyImageEditInput, EditTableInput, SelectionOperation, ElementBundle, SelectionEditResult } from './types'
 export * from './types'
 import type { FormatTextElementInput, ReplaceElementTextInput, CommentInput, ModernCommentOperation, TableHeaders, ElementAccessibility, ReadingOrderResult, AccessibilityReport, DocumentInspection, CleanCopyOptions, CleanCopyExport } from './types'
 import type { SetTableCellTextInput, EditVectorInput, CombineShapesInput } from './types'
@@ -64,7 +64,7 @@ export class AislideClient {
   setTableCellText(input: SetTableCellTextInput, options?: RequestOptions): Promise<Element>
   editVector(input: EditVectorInput, options?: RequestOptions): Promise<Element>
   /** Literal search. Paths are relative to Deck; offsets are Unicode scalars, end exclusive. */
-  searchText(deck: Deck, input: SearchOptions, options?: RequestOptions): Promise<TextMatch[]>
+  searchText(deck: Deck, input: SearchOptions, options?: RequestOptions): Promise<TextSearchResult>
   /** Pure local image preparation. Use session.applyImageEdit separately to mutate a picture. */
   editImage(input: ImageEditInput, options?: RequestOptions): Promise<EditedImage>
   inspectTemplate(input: { kind: 'potx'; base64: string }, options?: RequestOptions): Promise<import('./types').TemplateInspection>
@@ -175,7 +175,7 @@ export class DocumentSession {
   checkAccessibility(options?: RequestOptions): Promise<AccessibilityReport>
   inspectDocument(options?: RequestOptions): Promise<DocumentInspection>
   exportCleanCopy(input: CleanCopyOptions, options?: RequestOptions): Promise<CleanCopyExport>
-  searchText(input: SearchOptions, options?: RequestOptions): Promise<TextMatch[]>
+  searchText(input: SearchOptions, options?: RequestOptions): Promise<TextSearchResult>
   textAssist(input: TextAssistInput, options?: RequestOptions): Promise<TextAssistance>
   textAiStatus(options?: RequestOptions): Promise<ProviderStatus>
   applyTextAssist(slideId: string, input: ApplyTextAssistInput, options?: TransactionOptions): Promise<AislideDocument>

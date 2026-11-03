@@ -2968,6 +2968,23 @@ test('issue72 import_slides releases its source deck only when asked, after a su
   });
 });
 
+test('issue71 search_text documents max_matches and returns the core result with truncated', async () => {
+  await feedbackMcpFixture(async ({ registrations, call, calls, fixture }) => {
+    const { deck_id } = await call('create_presentation', { title: 'Synthetic search' });
+    const hit = { path: '/slides/0/elements/0/text', start: 6, end: 10, expected: 'page 1 / 5', snippet: 'page 1 / 5' };
+    fixture.onRequest = request => request.op === 'search_text' ? { matches: [hit], truncated: true } : { ready: true };
+    const found = await call('search_text', { deck_id, options: { query: ' / 5', max_matches: 1 } });
+    assert.deepEqual(found, { matches: [hit], truncated: true });
+    assert.deepEqual(calls.at(-1).request.options, { query: ' / 5', max_matches: 1 });
+    const tool = registrations.get('search_text');
+    assert.match(tool.config.description, /\{matches, truncated\}.*truncated=true when more exist/);
+    const published = z.toJSONSchema(tool.config.inputSchema, { io: 'input' });
+    assert.match(published.properties.options.properties.max_matches.description, /default 100.*truncated=true.*replace_all fails with a Limit error/);
+    assert.equal(published.properties.options.properties.max_matches.maximum, 1024);
+    assert.match(registrations.get('replace_text').config.description, /replace_all fails with a Limit error.*never replaces a prefix/);
+  });
+});
+
 test('managed batch MCP stub accepts strict parts and graphs with one guarded request', async () => {
   await feedbackMcpFixture(async ({ registrations, calls, call }) => {
     const { deck_id } = await call('create_presentation', { title: 'Synthetic managed batch' });
