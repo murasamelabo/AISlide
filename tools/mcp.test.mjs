@@ -1587,7 +1587,7 @@ test('roundtrip feedback skill and initialization expose the short safe authorin
       await client.connect(clientTransport);
       const instructions = client.getInstructions();
       if (patterns === 'off') assert.ok(Buffer.byteLength(instructions) < 1024);
-      for (const text of ['Serialize core-backed AISlide calls', 'apply_operations', 'asset_id', 'get_deck_summary', 'unmet requirements']) assert.ok(instructions.includes(text), text);
+      for (const text of ['Serialize core-backed AISlide calls', 'apply_operations', 'asset_id', 'get_deck_summary', 'unmet requirements', 'at most 8 decks stay open']) assert.ok(instructions.includes(text), text);
       for (const text of ['Prefer explanatory visuals by default', 'Explicit user exclusions override this default', 'never force decoration']) assert.ok(instructions.includes(text), text);
       for (const text of ['bounded cross-slide', 'accessibility edits', 'revision/hash guards',
         'layers, evidence readings or activity-to-outcome mappings', 'recommend_recipes, preview_recipe and apply_recipe',
