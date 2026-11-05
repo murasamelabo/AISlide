@@ -384,6 +384,10 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		// Text a managed part draws at sizes its preset fixes (tags, captions, badges) cannot be raised from the spec, so it is information;
 		// a body_size the author lowered below the floor stays a warning (see parts::fixed_typography).
 		let fixed_part = |object: &Object<'_>| object.owner.and_then(|owner| document.parts.iter().find(|part| part.slide_id == slide.id && part.element_id == owner)).filter(|part| !part.stale && crate::parts::fixed_typography(&part.spec, options.min_font_size));
+		// The source line and page number of a guided slide keep the size guided creation fixed for them; the guided input cannot change it.
+		let guided_annotation = |object: &Object<'_>| if object.scope == "slide" && object.owner.is_none() {
+			slide.elements.iter().find(|element| element.bounds().0 == object.id).and_then(|element| crate::guided::fixed_annotation(deck, slide, element))
+		} else { None };
 		let rendered = crate::render::render_with_effect_policy(deck, page, false, 1.0, crate::render::EffectPolicy::Preflight)?;
 		let text_bounds: std::collections::BTreeMap<_, _> = rendered.text.iter()
 			.map(|span| ((span.scope.as_str(), span.element_id.as_str()), span.occupied_bounds())).collect();
@@ -469,7 +473,12 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 					Some(part) => push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "info", "heuristic",
 						&format!("Part {} ({}) draws this text at a fixed {:.0}px, below the requested {}px floor; its preset does not let you change the size", part.element_id, part.spec.preset, object.font_size.unwrap_or_default(), options.min_font_size),
 						&["Choose a preset whose typography meets the floor, or accept the preset's fixed sizes", "Split the content across slides"])?,
-					None => push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &format!("Effective font is below the requested {}px floor", options.min_font_size), &["Increase font size and enlarge or reflow the frame", "Split dense content into another slide"])?,
+					None => match guided_annotation(object) {
+						Some(role) => push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "info", "heuristic",
+							&format!("Guided creation draws this {role} at a fixed {:.0}px, below the requested {}px floor; the guided input does not resize it and the body floor does not cover citations and page numbers", object.font_size.unwrap_or_default(), options.min_font_size),
+							&["Keep the fixed size, or raise this element's font size yourself; it is then checked against the floor like any other text", "Keep citations short instead of shrinking them"])?,
+						None => push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &format!("Effective font is below the requested {}px floor", options.min_font_size), &["Increase font size and enlarge or reflow the frame", "Split dense content into another slide"])?,
+					},
 				}
 			}
 			if !object.text { continue; }

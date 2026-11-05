@@ -8,6 +8,12 @@ const PATTERNS: &str = include_str!("../../../docs/authoring/consulting-patterns
 const DEFAULT_SLIDE_LIMIT: usize = 32;
 const MAX_SLIDE_LIMIT: usize = 128;
 pub const MAX_RECORD_BYTES: usize = crate::limits::MIB;
+const LAYOUT_ID: &str = "guided-content";
+const MASTER_ID: &str = "guided-master";
+const SOURCE_ID: &str = "source";
+const PAGE_ID: &str = "page";
+/// The size, in canvas pixels, at which every guided slide draws its source line and page number. The guided input cannot change it.
+const ANNOTATION_SIZE: f64 = 12.0;
 const PROFILES: &[(&str, &str, &str)] = &[
     ("consulting-decision", "Consulting and decision meetings", include_str!("../../../docs/authoring/consulting-decision.md")),
     ("technical-explainer", "Technical explanation", include_str!("../../../docs/authoring/technical-explainer.md")),
@@ -267,6 +273,25 @@ fn text(id:&str,value:&str,bounds:[f64;4],size:f64,color:&str,bold:bool)->Elemen
     Element::Text{visual:None,id:id.into(),x,y,width,height,text:value.into(),font_size:size,color:color.into(),bold,format:TextFormat{font_family:Some("@minor".into()),alignment:TextAlign::Left,..TextFormat::default()}}
 }
 
+/// What `element` is when it is still the source line or page number that guided creation drew on `slide`, at the size it fixes for them.
+/// The guided input cannot resize these two (docs/authoring/README.md keeps citations and page numbers out of the body floor), so
+/// preflight reports their size as information rather than as something to repair.
+///
+/// The identity is the layout the slide still uses, which guided creation defines and the PPTX preserves, and the generated ID of a
+/// top-level text box. Nothing else is read: not the array position, the text or the frame. Same-named text on a slide of another
+/// layout, text inside a group, and an element whose size was changed afterwards (even for one run only) are ordinary text. Editing
+/// what the text says keeps the exemption, because the size is what the preset fixes.
+pub(crate) fn fixed_annotation(deck:&Deck,slide:&crate::model::Slide,element:&Element)->Option<&'static str> {
+    let Element::Text{id,font_size,format,..}=element else {return None;};
+    let role=match id.as_str() {SOURCE_ID=>"source line",PAGE_ID=>"page number",_=>return None};
+    let unchanged=|size:f64|(size-ANNOTATION_SIZE).abs()<0.01;
+    (slide.layout_id.as_deref()==Some(LAYOUT_ID)
+        && deck.design.as_ref().is_some_and(|design|design.layouts.iter().any(|layout|layout.id==LAYOUT_ID&&layout.master_id==MASTER_ID))
+        && unchanged(*font_size)
+        && format.paragraphs.iter().flat_map(|paragraph|&paragraph.runs).all(|run|run.style.font_size.is_none_or(unchanged))
+    ).then_some(role)
+}
+
 fn decision_table(rows:&[Vec<String>],top:f64,height:f64,closing:bool)->Element {
     let widths=if closing {[180.0,360.0,180.0,432.0]} else {[180.0,300.0,530.0,142.0]};
     let mut drawing=crate::parts::Drawing::new("decision-cell");
@@ -464,14 +489,14 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
         design.theme.fonts.major=family.into();design.theme.fonts.minor=family.into();
         design.theme.fonts.east_asian=family.into();design.theme.fonts.complex_script=family.into();
     }
-    let design_value=json!({"theme":design.theme,"masters":[{"id":"guided-master","name":"Evidence-led briefing","background":"@lt1","elements":[]}],"layouts":[{"id":"guided-content","name":"Claim and evidence","master_id":"guided-master","background":null,"elements":[]}]});
+    let design_value=json!({"theme":design.theme,"masters":[{"id":MASTER_ID,"name":"Evidence-led briefing","background":"@lt1","elements":[]}],"layouts":[{"id":LAYOUT_ID,"name":"Claim and evidence","master_id":MASTER_ID,"background":null,"elements":[]}]});
     let mut slides=Vec::new();let mut parts=Vec::new();
     for (index,slide) in input.slides.iter().enumerate() {
         let double=if input.language=="ja" {slide.headline.chars().count()>36} else {slide.headline.chars().count()>80};
         let mut body_top=if double {168.0} else {144.0};let mut body_height=if double {474.0} else {498.0};
         let citations:Vec<_>=input.evidence.iter().filter(|entry|slide.support.iter().any(|support|support.evidence_ids.contains(&entry.id))).collect();
         let citation=citations.iter().map(|entry|format!("[{}] {}",entry.id,entry.reference)).collect::<Vec<_>>().join("; ");
-        let mut elements=vec![text("section",&slide.section,[64.0,24.0,1152.0,28.0],18.0,"@accent1",true),text("headline",&slide.headline,[64.0,64.0,1152.0,if double {86.0} else {52.0}],if double {29.0} else {32.0},"@dk1",true),text("source",&citation,[64.0,658.0,1052.0,48.0],12.0,"@dk2",false),text("page",&format!("{} / {}",index+1,input.slides.len()),[1132.0,676.0,84.0,26.0],12.0,"@dk2",false)];
+        let mut elements=vec![text("section",&slide.section,[64.0,24.0,1152.0,28.0],18.0,"@accent1",true),text("headline",&slide.headline,[64.0,64.0,1152.0,if double {86.0} else {52.0}],if double {29.0} else {32.0},"@dk1",true),text(SOURCE_ID,&citation,[64.0,658.0,1052.0,48.0],ANNOTATION_SIZE,"@dk2",false),text(PAGE_ID,&format!("{} / {}",index+1,input.slides.len()),[1132.0,676.0,84.0,26.0],ANNOTATION_SIZE,"@dk2",false)];
         crate::fields::pagination(&mut elements[3],&slide.id,index+1,input.slides.len());
         if let Some(settings)=&authoring {
             if let Element::Text {x,width,height,font_size,format,..}=&mut elements[1] {
@@ -531,7 +556,7 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
             for element in &mut elements[4..] {let bounds=element.bounds();author_body(element,settings,1.0,bounds.4,&BTreeSet::new());}
         }}
         let notes=slide_notes(input,slide,&citations)?;
-        let mut page=serde_json::from_value(json!({"id":slide.id,"title":slide.headline,"background":"@lt1","layout_id":"guided-content","inherit_background":true,"elements":elements,"notes":notes}))?;
+        let mut page=serde_json::from_value(json!({"id":slide.id,"title":slide.headline,"background":"@lt1","layout_id":LAYOUT_ID,"inherit_background":true,"elements":elements,"notes":notes}))?;
         describe_visuals(&mut page,slide.part.as_ref())?;
         slides.push(page);
     }

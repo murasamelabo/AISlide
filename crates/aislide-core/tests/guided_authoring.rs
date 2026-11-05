@@ -862,6 +862,126 @@ fn guided_ledger_notes_record_is_bounded_hashed_and_recoverable() {
     }
 }
 
+fn two_page_guided_document() -> Value {
+    let mut input = authoring_brief("status-report");
+    let mut second = input["slides"][0].clone(); second["id"] = json!("second");
+    input["slides"].as_array_mut().unwrap().push(second);
+    execute_request(json!({"op":"create_guided_presentation","id":"fixed-annotations","input":input})).unwrap()["document"].clone()
+}
+
+fn small_text_findings(document: &Value, options: Value, slide_id: &str, element_id: &str) -> Vec<Value> {
+    let report = execute_request(json!({"op":"preflight_presentation","document":document,"options":options})).unwrap();
+    report["findings"].as_array().unwrap().iter()
+        .filter(|finding| finding["code"] == "SMALL_TEXT" && finding["slide_id"] == slide_id && finding["element_ids"] == json!([element_id])).cloned().collect()
+}
+
+fn severities(document: &Value, slide_id: &str) -> Vec<Value> {
+    ["source", "page"].iter().flat_map(|element| small_text_findings(document, json!({"page_indices":[0,1]}), slide_id, element)).map(|finding| finding["severity"].clone()).collect()
+}
+
+#[test]
+fn issue77_guided_source_lines_and_page_numbers_are_information_for_every_selection_and_floor() {
+    let document = two_page_guided_document();
+    for slide in document["deck"]["slides"].as_array().unwrap() {
+        let element = |id: &str| slide["elements"].as_array().unwrap().iter().find(|element| element["id"] == id).unwrap().clone();
+        assert_eq!((element("source")["font_size"].as_f64(), element("page")["font_size"].as_f64()), (Some(12.0), Some(12.0)));
+    }
+    for options in [json!({"page_indices":[0,1]}), json!({"page_indices":[0,1],"include_inherited":false}), json!({"page_indices":[0,1],"min_font_size":24})] {
+        for (page, slide) in ["evidence-slide", "second"].into_iter().enumerate() {
+            for (element, role) in [("source", "source line"), ("page", "page number")] {
+                let findings = small_text_findings(&document, options.clone(), slide, element);
+                assert_eq!(findings.len(), 1, "{options} {slide}/{element}: {findings:?}");
+                assert_eq!(findings[0]["severity"], "info");
+                assert_eq!(findings[0]["page_index"], page);
+                let message = findings[0]["message"].as_str().unwrap();
+                assert!(message.contains(role) && message.contains("fixed 12px") && message.contains("guided input does not resize"), "{message}");
+                assert!(!findings[0]["suggestions"].as_array().unwrap().is_empty());
+            }
+        }
+    }
+    let selected = small_text_findings(&document, json!({"page_indices":[1]}), "second", "source");
+    assert_eq!(selected.len(), 1);
+    assert!(small_text_findings(&document, json!({"page_indices":[1]}), "evidence-slide", "source").is_empty(), "only the selected page is reported");
+    for element in ["source", "page"] {
+        assert!(small_text_findings(&document, json!({"page_indices":[0,1],"min_font_size":12}), "second", element).is_empty(), "12px meets a 12px floor");
+    }
+}
+
+#[test]
+fn issue77_the_exemption_ends_for_text_that_is_not_the_generated_annotation() {
+    let document = two_page_guided_document();
+    let apply = |document: &Value, operations: Value| execute_request(json!({"op":"apply_operations","document":document,
+        "expected_revision":document["revision"],"expected_hash":document["hash"],"operations":operations})).unwrap()["document"].clone();
+    assert_eq!(severities(&document, "second"), [json!("info"), json!("info")]);
+
+    // What the text says is not what the preset fixes.
+    let reworded = apply(&document, json!([{"op":"set_rich_text","slide_id":"second","id":"source","paragraphs":[{"runs":[{"text":"[source-a] A different locator"}]}]}]));
+    assert_eq!(severities(&reworded, "second"), [json!("info"), json!("info")]);
+
+    // A size the author chose is theirs: below the floor it is a warning, at or above it there is nothing to report.
+    for (size, expected) in [(14, Some("warning")), (16, None), (20, None), (12, Some("info"))] {
+        let resized = apply(&document, json!([{"op":"set_text_style","slide_id":"second","ids":["source"],"style":{"font_size":size}}]));
+        let findings = small_text_findings(&resized, json!({"page_indices":[0,1]}), "second", "source");
+        assert_eq!(findings.iter().map(|finding| finding["severity"].as_str().unwrap()).collect::<Vec<_>>(), expected.into_iter().collect::<Vec<_>>(), "size {size}");
+        assert_eq!(severities(&resized, "evidence-slide"), [json!("info"), json!("info")], "the other slide is untouched");
+    }
+    // One smaller run is enough to make the frame ordinary text again.
+    let run = apply(&document, json!([{"op":"set_rich_text","slide_id":"second","id":"source","paragraphs":[{"runs":[{"text":"[source-a] "},{"text":"fine print","style":{"font_size":10}}]}]}]));
+    let findings = small_text_findings(&run, json!({"page_indices":[0,1]}), "second", "source");
+    assert_eq!(findings.iter().map(|finding| finding["severity"].as_str().unwrap()).collect::<Vec<_>>(), ["warning"]);
+}
+
+#[test]
+fn issue77_same_named_text_outside_a_guided_slide_stays_a_warning() {
+    let document = two_page_guided_document();
+    // The slide leaves the guided layout: its text is no longer drawn by guided creation.
+    let mut deck = document["deck"].clone();
+    deck["slides"][1]["layout_id"] = Value::Null;
+    let moved = execute_request(json!({"op":"new_document","id":"left-layout","deck":deck})).unwrap();
+    for element in ["source", "page"] {
+        assert_eq!(small_text_findings(&moved, json!({"page_indices":[0,1]}), "evidence-slide", element)[0]["severity"], "info");
+        assert_eq!(small_text_findings(&moved, json!({"page_indices":[0,1]}), "second", element)[0]["severity"], "warning");
+    }
+    // A hand-made deck with the same IDs and sizes has nothing that guided creation drew.
+    let mut plain = execute_request(json!({"op":"create_presentation","id":"plain","title":"Plain"})).unwrap()["deck"].clone();
+    plain["slides"][0]["elements"] = json!([
+        {"type":"text","id":"source","x":64,"y":658,"width":600,"height":30,"text":"Source: synthetic","font_size":12,"color":"000000","bold":false},
+        {"type":"text","id":"page","x":1132,"y":676,"width":84,"height":26,"text":"1 / 1","font_size":12,"color":"000000","bold":false}
+    ]);
+    let plain = execute_request(json!({"op":"new_document","id":"plain-annotations","deck":plain})).unwrap();
+    let slide_id = plain["deck"]["slides"][0]["id"].clone();
+    for element in ["source", "page"] {
+        let findings = small_text_findings(&plain, json!({"page_indices":[0]}), slide_id.as_str().unwrap(), element);
+        assert_eq!(findings.len(), 1, "{element}");
+        assert_eq!(findings[0]["severity"], "warning");
+    }
+    // Body text on a guided slide is not an annotation either.
+    let mut body = document["deck"].clone();
+    body["slides"][1]["elements"].as_array_mut().unwrap().push(json!({"type":"text","id":"footnote","x":64,"y":600,"width":600,"height":30,"text":"Small body note","font_size":12,"color":"000000","bold":false}));
+    let body = execute_request(json!({"op":"new_document","id":"guided-body","deck":body})).unwrap();
+    assert_eq!(small_text_findings(&body, json!({"page_indices":[0,1]}), "second", "footnote")[0]["severity"], "warning");
+}
+
+#[test]
+fn issue77_the_exemption_survives_native_reopening_and_slide_duplication() {
+    let document = two_page_guided_document();
+    let exported = execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+    let reopened = execute_request(json!({"op":"open_presentation","id":"fixed-annotations-native","base64":exported["base64"]})).unwrap()["document"].clone();
+    for slide in ["evidence-slide", "second"] {
+        assert_eq!(severities(&reopened, slide), [json!("info"), json!("info")], "{slide} after reopening");
+    }
+    let duplicated = execute_request(json!({"op":"edit_slides","document":document,"expected_revision":document["revision"],"operations":[{"op":"duplicate","slide_id":"evidence-slide","id":"copy"}]})).unwrap();
+    let copied = &duplicated["document"];
+    assert_eq!(copied["deck"]["slides"][1]["id"], "copy");
+    let report = execute_request(json!({"op":"preflight_presentation","document":copied,"options":{"page_indices":[0,1,2]}})).unwrap();
+    for element in ["source", "page"] {
+        let findings: Vec<_> = report["findings"].as_array().unwrap().iter()
+            .filter(|finding| finding["code"] == "SMALL_TEXT" && finding["slide_id"] == "copy" && finding["element_ids"] == json!([element])).collect();
+        assert_eq!(findings.len(), 1, "{element}");
+        assert_eq!(findings[0]["severity"], "info");
+    }
+}
+
 #[test]
 fn guided_record_is_inspected_and_removed_by_explicit_clean_copy() {
     for mode in ["summary","none"] {
