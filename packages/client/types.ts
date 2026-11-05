@@ -189,8 +189,9 @@ export type ModernCommentOperation =
 export type TableHeaders = 'unknown' | 'none' | 'first_row' | 'first_column' | 'both'
 export type ElementAccessibility = { title?: string | null; description?: string | null; decorative?: boolean | null }
 export type SlideReview = { comments?: Comment[]; modern_threads?: ModernThread[] | null; table_headers?: Record<string, TableHeaders>; accessibility?: Record<string, ElementAccessibility>; reading_order?: string[] }
-export type AccessibilityIssue = { code: string; slide_id: string; element_id: string | null; status: string; contrast_ratio: number | null; required_ratio: number | null; repair_target: 'alternative_text' | 'table_headers' | null }
-export type AccessibilityReport = { issues: AccessibilityIssue[]; checked_features: string[]; limitations: string[]; wcag_certified: false }
+export type AccessibilityIssue = { code: string; slide_id: string; element_id: string | null; status: string; contrast_ratio: number | null; required_ratio: number | null; repair_target: 'alternative_text' | 'table_headers' | null; reason?: 'background_not_solid' | 'partial_cover' | 'unsupported_backdrop' | 'transformed_text' | 'text_highlight_or_baseline' }
+/** `contrast_checked` / `contrast_unsupported` count text elements (not runs); low contrast counts as checked. `checked_features` lists what the checker can evaluate, not what it did in this deck. */
+export type AccessibilityReport = { issues: AccessibilityIssue[]; checked_features: string[]; contrast_checked: number; contrast_unsupported: number; limitations: string[]; wcag_certified: false }
 export type InspectionCategory = 'sources' | 'custom_xml' | 'comments' | 'notes' | 'unused_media' | 'off_slide' | 'invisible'
 export type PersonalDataCandidate = { rule: 'email_candidate' | 'phone_candidate' | 'personal_property_candidate'; scope: 'current_deck' | 'embedded_origin'; surface: string; count: number; locations: number[][]; masked_value: '[REDACTED]' }
 export type DocumentInspection = { findings: { category: InspectionCategory; count: number; paths: string[] }[]; candidates: PersonalDataCandidate[]; candidate_scan_truncated: boolean; limitations: string[]; complete_personal_data_detection: false }

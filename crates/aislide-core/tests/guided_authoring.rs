@@ -1072,6 +1072,47 @@ fn issue75_no_guided_part_draws_text_in_a_pale_accent_tint() {
     assert!(pale.is_empty(), "text in an accent that is pale on the panel color: {pale:#?}");
 }
 
+fn recolor_text(value: &mut Value, text: &str, color: &str) -> Option<String> {
+    match value {
+        Value::Array(values) => values.iter_mut().find_map(|value| recolor_text(value, text, color)),
+        Value::Object(object) => {
+            if object.get("type").is_some_and(|kind| kind == "text") && object.get("text").is_some_and(|value| value == text) {
+                object.insert("color".into(), json!(color));
+                return object.get("id").and_then(Value::as_str).map(str::to_owned);
+            }
+            object.values_mut().find_map(|child| recolor_text(child, text, color))
+        }
+        _ => None,
+    }
+}
+
+#[test]
+fn issue76_guided_deck_text_is_checked_and_a_pale_heading_is_reported() {
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue76","input":issue75_input()})).unwrap();
+    let document = &created["document"];
+    assert_eq!(document["deck"]["slides"][0]["inherit_background"], true);
+    let report = execute_request(json!({"op":"check_accessibility","document":document})).unwrap();
+    let low = |report: &Value| report["issues"].as_array().unwrap().iter().filter(|issue| issue["code"] == "text_contrast_low").count();
+    assert_eq!(low(&report), 0, "{report}");
+    // 4 slide texts (section, headline, source, page) and the 21 texts of the part, all inside groups on an inherited background.
+    assert_eq!((report["contrast_checked"].as_u64(), report["contrast_unsupported"].as_u64()), (Some(25), Some(0)), "{report}");
+    assert!(report["issues"].as_array().unwrap().iter().all(|issue| issue["code"] != "contrast_background_unverified"), "{report}");
+
+    // The pale tint of the report: drawn in the fourth accent again, the heading is found.
+    let mut deck = document["deck"].clone();
+    let id = recolor_text(&mut deck["slides"][0]["elements"], "Domain 4", "@accent4").expect("the fourth group heading");
+    let expected = wcag_contrast(&theme_color(&deck, "@accent4"), &theme_color(&deck, "@lt1"));
+    assert!(expected < 3.0, "the default brand's fourth accent is pale: {expected:.2}:1");
+    let pale = aislide_core::review::check_accessibility(&serde_json::from_value(deck).unwrap());
+    let found: Vec<_> = pale.issues.iter().filter(|issue| issue.code == "text_contrast_low").collect();
+    assert_eq!(found.len(), 1, "{:?}", pale.issues);
+    assert_eq!(found[0].element_id.as_deref(), Some(id.as_str()));
+    assert!((found[0].contrast_ratio.unwrap() - expected).abs() < 0.01, "{:?} vs {expected}", found[0].contrast_ratio);
+    assert!([Some(3.0), Some(4.5)].contains(&found[0].required_ratio), "{:?}", found[0].required_ratio);
+    assert_eq!((pale.contrast_checked, pale.contrast_unsupported), (25, 0));
+
+}
+
 #[test]
 fn guided_record_is_inspected_and_removed_by_explicit_clean_copy() {
     for mode in ["summary","none"] {

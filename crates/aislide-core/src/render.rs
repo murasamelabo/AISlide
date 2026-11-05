@@ -190,7 +190,7 @@ pub(crate) fn render_preview_at_scale(
 
 pub(crate) enum EffectPolicy { Strict, Preview, Preflight, DeliveryPdf }
 
-fn render_layers(deck: &Deck, page_index: usize) -> Result<Vec<(String, &[Element])>> {
+pub(crate) fn render_layers(deck: &Deck, page_index: usize) -> Result<Vec<(String, &[Element])>> {
     let slide = deck.slides.get(page_index)
         .ok_or_else(|| Error::Invalid("render page index out of range".into()))?;
     let layout = deck.design.as_ref().and_then(|design| {
@@ -264,20 +264,6 @@ pub(crate) fn render_with_effect_policy(
         .ok_or_else(|| Error::Invalid("render page index out of range".into()))?;
     let fallback = Theme::default();
     let theme = crate::design::slide_theme(slide, deck.design.as_ref()).unwrap_or(&fallback);
-    let layout = deck.design.as_ref().and_then(|design| {
-        slide
-            .layout_id
-            .as_ref()
-            .and_then(|id| design.layouts.iter().find(|layout| &layout.id == id))
-            .or_else(|| design.layouts.first())
-    });
-    let master = layout.and_then(|layout| {
-        deck.design
-            .as_ref()?
-            .masters
-            .iter()
-            .find(|master| master.id == layout.master_id)
-    });
     let layers = render_layers(deck, page_index)?;
     let mut characters = 0usize;
     let mut points = 0usize;
@@ -354,14 +340,7 @@ pub(crate) fn render_with_effect_policy(
         .writer
         .write_attribute("viewBox", &format!("0 0 {} {}", deck.width, deck.height));
     if !transparent {
-        let background = if slide.inherit_background {
-            layout
-                .and_then(|layout| layout.background.as_deref())
-                .or_else(|| master.map(|master| master.background.as_str()))
-                .unwrap_or(&slide.background)
-        } else {
-            &slide.background
-        };
+        let background = crate::design::rendered_background(slide, deck.design.as_ref());
         scene.rectangle(
             [0.0, 0.0, deck.width as f64, deck.height as f64],
             &scene.color(background),

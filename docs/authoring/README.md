@@ -1103,7 +1103,8 @@ The complete ledger and evidence text are preserved in notes for `full`, and in 
 Typed batches reduce separate edit requests; they do not make the core a
 stateful document service or add SVG caching. A general report-layout catalog,
 preflight overlap aggregation, finding prioritization and preflight contrast
-analysis are not implemented by this feedback work. Existing bounded findings
+analysis are not implemented by this feedback work (`check_accessibility` compares
+text with known solid backgrounds; see [Phase 6 review](review-phase6.md)). Existing bounded findings
 and separate accessibility checks remain as documented, not a combined
 automatic quality verdict. These are future candidates, not delivered features.
 

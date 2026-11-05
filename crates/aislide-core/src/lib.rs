@@ -11,6 +11,7 @@ pub mod rich_text;
 pub mod fields;
 pub mod comments;
 pub mod review;
+mod contrast;
 pub mod table_format;
 pub mod report;
 mod report_design;

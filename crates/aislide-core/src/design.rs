@@ -261,6 +261,15 @@ pub fn slide_background<'a>(slide: &'a Slide, design: Option<&'a Design>) -> &'a
     &slide.background
 }
 
+/// The background the renderer paints: the slide's own or, when it inherits, its layout's, else that layout's master's. As for
+/// `slide_theme`, a slide without a layout of its own uses the first layout.
+pub(crate) fn rendered_background<'a>(slide: &'a Slide, design: Option<&'a Design>) -> &'a str {
+    if !slide.inherit_background { return &slide.background; }
+    let layout = design.and_then(|design| slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)).or_else(|| design.layouts.first()));
+    let master = layout.and_then(|layout| design?.masters.iter().find(|master| master.id == layout.master_id));
+    layout.and_then(|layout| layout.background.as_deref()).or_else(|| master.map(|master| master.background.as_str())).unwrap_or(&slide.background)
+}
+
 pub fn resolve_color(value: &str, theme: Option<&Theme>) -> String {
     value.strip_prefix('@').and_then(|key| theme.and_then(|theme| theme.colors.get(key)).cloned().or_else(|| Theme::default().colors.get(key).cloned())).unwrap_or_else(|| value.into())
 }
