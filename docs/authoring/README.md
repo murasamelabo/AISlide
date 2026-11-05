@@ -553,6 +553,24 @@ before applying a repair. Do not silently infer semantic roles, change reading
 order, move user content or globally suppress overlap findings. These checks
 are heuristics, not Office visual parity or accessibility certification.
 
+### Text And Decorative Colors
+
+Presets keep `@accent1`-`@accent6` for rules, fills, markers and outlines. Text
+takes an accent only while it is readable on the color behind it, and otherwise
+the preset draws that text in `@dk1`. The check is WCAG 2 contrast against the
+background the preset actually paints (`@lt1`, `@lt2`, or the accent fill under
+light text): 3:1 for text of 24px or more and for bold text of 56/3px or more,
+4.5:1 for other text. A palette whose accents already meet the ratio renders as
+before; a pale brand color changes only the text, never the decoration. Group
+headings (`data.kind:"groups"`) are always `@dk1`, and the accent stays on the
+rule above them. Guided decks draw the 12px source and page annotations in
+`@dk2` (`5F6F78`), at least 4.5:1 on `@lt1` and on `@lt2`.
+
+The rule applies when a part or guided deck is created or regenerated.
+Saved decks keep their colors and are not migrated. `@dk1` is not checked
+against a custom `@lt1`/`@lt2`, so a theme with unusual neutrals is outside this
+guarantee, and `check_accessibility` and preflight remain separate checks.
+
 ### Regeneration Feedback
 
 `set_accessibility` uses at least 65 seconds, with larger documents receiving

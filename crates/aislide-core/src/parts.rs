@@ -423,7 +423,7 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
     }
     let identity = crate::canonical::bytes(spec)?;
     use sha2::{Digest, Sha256};
-    let mut drawing = Drawing::new(&format!("{id}-{}", &format!("{:x}",Sha256::digest(identity))[..10]));
+    let mut drawing = Drawing::new(&format!("{id}-{}", &format!("{:x}",Sha256::digest(identity))[..10])).with_theme(theme);
     drawing.text(&spec.title, [16.0, 0.0, 1120.0, 40.0], 28.0, "@dk1", true, TextAlign::Left);
     drawing.text(&spec.subtitle, [16.0, 44.0, 1120.0, 26.0], 16.0, "@dk2", false, TextAlign::Left);
     if catalog::CATEGORIES.iter().take(10).any(|entry| entry.0 == category) { charts::render(&mut drawing, category, variant, &spec.data, spec.layout.as_ref().is_some_and(|layout| !layout.show_title))?; }
@@ -638,9 +638,25 @@ pub(crate) fn layout_overflow(element: &Element, theme: &crate::design::Theme) -
     }))
 }
 
-pub(crate) struct Drawing { prefix: String, pub elements: Vec<Element>, places: std::collections::BTreeMap<String, String> }
+pub(crate) struct Drawing { prefix: String, pub elements: Vec<Element>, places: std::collections::BTreeMap<String, String>, theme: Option<crate::design::Theme> }
 impl Drawing {
-    pub fn new(prefix: &str) -> Self { Self { prefix: prefix.into(), elements: Vec::new(), places: Default::default() } }
+    pub fn new(prefix: &str) -> Self { Self { prefix: prefix.into(), elements: Vec::new(), places: Default::default(), theme: None } }
+    /// Lets `accent_text` choose by contrast against the colors of this theme.
+    pub fn with_theme(mut self, theme: &crate::design::Theme) -> Self { self.theme = Some(theme.clone()); self }
+    /// `color` as the color of text of `size` and weight `bold` on `background`: kept while it meets WCAG 2 (3:1 for large text, 4.5:1
+    /// otherwise), else `@dk1` when `@dk1` reads better. An accent stays the color of lines and fills; only text falls back. A palette
+    /// whose accents all meet the ratio renders as before, and without a theme the color is kept.
+    pub fn readable_color(&self, color: &str, background: &str, size: f64, bold: bool) -> String {
+        let Some(theme) = &self.theme else { return color.into(); };
+        let ratio = |value: &str| crate::review::contrast_ratio(&crate::design::resolve_color(value, Some(theme)), &crate::design::resolve_color(background, Some(theme))).unwrap_or(f64::MAX);
+        let needed = if size >= 24.0 || (bold && size >= 56.0 / 3.0) { 3.0 } else { 4.5 };
+        if ratio(color) >= needed || ratio(color) >= ratio("@dk1") { color.into() } else { "@dk1".into() }
+    }
+    /// `text` with a preferred `color` that gives way to `@dk1` when it is too pale for `background` (see `readable_color`).
+    pub fn text_on(&mut self, text: &str, bounds: [f64; 4], size: f64, color: &str, background: &str, bold: bool, alignment: TextAlign) {
+        let color = self.readable_color(color, background, size, bold);
+        self.text(text, bounds, size, &color, bold, alignment);
+    }
     /// Name the spec field the NEXT element stands for, so an error can say `panels[0].label` instead of an element ID.
     pub fn name_next(&mut self, place: String) { self.places.insert(self.id(), place); }
     pub fn place_of(&self, id: &str) -> Option<&str> { self.places.get(id).map(String::as_str) }

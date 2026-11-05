@@ -483,7 +483,7 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
     let tint=|weight:f64|->String {(0..3).map(|index|{let channel=u8::from_str_radix(&primary[index*2..index*2+2],16).unwrap_or(0) as f64;format!("{:02X}",(channel+(255.0-channel)*weight).round() as u8)}).collect()};
     let mut design=crate::design::Design::default();
     design.theme.name=format!("Guided {}",input.profile_id);
-    for (slot,value) in [("accent1",primary.to_owned()),("accent2",tint(0.28)),("accent3",tint(0.52)),("accent4",tint(0.75)),("accent5",primary.into()),("accent6","222222".into()),("dk1","222222".into()),("dk2","6B7C85".into()),("lt1","FFFFFF".into()),("lt2","EEF3F6".into())] {design.theme.colors.insert(slot.into(),value);}
+    for (slot,value) in [("accent1",primary.to_owned()),("accent2",tint(0.28)),("accent3",tint(0.52)),("accent4",tint(0.75)),("accent5",primary.into()),("accent6","222222".into()),("dk1","222222".into()),("dk2","5F6F78".into()),("lt1","FFFFFF".into()),("lt2","EEF3F6".into())] {design.theme.colors.insert(slot.into(),value);}
     design.theme.fonts.major="Yu Gothic".into();design.theme.fonts.minor="Yu Gothic".into();design.theme.fonts.east_asian="Yu Gothic".into();
     if let Some(family)=authoring.as_ref().and_then(|settings|settings.font_family) {
         design.theme.fonts.major=family.into();design.theme.fonts.minor=family.into();

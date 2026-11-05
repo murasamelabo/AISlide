@@ -982,6 +982,96 @@ fn issue77_the_exemption_survives_native_reopening_and_slide_duplication() {
     }
 }
 
+fn wcag_contrast(foreground: &str, background: &str) -> f64 {
+    let luminance = |color: &str| [(0, 0.2126), (2, 0.7152), (4, 0.0722)].into_iter().map(|(offset, weight)| {
+        let channel = f64::from(u8::from_str_radix(&color[offset..offset + 2], 16).unwrap()) / 255.0;
+        weight * if channel <= 0.04045 { channel / 12.92 } else { ((channel + 0.055) / 1.055).powf(2.4) }
+    }).sum::<f64>();
+    let (first, second) = (luminance(foreground), luminance(background));
+    (first.max(second) + 0.05) / (first.min(second) + 0.05)
+}
+
+fn theme_color(deck: &Value, color: &str) -> String {
+    color.strip_prefix('@').map_or_else(|| color.to_owned(), |key| deck["design"]["theme"]["colors"][key].as_str().unwrap_or_else(|| panic!("theme color {key}")).to_owned())
+}
+
+fn collect_text(value: &Value, output: &mut Vec<Value>) {
+    match value {
+        Value::Array(values) => for value in values { collect_text(value, output); },
+        Value::Object(object) => {
+            if object.get("type").is_some_and(|kind| kind == "text") { output.push(value.clone()); }
+            for child in object.values() { collect_text(child, output); }
+        }
+        _ => {}
+    }
+}
+
+fn issue75_input() -> Value {
+    json!({"version":1,"title":"Repro","language":"ja","profile_id":"technical-explainer","audience":"検証担当","purpose":"不具合の再現","governing_message":"合成データで不具合を再現する",
+        "authoring":{"context":"reading","headline_style":"keyword","ledger_notes":"summary"},
+        "evidence":[{"id":"E1","kind":"source","reference":"synthetic","statement":"合成データ"}],
+        "slides":[{"id":"r1","section":"再現","headline":"グループの一覧","question":"何があるか","parent_message":"governing","pattern_id":"native-part","sentence_form":"outcome","parallel_basis":"領域","transition":"終わり",
+            "support":[{"clause":"グループの一覧","body_paths":["/data/groups/0/items/0"],"evidence_ids":["E1"]}],
+            "part":{"version":1,"preset":"list-set/balanced","title":"領域ごとの項目","data":{"kind":"groups","groups":(1..=5).map(|index| json!({"label":format!("Domain {index}"),"items":["Plan","Build","Measure"]})).collect::<Vec<_>>()}}}]})
+}
+
+#[test]
+fn issue75_guided_group_headings_and_annotations_are_readable_for_any_brand_color() {
+    for brand in [None, Some("1976D2"), Some("FFEB3B"), Some("F5F5F5"), Some("0B1F3A"), Some("E53935")] {
+        let mut input = issue75_input();
+        if let Some(brand) = brand { input["brand_color"] = json!(brand); }
+        let created = execute_request(json!({"op":"create_guided_presentation","id":"issue75","input":input})).unwrap_or_else(|error| panic!("{brand:?}: {error}"));
+        let deck = &created["document"]["deck"];
+        let mut texts = Vec::new();
+        collect_text(&deck["slides"][0]["elements"], &mut texts);
+        let background = theme_color(deck, deck["slides"][0]["background"].as_str().unwrap());
+        let headings: Vec<_> = texts.iter().filter(|text| text["text"].as_str().is_some_and(|text| text.starts_with("Domain "))).collect();
+        assert_eq!(headings.len(), 5, "{brand:?}");
+        for heading in headings {
+            let ratio = wcag_contrast(&theme_color(deck, heading["color"].as_str().unwrap()), &background);
+            assert!(ratio >= 4.5, "{brand:?}: {} is {ratio:.2}:1 on {background}", heading["text"]);
+            assert_eq!(heading["color"], "@dk1", "headings are text; the group accent stays on the rule above it");
+        }
+        for id in ["source", "page"] {
+            let text = texts.iter().find(|text| text["id"] == id).unwrap();
+            assert_eq!(text["font_size"], 12.0);
+            let ratio = wcag_contrast(&theme_color(deck, text["color"].as_str().unwrap()), &background);
+            assert!(ratio >= 4.5, "{brand:?}: {id} is {ratio:.2}:1");
+        }
+        // Decoration keeps the pale tints, so the repair does not darken the accents.
+        let colors = &deck["design"]["theme"]["colors"];
+        assert!(wcag_contrast(colors["accent4"].as_str().unwrap(), "FFFFFF") < 3.0 || brand == Some("0B1F3A") || brand == Some("E53935"), "{brand:?}");
+        assert!(wcag_contrast(colors["dk2"].as_str().unwrap(), colors["lt2"].as_str().unwrap()) >= 4.5, "the annotation color also reads on the neutral panel");
+    }
+}
+
+#[test]
+fn issue75_no_guided_part_draws_text_in_a_pale_accent_tint() {
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let mut checked = 0;
+    let mut pale = Vec::new();
+    for entry in catalog["presets"].as_array().unwrap() {
+        let preset = entry["id"].as_str().unwrap();
+        let mut input = authoring_brief("status-report");
+        input["slides"][0]["part"] = entry["example"].clone();
+        input["slides"][0]["support"][0]["body_paths"] = json!(["/data"]);
+        input["slides"][0]["numbers"] = catalog_brief(preset)["slides"][0]["numbers"].clone();
+        let Ok(created) = execute_request(json!({"op":"create_guided_presentation","id":"issue75-catalog","input":input})) else { continue; };
+        checked += 1;
+        let deck = &created["document"]["deck"];
+        let mut texts = Vec::new();
+        collect_text(&deck["slides"][0]["elements"], &mut texts);
+        for text in texts {
+            let color = text["color"].as_str().unwrap();
+            if !color.starts_with("@accent") { continue; }
+            // The darker of the two light backgrounds a part draws on.
+            if wcag_contrast(&theme_color(deck, color), &theme_color(deck, "@lt2")) < 3.0 { pale.push(format!("{preset}: {} {color}", text["text"])); }
+        }
+    }
+    assert!(checked >= 40, "only {checked} presets could be checked");
+    assert!(pale.is_empty(), "text in an accent that is pale on the panel color: {pale:#?}");
+}
+
 #[test]
 fn guided_record_is_inspected_and_removed_by_explicit_clean_copy() {
     for mode in ["summary","none"] {
