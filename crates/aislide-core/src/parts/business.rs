@@ -304,7 +304,7 @@ fn kpi_cards(drawing: &mut Drawing, cards: &[KpiCard], columns: Option<usize>, f
             .runs(&[(card.value.as_str(), value_size, "@dk1", true), (unit.as_str(), 18.0, "@dk2", false)], 200)
             .add(&card.delta, 16.0, &emphasis, true, 100)
             .add(&card.comparison, SMALL, "@dk2", false, 0);
-        drawing.name_next(format!("item {} (cards[{index}])", index + 1));
+        drawing.name_next_at(format!("item {} (cards[{index}])", index + 1), format!("/data/cards/{index}"));
         text(drawing, [x + 26.0, y + 12.0, card_width - 44.0, card_height - 24.0], content.finish(), TextAlign::Left, VerticalAlign::Middle);
     }
     Ok(Drawn { bottom: top + rows as f64 * card_height + GAP * (rows - 1) as f64, flexible: Vec::new() })

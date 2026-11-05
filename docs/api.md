@@ -1066,7 +1066,7 @@ SDK: `client.createPresentation(id,title?,options?)`, `session.editSlides(operat
 | --- | --- | --- |
 | `best_practice_profiles` | None | Four purpose-specific English profiles and default color |
 | `best_practice_guide` | `profile_id` | English common/profile guide, pattern capabilities, limits and Rust-derived `GuidedInput` schema |
-| `validate_guided_presentation` | `input: GuidedInput` | Pure preflight `{ready,issues,review_required,semantic_truth_verified:false,office_visual_parity:false}` |
+| `validate_guided_presentation` | `input: GuidedInput` | Pure preflight `{ready,issues,diagnostics?,review_required,semantic_truth_verified:false,office_visual_parity:false}`. Slide problems from every slide (text that does not fit, a part that cannot be created) are collected in `issues`, each led by the input's slide ID and the part field path, and in `diagnostics` (`{code,slide_id,preset?,path?,message,measured_px?,available_px?}`) |
 | `create_guided_presentation` | `id`, `input: GuidedInput` | New `{document,validation,profile_id,model_inference:false}`; no existing document or file is replaced |
 
 Profiles are `consulting-decision`, `technical-explainer`, `event-talk`, and `status-report`. The [guided authoring contract](authoring/README.md) defines the evidence, headline ledger, numeric JSON pointers and decision issue fields. All actual document behavior is computed in Rust; no model or source URL is contacted. `ready` means compilable input and measured text layout, not factual or semantic verification. Notes and creation records require privacy review before redistribution.

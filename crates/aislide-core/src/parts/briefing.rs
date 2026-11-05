@@ -1,4 +1,4 @@
-﻿use super::{count, Drawing, PartData, PartSpec};
+﻿use super::{count, Drawing, PartData, PartFailure, PartOverflow, PartSpec};
 use crate::{design::Theme, graphs::GraphIcon, model::{Bullet, Crop, Element, TextAlign, TextFormat, TextPadding, VerticalAlign, valid_color, valid_text}, rich_text::{RichParagraph, RichRun, RunStyle, Spacing}, visual::{ShapeAdjustment, VisualStyle}, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -351,44 +351,55 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn create(id: &str, spec: &PartSpec, theme: &Theme) -> Result<Element> {
+pub(super) fn create(id: &str, spec: &PartSpec, theme: &Theme) -> std::result::Result<Element, PartFailure> {
     use sha2::{Digest, Sha256};
     let (x, y, width, height, show_title) = spec.layout.as_ref().map_or((64.0, 144.0, 1152.0, 512.0, true), |layout| (layout.x, layout.y, layout.width, layout.height, layout.show_title));
     let prefix = format!("{id}-{}", &format!("{:x}", Sha256::digest(crate::canonical::bytes(spec)?))[..10]);
     let top = if show_title { 88.0 } else { 0.0 };
-    if width < 320.0 || height - top < 120.0 { return Err(Error::Invalid(format!("{} requires a body region of at least 320x120px", spec.preset))); }
-    let build = |shrink: f64| -> Result<(Element, Vec<String>, std::collections::BTreeMap<String, String>)> {
+    if width < 320.0 || height - top < 120.0 { return Err(Error::Invalid(format!("{} requires a body region of at least 320x120px", spec.preset)).into()); }
+    // The names of the drawn texts (for messages) and where each is in the spec (JSON Pointers), by element ID.
+    type Named = (std::collections::BTreeMap<String, String>, std::collections::BTreeMap<String, String>);
+    let build = |shrink: f64| -> Result<(Element, Vec<String>, Named)> {
         let mut drawing = Drawing::new(&prefix);
         if show_title {
             drawing.text(&spec.title, [0.0, 0.0, width, 40.0], 28.0, "@dk1", true, TextAlign::Left);
             drawing.text(&spec.subtitle, [0.0, 44.0, width, 26.0], 16.0, "@dk2", false, TextAlign::Left);
         }
         let flexible = render(&mut drawing, &spec.data, [0.0, top, width, height - top], theme, shrink)?;
-        let places = drawing.places.clone();
-        Ok((Element::Group { visual: None, id: id.into(), x, y, width, height, view_width: width, view_height: height, children: drawing.elements }, flexible, places))
+        let named = (drawing.places.clone(), drawing.pointers.clone());
+        Ok((Element::Group { visual: None, id: id.into(), x, y, width, height, view_width: width, view_height: height, children: drawing.elements }, flexible, named))
     };
-    let (mut result, flexible, mut places) = build(0.0)?;
+    let (mut result, flexible, mut named) = build(0.0)?;
     if !flexible.is_empty() {
         let shrink = (super::measured_slack(&result, theme, &flexible)? - FIT_MARGIN).floor();
         if shrink >= 8.0 {
             let rebuilt = build(shrink)?;
             result = rebuilt.0;
-            places = rebuilt.2;
+            named = rebuilt.2;
         }
     }
     crate::model::validate_elements(std::slice::from_ref(&result), (4096.0, 4096.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
-    if let Some(overflow) = super::layout_overflow(&result, theme)? {
-        let text = &overflow.text;
-        let place = places.get(&overflow.element_id).map_or(overflow.element_id.as_str(), String::as_str);
-        let measured_px = overflow.measured_height;
-        let available_px = overflow.available_height.floor().max(0.0) as u32;
-        let detail = if measured_px > available_px {
-            format!("{place}: measured {measured_px}px > available {available_px}px, over by {}px", measured_px - available_px)
-        } else {
-            format!("{place}: measured {measured_px}px in {available_px}px frame")
-        };
-        return Err(Error::Invalid(if overflow.missing_glyphs { format!("{} text \"{text}\" uses glyphs missing from the selected font; choose an installed font that covers it", spec.preset) }
-            else { format!("{} text \"{text}\" does not fit at its fixed font size ({detail}); shorten the text, enlarge the part frame or split the slide", spec.preset) }));
+    let overflows = super::layout_overflows(&result, theme)?;
+    if !overflows.is_empty() {
+        return Err(PartFailure::Overflow(overflows.into_iter().map(|overflow| {
+            let text = &overflow.text;
+            let place = named.0.get(&overflow.element_id).map_or(overflow.element_id.as_str(), String::as_str);
+            let measured_px = overflow.measured_height;
+            let available_px = overflow.available_height.floor().max(0.0) as u32;
+            let detail = if measured_px > available_px {
+                format!("{place}: measured {measured_px}px > available {available_px}px, over by {}px", measured_px - available_px)
+            } else {
+                format!("{place}: measured {measured_px}px in {available_px}px frame")
+            };
+            PartOverflow {
+                pointer: named.1.get(&overflow.element_id).cloned(),
+                message: if overflow.missing_glyphs { format!("{} text \"{text}\" uses glyphs missing from the selected font; choose an installed font that covers it", spec.preset) }
+                    else { format!("{} text \"{text}\" does not fit at its fixed font size ({detail}); shorten the text, enlarge the part frame or split the slide", spec.preset) },
+                missing_glyphs: overflow.missing_glyphs,
+                measured: Some(measured_px),
+                available: Some(available_px),
+            }
+        }).collect()));
     }
     Ok(result)
 }
@@ -587,7 +598,7 @@ fn icon_cards(drawing: &mut Drawing, cards: &[IconCard], columns: Option<usize>,
         let mut content = Rich::default();
         content.add(&card.label, LABEL, "@dk1", true, 600).add(&card.caption, SMALL, "@dk2", false, 800).add(&card.detail, size, "@dk1", false, 800);
         for point in &card.points { content.bullet(point, size, "@dk1", 700); }
-        drawing.name_next(format!("item {} (cards[{index}])", index + 1));
+        drawing.name_next_at(format!("item {} (cards[{index}])", index + 1), format!("/data/cards/{index}"));
         flexible.extend(text(drawing, [x + PAD, cursor, card_width - PAD * 2.0, bottom - cursor], content.finish(), TextAlign::Left, VerticalAlign::Top));
     }
     Ok(Drawn { bottom: top + rows as f64 * card_height + GAP * (rows - 1) as f64, flexible })
@@ -622,7 +633,7 @@ fn icon_rows(drawing: &mut Drawing, rows: &[IconRow], boxed: bool, size: f64, fr
         } else {
             content.add(&row.detail, size, "@dk2", false, 0);
         }
-        drawing.name_next(format!("item {} (rows[{index}])", index + 1));
+        drawing.name_next_at(format!("item {} (rows[{index}])", index + 1), format!("/data/rows/{index}"));
         text(drawing, [x, y + 6.0, left + width - inset - x, row_height - 12.0], content.finish(), TextAlign::Left, VerticalAlign::Middle);
         if !boxed && index + 1 < rows.len() { shape(drawing, Fill::solid("rect", &border), [x, y + row_height - 0.5, left + width - x, 1.0], None); }
     }
@@ -652,12 +663,14 @@ fn shift_rows(drawing: &mut Drawing, headings: [&String; 2], rows: &[ShiftRow], 
     if row_height < 44.0 { return Err(too_small("shift rows")); }
     for (index, row) in rows.iter().enumerate() {
         let row_top = y + index as f64 * (row_height + gap);
+        drawing.name_next_at(format!("rows[{index}].from"), format!("/data/rows/{index}/from"));
         shape(drawing, Fill::solid("rect", &neutral), [left, row_top, from_width, row_height], Some((label(&row.from, BODY, "@dk1", false), TextAlign::Center, [12.0, 8.0, 12.0, 8.0])));
         shape(drawing, Fill::solid("chevron", accent), [chevron_x, row_top + row_height / 2.0 - 16.0, 26.0, 32.0], None);
         let destination = Rich::default().add(&row.to, 17.0, "@lt1", true, 200).add(&row.caption, 12.0, "@lt1", false, 0).finish();
+        drawing.name_next_at(format!("rows[{index}].to"), format!("/data/rows/{index}/to"));
         shape(drawing, Fill::solid("rect", accent), [to_x, row_top, to_width, row_height], Some((destination, TextAlign::Left, [16.0, 8.0, 12.0, 8.0])));
         if !row.detail.is_empty() {
-            drawing.name_next(format!("item {} (rows[{index}])", index + 1));
+            drawing.name_next_at(format!("rows[{index}].detail"), format!("/data/rows/{index}/detail"));
             text(drawing, [detail_x, row_top, detail_width, row_height], label(&row.detail, size, "@dk1", false), TextAlign::Left, VerticalAlign::Middle);
         }
     }
@@ -706,7 +719,7 @@ fn step_cards(drawing: &mut Drawing, steps: &[StepCard], step_label: &str, accen
         let mut content = Rich::default();
         content.add(&step.label, LABEL, "@dk1", true, 600).add(&step.detail, size, "@dk1", false, 800);
         for point in &step.points { content.bullet(point, size, "@dk1", 600); }
-        drawing.name_next(format!("item {} (steps[{index}])", index + 1));
+        drawing.name_next_at(format!("item {} (steps[{index}])", index + 1), format!("/data/steps/{index}"));
         flexible.extend(text(drawing, [x, y, column, bottom - y], content.finish(), TextAlign::Left, VerticalAlign::Top));
         if index + 1 < steps.len() { shape(drawing, Fill::solid("chevron", &chevron), [x + column + (arrow - 14.0) / 2.0, chevron_center - 13.0, 14.0, 26.0], None); }
     }
@@ -728,7 +741,7 @@ fn agenda(drawing: &mut Drawing, items: &[AgendaItem], fill: &str, size: f64, fr
         let y = top + index as f64 * row_height;
         let middle = y + row_height / 2.0;
         shape(drawing, Fill::solid("ellipse", fill), [left, middle - diameter / 2.0, diameter, diameter], Some((label(&format!("{:02}", index + 1), 15.0, "@lt1", true), TextAlign::Center, [0.0, 0.0, 0.0, 0.0])));
-        drawing.name_next(format!("item {} (items[{index}])", index + 1));
+        drawing.name_next_at(format!("item {} (items[{index}])", index + 1), format!("/data/items/{index}"));
         text(drawing, [text_left, y + 4.0, text_right - text_left, row_height - 8.0], Rich::default().add(&item.label, LABEL, "@dk1", true, 200).add(&item.detail, size, "@dk2", false, 0).finish(), TextAlign::Left, VerticalAlign::Middle);
         if !item.meta.is_empty() { shape(drawing, Fill::solid("roundRect", &pale).rounded(50000), [left + width - meta_width, middle - 14.0, meta_width, 28.0], Some((label(&item.meta, SMALL, "@dk2", false), TextAlign::Center, [10.0, 0.0, 10.0, 0.0]))); }
         if index + 1 < items.len() { shape(drawing, Fill::solid("rect", &border), [text_left, y + row_height - 0.5, left + width - text_left, 1.0], None); }
@@ -828,7 +841,7 @@ fn screenshot_callouts(drawing: &mut Drawing, image: &GraphIcon, callouts: &[Cal
         let row_top = top + index as f64 * pitch;
         number_badge(drawing, index + 1, [legend_left, row_top], accent);
         let content = Rich::default().add(&callout.label, LABEL, "@dk1", true, 300).add(&callout.detail, size, "@dk1", false, 0).finish();
-        drawing.name_next(format!("item {} (callouts[{index}])", index + 1));
+        drawing.name_next_at(format!("item {} (callouts[{index}])", index + 1), format!("/data/callouts/{index}"));
         flexible.extend(text(drawing, [legend_left + CALLOUT + 14.0, row_top + 1.0, legend_width - CALLOUT - 14.0, pitch - 16.0], content, TextAlign::Left, VerticalAlign::Top));
     }
     Ok(Drawn { bottom: (top + image_height).max(top + pitch * callouts.len() as f64 - 16.0), flexible })

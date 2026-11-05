@@ -1110,7 +1110,127 @@ fn issue76_guided_deck_text_is_checked_and_a_pale_heading_is_reported() {
     assert!((found[0].contrast_ratio.unwrap() - expected).abs() < 0.01, "{:?} vs {expected}", found[0].contrast_ratio);
     assert!([Some(3.0), Some(4.5)].contains(&found[0].required_ratio), "{:?}", found[0].required_ratio);
     assert_eq!((pale.contrast_checked, pale.contrast_unsupported), (25, 0));
+}
 
+fn issue74_part(long: &[(usize, &str)]) -> Value {
+    let mut rows: Vec<Value> = (0..5).map(|index| json!({"from":format!("旧方式 {index}"),"to":format!("新方式 {index}"),"detail":"説明"})).collect();
+    for (row, field) in long { rows[*row][*field] = json!(if *field == "detail" { "説明".repeat(100) } else { "あ".repeat(48) }); }
+    json!({"version":1,"preset":"before-after/shift","title":"変更点","data":{"kind":"shift_rows","from_label":"前","to_label":"後",
+        "message":{"text":"選定の基準を統一した","detail":"全体の説明は別の資料にある"},"rows":rows}})
+}
+
+fn issue74_slide(id: &str, transition: &str, part: Value) -> Value {
+    json!({"id":id,"section":"再現","headline":format!("変更点 {id}"),"question":"何が変わるか","parent_message":"governing","pattern_id":"native-part","sentence_form":"outcome","parallel_basis":"変更","transition":transition,
+        "support":[{"clause":format!("変更点 {id}"),"body_paths":["/data/rows/0/from","/data/rows/0/to"],"evidence_ids":["E1"]}],"part":part})
+}
+
+fn issue74_input(slides: Vec<Value>) -> Value {
+    let mut input = issue75_input();
+    input["slides"] = json!(slides);
+    input
+}
+
+fn issue74_diagnostics(checked: &Value) -> Vec<(String, String, Option<String>)> {
+    checked["diagnostics"].as_array().map_or_else(Vec::new, |list| list.iter().map(|entry| (entry["code"].as_str().unwrap().to_owned(), entry["slide_id"].as_str().unwrap().to_owned(), entry["path"].as_str().map(str::to_owned))).collect())
+}
+
+#[test]
+fn issue74_validation_reports_every_text_that_does_not_fit_with_its_slide_and_field() {
+    let first = issue75_input()["slides"][0].clone();
+    let slides = vec![
+        first,
+        issue74_slide("r2", "次へ", issue74_part(&[(0, "from"), (2, "detail")])),
+        issue74_slide("r3", "終わり", issue74_part(&[(1, "to"), (3, "from")])),
+    ];
+    let input = issue74_input(slides);
+    // The two shift parts really do not fit: the single-error `create_part` still reports the first text only.
+    let single = execute_request(json!({"op":"create_part","id":"single","spec":input["slides"][1]["part"]})).unwrap_err().to_string();
+    assert!(single.contains("does not fit at its fixed font size") && single.contains("rows[0].from"), "{single}");
+
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"], false, "{checked}");
+    let found = issue74_diagnostics(&checked);
+    let shown: Vec<_> = found.iter().map(|(_, slide, path)| (slide.as_str(), path.as_deref().unwrap_or(""))).collect();
+    assert_eq!(shown, [("r2", "/data/rows/0/from"), ("r2", "/data/rows/2/detail"), ("r3", "/data/rows/1/to"), ("r3", "/data/rows/3/from")], "{checked}");
+    assert!(found.iter().all(|(code, ..)| ["PART_TEXT_OVERFLOW", "PART_MISSING_GLYPHS"].contains(&code.as_str())), "{found:?}");
+    for entry in checked["diagnostics"].as_array().unwrap() {
+        assert_eq!(entry["preset"], "before-after/shift");
+        if entry["code"] == "PART_TEXT_OVERFLOW" { assert!(entry["measured_px"].as_u64().unwrap() > entry["available_px"].as_u64().unwrap(), "{entry}"); }
+    }
+    // Every problem is also a sentence, led by the input's slide ID and the spec path, in the same order.
+    let issues: Vec<_> = checked["issues"].as_array().unwrap().iter().map(|issue| issue.as_str().unwrap()).collect();
+    assert_eq!(issues.len(), 4, "{checked}");
+    for (issue, (slide, path)) in issues.iter().zip(&shown) { assert!(issue.starts_with(&format!("{slide} / {path}: before-after/shift text ")), "{issue}"); }
+
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue74","input":input})).unwrap_err().to_string();
+    assert!(created.contains("r2 / /data/rows/0/from") && created.contains("r3 / /data/rows/3/from"), "{created}");
+
+    // Moving a slide moves its diagnostics with it; the slide ID never comes from the element number.
+    let mut swapped = input.clone();
+    swapped["slides"].as_array_mut().unwrap().swap(1, 2);
+    swapped["slides"][1]["transition"] = json!("次へ");
+    swapped["slides"][2]["transition"] = json!("終わり");
+    let after = issue74_diagnostics(&execute_request(json!({"op":"validate_guided_presentation","input":swapped})).unwrap());
+    let slide_ids: Vec<_> = after.iter().map(|(_, slide, _)| slide.as_str()).collect();
+    assert_eq!(slide_ids, ["r3", "r3", "r2", "r2"], "{after:?}");
+
+    // Once every text fits, the input is ready again and nothing is reported.
+    let fixed = issue74_input(vec![issue75_input()["slides"][0].clone(), issue74_slide("r2", "次へ", issue74_part(&[])), issue74_slide("r3", "終わり", issue74_part(&[]))]);
+    let ready = execute_request(json!({"op":"validate_guided_presentation","input":fixed})).unwrap();
+    assert_eq!(ready["ready"], true, "{ready}");
+    assert!(ready.get("diagnostics").is_none() && ready["issues"].as_array().unwrap().is_empty(), "{ready}");
+    execute_request(json!({"op":"create_guided_presentation","id":"issue74-fixed","input":fixed})).unwrap();
+}
+
+#[test]
+fn issue74_slides_are_checked_independently_of_each_other_and_of_other_input_problems() {
+    let mut broken = issue75_input()["slides"][0].clone();
+    broken["part"]["data"]["groups"] = json!([{"label":"Only one","items":["Plan"]}]);
+    let slides = vec![broken, issue74_slide("r2", "次へ", issue74_part(&[(0, "from")])), issue74_slide("r3", "終わり", issue74_part(&[(1, "to")]))];
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":issue74_input(slides.clone())})).unwrap();
+    let found = issue74_diagnostics(&checked);
+    let shown: Vec<_> = found.iter().map(|(code, slide, path)| (code.as_str(), slide.as_str(), path.as_deref())).collect();
+    assert_eq!(shown[0], ("PART_INVALID", "r1", None), "{checked}");
+    assert_eq!(shown[1..].iter().map(|(_, slide, path)| (*slide, *path)).collect::<Vec<_>>(), [("r2", Some("/data/rows/0/from")), ("r3", Some("/data/rows/1/to"))], "{checked}");
+
+    // An input that fails its other checks still gets the diagnostics of its parts, after those checks.
+    let mut unchecked = issue74_input(slides);
+    unchecked["audience"] = json!("");
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":unchecked})).unwrap();
+    let issues: Vec<_> = checked["issues"].as_array().unwrap().iter().map(|issue| issue.as_str().unwrap()).collect();
+    assert!(issues[0].starts_with("audience:"), "{issues:?}");
+    assert!(issues.iter().any(|issue| issue.starts_with("r2 / /data/rows/0/from: ")) && issues.iter().any(|issue| issue.starts_with("r3 / /data/rows/1/to: ")), "{issues:?}");
+    assert_eq!(checked["ready"], false);
+}
+
+#[test]
+fn issue74_a_response_that_has_to_be_cut_says_how_much_was_left_out() {
+    let all = [(0, "from"), (0, "to"), (0, "detail"), (1, "from"), (1, "to"), (1, "detail"), (2, "from"), (2, "to"), (2, "detail"), (3, "from"), (3, "to"), (3, "detail"), (4, "from"), (4, "to"), (4, "detail")];
+    let slides: Vec<_> = (1..=32).map(|index| issue74_slide(&format!("s{index:02}"), if index == 32 { "終わり" } else { "次へ" }, issue74_part(&all))).collect();
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":issue74_input(slides)})).unwrap();
+    assert_eq!(checked["diagnostics"].as_array().unwrap().len(), 200, "the list is cut at 200");
+    let issues = checked["issues"].as_array().unwrap();
+    let last = issues.last().unwrap().as_str().unwrap();
+    assert!(last.contains("more problems in the slides are not listed"), "{last}");
+    assert_eq!(issues.len(), 201);
+    let omitted: usize = last.split(' ').next().unwrap().parse().unwrap();
+    assert!(omitted > 0 && omitted + 200 <= 480, "{omitted}");
+}
+
+#[test]
+fn issue74_a_layout_that_does_not_fit_is_still_reported_next_to_the_slides_that_do_not_compile() {
+    let mut matrix = issue74_slide("m1", "終わり", json!({"version":1,"preset":"matrix/labeled","title":"Review","subtitle":"Decisions","data":{"kind":"matrix","rows":["Now","Next"],"columns":["A","B"],"cells":[["A\nB\nC","No"],["No","Yes"]]}}));
+    matrix["support"][0]["body_paths"] = json!(["/data/cells"]);
+    let mut input = issue74_input(vec![issue74_slide("r2", "次へ", issue74_part(&[(0, "from")])), matrix]);
+    input["authoring"] = json!({"body_font_min":28,"spacing":"relaxed","font_family":"Arial","headline_style":"keyword","ledger_notes":"summary"});
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"], false, "{checked}");
+    assert_eq!(issue74_diagnostics(&checked).iter().map(|(_, slide, path)| (slide.as_str(), path.as_deref())).collect::<Vec<_>>(), [("r2", Some("/data/rows/0/from"))], "{checked}");
+    let issues: Vec<_> = checked["issues"].as_array().unwrap().iter().map(|issue| issue.as_str().unwrap()).collect();
+    assert_eq!(issues.len(), 2, "{checked}");
+    assert!(issues[0].starts_with("r2 / /data/rows/0/from: "), "{issues:?}");
+    assert!(issues[1].contains("guided layout does not fit") && issues[1].contains("TEXT_OVERFLOW") && issues[1].contains("m1"), "the compiled slide keeps its layout check: {issues:?}");
+    assert!(!issues[1].contains("r2"), "the slide that did not compile is not measured: {issues:?}");
 }
 
 #[test]

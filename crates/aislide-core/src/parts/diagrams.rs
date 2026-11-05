@@ -72,7 +72,7 @@ fn comparison_panels(drawing: &mut Drawing, data: &PartData, theme: &crate::desi
             "comparison panel heading panels[{panel_index}].label is too long for its panel; it must fit on one line within {HEADING_BAND_LIMIT:.0}px at 18px bold, so shorten the heading")))?;
         drawing.shape("roundRect", [left + 24.0, 104.0, band, 42.0], heading_fill, heading_fill);
         if let Some(Element::Shape { visual, .. }) = drawing.elements.last_mut() { *visual = Some(crate::visual::VisualStyle { adjustments: vec![crate::visual::ShapeAdjustment { name: "adj".into(), value: 50000 }], ..Default::default() }); }
-        drawing.name_next(format!("panels[{panel_index}].label"));
+        drawing.name_next_at(format!("panels[{panel_index}].label"), format!("/data/panels/{panel_index}/label"));
         drawing.text(&panel.label, [left + 44.0, 113.0, band - 40.0, 24.0], 18.0, heading_color, true, TextAlign::Center);
         if let Some(Element::Text { format, .. }) = drawing.elements.last_mut() { format.vertical = crate::model::VerticalAlign::Middle; }
         let has_icons = panel.items.iter().any(|item| item.icon.is_some());
@@ -93,7 +93,7 @@ fn comparison_panels(drawing: &mut Drawing, data: &PartData, theme: &crate::desi
                 }
                 drawing.elements.push(picture);
             }
-            drawing.name_next(format!("panels[{panel_index}].items[{row_index}].text"));
+            drawing.name_next_at(format!("panels[{panel_index}].items[{row_index}].text"), format!("/data/panels/{panel_index}/items/{row_index}/text"));
             drawing.text(&item.text, [text_left, top + 10.0, text_width, row_height - 20.0], body_size, "@dk1", false, TextAlign::Left);
             if let Some(Element::Text { format, .. }) = drawing.elements.last_mut() { format.vertical = crate::model::VerticalAlign::Middle; }
             if row_index + 1 < panel.items.len() { drawing.rect([text_left, top + row_height - 1.0, text_width, 1.0], if panel_index == 0 { "D2DBEB" } else { "B5DBD8" }); }

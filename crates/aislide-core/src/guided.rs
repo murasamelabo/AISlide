@@ -149,7 +149,10 @@ pub struct DecisionIssue {
 
 #[derive(Serialize)]
 pub struct Review {
-    pub ready: bool, pub issues: Vec<String>, pub review_required: Vec<String>,
+    pub ready: bool, pub issues: Vec<String>,
+    /// The slide problems among `issues`, structured; absent when there are none.
+    #[serde(skip_serializing_if="Vec::is_empty")] pub diagnostics: Vec<Diagnostic>,
+    pub review_required: Vec<String>,
     pub semantic_truth_verified: bool, pub office_visual_parity: bool,
 }
 
@@ -477,21 +480,80 @@ fn describe_visuals(slide: &mut crate::model::Slide, spec: Option<&PartSpec>) ->
     Ok(())
 }
 
-fn build(input:&GuidedInput,id:&str)->Result<Document> {
-    let authoring=input.authoring.as_ref().filter(|settings|settings.has_typography()).map(|settings|settings.resolve(&input.profile_id));
-    let primary=input.brand_color.as_deref().unwrap_or("1976D2");
+/// The theme of a guided deck. What the input checks reject (a brand color that is not six hex digits, an unusable font family)
+/// falls back to the default, so that the parts of an input that fails those checks can still be compiled on their own.
+fn guided_design(input:&GuidedInput,authoring:Option<&ResolvedAuthoring<'_>>)->crate::design::Design {
+    let primary=input.brand_color.as_deref().filter(|color|color.len()==6 && color.bytes().all(|byte|byte.is_ascii_hexdigit())).unwrap_or("1976D2");
     let tint=|weight:f64|->String {(0..3).map(|index|{let channel=u8::from_str_radix(&primary[index*2..index*2+2],16).unwrap_or(0) as f64;format!("{:02X}",(channel+(255.0-channel)*weight).round() as u8)}).collect()};
     let mut design=crate::design::Design::default();
     design.theme.name=format!("Guided {}",input.profile_id);
     for (slot,value) in [("accent1",primary.to_owned()),("accent2",tint(0.28)),("accent3",tint(0.52)),("accent4",tint(0.75)),("accent5",primary.into()),("accent6","222222".into()),("dk1","222222".into()),("dk2","5F6F78".into()),("lt1","FFFFFF".into()),("lt2","EEF3F6".into())] {design.theme.colors.insert(slot.into(),value);}
     design.theme.fonts.major="Yu Gothic".into();design.theme.fonts.minor="Yu Gothic".into();design.theme.fonts.east_asian="Yu Gothic".into();
-    if let Some(family)=authoring.as_ref().and_then(|settings|settings.font_family) {
+    if let Some(family)=authoring.and_then(|settings|settings.font_family).filter(|family|!family.trim().is_empty() && family.chars().count()<=100 && !family.chars().any(char::is_control)) {
         design.theme.fonts.major=family.into();design.theme.fonts.minor=family.into();
         design.theme.fonts.east_asian=family.into();design.theme.fonts.complex_script=family.into();
     }
+    design
+}
+
+/// One problem found while compiling a slide of the input: which slide, and for a part text that does not fit, where it is and what
+/// was measured. `Review::issues` carries the same problems as sentences.
+#[derive(Clone,Serialize)]
+pub struct Diagnostic {
+    /// `PART_TEXT_OVERFLOW`, `PART_MISSING_GLYPHS`, `PART_INVALID` (the part could not be created) or `SLIDE_INVALID`.
+    pub code: &'static str,
+    /// The input's slide ID, never derived from an element ID.
+    pub slide_id: String,
+    #[serde(skip_serializing_if="Option::is_none")] pub preset: Option<String>,
+    /// JSON Pointer into the slide's part (`/data/rows/0/from`), as in `support.body_paths`, when the preset names the text.
+    #[serde(skip_serializing_if="Option::is_none")] pub path: Option<String>,
+    pub message: String,
+    #[serde(skip_serializing_if="Option::is_none")] pub measured_px: Option<u32>,
+    #[serde(skip_serializing_if="Option::is_none")] pub available_px: Option<u32>,
+}
+
+impl Diagnostic {
+    fn issue(&self)->String {match &self.path {Some(path)=>format!("{} / {path}: {}",self.slide_id,self.message),None=>format!("{}: {}",self.slide_id,self.message)}}
+}
+
+enum SlideFailure {Part(crate::parts::PartFailure),Other(Error)}
+impl From<Error> for SlideFailure {fn from(error:Error)->Self {Self::Other(error)}}
+impl From<serde_json::Error> for SlideFailure {fn from(error:serde_json::Error)->Self {Self::Other(error.into())}}
+
+fn diagnostics_of(slide:&GuidedSlide,failure:SlideFailure)->Vec<Diagnostic> {
+    let preset=slide.part.as_ref().map(|part|part.preset.clone());
+    let one=|code:&'static str,error:Error|vec![Diagnostic{code,slide_id:slide.id.clone(),preset:preset.clone(),path:None,message:match error {Error::Invalid(message)=>message,other=>other.to_string()},measured_px:None,available_px:None}];
+    match failure {
+        SlideFailure::Part(crate::parts::PartFailure::Overflow(overflows))=>overflows.into_iter().map(|overflow|Diagnostic{
+            code:if overflow.missing_glyphs {"PART_MISSING_GLYPHS"} else {"PART_TEXT_OVERFLOW"},slide_id:slide.id.clone(),preset:preset.clone(),
+            path:overflow.pointer,message:overflow.message,measured_px:overflow.measured,available_px:overflow.available,
+        }).collect(),
+        SlideFailure::Part(crate::parts::PartFailure::Error(error))=>one("PART_INVALID",error),
+        SlideFailure::Other(error)=>one("SLIDE_INVALID",error),
+    }
+}
+
+/// The parts of an input that failed its other checks, compiled on their own: a slide's text that does not fit does not depend on them.
+fn part_diagnostics(input:&GuidedInput)->Vec<Diagnostic> {
+    if input.slides.is_empty() || input.slides.len()>MAX_SLIDE_LIMIT || !PROFILES.iter().any(|entry|entry.0==input.profile_id) {return Vec::new();}
+    let authoring=input.authoring.as_ref().filter(|settings|settings.has_typography()).map(|settings|settings.resolve(&input.profile_id));
+    let design=guided_design(input,authoring.as_ref());
+    let mut diagnostics=Vec::new();
+    for (index,slide) in input.slides.iter().enumerate() {
+        let Some(spec)=&slide.part else {continue;};
+        if let Err(failure)=crate::parts::create_detailed(&format!("guided-part-{}",index+1),spec,&design.theme) {diagnostics.extend(diagnostics_of(slide,SlideFailure::Part(failure)));}
+    }
+    diagnostics
+}
+
+fn build(input:&GuidedInput,id:&str,diagnostics:&mut Vec<Diagnostic>)->Result<Option<Document>> {
+    let authoring=input.authoring.as_ref().filter(|settings|settings.has_typography()).map(|settings|settings.resolve(&input.profile_id));
+    let design=guided_design(input,authoring.as_ref());
     let design_value=json!({"theme":design.theme,"masters":[{"id":MASTER_ID,"name":"Evidence-led briefing","background":"@lt1","elements":[]}],"layouts":[{"id":LAYOUT_ID,"name":"Claim and evidence","master_id":MASTER_ID,"background":null,"elements":[]}]});
     let mut slides=Vec::new();let mut parts=Vec::new();
-    for (index,slide) in input.slides.iter().enumerate() {
+    // One slide's page and part. A slide that cannot be built is reported with its own ID and the others are still compiled.
+    let build_slide=|index:usize,slide:&GuidedSlide|->std::result::Result<(crate::model::Slide,Option<PartInstance>),SlideFailure> {
+        let mut part=None;
         let double=if input.language=="ja" {slide.headline.chars().count()>36} else {slide.headline.chars().count()>80};
         let mut body_top=if double {168.0} else {144.0};let mut body_height=if double {474.0} else {498.0};
         let citations:Vec<_>=input.evidence.iter().filter(|entry|slide.support.iter().any(|support|support.evidence_ids.contains(&entry.id))).collect();
@@ -509,7 +571,7 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
         }
         if let Some(spec)=&slide.part {
             let element_id=format!("guided-part-{}",index+1);
-            let mut element=crate::parts::create_with_theme(&element_id,spec,&design.theme)?;
+            let mut element=crate::parts::create_detailed(&element_id,spec,&design.theme).map_err(SlideFailure::Part)?;
             let fixed=crate::parts::fixed_annotation_ids(&element_id,spec,&element)?;
             let margin=authoring.as_ref().map_or(64.0,|settings|settings.margin);
             let body_width=1280.0-2.0*margin;
@@ -523,7 +585,7 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
                 element=serde_json::from_value(encoded)?;
             }
             if let Some(settings)=&authoring {author_body(&mut element,settings,1.0,body_height,&fixed);}
-            parts.push(PartInstance{slide_id:slide.id.clone(),element_id,spec:spec.clone(),render_sha256:crate::parts::state::render_hash(&element)?,native_sha256:None,stale:false});
+            part=Some(PartInstance{slide_id:slide.id.clone(),element_id,spec:spec.clone(),render_sha256:crate::parts::state::render_hash(&element)?,native_sha256:None,stale:false});
             elements.push(element);
         } else {
             let closing=slide.pattern_id=="C03";
@@ -539,7 +601,7 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
             let schedule_top=if authoring.is_some() {panel_top-gap-title_height} else {body_top+400.0};
             let table_top=body_top+gap;
             let table_height=if authoring.is_some() {if closing {schedule_top-gap-table_top} else {642.0-table_top}} else if closing {382.0} else {452.0};
-            if table_height<=44.0 {return Err(Error::Invalid("guided decision body has insufficient space; reduce density or headline size".into()));}
+            if table_height<=44.0 {return Err(Error::Invalid("guided decision body has insufficient space; reduce density or headline size".into()).into());}
             let mut table=decision_table(&rows,table_top,table_height,closing);
             if let Some(settings)=&authoring {
                 if let Element::Group{x,width,..}=&mut table {*x=settings.margin;*width=body_width;}
@@ -558,8 +620,15 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
         let notes=slide_notes(input,slide,&citations)?;
         let mut page=serde_json::from_value(json!({"id":slide.id,"title":slide.headline,"background":"@lt1","layout_id":LAYOUT_ID,"inherit_background":true,"elements":elements,"notes":notes}))?;
         describe_visuals(&mut page,slide.part.as_ref())?;
-        slides.push(page);
+        Ok((page,part))
+    };
+    for (index,slide) in input.slides.iter().enumerate() {
+        match build_slide(index,slide) {
+            Ok((page,part))=>{slides.push(page);parts.extend(part);}
+            Err(failure)=>diagnostics.extend(diagnostics_of(slide,failure)),
+        }
     }
+    if slides.is_empty() {return Ok(None);}
     let deck:Deck=serde_json::from_value(json!({"version":1,"title":input.title,"width":1280,"height":720,"design":design_value,"slides":slides}))?;
     let measured=if authoring.is_some() {
         crate::model::validate_deck(&deck)?;
@@ -570,6 +639,7 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
     let measured=serde_json::to_value(measured)?;
     let errors:Vec<_>=measured["issues"].as_array().unwrap().iter().filter(|issue|issue["severity"]=="error").collect();
     if !errors.is_empty() {return Err(Error::Invalid(format!("guided layout does not fit: {}",serde_json::to_string(&errors)?)));}
+    if !diagnostics.is_empty() {return Ok(None);}
     let document=crate::document::create(id.into(),deck,Vec::new(),Vec::new(),None)?;
     let mut operations=Vec::new();
     if !parts.is_empty() {operations.push(json!({"op":"add","path":"/parts","value":parts}));}
@@ -580,7 +650,7 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
         validate_record(&record)?;
         operations.push(json!({"op":"add","path":"/guided_record","value":record}));
     }
-    if operations.is_empty() {return Ok(document);}
+    if operations.is_empty() {return Ok(Some(document));}
     let document=crate::document::transact(&document,crate::document::Transaction{expected_revision:document.revision,expected_hash:document.hash.clone(),operations:serde_json::from_value(json!(operations))?})?.document;
     if document.guided_record.is_some() {
         crate::provenance::attach(crate::pptx::export_pptx(&document.deck)?,&document).map_err(|error|match error {
@@ -588,13 +658,29 @@ fn build(input:&GuidedInput,id:&str)->Result<Document> {
             error=>error,
         })?;
     }
-    Ok(document)
+    Ok(Some(document))
 }
+
+/// Problems beyond this many are counted, not listed, so a response stays bounded and says that it was cut.
+const MAX_DIAGNOSTICS:usize=200;
 
 fn evaluate(input:&GuidedInput,id:&str)->(Option<Document>,Review) {
     let mut issues=checks(input);
-    let document=if issues.is_empty() {match build(input,id) {Ok(document)=>Some(document),Err(error)=>{issues.push(error.to_string());None}}} else {None};
-    let review=Review{ready:document.is_some(),issues,review_required:vec!["Verify source authenticity, assumptions and headline entailment; declared references are not proof.".into(),"Review material quantities embedded in prose, arithmetic, qualitative scores, and logical completeness.".into(),"Inspect actual Office rendering, chart scales, figure conventions, shape-label collisions and orphan lines.".into(),"Native parts are primitives, not implementations of every consulting compound pattern.".into()],semantic_truth_verified:false,office_visual_parity:false};
+    let mut diagnostics=Vec::new();
+    // What stopped the build after the slides were compiled, such as a layout that does not fit.
+    let mut failure=None;
+    let mut document=None;
+    if issues.is_empty() {
+        match build(input,id,&mut diagnostics) {Ok(built)=>document=built,Err(error)=>failure=Some(error.to_string())}
+    } else {
+        diagnostics=part_diagnostics(input);
+    }
+    let omitted=diagnostics.len().saturating_sub(MAX_DIAGNOSTICS);
+    diagnostics.truncate(MAX_DIAGNOSTICS);
+    issues.extend(diagnostics.iter().map(Diagnostic::issue));
+    if omitted>0 {issues.push(format!("{omitted} more problems in the slides are not listed; fix the listed ones and validate again"));}
+    issues.extend(failure);
+    let review=Review{ready:document.is_some(),issues,diagnostics,review_required:vec!["Verify source authenticity, assumptions and headline entailment; declared references are not proof.".into(),"Review material quantities embedded in prose, arithmetic, qualitative scores, and logical completeness.".into(),"Inspect actual Office rendering, chart scales, figure conventions, shape-label collisions and orphan lines.".into(),"Native parts are primitives, not implementations of every consulting compound pattern.".into()],semantic_truth_verified:false,office_visual_parity:false};
     (document,review)
 }
 
