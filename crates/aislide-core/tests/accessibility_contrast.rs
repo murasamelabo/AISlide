@@ -227,13 +227,64 @@ fn issue76_a_turned_shape_keeps_its_own_fill_and_a_group_has_no_opacity_to_fade_
     let report = report("FFFFFF", vec![turned("dark-turned", DARK, "FFFFFF", 60.0), turned("pale-turned", "F4F4F4", "FFFFFF", 300.0),
         // Text with no fill of its own, inside a turned group, still needs a background it cannot read from the geometry.
         group("turned", [500.0, 300.0, 300.0, 100.0], [300.0, 100.0], Some(json!({"rotation":20})), vec![text("in-turned", [10.0, 10.0, 100.0, 30.0], "000000")])]);
-    // The fill sits behind the text however the shape turns, so it decides without the geometry the other backgrounds need.
+    // The outline is read in the shape's own coordinates, so a turned shape holds its text as an upright one does, without the
+    // page geometry the other backgrounds need.
     assert!(outcome(&report, "dark-turned").is_empty());
     assert_eq!(outcome(&report, "pale-turned"), ["text_contrast_low"]);
     assert_eq!(outcome(&report, "in-turned"), ["contrast_background_unverified:transformed_text"]);
     // Only a soft edge can make what a group holds translucent, and that is read as not solid (see the unsupported backgrounds above).
     let faded = deck(slide("FFFFFF", vec![group("g", [0.0, 0.0, 400.0, 200.0], [400.0, 200.0], Some(json!({"opacity":0.5})), vec![rect("r", [0.0, 0.0, 400.0, 200.0], DARK)])]), None);
     assert!(aislide_core::model::validate_deck(&faded).is_err(), "a group cannot carry an opacity");
+}
+
+fn labelled(id: &str, preset: &str, bounds: [f64; 4], text: &str, format: Value) -> Value {
+    let mut element = shape(id, preset, bounds, DARK);
+    element["text"] = json!(text);
+    // Navy on navy: when the fill is the backdrop this is a low-contrast finding, and when it is not, an unsupported one.
+    element["color"] = json!("223A5E");
+    element["format"] = format;
+    element
+}
+
+#[test]
+fn issue76_a_shapes_own_fill_is_the_backdrop_only_where_its_text_is_drawn_inside_the_outline() {
+    let padding = |left: f64, top: f64| json!({"left":left,"right":left,"top":top,"bottom":top});
+    let centered = |left: f64, top: f64| json!({"alignment":"center","vertical":"middle","padding":padding(left, top)});
+    let pill = |id: &str, y: f64, format: Value, visual: Value| {
+        let mut element = labelled(id, "roundRect", [60.0, y, 240.0, 36.0], "Label", format);
+        let mut style = json!({"adjustments":[{"name":"adj","value":50000}]});
+        for (key, value) in visual.as_object().into_iter().flatten() { style[key] = value.clone(); }
+        element["visual"] = style;
+        element
+    };
+    let turned = |id: &str, x: f64, text: &str, format: Value| {
+        let mut element = labelled(id, "ellipse", [x, 600.0, 200.0, 200.0], text, format);
+        element["rotation"] = json!(30);
+        element
+    };
+    let mut custom = labelled("custom", "rect", [600.0, 600.0, 200.0, 200.0], "12", centered(0.0, 0.0));
+    custom["visual"] = json!({"path":{"commands":[{"op":"move","point":[0,0]},{"op":"line","point":[1,0]},{"op":"line","point":[0,1]},{"op":"close"}]}});
+    let report = report("FFFFFF", vec![
+        // Centered text is small and sits in the middle of a circle, though the frame it is drawn in reaches past the outline.
+        labelled("badge", "ellipse", [60.0, 60.0, 200.0, 200.0], "12", centered(0.0, 0.0)),
+        // Text that starts at the frame's corner, or fills the frame, is drawn partly outside the circle.
+        labelled("starts-at-corner", "ellipse", [300.0, 60.0, 200.0, 200.0], "Synthetic", json!({})),
+        labelled("fills-the-frame", "ellipse", [540.0, 60.0, 200.0, 200.0], &"Synthetic ".repeat(60), centered(0.0, 0.0)),
+        pill("tag", 300.0, centered(2.0, 0.0), json!({})),
+        pill("tag-at-the-edge", 360.0, json!({"padding":padding(2.0, 0.0)}), json!({})),
+        pill("tag-mirrored", 420.0, centered(2.0, 0.0), json!({"flip_h":true})),
+        // A rounded rectangle at its default radius holds its default text frame, so no measuring is needed.
+        labelled("card", "roundRect", [60.0, 480.0, 240.0, 36.0], "Label", json!({})),
+        turned("turned-badge", 60.0, "12", centered(0.0, 0.0)),
+        turned("turned-corner", 300.0, "Synthetic", json!({})),
+        custom,
+        labelled("arrow", "chevron", [900.0, 600.0, 200.0, 100.0], "Next", centered(24.0, 2.0)),
+    ]);
+    for id in ["badge", "tag", "card", "turned-badge"] { assert_eq!(outcome(&report, id), ["text_contrast_low"], "{id}: judged against its own fill"); }
+    for id in ["starts-at-corner", "fills-the-frame", "tag-at-the-edge", "tag-mirrored", "turned-corner"] {
+        assert_eq!(outcome(&report, id), ["contrast_background_unverified:partial_cover"], "{id}: its text leaves the outline");
+    }
+    for id in ["custom", "arrow"] { assert_eq!(outcome(&report, id), ["contrast_background_unverified:unsupported_backdrop"], "{id}: an outline that is not measured"); }
 }
 
 #[test]

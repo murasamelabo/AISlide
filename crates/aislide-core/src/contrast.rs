@@ -2,12 +2,14 @@
 //!
 //! Layers are the master, layout and slide in the order the renderer paints them, so a nested group, an inherited slide
 //! background and an inherited graphic are read the way they are drawn. Text gets a background only when the paint behind it
-//! is known exactly: its own solid fill, the topmost opaque solid shape below it that covers its whole frame, or else the
-//! background the renderer paints for the slide. A partial cover, a picture, chart or table, a gradient, transparency, a soft
-//! edge, a shape this module cannot measure, or rotation and skew when the background has to be found behind the text is
-//! reported with a reason. A shape's own fill sits behind its text however the shape turns, so a turned shape keeps it.
-//! Nothing is guessed to be white.
-use crate::{model::{Deck, Element}, visual::VisualStyle};
+//! is known exactly: the topmost opaque solid shape below it that covers its whole frame, or else the background the renderer
+//! paints for the slide. A shape that holds text is its own backdrop only where its outline holds that text: the content
+//! frame the text is drawn in lies inside a rectangle, rounded rectangle or ellipse, or else the laid-out text does (centered
+//! text in a circle or a pill usually does). The outline is read in the shape's own coordinates, so a turned shape is judged
+//! like an upright one. A partial cover, a picture, chart or table, a gradient, transparency, a soft edge, an outline this
+//! module cannot measure (a custom path or another preset), or rotation and skew when the background has to be found behind
+//! the text is reported with a reason. Nothing is guessed to be white.
+use crate::{model::{Deck, Element, TextAlign, VerticalAlign}, visual::VisualStyle};
 use kurbo::{Affine, Point, Rect};
 use std::collections::BTreeMap;
 
@@ -41,10 +43,15 @@ enum Paint { Solid(String, Geometry), Unknown(&'static str) }
 
 struct Painter { frame: Rect, paint: Paint }
 
-#[derive(Clone)]
 enum Fill { Nothing, Solid(String), Unknown(&'static str) }
 
-struct Site { id: String, before: usize, frame: Rect, scale: f64, aligned: bool, faded: bool, own: Fill }
+/// What a text-bearing shape lays under its own text. Its outline is kept in the shape's own coordinates, where a turn or a
+/// group's scale changes nothing about whether the text sits inside it.
+enum OwnPaint<'a> { Nothing, Unknown(&'static str), Solid(Own<'a>) }
+
+struct Own<'a> { color: String, shape: &'a Element, outline: Geometry, frame: Rect }
+
+struct Site<'a> { id: String, before: usize, frame: Rect, scale: f64, aligned: bool, faded: bool, own: OwnPaint<'a> }
 
 struct Context { transform: Affine, faded: bool, hidden: bool }
 
@@ -57,13 +64,23 @@ pub(crate) fn text_backdrops(deck: &Deck, page: usize) -> BTreeMap<String, TextB
     let mut sites = Vec::new();
     let context = Context { transform: Affine::IDENTITY, faded: false, hidden: false };
     for (index, (_, elements)) in layers.iter().enumerate() { walk(elements, &context, index + 1 == layers.len(), &mut painters, &mut sites); }
-    sites.into_iter().map(|site| {
-        let backdrop = backdrop(&site, &painters, background);
-        (site.id, TextBackdrop { scale: site.scale, backdrop })
-    }).collect()
+    let mut backdrops: Vec<Option<Backdrop>> = sites.iter().map(|site| match &site.own {
+        OwnPaint::Nothing => Some(backdrop(site, &painters, background)),
+        OwnPaint::Unknown(reason) => Some(Backdrop::Unsupported(reason)),
+        OwnPaint::Solid(own) => own.settle(),
+    }).collect();
+    // A frame that reaches outside its shape's outline is left to the text itself; one pass measures every such shape.
+    let open: Vec<usize> = (0..sites.len()).filter(|&index| backdrops[index].is_none()).collect();
+    if !open.is_empty() {
+        let shapes: Vec<&Element> = open.iter().filter_map(|&index| match &sites[index].own { OwnPaint::Solid(own) => Some(own.shape), _ => None }).collect();
+        for (&index, extent) in open.iter().zip(crate::layout::text_extents(deck, slide, &shapes)) {
+            if let OwnPaint::Solid(own) = &sites[index].own { backdrops[index] = Some(own.settle_by_text(extent)); }
+        }
+    }
+    sites.into_iter().zip(backdrops).map(|(site, backdrop)| (site.id, TextBackdrop { scale: site.scale, backdrop: backdrop.unwrap_or(Backdrop::Unsupported(UNSUPPORTED_BACKDROP)) })).collect()
 }
 
-fn walk(elements: &[Element], parent: &Context, slide_layer: bool, painters: &mut Vec<Painter>, sites: &mut Vec<Site>) {
+fn walk<'a>(elements: &'a [Element], parent: &Context, slide_layer: bool, painters: &mut Vec<Painter>, sites: &mut Vec<Site<'a>>) {
     for element in elements {
         let (id, x, y, width, height) = element.bounds();
         let none = VisualStyle::default();
@@ -73,6 +90,7 @@ fn walk(elements: &[Element], parent: &Context, slide_layer: bool, painters: &mu
             * Affine::rotate(rotation.to_radians())
             * Affine::scale_non_uniform(if style.flip_h { -1.0 } else { 1.0 }, if style.flip_v { -1.0 } else { 1.0 })
             * Affine::translate((-width / 2.0, -height / 2.0));
+        // A group cannot carry an opacity (`visual::validate` rejects it), so only a soft edge fades what a group holds.
         let faded = parent.faded || style.soft_edge.is_some_and(|radius| radius > 0.0);
         let hidden = parent.hidden || style.hidden;
         let frame = transform.transform_rect_bbox(Rect::new(0.0, 0.0, width, height));
@@ -82,8 +100,7 @@ fn walk(elements: &[Element], parent: &Context, slide_layer: bool, painters: &mu
         if slide_layer {
             if let Element::Text { text, .. } | Element::Shape { text, .. } = element {
                 if !text.trim().is_empty() {
-                    sites.push(Site { id: id.to_owned(), before: painters.len(), frame, scale: (a.hypot(b).min(c.hypot(d)) * 1e6).round() / 1e6, aligned, faded,
-                        own: if matches!(element, Element::Shape { .. }) { fill.clone() } else { Fill::Nothing } });
+                    sites.push(Site { id: id.to_owned(), before: painters.len(), frame, scale: (a.hypot(b).min(c.hypot(d)) * 1e6).round() / 1e6, aligned, faded, own: own_paint(element, style, &fill) });
                 }
             }
         }
@@ -139,12 +156,8 @@ fn geometry(element: &Element, style: &VisualStyle, transform: Affine, frame: Re
     }
 }
 
+/// The background of text that has no paint of its own: the nearest painter below it, or else the slide's background.
 fn backdrop(site: &Site, painters: &[Painter], background: &str) -> Backdrop {
-    match &site.own {
-        Fill::Solid(color) => return Backdrop::Solid(color.clone()),
-        Fill::Unknown(reason) => return Backdrop::Unsupported(reason),
-        Fill::Nothing => {}
-    }
     if !site.aligned { return Backdrop::Unsupported(TRANSFORMED_TEXT); }
     if site.faded { return Backdrop::Unsupported(BACKGROUND_NOT_SOLID); }
     for painter in painters[..site.before].iter().rev() {
@@ -161,6 +174,68 @@ fn backdrop(site: &Site, painters: &[Painter], background: &str) -> Backdrop {
 
 fn overlaps(first: Rect, second: Rect) -> bool {
     first.x0 < second.x1 - 0.01 && second.x0 < first.x1 - 0.01 && first.y0 < second.y1 - 0.01 && second.y0 < first.y1 - 0.01
+}
+
+fn own_paint<'a>(element: &'a Element, style: &VisualStyle, fill: &Fill) -> OwnPaint<'a> {
+    let Element::Shape { width, height, format, .. } = element else { return OwnPaint::Nothing; };
+    match fill {
+        Fill::Nothing => OwnPaint::Nothing,
+        Fill::Unknown(reason) => OwnPaint::Unknown(reason),
+        Fill::Solid(color) => {
+            // The renderer clips a shape's text to this frame, so no glyph is drawn outside it.
+            let [x, y, text_width, text_height] = format.content_frame(*width, *height, true);
+            OwnPaint::Solid(Own { color: color.clone(), shape: element, outline: geometry(element, style, Affine::IDENTITY, Rect::new(0.0, 0.0, *width, *height)), frame: Rect::new(x, y, x + text_width, y + text_height) })
+        }
+    }
+}
+
+impl Own<'_> {
+    /// The backdrop when the text frame alone decides it: the outline holds the whole frame, or it cannot be measured at all.
+    /// `None` when only the laid-out text can tell.
+    fn settle(&self) -> Option<Backdrop> {
+        if self.outline.covers(self.frame) { Some(Backdrop::Solid(self.color.clone())) }
+        else if matches!(self.outline, Geometry::Other) { Some(Backdrop::Unsupported(UNSUPPORTED_BACKDROP)) }
+        else { None }
+    }
+
+    /// The frame reaches outside the outline, as it does for centered text in a circle or a pill, so the fill is the backdrop
+    /// only if the text as it is laid out stays inside.
+    fn settle_by_text(&self, extent: Option<(f64, f64)>) -> Backdrop {
+        match extent.and_then(|(width, height)| laid_out_text(self.shape, self.frame, width, height)) {
+            Some(text) if self.outline.covers(text) => Backdrop::Solid(self.color.clone()),
+            _ => Backdrop::Unsupported(PARTIAL_COVER),
+        }
+    }
+}
+
+/// Where the text of a shape is drawn inside its content frame, from the size it measures and how it is aligned. `None` when
+/// that is not known for sure: a warped shape, or paragraphs that carry tabs.
+fn laid_out_text(shape: &Element, frame: Rect, width: f64, height: f64) -> Option<Rect> {
+    let Element::Shape { text, font_size, visual, format, .. } = shape else { return None; };
+    if visual.as_ref().is_some_and(|style| style.text_warp.is_some()) { return None; }
+    let (mirrored_x, mirrored_y) = visual.as_ref().map_or((false, false), |style| (style.flip_h, style.flip_v));
+    let paragraphs = crate::rich_text::paragraphs(text, format);
+    if paragraphs.iter().any(|paragraph| !paragraph.tabs.is_empty() || paragraph.runs.iter().any(|run| run.text.contains('\t'))) { return None; }
+    let alignment = paragraphs.first()?.alignment.unwrap_or(format.alignment);
+    // Lines of one alignment and no indent share one edge or center; anything else may use the frame's whole width. A mirrored
+    // shape draws its text mirrored too, so along the mirrored axis the whole frame is allowed.
+    let shared = paragraphs.iter().all(|paragraph| paragraph.alignment.unwrap_or(format.alignment) == alignment && crate::rich_text::paragraph_insets(paragraph, format, *font_size) == (0.0, 0.0));
+    let (width, height) = (width.min(frame.width()), height.min(frame.height()));
+    let (left, right) = match alignment {
+        _ if !shared || mirrored_x => (frame.x0, frame.x1),
+        TextAlign::Left => (frame.x0, frame.x0 + width),
+        TextAlign::Center => (frame.x0 + (frame.width() - width) / 2.0, frame.x0 + (frame.width() + width) / 2.0),
+        TextAlign::Right => (frame.x1 - width, frame.x1),
+        TextAlign::Justify => (frame.x0, frame.x1),
+    };
+    let (top, bottom) = match format.vertical {
+        _ if mirrored_y => (frame.y0, frame.y1),
+        VerticalAlign::Top => (frame.y0, frame.y0 + height),
+        VerticalAlign::Middle => (frame.y0 + (frame.height() - height) / 2.0, frame.y0 + (frame.height() + height) / 2.0),
+        VerticalAlign::Bottom => (frame.y1 - height, frame.y1),
+    };
+    // A pixel of slack absorbs the difference between measuring and drawing.
+    Some(Rect::new(left, top, right, bottom).inflate(1.0, 1.0).intersect(frame))
 }
 
 impl Geometry {
@@ -213,4 +288,44 @@ fn is_convex(points: &[Point]) -> bool {
         total += cross.atan2(before.0 * after.0 + before.1 * after.1);
     }
     (total.abs() - std::f64::consts::TAU).abs() < 1e-6
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    // The text block is worked out from the measured size and the alignment; the renderer alone decides where glyphs land. Keep the
+    // two in step: every glyph the renderer draws must lie inside the block, give or take the em-box proxy `occupied_bounds` uses.
+    #[test]
+    fn the_laid_out_text_holds_every_glyph_the_renderer_draws() {
+        let padding = |left: f64, top: f64| json!({"left":left,"right":left,"top":top,"bottom":top});
+        let cases: Vec<(String, Value)> = vec![
+            ("12".into(), json!({"alignment":"center","vertical":"middle","padding":padding(0.0, 0.0)})),
+            ("Synthetic".into(), json!({})),
+            ("Synthetic text".into(), json!({"alignment":"right","vertical":"bottom","padding":padding(10.0, 6.0)})),
+            ("First line\nSecond".into(), json!({"alignment":"center","vertical":"middle"})),
+            ("Synthetic ".repeat(12), json!({"alignment":"center","vertical":"top"})),
+            ("日本語の見出しです".into(), json!({"alignment":"center","vertical":"middle"})),
+            ("Short\nA much longer second line of text".into(), json!({"alignment":"left","vertical":"middle","padding":padding(8.0, 4.0)})),
+        ];
+        for (text, format) in cases {
+            let shape = json!({"type":"shape","id":"label","x":100,"y":100,"width":320,"height":120,"preset":"rect","fill":"0B1F3A","stroke":"0B1F3A","stroke_width":1,
+                "text":text,"font_size":18,"color":"FFFFFF","bold":false,"format":format});
+            let deck: Deck = serde_json::from_value(json!({"version":1,"title":"Synthetic","width":1280,"height":720,
+                "slides":[{"id":"s1","title":"Synthetic","background":"FFFFFF","notes":"","elements":[shape]}]})).unwrap();
+            crate::model::validate_deck(&deck).unwrap();
+            let slide = &deck.slides[0];
+            let element = &slide.elements[0];
+            let Element::Shape { width, height, format, .. } = element else { unreachable!() };
+            let [x, y, frame_width, frame_height] = format.content_frame(*width, *height, true);
+            let frame = Rect::new(x, y, x + frame_width, y + frame_height);
+            let drawn = crate::render::render_validated(&deck, 0, false).unwrap().text.iter()
+                .find(|item| item.element_id == "label").and_then(|item| item.occupied_bounds()).expect("the renderer draws the text");
+            let (measured_width, measured_height) = crate::layout::text_extents(&deck, slide, &[element])[0].expect("installed fonts measure the text");
+            let block = laid_out_text(element, frame, measured_width, measured_height).expect("plain aligned text has a known block");
+            let slack = 0.2 * 18.0;
+            assert!(block.x0 - 1.0 <= drawn.x0 && drawn.x1 <= block.x1 + 1.0 && block.y0 - slack <= drawn.y0 && drawn.y1 <= block.y1 + slack, "{text:?}: drawn {drawn:?} outside block {block:?}");
+        }
+    }
 }
