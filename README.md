@@ -223,7 +223,17 @@ See [docs/implementation.md](docs/implementation.md) for implementation boundari
 
 ### AI Guidance and Review Workflows
 
-`issue-guidance.yml` comments an implementation approach on open issues without a linked or issue-numbered branch, then labels them `ai-guidance`. `pr-review.yml` posts an advisory verdict on non-draft PRs without checking out PR code; it never approves or merges. Both use Copilot CLI and change no code. Setup: add the repository secret `COPILOT_GITHUB_TOKEN` (a fine-grained PAT with the Copilot Requests permission), optionally set the repository variable `AI_MODEL` (default `claude-opus-5.5`), and allow GitHub Actions to write to issues and pull requests.
+`issue-guidance.yml` comments an implementation approach on open issues without a linked or issue-numbered branch, then labels them `ai-guidance`. `pr-review.yml` posts an advisory verdict on non-draft PRs without checking out PR code; it never approves or merges. Both use **@murasamelabo's personal Copilot subscription** and change no code.
+
+1. Sign in as `murasamelabo` and confirm the subscription and Copilot CLI/model policies at [Copilot settings](https://github.com/settings/copilot).
+2. Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) with the **account permission `Copilot Requests: read`**. Repository write permissions are not needed for this token.
+3. In this repository's **Settings > Secrets and variables > Actions**, register it as **`MURASAMELABO_COPILOT_TOKEN`**. Enter the value only in the secret form, never in chat or source files. The workflows do not fall back to the old `COPILOT_GITHUB_TOKEN` secret.
+
+The workflows pass that secret to the CLI as `COPILOT_GITHUB_TOKEN` and verify that its owner is `murasamelabo` before making Copilot requests. Copilot usage is charged to the token owner's subscription, not inferred from the repository owner or the account running this setup session. The separate built-in `github.token` handles repository reads, issue comments/labels and PR comments; allow GitHub Actions to write to issues and pull requests.
+
+Both workflows explicitly use **GPT 6.1 Sol (`gpt-6.1-sol`)** via the CLI's `--model` option. The repository variable `AI_MODEL` is not used, so an old account's model setting cannot override this selection. Confirm that this model is enabled for `murasamelabo`. `Access denied by policy settings` requires checking that account's CLI/model policies; changing the workflow alone cannot grant Copilot access.
+
+Missing, invalid, expired or wrong-account tokens fail explicitly. Guidance continues processing other eligible issues after a Copilot failure but fails the overall job, leaving failed issues unlabeled for retry. After merging and registering the secret, run **Actions > Issue Guidance > Run workflow**, then open or update a non-draft PR to exercise PR Review. Regression checks for the Ubuntu workflow scripts run with `node --test tools/copilot-workflows.test.mjs`.
 
 ## Limitations
 

@@ -21,18 +21,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      AI_MODEL: ${{ vars.AI_MODEL || 'claude-opus-5.5' }}
-      COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+      AI_MODEL: gpt-6.1-sol
+      COPILOT_GITHUB_TOKEN: ${{ secrets.MURASAMELABO_COPILOT_TOKEN }}
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       DEVELOPER: murasamelabo
     steps:
-      - name: Check Copilot token
+      - name: Check Copilot account
         run: |
+          set -euo pipefail
           if [ -z "${COPILOT_GITHUB_TOKEN}" ]; then
-            echo "::error::Secret COPILOT_GITHUB_TOKEN is not set. Register a fine-grained PAT with the Copilot Requests permission."
+            echo "::error::Secret MURASAMELABO_COPILOT_TOKEN is not set. Add a fine-grained PAT issued by $DEVELOPER with Copilot Requests: read."
+            exit 1
+          fi
+          if ! copilot_user="$(GH_TOKEN="$COPILOT_GITHUB_TOKEN" timeout 30 gh api user --jq .login)"; then
+            echo "::error::Cannot verify the Copilot token owner. Check MURASAMELABO_COPILOT_TOKEN and its expiration."
+            exit 1
+          fi
+          if [ "$copilot_user" != "$DEVELOPER" ]; then
+            echo "::error::MURASAMELABO_COPILOT_TOKEN must belong to $DEVELOPER, not $copilot_user."
             exit 1
           fi
       # Checks out the base branch only, to read .github/copilot-instructions.md. PR head code is never checked out or executed.
@@ -48,6 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
           limit=80000
 
           check_head() {
@@ -135,10 +145,14 @@ jobs:
             printf '\nPR_END\n'
           } > "$work/prompt.txt"
 
-          timeout 1200 copilot -p "$(cat "$work/prompt.txt")" --model "$AI_MODEL" --silent \
-            --deny-tool=shell --deny-tool=write --deny-tool=url --deny-tool=read --deny-tool=memory \
-            --disable-builtin-mcps --no-ask-user --no-auto-update \
-            > "$work/answer.md"
+          if ! timeout 1200 copilot -p "$(cat "$work/prompt.txt")" --model "$AI_MODEL" --silent \
+              --deny-tool=shell --deny-tool=write --deny-tool=url --deny-tool=read --deny-tool=memory \
+              --disable-builtin-mcps --no-ask-user --no-auto-update \
+              > "$work/answer.md" 2> "$work/copilot-error.txt"; then
+            echo "::error::Copilot CLI failed to review PR #$PR_NUMBER. Check $DEVELOPER's Copilot CLI/model policies at https://github.com/settings/copilot."
+            tail -n 20 "$work/copilot-error.txt"
+            exit 1
+          fi
           sed -i '/./,$!d' "$work/answer.md"
           if [ ! -s "$work/answer.md" ]; then
             echo "::error::Copilot CLI returned no review output."

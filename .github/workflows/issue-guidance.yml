@@ -20,8 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      AI_MODEL: ${{ vars.AI_MODEL || 'claude-opus-5.5' }}
-      COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+      AI_MODEL: gpt-6.1-sol
+      COPILOT_GITHUB_TOKEN: ${{ secrets.MURASAMELABO_COPILOT_TOKEN }}
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       EVENT_NAME: ${{ github.event_name }}
@@ -29,10 +29,19 @@ jobs:
       DEVELOPER: murasamelabo
       LABEL: ai-guidance
     steps:
-      - name: Check Copilot token
+      - name: Check Copilot account
         run: |
+          set -euo pipefail
           if [ -z "${COPILOT_GITHUB_TOKEN}" ]; then
-            echo "::error::Secret COPILOT_GITHUB_TOKEN is not set. Register a fine-grained PAT with the Copilot Requests permission."
+            echo "::error::Secret MURASAMELABO_COPILOT_TOKEN is not set. Add a fine-grained PAT issued by $DEVELOPER with Copilot Requests: read."
+            exit 1
+          fi
+          if ! copilot_user="$(GH_TOKEN="$COPILOT_GITHUB_TOKEN" timeout 30 gh api user --jq .login)"; then
+            echo "::error::Cannot verify the Copilot token owner. Check MURASAMELABO_COPILOT_TOKEN and its expiration."
+            exit 1
+          fi
+          if [ "$copilot_user" != "$DEVELOPER" ]; then
+            echo "::error::MURASAMELABO_COPILOT_TOKEN must belong to $DEVELOPER, not $copilot_user."
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -47,6 +56,8 @@ jobs:
         run: |
           set -euo pipefail
           work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          failures=0
           gh label create "$LABEL" --repo "$REPO" --color 5319e7 --description "AI implementation guidance posted" --force
 
           if [ "$EVENT_NAME" = "issues" ]; then
@@ -122,12 +133,14 @@ jobs:
                 --deny-tool=shell --deny-tool=write --deny-tool=url --deny-tool=read --deny-tool=memory \
                 --disable-builtin-mcps --no-ask-user --no-auto-update \
                 > "$work/answer.md" 2> "$work/copilot-error.txt"; then
-              echo "::warning::Copilot CLI failed for issue #$n; continuing."
-              tail -n 20 "$work/copilot-error.txt" || true
+              echo "::error::Copilot CLI failed for issue #$n. Check $DEVELOPER's Copilot CLI/model policies at https://github.com/settings/copilot."
+              tail -n 20 "$work/copilot-error.txt"
+              failures=$((failures + 1))
               continue
             fi
             if [ ! -s "$work/answer.md" ]; then
-              echo "::warning::Copilot CLI returned no output for issue #$n; continuing."
+              echo "::error::Copilot CLI returned no output for issue #$n."
+              failures=$((failures + 1))
               continue
             fi
 
@@ -140,3 +153,7 @@ jobs:
             gh issue comment "$n" --repo "$REPO" --body-file "$work/comment.md"
             gh issue edit "$n" --repo "$REPO" --add-label "$LABEL"
           done
+          if [ "$failures" -gt 0 ]; then
+            echo "::error::Guidance failed for $failures issue(s); failed issues remain unlabeled for retry."
+            exit 1
+          fi
