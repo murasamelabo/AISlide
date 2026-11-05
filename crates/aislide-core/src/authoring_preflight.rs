@@ -9,10 +9,13 @@ pub struct PreflightOptions {
 	pub page_indices: Option<Vec<usize>>,
 	pub min_font_size: f64,
 	pub include_inherited: bool,
+	/// false omits the page-level info notices about preview approximation (SHAPE_APPROXIMATION and the generic chart parity notices);
+	/// specific chart limits and every other finding are unaffected.
+	pub include_preview_notices: bool,
 }
 
 impl Default for PreflightOptions {
-	fn default() -> Self { Self { page_indices: None, min_font_size: 16.0, include_inherited: true } }
+	fn default() -> Self { Self { page_indices: None, min_font_size: 16.0, include_inherited: true, include_preview_notices: true } }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -231,7 +234,7 @@ fn route_crosses_badge_center(object: &Object<'_>, connector: &Object<'_>) -> bo
 fn push_finding(report: &mut PreflightReport, page: usize, slide: &str, objects: &[&Object<'_>], code: &str, severity: &str, evidence: &str, message: &str, suggestions: &[&str]) -> Result<()> {
 	let inherited = !objects.is_empty() && objects.iter().all(|object| object.scope != "slide");
 	if inherited && !report.include_inherited { return Ok(()); }
-	let aggregate = inherited && matches!(code, "SMALL_TEXT" | "FONT_FALLBACK");
+	let aggregate = inherited && matches!(code, "SMALL_TEXT" | "FONT_FALLBACK" | "SHAPE_APPROXIMATION");
 	if aggregate {
 		if let Some(finding) = report.findings.iter_mut().find(|finding| finding.code == code && finding.message == message && finding.evidence == evidence
 			&& finding.element_ids.iter().map(String::as_str).eq(objects.iter().map(|object| object.id))
@@ -361,7 +364,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 	}
 	let mut report = PreflightReport { revision: document.revision, hash: document.hash.clone(), page_indices: selected.clone(), findings: Vec::new(),
 		checks: ["renderer_warnings", "off_slide", "text_overlap", "connector_label_interference", "connector_badge_overlap", "container_clearance", "small_text", "density"].map(String::from).to_vec(),
-		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed shaped-glyph metric bounds with alignment, padding and clipping, not exact ink intersection; warped text conservatively uses its content frame", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices are summarized per page as info; specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
+		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed shaped-glyph metric bounds with alignment, padding and clipping, not exact ink intersection; warped text conservatively uses its content frame", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices and SHAPE_APPROXIMATION preview notices are summarized per page as info (include_preview_notices:false omits them); specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
 		office_visual_parity: false, semantic_truth_verified: false, include_inherited: options.include_inherited };
 	report.limitations.push("Template-owned SMALL_TEXT and FONT_FALLBACK are informational and aggregated by owner and element before the finding limit; affected_page_indices and affected_slide_ids retain coverage. include_inherited:false omits inherited-only findings, not interactions with slide objects or unprojected native content.".into());
 	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into(), "numbered_sequence_spacing".into(), "part_aspect".into(), "part_title_band".into(), "interactive_lab_frame".into()]);
@@ -390,6 +393,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			}
 		}
 		let mut chart_notices: Vec<&Object<'_>> = Vec::new();
+		let mut shape_notices: Vec<(&Object<'_>, String)> = Vec::new();
 		for warning in rendered.warnings.into_iter().chain(projection_warnings.iter().filter(|warning| warning.page_index == page).cloned()) {
 			let object = if warning.code == "NATIVE_OBJECT_NOT_PREVIEWED" { None } else {
 				objects.iter().rev().find(|object| warning.scope.as_deref().is_none_or(|scope| scope == object.scope)
@@ -400,6 +404,12 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			if generic_chart_notice {
 				if let Some(object) = object {
 					if !chart_notices.iter().any(|previous| std::ptr::eq(*previous, object)) { chart_notices.push(object); }
+					continue;
+				}
+			}
+			if warning.code == crate::render::SHAPE_APPROXIMATION {
+				if let Some(object) = object {
+					if !shape_notices.iter().any(|(previous, _)| std::ptr::eq(*previous, object)) { shape_notices.push((object, crate::render::approximated_preset(&warning.message).to_owned())); }
 					continue;
 				}
 			}
@@ -417,10 +427,19 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				if let Some(finding) = report.findings.last_mut() { finding.element_ids.push(warning.element_id); }
 			}
 		}
-		if !chart_notices.is_empty() {
+		if !chart_notices.is_empty() && options.include_preview_notices {
 			push_finding(&mut report, page, &slide.id, &chart_notices, "CHART_PREVIEW", "info", "renderer",
 				&format!("{} chart preview(s) use bounded rendering; axis and legend placement are not Office visual parity (exported PPTX retains editable native OOXML charts; do not replace with hand-drawn shapes)", chart_notices.len()),
 				&["Keep native editable charts; do not replace them with hand-drawn shapes because of preview approximation", "Compare the listed charts in Office when visual parity matters", "Review specific chart warnings separately"])?;
+		}
+		// Slide-owned shapes and template-owned ones are separate findings, so that include_inherited:false omits only the template's.
+		for inherited in [false, true].into_iter().filter(|_| options.include_preview_notices) {
+			let group: Vec<&(&Object<'_>, String)> = shape_notices.iter().filter(|(object, _)| (object.scope != "slide") == inherited).collect();
+			if group.is_empty() { continue; }
+			let shapes: Vec<&Object<'_>> = group.iter().map(|(object, _)| *object).collect();
+			let presets: BTreeSet<&str> = group.iter().map(|(_, preset)| preset.as_str()).collect();
+			push_finding(&mut report, page, &slide.id, &shapes, crate::render::SHAPE_APPROXIMATION, "info", "renderer", &crate::render::shape_approximation_summary(shapes.len(), &presets),
+				&["Keep the preset shapes; the preview only approximates their geometry and the exported PPTX keeps the preset", "Compare the listed shapes in Office when exact geometry matters"])?;
 		}
 		container_findings(&mut report, page, &slide.id, &objects)?;
 		numbered_sequence_findings(&mut report, page, &slide.id, &objects)?;

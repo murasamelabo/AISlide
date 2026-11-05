@@ -52,6 +52,52 @@ pub struct RenderedSlide {
     pub(crate) objects: Vec<(String, String)>,
 }
 
+pub(crate) const SHAPE_APPROXIMATION: &str = "SHAPE_APPROXIMATION";
+
+// The preview draws the shapes that are not rect, ellipse, flowChartProcess or flowChartConnector from normalized geometry. The renderer
+// warns once per shape; previews and preflight report one notice per page (see summarize_shape_approximations).
+fn shape_approximation_message(preset: &str) -> String {
+    format!("{preset}: normalized preset preview geometry, not Office parity")
+}
+
+/// The preset that a per-shape SHAPE_APPROXIMATION warning names.
+pub(crate) fn approximated_preset(message: &str) -> &str {
+    message.split(':').next().unwrap_or(message)
+}
+
+/// What a page-level SHAPE_APPROXIMATION notice says about `count` shapes drawn from the given presets.
+pub(crate) fn shape_approximation_summary(count: usize, presets: &BTreeSet<&str>) -> String {
+    format!(
+        "{count} shape(s) use normalized preset preview geometry ({}); the preview is not Office visual parity, so compare in Office when exact shape geometry matters (the exported PPTX keeps the native preset)",
+        presets.iter().copied().collect::<Vec<_>>().join(", ")
+    )
+}
+
+/// Collapses the per-shape SHAPE_APPROXIMATION warnings of each page and scope into one notice at the position of the first of them.
+/// The notice lists the shapes in `element_ids`; other warnings keep their order and content.
+pub(crate) fn summarize_shape_approximations(warnings: Vec<RenderWarning>) -> Vec<RenderWarning> {
+    type Key = (usize, Option<String>);
+    let mut groups: std::collections::BTreeMap<Key, (Vec<String>, BTreeSet<String>)> = std::collections::BTreeMap::new();
+    for warning in warnings.iter().filter(|warning| warning.code == SHAPE_APPROXIMATION) {
+        let (ids, presets) = groups.entry((warning.page_index, warning.scope.clone())).or_default();
+        if !ids.contains(&warning.element_id) { ids.push(warning.element_id.clone()); }
+        presets.insert(approximated_preset(&warning.message).to_owned());
+    }
+    let mut emitted: BTreeSet<Key> = BTreeSet::new();
+    let mut summarized = Vec::with_capacity(warnings.len());
+    for warning in warnings {
+        if warning.code != SHAPE_APPROXIMATION { summarized.push(warning); continue; }
+        let key = (warning.page_index, warning.scope.clone());
+        if !emitted.insert(key.clone()) { continue; }
+        let (ids, presets) = &groups[&key];
+        summarized.push(RenderWarning {
+            code: SHAPE_APPROXIMATION.into(), page_index: warning.page_index, element_id: String::new(), element_ids: ids.clone(), scope: warning.scope,
+            message: shape_approximation_summary(ids.len(), &presets.iter().map(String::as_str).collect()),
+        });
+    }
+    summarized
+}
+
 pub(crate) struct RenderedText {
     pub element_id: String,
     pub scope: String,
@@ -189,7 +235,7 @@ pub(crate) fn validated_authoring_effect_warnings(deck: &Deck, page_indices: &[u
     for &page_index in page_indices {
         match page_effect_budget(deck, page_index, scale) {
             Ok(budget) => warnings.extend(budget.warning(&deck.slides[page_index].id, page_index, scale, None)),
-            Err(Error::Limit(message)) => warnings.push(RenderWarning { code: "EFFECT_ANALYSIS_UNAVAILABLE".into(), page_index, element_id: String::new(), scope: None, message: format!("Effect budget prediction unavailable at scale={scale}: {message}. The edit is accepted; actual rendering limits remain enforced.") }),
+            Err(Error::Limit(message)) => warnings.push(RenderWarning { code: "EFFECT_ANALYSIS_UNAVAILABLE".into(), page_index, element_id: String::new(), element_ids: Vec::new(), scope: None, message: format!("Effect budget prediction unavailable at scale={scale}: {message}. The edit is accepted; actual rendering limits remain enforced.") }),
             Err(error) => return Err(error),
         }
     }
@@ -382,6 +428,7 @@ impl Scene<'_> {
                 code: code.into(),
                 page_index: self.page_index,
                 element_id: id.into(),
+                element_ids: Vec::new(),
                 scope: Some(self.scope.clone()),
                 message,
             });
@@ -603,11 +650,7 @@ impl Scene<'_> {
                     preset.as_str(),
                     "rect" | "ellipse" | "flowChartProcess" | "flowChartConnector"
                 ) {
-                    self.warning(
-                        id,
-                        "SHAPE_APPROXIMATION",
-                        format!("{preset}: normalized preset preview geometry, not Office parity"),
-                    );
+                    self.warning(id, SHAPE_APPROXIMATION, shape_approximation_message(preset));
                 }
                 self.path(&path, fill, stroke, *stroke_width, visual)?;
                 for extra in shape_details(preset, width, height) {
@@ -1440,7 +1483,7 @@ impl EffectBudget {
     }
 
     fn warning(&self, slide_id: &str, page_index: usize, scale: f64, mode: Option<&str>) -> Option<RenderWarning> {
-        self.exceeded().then(|| RenderWarning { code: "EFFECT_APPROXIMATION".into(), page_index, element_id: self.highest_id.clone(), scope: None,
+        self.exceeded().then(|| RenderWarning { code: "EFFECT_APPROXIMATION".into(), page_index, element_id: self.highest_id.clone(), element_ids: Vec::new(), scope: None,
             message: format!("{}; {}: shadow, glow, soft-edge and reflection {} omitted from the disposable rendered view on this page; fills, text, opacity and native PPTX are unchanged. This budget check does not validate other renderer resources.",
                 self.description(slide_id, scale), mode.unwrap_or("budget analysis for preview/preflight/delivery"), if mode.is_some() { "are" } else { "would be" }) })
     }

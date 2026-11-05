@@ -140,6 +140,7 @@ fn append_warning(part: &ProjectionPart, page_index: usize, warnings: &mut Vec<R
     warnings.push(RenderWarning {
         code: "NATIVE_OBJECT_NOT_PREVIEWED".into(), page_index,
         element_id: if missing.len() == 1 { missing[0].to_string() } else { String::new() },
+        element_ids: Vec::new(),
         scope: None,
         message,
     });
@@ -147,7 +148,7 @@ fn append_warning(part: &ProjectionPart, page_index: usize, warnings: &mut Vec<R
 
 fn append_color_warning(part: &ProjectionPart, page_index: usize, seen: &mut BTreeSet<String>, warnings: &mut Vec<RenderWarning>) {
     if part.unsupported_color_mapping && seen.insert(part.path.clone()) {
-        warnings.push(RenderWarning { code: "NATIVE_COLOR_MAPPING_UNSUPPORTED".into(), page_index, element_id: String::new(), scope: None, message: native::color_mapping_warning(&part.path) });
+        warnings.push(RenderWarning { code: "NATIVE_COLOR_MAPPING_UNSUPPORTED".into(), page_index, element_id: String::new(), element_ids: Vec::new(), scope: None, message: native::color_mapping_warning(&part.path) });
     }
 }
 

@@ -108,6 +108,19 @@ test('issue36 preflight schema exposes the inherited-only finding switch', async
   });
 });
 
+test('issue83 preflight schema exposes the preview notice switch and rejects other keys', async () => {
+  await feedbackMcpFixture(async ({ registrations }) => {
+    const { config } = registrations.get('preflight_presentation');
+    const input = { deck_id: '00000000-0000-4000-8000-000000000083', options: { page_indices: [0], include_preview_notices: false } };
+    assert.deepEqual(config.inputSchema.parse(input), input);
+    assert.throws(() => config.inputSchema.parse({ ...input, options: { include_preview_notice: false } }));
+    assert.throws(() => config.inputSchema.parse({ ...input, options: { include_preview_notices: 'no' } }));
+    const jsonSchema = z.toJSONSchema(config.inputSchema, { io: 'input' });
+    assert.match(jsonSchema.properties.options.properties.include_preview_notices.description, /Default true.*SHAPE_APPROXIMATION/);
+    assert.match(config.description, /SHAPE_APPROXIMATION.*element_ids.*include_preview_notices:false/);
+  });
+});
+
 test('issue51 full tool-profile defaults detail to summary, omits filtered part_catalog schema and explains page_indices/detail on 9-page full requests', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-issue51-'));
   try {

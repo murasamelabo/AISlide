@@ -87,6 +87,12 @@ Those general choices do not require that reference's optional technical style.
   AISlide structural checks alone. When PowerPoint rendering is not separately
   verified, keep the native chart and report "chart rendering not verified in
   PowerPoint".
+- `SHAPE_APPROXIMATION` is one page-level info notice per owner (the slide or its
+  template) that lists the shapes in `element_ids`, not a per-shape defect: the
+  preview draws presets such as `roundRect` from normalized geometry and the PPTX
+  keeps the preset. Do not redraw shapes or change presets because of it; pass
+  `options.include_preview_notices:false` to `preflight_presentation` to read only
+  the findings that call for a change.
 - Record one ledger row per slide:
   `reader question | relation | primary visual (native chart / native table / part:<preset> / graph / picture / text / hand-drawn shapes) | why chosen | rejected native alternative and why | verification (preview / PowerPoint / not verified)`.
   A deck-wide rule such as "draw charts with shapes" is invalid.

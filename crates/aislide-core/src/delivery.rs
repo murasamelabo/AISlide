@@ -90,7 +90,7 @@ pub fn prepare_delivery(document: &Document, expected_revision: u64, expected_ha
     let mut preview_pages = Vec::new();
     if options.pdf {
         let output = export_static::export_delivery_static(&document.deck, &ExportOptions { format: ExportFormat::Pdf, page_indices: Some(selected.clone()), max_output_bytes: bundle.remaining.min(export_static::MAX_OUTPUT_BYTES), ..Default::default() })?;
-        render_warnings.extend(output.warnings);
+        render_warnings.extend(crate::render::summarize_shape_approximations(output.warnings));
         for artifact in output.artifacts {
             bundle.add("pdf", ".pdf".into(), &artifact.mime_type, artifact.page_indices, artifact.bytes, None)?;
         }
@@ -107,7 +107,7 @@ pub fn prepare_delivery(document: &Document, expected_revision: u64, expected_ha
         }
     }
     let mut warning_keys = BTreeSet::new();
-    render_warnings.retain(|warning| warning_keys.insert((warning.page_index, warning.element_id.clone(), warning.code.clone(), warning.message.clone())));
+    render_warnings.retain(|warning| warning_keys.insert((warning.page_index, warning.element_id.clone(), warning.element_ids.clone(), warning.scope.clone(), warning.code.clone(), warning.message.clone())));
     if options.notes {
         let mut notes = format!("\u{feff}{}\n\nDocument: {}\nRevision: {}\nContent SHA-256: {}\n\nSpeaker notes and evidence are user-authored; not independently verified.\n", document.deck.title, document.id, document.revision, document.hash);
         for (index, slide) in document.deck.slides.iter().enumerate() {

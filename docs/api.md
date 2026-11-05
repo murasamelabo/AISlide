@@ -750,7 +750,7 @@ The shared core additionally exposes the following bounded read/preview/apply op
 | Core operation | Inputs besides op | Result |
 | --- | --- | --- |
 | `preview_presentation` | `document`, optional `options:{page_indices,max_dimension,layout,max_output_bytes,format,overflow}` | `revision`, `hash`, requested/actual max dimension, quality-reduction flag, ordered page IDs/image coordinates, PNG/JPEG images with base64/size/SHA-256 and renderer warnings |
-| `preflight_presentation` | `document`, optional `options:{page_indices,min_font_size,include_inherited}` | Bounded findings with IDs/scopes/bounds/evidence/suggestions; no mutation |
+| `preflight_presentation` | `document`, optional `options:{page_indices,min_font_size,include_inherited,include_preview_notices}` | Bounded findings with IDs/scopes/bounds/evidence/suggestions; no mutation |
 | `preview_slide_revision` | `document`, `expected_revision`, `expected_hash`, `slide_id`, `edits`, optional `max_dimension` | Base/candidate hashes, before/after previews, affected IDs and stale part/source impact; no mutation |
 | `apply_slide_revision` | Same base and edits, plus `candidate_hash`, without `max_dimension` | Normal atomic transaction result with one inverse Undo receipt |
 
@@ -775,6 +775,23 @@ Renderer warnings include their optional `scope` for this distinction.
 `options.include_inherited` defaults to `true`; `false` omits inherited-only
 findings, not collisions involving slide-owned objects or unprojected native
 content. This is a diagnostic filter, not a change to document content.
+
+`SHAPE_APPROXIMATION` states that the preview draws a preset from normalized
+geometry (every preset except `rect`, `ellipse`, `flowChartProcess` and
+`flowChartConnector`); the exported PPTX keeps the native preset. It is a limit
+of the preview, not a defect to repair shape by shape, so `preview_presentation`
+and `preflight_presentation` report one notice per page and owner (the slide
+itself, or the template it inherits from) and list the shapes in `element_ids`.
+The `element_id` of such a preview warning is empty. In preflight the notice has
+severity `info`; template-owned notices are aggregated across pages like the
+other inherited findings, so `include_inherited:false` omits them and keeps the
+slide-owned ones. `options.include_preview_notices` defaults to `true`; `false`
+omits `SHAPE_APPROXIMATION` and the generic `CHART_PREVIEW` parity notice, and
+leaves every other finding as it was. No preset is excluded automatically: a
+"small difference" has no defined threshold, and excluding by preset or by the
+part that drew the shape would hide real differences. `export_static` keeps the
+per-shape renderer warnings (and `deny_warnings` still counts them);
+`prepare_delivery` reports the same page-level notice for its PDF and overview.
 
 Default integral chart ticks omit a redundant `.0`. Both the Plotters and
 explicit-format Cartesian adapters reserve axis space from the actual shaped
@@ -1480,8 +1497,11 @@ current managed metadata, render fingerprints, actual badge attributes and
 the specified route agree. Hand-authored, stale, unverifiable and other-edge
 crossings remain reportable, as do badge/label collisions. Generic chart
 parity notices become one informational `CHART_PREVIEW` finding per selected
-page; specific `CHART_PRESENTATION` limits remain warnings. Raw renderer and
-preview warnings remain available, and `office_visual_parity` remains false.
+page; specific `CHART_PRESENTATION` limits remain warnings. `SHAPE_APPROXIMATION`
+follows the same rule, one `info` finding per page and owner with the shapes in
+`element_ids`; `options.include_preview_notices:false` omits both notices. Per-shape
+renderer warnings remain available from `export_static`, and `office_visual_parity`
+remains false.
 
 `GraphIcon` is `{base64,mime_type,alt?}` in direct core/SDK calls, with PNG/JPEG bytes rather than a path, URL or raw SVG. MCP accepts either that form or a prepared handle, `{asset_id,mime_type?,alt?}`, and resolves the handle to inline data before calling core. The `schema.$defs.GraphIcon` entry that MCP returns from `part_catalog`, `graph_catalog` and `best_practice_guide` documents both forms. The catalogs from core, the CLI and the SDK describe only the inline form, and core rejects `asset_id`. Set `icon` to null or omit it on a complete replacement to remove an icon; an icon-mode node must also return to `presentation: "card"`. Each payload uses the existing 1 MiB/4096px/64 MiB decoder bounds; total encoded node and boundary icons share a 3 MiB budget. Document/metadata/response budgets can reject a graph before these maxima. Use `create_graph_icon` for generic imported images: inert SVG becomes PNG at a 256px longest side, larger PNG/JPEG images are downsampled in their format, and smaller rasters retain their bytes. Prepared cloud PNGs bypass this helper to preserve originals up to 512px. Normal `create_asset` behavior is unchanged. Alt text is at most 500 characters.
 
