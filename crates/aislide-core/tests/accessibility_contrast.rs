@@ -216,6 +216,27 @@ fn issue76_text_in_a_shape_uses_the_shapes_own_solid_fill() {
 }
 
 #[test]
+fn issue76_a_turned_shape_keeps_its_own_fill_and_a_group_has_no_opacity_to_fade_its_children() {
+    let turned = |id: &str, fill: &str, color: &str, y: f64| {
+        let mut element = shape(id, "rect", [60.0, y, 300.0, 100.0], fill);
+        element["text"] = json!("Synthetic");
+        element["color"] = json!(color);
+        element["rotation"] = json!(20);
+        element
+    };
+    let report = report("FFFFFF", vec![turned("dark-turned", DARK, "FFFFFF", 60.0), turned("pale-turned", "F4F4F4", "FFFFFF", 300.0),
+        // Text with no fill of its own, inside a turned group, still needs a background it cannot read from the geometry.
+        group("turned", [500.0, 300.0, 300.0, 100.0], [300.0, 100.0], Some(json!({"rotation":20})), vec![text("in-turned", [10.0, 10.0, 100.0, 30.0], "000000")])]);
+    // The fill sits behind the text however the shape turns, so it decides without the geometry the other backgrounds need.
+    assert!(outcome(&report, "dark-turned").is_empty());
+    assert_eq!(outcome(&report, "pale-turned"), ["text_contrast_low"]);
+    assert_eq!(outcome(&report, "in-turned"), ["contrast_background_unverified:transformed_text"]);
+    // Only a soft edge can make what a group holds translucent, and that is read as not solid (see the unsupported backgrounds above).
+    let faded = deck(slide("FFFFFF", vec![group("g", [0.0, 0.0, 400.0, 200.0], [400.0, 200.0], Some(json!({"opacity":0.5})), vec![rect("r", [0.0, 0.0, 400.0, 200.0], DARK)])]), None);
+    assert!(aislide_core::model::validate_deck(&faded).is_err(), "a group cannot carry an opacity");
+}
+
+#[test]
 fn issue76_counts_cover_every_text_element_and_low_contrast_counts_as_checked() {
     let mut decorative = text("decoration", [60.0, 300.0, 200.0, 40.0], "FFFFFF");
     decorative["text"] = json!("Ornament");

@@ -4,7 +4,9 @@
 //! background and an inherited graphic are read the way they are drawn. Text gets a background only when the paint behind it
 //! is known exactly: its own solid fill, the topmost opaque solid shape below it that covers its whole frame, or else the
 //! background the renderer paints for the slide. A partial cover, a picture, chart or table, a gradient, transparency, a soft
-//! edge, rotation or a shape this module cannot measure is reported with a reason. Nothing is guessed to be white.
+//! edge, a shape this module cannot measure, or rotation and skew when the background has to be found behind the text is
+//! reported with a reason. A shape's own fill sits behind its text however the shape turns, so a turned shape keeps it.
+//! Nothing is guessed to be white.
 use crate::{model::{Deck, Element}, visual::VisualStyle};
 use kurbo::{Affine, Point, Rect};
 use std::collections::BTreeMap;
