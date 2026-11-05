@@ -288,6 +288,49 @@ fn issue76_a_shapes_own_fill_is_the_backdrop_only_where_its_text_is_drawn_inside
 }
 
 #[test]
+fn issue76_a_line_or_an_outline_across_the_text_leaves_its_backdrop_unknown() {
+    let line = |id: &str, bounds: [f64; 4]| json!({"type":"connector","id":id,"x":bounds[0],"y":bounds[1],"width":bounds[2],"height":bounds[3],"color":"000000","stroke_width":2,"arrow":false});
+    let outlined = |id: &str, preset: &str, bounds: [f64; 4]| {
+        let mut element = shape(id, preset, bounds, "none");
+        element["stroke"] = json!("000000");
+        element["stroke_width"] = json!(4);
+        element
+    };
+    let mut bordered = shape("bordered", "rect", [40.0, 560.0, 300.0, 60.0], DARK);
+    bordered["stroke"] = json!("FFFFFF");
+    bordered["stroke_width"] = json!(6);
+    let report = report("FFFFFF", vec![
+        line("line", [0.0, 120.0, 400.0, 1.0]),
+        text("crossed", [60.0, 100.0, 200.0, 40.0], "000000"),
+        text("beside", [60.0, 200.0, 200.0, 40.0], "000000"),
+        // A line under a covering shape is hidden by it; a line over the shape still crosses the text.
+        line("under", [0.0, 320.0, 400.0, 1.0]),
+        rect("panel", [40.0, 290.0, 300.0, 60.0], DARK),
+        text("on-panel", [60.0, 300.0, 200.0, 40.0], "FFFFFF"),
+        rect("panel-2", [40.0, 390.0, 300.0, 60.0], DARK),
+        line("over", [0.0, 420.0, 400.0, 1.0]),
+        text("through-panel", [60.0, 400.0, 200.0, 40.0], "FFFFFF"),
+        // A shape with no fill draws only its outline: text inside it is on the slide, text on the outline is not.
+        outlined("ring", "ellipse", [500.0, 60.0, 300.0, 300.0]),
+        text("in-ring", [590.0, 170.0, 120.0, 60.0], "000000"),
+        text("on-ring", [490.0, 190.0, 100.0, 40.0], "000000"),
+        outlined("card", "roundRect", [500.0, 400.0, 400.0, 200.0]),
+        text("in-card", [520.0, 420.0, 360.0, 60.0], "000000"),
+        text("on-card-edge", [520.0, 390.0, 200.0, 40.0], "000000"),
+        // An outline that is not measured covers its whole frame with something that is not one color.
+        outlined("arrow", "chevron", [940.0, 60.0, 300.0, 100.0]),
+        text("in-chevron", [990.0, 80.0, 100.0, 40.0], "000000"),
+        // The border of a filled shape is an edge of its fill, not a backdrop.
+        bordered,
+        text("in-bordered", [40.0, 560.0, 300.0, 60.0], "FFFFFF"),
+    ]);
+    for id in ["beside", "on-panel", "in-ring", "in-card", "in-bordered"] { assert!(outcome(&report, id).is_empty(), "{id}: {:?}", report.issues); }
+    for id in ["crossed", "through-panel", "on-ring", "on-card-edge", "in-chevron"] {
+        assert_eq!(outcome(&report, id), ["contrast_background_unverified:unsupported_backdrop"], "{id}");
+    }
+}
+
+#[test]
 fn issue76_counts_cover_every_text_element_and_low_contrast_counts_as_checked() {
     let mut decorative = text("decoration", [60.0, 300.0, 200.0, 40.0], "FFFFFF");
     decorative["text"] = json!("Ornament");

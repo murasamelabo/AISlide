@@ -6,9 +6,11 @@
 //! paints for the slide. A shape that holds text is its own backdrop only where its outline holds that text: the content
 //! frame the text is drawn in lies inside a rectangle, rounded rectangle or ellipse, or else the laid-out text does (centered
 //! text in a circle or a pill usually does). The outline is read in the shape's own coordinates, so a turned shape is judged
-//! like an upright one. A partial cover, a picture, chart or table, a gradient, transparency, a soft edge, an outline this
-//! module cannot measure (a custom path or another preset), or rotation and skew when the background has to be found behind
-//! the text is reported with a reason. Nothing is guessed to be white.
+//! like an upright one. A line is no backdrop of its own: a connector, or the outline of a shape that has no fill, leaves the text
+//! unsupported where it crosses the text frame, while the border of a filled shape is an edge of that fill. A partial cover, a
+//! picture, chart or table, a gradient, transparency, a soft edge, an outline this module cannot measure (a custom path or
+//! another preset), or rotation and skew when the background has to be found behind the text is reported with a reason. Nothing
+//! is guessed to be white.
 use crate::{model::{Deck, Element, TextAlign, VerticalAlign}, visual::VisualStyle};
 use kurbo::{Affine, Point, Rect};
 use std::collections::BTreeMap;
@@ -39,7 +41,7 @@ pub(crate) struct TextBackdrop {
 
 enum Geometry { Rect(Rect), RoundRect(Rect, f64), Ellipse(Rect), Convex(Vec<Point>), Other }
 
-enum Paint { Solid(String, Geometry), Unknown(&'static str) }
+enum Paint { Solid(String, Geometry), Unknown(&'static str), Line(Vec<Point>) }
 
 struct Painter { frame: Rect, paint: Paint }
 
@@ -112,6 +114,7 @@ fn walk<'a>(elements: &'a [Element], parent: &Context, slide_layer: bool, painte
             continue;
         }
         if hidden { continue; }
+        if let Some(paint) = line_paint(element, style, transform, width, height) { painters.push(Painter { frame, paint }); }
         match fill {
             Fill::Nothing => {}
             Fill::Unknown(reason) => painters.push(Painter { frame, paint: Paint::Unknown(reason) }),
@@ -163,6 +166,9 @@ fn backdrop(site: &Site, painters: &[Painter], background: &str) -> Backdrop {
     for painter in painters[..site.before].iter().rev() {
         if !overlaps(painter.frame, site.frame) { continue; }
         return match &painter.paint {
+            // A line is no backdrop of its own: it matters only where it crosses the text frame, and then the paint under it is not one color.
+            Paint::Line(route) if !crosses(route, site.frame) => continue,
+            Paint::Line(_) => Backdrop::Unsupported(UNSUPPORTED_BACKDROP),
             Paint::Solid(color, shape) if shape.covers(site.frame) => Backdrop::Solid(color.clone()),
             Paint::Solid(_, Geometry::Other) => Backdrop::Unsupported(UNSUPPORTED_BACKDROP),
             Paint::Solid(..) => Backdrop::Unsupported(PARTIAL_COVER),
@@ -174,6 +180,58 @@ fn backdrop(site: &Site, painters: &[Painter], background: &str) -> Backdrop {
 
 fn overlaps(first: Rect, second: Rect) -> bool {
     first.x0 < second.x1 - 0.01 && second.x0 < first.x1 - 0.01 && first.y0 < second.y1 - 0.01 && second.y0 < first.y1 - 0.01
+}
+
+// The paint a line leaves: a connector, or a shape that has no fill and so draws only its outline. A line is no backdrop of its
+// own; it matters where it crosses a text frame. The outlines that are measured are followed segment by segment; any other (a custom
+// path, a preset not listed) covers its whole frame with something that is not one color.
+fn line_paint(element: &Element, style: &VisualStyle, transform: Affine, width: f64, height: f64) -> Option<Paint> {
+    let to_page = |points: Vec<[f64; 2]>| Paint::Line(points.iter().map(|point| transform * Point::new(point[0], point[1])).collect());
+    if let Element::Connector { color, stroke_width, routing, flip_v, .. } = element {
+        if color == "none" || *stroke_width <= 0.0 { return None; }
+        let route = routing.as_ref().map(|route| route.points.clone()).unwrap_or_else(|| vec![[0.0, if *flip_v { 1.0 } else { 0.0 }], [1.0, if *flip_v { 0.0 } else { 1.0 }]]);
+        return Some(to_page(route.iter().map(|point| [point[0] * width, point[1] * height]).collect()));
+    }
+    let (Element::Shape { stroke, stroke_width, fill, .. } | Element::Polygon { stroke, stroke_width, fill, .. }) = element else { return None; };
+    if fill != "none" || stroke == "none" || *stroke_width <= 0.0 { return None; }
+    let local: Vec<[f64; 2]> = match element {
+        Element::Polygon { points, .. } if style.path.is_none() => points.iter().chain(points.first()).map(|point| [point[0] * width, point[1] * height]).collect(),
+        Element::Shape { preset, .. } if style.path.is_none() => match preset.as_str() {
+            "rect" => vec![[0.0, 0.0], [width, 0.0], [width, height], [0.0, height], [0.0, 0.0]],
+            "roundRect" => {
+                let adjustment = style.adjustments.iter().find(|adjustment| adjustment.name == "adj").map_or(16667.0, |adjustment| f64::from(adjustment.value)).clamp(0.0, 50000.0);
+                let radius = (width.min(height) * adjustment / 100000.0).min(width / 2.0).min(height / 2.0);
+                let corners = [([width - radius, radius], -std::f64::consts::FRAC_PI_2), ([width - radius, height - radius], 0.0), ([radius, height - radius], std::f64::consts::FRAC_PI_2), ([radius, radius], std::f64::consts::PI)];
+                let mut route: Vec<[f64; 2]> = corners.iter().flat_map(|(center, start)| (0..=8).map(move |step| { let angle = start + std::f64::consts::FRAC_PI_2 * f64::from(step) / 8.0; [center[0] + radius * angle.cos(), center[1] + radius * angle.sin()] })).collect();
+                route.push(route[0]);
+                route
+            }
+            "ellipse" => (0..=64).map(|step| { let angle = f64::from(step) / 64.0 * std::f64::consts::TAU; [width / 2.0 * (1.0 + angle.cos()), height / 2.0 * (1.0 + angle.sin())] }).collect(),
+            _ => return Some(Paint::Unknown(UNSUPPORTED_BACKDROP)),
+        },
+        _ => return Some(Paint::Unknown(UNSUPPORTED_BACKDROP)),
+    };
+    Some(to_page(local))
+}
+
+fn crosses(route: &[Point], frame: Rect) -> bool {
+    route.windows(2).any(|pair| passes_through(pair[0], pair[1], frame))
+}
+
+// Liang-Barsky clipping against the open rectangle: a segment that only touches the frame's edge or corner does not cross it.
+fn passes_through(from: Point, to: Point, frame: Rect) -> bool {
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let (mut enter, mut leave) = (0.0f64, 1.0f64);
+    for (direction, distance) in [(-dx, from.x - frame.x0), (dx, frame.x1 - from.x), (-dy, from.y - frame.y0), (dy, frame.y1 - from.y)] {
+        if direction == 0.0 {
+            if distance <= 0.0 { return false; }
+        } else if direction < 0.0 {
+            enter = enter.max(distance / direction);
+        } else {
+            leave = leave.min(distance / direction);
+        }
+    }
+    leave - enter > 1e-9
 }
 
 fn own_paint<'a>(element: &'a Element, style: &VisualStyle, fill: &Fill) -> OwnPaint<'a> {
