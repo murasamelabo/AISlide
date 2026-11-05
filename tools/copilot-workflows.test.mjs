@@ -88,7 +88,6 @@ fi
     EVENT_ISSUE_NUMBER: '17',
     PR_NUMBER: '23',
     HEAD_SHA: 'expected-head',
-    AI_MODEL: '',
     MOCK_GH_CALLS: calls,
     MOCK_COPILOT_ARGS: args,
     MOCK_COPILOT_COUNT: count,
@@ -100,7 +99,10 @@ fi
   };
   return {
     run(workflow, step) {
-      const result = spawnSync('bash', ['-e', '-c', runScript(workflow, step)], { cwd: directory, env, encoding: 'utf8', timeout: 15000 });
+      const source = readFileSync(new URL(`../.github/workflows/${workflow}`, import.meta.url), 'utf8');
+      const model = source.match(/^      AI_MODEL: (.+)$/m);
+      assert.ok(model, `Missing model in ${workflow}`);
+      const result = spawnSync('bash', ['-e', '-c', runScript(workflow, step)], { cwd: directory, env: { ...env, AI_MODEL: model[1] }, encoding: 'utf8', timeout: 15000 });
       assert.ifError(result.error);
       return { ...result, calls: readFileSync(calls, 'utf8'), args: readFileSync(args, 'utf8'), count: readFileSync(count, 'utf8').trim().split('\n').filter(Boolean).length };
     },
@@ -108,6 +110,11 @@ fi
 }
 
 for (const workflow of workflows) {
+  test(`${workflow}: pins GPT 6.1 Sol without a repository variable override`, () => {
+    const source = readFileSync(new URL(`../.github/workflows/${workflow}`, import.meta.url), 'utf8');
+    assert.match(source, /^      AI_MODEL: gpt-6\.1-sol$/m);
+    assert.doesNotMatch(source, /vars\.AI_MODEL/);
+  });
   test(`${workflow}: dedicated secret only`, () => {
     const source = readFileSync(new URL(`../.github/workflows/${workflow}`, import.meta.url), 'utf8');
     assert.match(source, /COPILOT_GITHUB_TOKEN: \$\{\{ secrets\.MURASAMELABO_COPILOT_TOKEN \}\}/);
@@ -139,10 +146,11 @@ for (const workflow of workflows) {
   });
 }
 
-test('guidance: successful requests use the CLI default and repository token for writes', (t) => {
-  const result = fixture(t).run('issue-guidance.yml', 'Post guidance for not-started issues');
+test('guidance: successful requests use GPT 6.1 Sol and the repository token for writes', (t) => {
+  const result = fixture(t, { AI_MODEL: 'previous-model' }).run('issue-guidance.yml', 'Post guidance for not-started issues');
   assert.equal(result.status, 0, result.stderr);
-  assert.doesNotMatch(result.args, /--model/);
+  assert.match(result.args, /--model\ngpt-6\.1-sol\n/);
+  assert.doesNotMatch(result.args, /previous-model/);
   assert.match(result.calls, /repository-token\tissue comment 17 /);
   assert.match(result.calls, /repository-token\tissue edit 17 .*--add-label ai-guidance/);
 });
@@ -166,10 +174,11 @@ test('guidance: other issues still succeed after a failure, but the job fails', 
   assert.match(result.calls, /issue edit 18 .*--add-label ai-guidance/);
 });
 
-test('review: uses the configured model and repository token without approving or merging', (t) => {
-  const result = fixture(t, { AI_MODEL: 'enabled-model' }).run('pr-review.yml', 'Review pull request');
+test('review: uses GPT 6.1 Sol and the repository token without approving or merging', (t) => {
+  const result = fixture(t, { AI_MODEL: 'previous-model' }).run('pr-review.yml', 'Review pull request');
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.args, /--model\nenabled-model\n/);
+  assert.match(result.args, /--model\ngpt-6\.1-sol\n/);
+  assert.doesNotMatch(result.args, /previous-model/);
   assert.match(result.calls, /repository-token\tpr comment 23 /);
   assert.doesNotMatch(result.calls, /pr (review|merge)/);
   for (const tool of ['shell', 'write', 'url', 'read', 'memory']) assert.ok(result.args.includes(`--deny-tool=${tool}\n`));

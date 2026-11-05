@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      AI_MODEL: ${{ vars.AI_MODEL }}
+      AI_MODEL: gpt-6.1-sol
       COPILOT_GITHUB_TOKEN: ${{ secrets.MURASAMELABO_COPILOT_TOKEN }}
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -58,10 +58,6 @@ jobs:
           set -euo pipefail
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT
-          model_args=()
-          if [ -n "$AI_MODEL" ]; then
-            model_args=(--model "$AI_MODEL")
-          fi
           limit=80000
 
           check_head() {
@@ -149,7 +145,7 @@ jobs:
             printf '\nPR_END\n'
           } > "$work/prompt.txt"
 
-          if ! timeout 1200 copilot -p "$(cat "$work/prompt.txt")" "${model_args[@]}" --silent \
+          if ! timeout 1200 copilot -p "$(cat "$work/prompt.txt")" --model "$AI_MODEL" --silent \
               --deny-tool=shell --deny-tool=write --deny-tool=url --deny-tool=read --deny-tool=memory \
               --disable-builtin-mcps --no-ask-user --no-auto-update \
               > "$work/answer.md" 2> "$work/copilot-error.txt"; then
@@ -173,6 +169,6 @@ jobs:
             printf '@%s AI レビュー結果です(助言のみ)。\n\n' "$DEVELOPER"
             cat "$work/answer.md"
             # shellcheck disable=SC2016 # Markdown backticks are literal.
-            printf '\n\n---\n<sub>モデル: `%s` / レビュー対象 head: `%s`。これは助言のみで、承認・変更要求・マージは行いません。</sub>\n' "${AI_MODEL:-Copilot CLI default}" "$HEAD_SHA"
+            printf '\n\n---\n<sub>モデル: `%s` / レビュー対象 head: `%s`。これは助言のみで、承認・変更要求・マージは行いません。</sub>\n' "$AI_MODEL" "$HEAD_SHA"
           } > "$work/comment.md"
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$work/comment.md" --edit-last --create-if-none

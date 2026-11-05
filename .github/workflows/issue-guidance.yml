@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      AI_MODEL: ${{ vars.AI_MODEL }}
+      AI_MODEL: gpt-6.1-sol
       COPILOT_GITHUB_TOKEN: ${{ secrets.MURASAMELABO_COPILOT_TOKEN }}
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -58,10 +58,6 @@ jobs:
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT
           failures=0
-          model_args=()
-          if [ -n "$AI_MODEL" ]; then
-            model_args=(--model "$AI_MODEL")
-          fi
           gh label create "$LABEL" --repo "$REPO" --color 5319e7 --description "AI implementation guidance posted" --force
 
           if [ "$EVENT_NAME" = "issues" ]; then
@@ -133,7 +129,7 @@ jobs:
               printf '\nISSUE_END\n'
             } > "$work/prompt.txt"
 
-            if ! timeout 900 copilot -p "$(cat "$work/prompt.txt")" "${model_args[@]}" --silent \
+            if ! timeout 900 copilot -p "$(cat "$work/prompt.txt")" --model "$AI_MODEL" --silent \
                 --deny-tool=shell --deny-tool=write --deny-tool=url --deny-tool=read --deny-tool=memory \
                 --disable-builtin-mcps --no-ask-user --no-auto-update \
                 > "$work/answer.md" 2> "$work/copilot-error.txt"; then
@@ -152,7 +148,7 @@ jobs:
               printf '@%s 未着手の Issue に対する実装方針(案)です。\n\n' "$DEVELOPER"
               cat "$work/answer.md"
               # shellcheck disable=SC2016 # Markdown backticks are literal.
-              printf '\n\n---\n<sub>モデル: `%s`。これは方針の提案のみで、コードは変更していません。</sub>\n' "${AI_MODEL:-Copilot CLI default}"
+              printf '\n\n---\n<sub>モデル: `%s`。これは方針の提案のみで、コードは変更していません。</sub>\n' "$AI_MODEL"
             } > "$work/comment.md"
             gh issue comment "$n" --repo "$REPO" --body-file "$work/comment.md"
             gh issue edit "$n" --repo "$REPO" --add-label "$LABEL"

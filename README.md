@@ -231,7 +231,7 @@ See [docs/implementation.md](docs/implementation.md) for implementation boundari
 
 The workflows pass that secret to the CLI as `COPILOT_GITHUB_TOKEN` and verify that its owner is `murasamelabo` before making Copilot requests. Copilot usage is charged to the token owner's subscription, not inferred from the repository owner or the account running this setup session. The separate built-in `github.token` handles repository reads, issue comments/labels and PR comments; allow GitHub Actions to write to issues and pull requests.
 
-The repository variable `AI_MODEL` is optional. When unset, the CLI chooses its default model rather than forcing the model used by the previous account. If set, it must identify a model enabled for `murasamelabo`. `Access denied by policy settings` requires checking that account's CLI/model policies; changing the workflow alone cannot grant Copilot access.
+Both workflows explicitly use **GPT 6.1 Sol (`gpt-6.1-sol`)** via the CLI's `--model` option. The repository variable `AI_MODEL` is not used, so an old account's model setting cannot override this selection. Confirm that this model is enabled for `murasamelabo`. `Access denied by policy settings` requires checking that account's CLI/model policies; changing the workflow alone cannot grant Copilot access.
 
 Missing, invalid, expired or wrong-account tokens fail explicitly. Guidance continues processing other eligible issues after a Copilot failure but fails the overall job, leaving failed issues unlabeled for retry. After merging and registering the secret, run **Actions > Issue Guidance > Run workflow**, then open or update a non-draft PR to exercise PR Review. Regression checks for the Ubuntu workflow scripts run with `node --test tools/copilot-workflows.test.mjs`.
 
