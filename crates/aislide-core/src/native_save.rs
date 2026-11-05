@@ -1067,12 +1067,43 @@ pub(crate) fn patch_theme(package: &mut Package, path: &str, before: &crate::des
         }
     }
     if !equal(&before.fonts, &after.fonts)? {
+        use crate::theme_fonts::{FontGroup, FontScript, UnsetFont};
         let scheme = child(elements, A, "fontScheme").ok_or_else(|| Error::Unsupported("theme font scheme missing".into()))?;
-        for (kind, old_latin, latin) in [("majorFont", &before.fonts.major, &after.fonts.major), ("minorFont", &before.fonts.minor, &after.fonts.minor)] {
-            let group = child(scheme, A, kind).ok_or_else(|| Error::Unsupported("theme font collection missing".into()))?;
-            for (tag, previous, value) in [("latin", old_latin, latin), ("ea", &before.fonts.east_asian, &after.fonts.east_asian), ("cs", &before.fonts.complex_script, &after.fonts.complex_script)] {
-                if previous == value { continue; }
-                let font = child(group, A, tag).ok_or_else(|| Error::Unsupported("theme font missing".into()))?; set_attribute(&xml, font, "typeface", value, &mut edits)?;
+        for group in FontGroup::ALL {
+            let collection = child(scheme, A, group.element()).ok_or_else(|| Error::Unsupported("theme font collection missing".into()))?;
+            let mut missing: Vec<(FontScript, &str)> = Vec::new();
+            for script in FontScript::ALL {
+                let (was, state) = (before.fonts.unset.state(group, script), after.fonts.unset.state(group, script));
+                let (old, new) = (before.fonts.family(group, script), after.fonts.family(group, script));
+                // A name that changed is written, and so is one an edit gave to a slot the file leaves unspecified, even when it is the name
+                // AISlide showed for it. A slot the deck still lists as unspecified keeps the file's own empty or missing element, and a
+                // font the file specifies is never emptied.
+                if old == new && !(was.is_some() && state == Some(UnsetFont::Written)) { continue; }
+                match child(collection, A, script.element()) {
+                    Some(font) => set_attribute(&xml, font, "typeface", new, &mut edits)?,
+                    None => missing.push((script, new)),
+                }
+            }
+            if missing.is_empty() { continue; }
+            let prefix = collection.lookup_prefix(A).unwrap_or("");
+            let fragment = |script: FontScript, text: &str| {
+                let name = if prefix.is_empty() { script.element().to_owned() } else { format!("{prefix}:{}", script.element()) };
+                format!("<{name} typeface=\"{}\"/>", quick_xml::escape::escape(text))
+            };
+            if collection.children().all(|node| !node.is_element()) {
+                // A collection without children is expanded once, which one edit per slot would overlap.
+                let children: String = missing.iter().map(|(script, text)| fragment(*script, text)).collect();
+                insert_child(&xml, collection, &children, None, &mut edits)?;
+                continue;
+            }
+            for (script, text) in missing {
+                // a font collection lists latin, ea and cs in this order, then script-specific fonts and extensions
+                let next = collection.children().find(|node| node.is_element() && (match script {
+                    FontScript::Latin => node.has_tag_name((A, "ea")) || node.has_tag_name((A, "cs")),
+                    FontScript::EastAsian => node.has_tag_name((A, "cs")),
+                    FontScript::ComplexScript => false,
+                } || node.has_tag_name((A, "font")) || node.has_tag_name((A, "extLst"))));
+                insert_child(&xml, collection, &fragment(script, text), next, &mut edits)?;
             }
         }
     }

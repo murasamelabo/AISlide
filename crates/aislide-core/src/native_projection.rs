@@ -27,6 +27,7 @@ struct ProjectionPart {
     missing: Vec<String>,
     hide_master_graphics: bool,
     unsupported_color_mapping: bool,
+    effects: crate::template_effects::Effects,
 }
 
 struct CacheEntry {
@@ -94,6 +95,7 @@ fn part(package: &Package, binding: &NativePart, elements: &[Element], design: b
         path: binding.path.clone(), missing: missing.into_iter().collect(),
         hide_master_graphics: matches!(root.attribute("showMasterSp"), Some("0" | "false")),
         unsupported_color_mapping: native::part_color_map_unsupported(package, &binding.path),
+        effects: crate::template_effects::read(package, &binding.path)?,
     })
 }
 
@@ -152,16 +154,55 @@ fn append_color_warning(part: &ProjectionPart, page_index: usize, seen: &mut BTr
     }
 }
 
+fn origin_index(document: &Document) -> Result<Option<Arc<ProjectionIndex>>> {
+    let Some(origin) = document.origin.as_ref().filter(|origin| origin.native) else { return Ok(None); };
+    if let Some(index) = cached(&origin.sha256) { return Ok(Some(index)); }
+    let bytes = STANDARD.decode(&origin.base64).map_err(|_| Error::Invalid("native origin encoding".into()))?;
+    if format!("{:x}", Sha256::digest(&bytes)) != origin.sha256 { return Err(Error::Conflict("import origin hash mismatch".into())); }
+    let package = Package::open(bytes)?;
+    let source = native::read(&package)?;
+    Ok(Some(store(origin.sha256.clone(), build(&package, &source)?)?))
+}
+
 pub(crate) fn warnings(document: &Document, pages: &[usize]) -> Result<Vec<RenderWarning>> {
-    let Some(origin) = document.origin.as_ref().filter(|origin| origin.native) else { return Ok(Vec::new()); };
-    let index = if let Some(index) = cached(&origin.sha256) { index } else {
-        let bytes = STANDARD.decode(&origin.base64).map_err(|_| Error::Invalid("native origin encoding".into()))?;
-        if format!("{:x}", Sha256::digest(&bytes)) != origin.sha256 { return Err(Error::Conflict("import origin hash mismatch".into())); }
-        let package = Package::open(bytes)?;
-        let source = native::read(&package)?;
-        store(origin.sha256.clone(), build(&package, &source)?)?
-    };
+    let Some(index) = origin_index(document)? else { return Ok(Vec::new()); };
     selected_warnings(&document.deck, pages, &index)
+}
+
+/// Where a transition or animations that a slide shows are set.
+#[derive(Clone, Debug)]
+pub(crate) struct EffectSource { pub scope: &'static str, pub id: String, pub name: String }
+
+/// The transition a slide shows in a slide show and the parts that set animations, read from the package the document was opened from.
+#[derive(Debug)]
+pub(crate) struct PageEffects { pub page_index: usize, pub transition: Option<(crate::template_effects::Transition, EffectSource)>, pub animations: Vec<EffectSource> }
+
+/// A slide's own transition wins, else its layout's, else its master's, as PowerPoint inherits it. An explicit transition without an effect
+/// overrides what would be inherited. Animations are listed wherever they are set; their inheritance is not asserted.
+pub(crate) fn effects(document: &Document, pages: &[usize]) -> Result<Vec<PageEffects>> {
+    let Some(index) = origin_index(document)? else { return Ok(Vec::new()); };
+    let deck = &document.deck;
+    let mut result = Vec::new();
+    for &page in pages {
+        let slide = deck.slides.get(page).ok_or_else(|| Error::Invalid("projection effects page index out of range".into()))?;
+        let source_id = slide.native_source_id.as_deref().unwrap_or(&slide.id);
+        let mut sources = Vec::new();
+        if let Some(part) = index.slides.get(source_id) { sources.push((EffectSource { scope: "slide", id: slide.id.clone(), name: slide.title.clone() }, &part.effects)); }
+        let layout = deck.design.as_ref().and_then(|design| {
+            slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id)).or_else(|| design.layouts.first())
+        });
+        if let (Some(design), Some(layout)) = (&deck.design, layout) {
+            if let Some(part) = index.layouts.get(&layout.id) { sources.push((EffectSource { scope: "layout", id: layout.id.clone(), name: layout.name.clone() }, &part.effects)); }
+            if let Some(part) = index.masters.get(&layout.master_id) {
+                let name = design.masters.iter().find(|master| master.id == layout.master_id).map(|master| master.name.clone()).unwrap_or_default();
+                sources.push((EffectSource { scope: "master", id: layout.master_id.clone(), name }, &part.effects));
+            }
+        }
+        let transition = sources.iter().find_map(|(source, effects)| effects.transition.clone().map(|transition| (transition, source.clone())));
+        let animations = sources.iter().filter(|(_, effects)| effects.animations).map(|(source, _)| source.clone()).collect();
+        result.push(PageEffects { page_index: page, transition, animations });
+    }
+    Ok(result)
 }
 
 fn selected_warnings(deck: &Deck, pages: &[usize], index: &ProjectionIndex) -> Result<Vec<RenderWarning>> {

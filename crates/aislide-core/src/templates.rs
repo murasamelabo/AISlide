@@ -69,17 +69,27 @@ pub struct TemplateImportOptions {
     #[schemars(length(max = 8))]
     pub master_names: Vec<String>,
     pub strip_sections: bool,
+    /// Removes the slide transitions (`p:transition`) of the retained masters, layouts and sample slides from the imported copy. PowerPoint
+    /// applies the one on a master or layout to every slide that inherits it. Default false.
+    pub strip_transitions: bool,
+    /// Removes the animations (`p:timing`) of the retained masters, layouts and sample slides from the imported copy. Default false.
+    pub strip_animations: bool,
     pub source_sha256: Option<String>,
 }
 
 impl Default for TemplateImportOptions {
     fn default() -> Self {
-        Self { include_sample_slides: true, layout_ids: vec![], layout_names: vec![], master_ids: vec![], master_names: vec![], strip_sections: false, source_sha256: None }
+        Self { include_sample_slides: true, layout_ids: vec![], layout_names: vec![], master_ids: vec![], master_names: vec![], strip_sections: false, strip_transitions: false, strip_animations: false, source_sha256: None }
     }
 }
 
 pub fn inspect_potx(bytes: Vec<u8>) -> Result<serde_json::Value> {
-    selection::inspect(bytes)
+    selection::inspect(bytes, None)
+}
+
+/// Inspects the template and, for the given import options, reports what the import would retain and remove without creating a document.
+pub fn inspect_potx_with_options(bytes: Vec<u8>, options: Option<&TemplateImportOptions>) -> Result<serde_json::Value> {
+    selection::inspect(bytes, options)
 }
 
 pub fn load_potx_with_options(id: String, bytes: Vec<u8>, options: &TemplateImportOptions) -> Result<Document> {

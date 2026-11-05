@@ -55,6 +55,10 @@ pub struct PreflightReport {
 	pub limitations: Vec<String>,
 	pub office_visual_parity: bool,
 	pub semantic_truth_verified: bool,
+	/// The whole deck's mix of managed part presets: slides and instances per preset, the longest runs of one preset, slides with a relationship
+	/// diagram and slides without a part. Information for review, never a target; independent of the selected pages.
+	#[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+	pub deck_composition: serde_json::Value,
 	#[serde(skip)] include_inherited: bool,
 	// Element IDs of the managed parts on the page being checked.
 	#[serde(skip)] page_parts: BTreeSet<String>,
@@ -387,6 +391,20 @@ fn part_aspect_findings(report: &mut PreflightReport, document: &Document, page:
 	Ok(())
 }
 
+fn source_label(source: &crate::native_projection::EffectSource) -> String {
+	if source.scope == "slide" { "on the slide itself".into() } else { format!("on {} '{}' ({})", source.scope, source.name, source.id) }
+}
+
+fn transition_message(transition: &crate::template_effects::Transition, source: &crate::native_projection::EffectSource) -> String {
+	let place = if source.scope == "slide" { "set on the slide itself".to_owned() } else { format!("inherited from {} '{}' ({})", source.scope, source.name, source.id) };
+	let mut message = if transition.kind == "none" { format!("This slide's slide-show transition has no visual effect ({place})") }
+		else { format!("This slide shows a {}{} transition in a slide show ({place})", transition.kind, if transition.extended { " (PowerPoint 2010+ effect)" } else { "" }) };
+	if let Some(milliseconds) = transition.advance_after_ms { message.push_str(&format!("; it advances by itself after {milliseconds} ms")); }
+	if transition.sound == Some("stop") { message.push_str("; it stops the sound that is playing"); } else if transition.sound.is_some() { message.push_str("; it starts a sound"); }
+	message.push_str("; AISlide does not play or edit transitions and the preview omits them");
+	message
+}
+
 pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -> Result<PreflightReport> {
 	crate::document::verify(document)?;
 	let deck = &document.deck;
@@ -397,17 +415,40 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 	if !options.min_font_size.is_finite() || !(8.0..=48.0).contains(&options.min_font_size) {
 		return Err(Error::Invalid("visual preflight minimum font size must be in 8..=48 pixels".into()));
 	}
+	let composition: Vec<crate::composition_mix::SlideParts> = deck.slides.iter().map(|slide| crate::composition_mix::SlideParts {
+		id: slide.id.clone(), presets: document.parts.iter().filter(|part| part.slide_id == slide.id).map(|part| part.spec.preset.clone()).collect(),
+	}).collect();
 	let mut report = PreflightReport { revision: document.revision, hash: document.hash.clone(), page_indices: selected.clone(), findings: Vec::new(),
+		deck_composition: crate::composition_mix::mix(&composition),
 		checks: ["renderer_warnings", "off_slide", "text_overlap", "connector_label_interference", "connector_badge_overlap", "container_clearance", "small_text", "density"].map(String::from).to_vec(),
 		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed shaped-glyph metric bounds with alignment, padding and clipping, not exact ink intersection; warped text conservatively uses its content frame", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices and SHAPE_APPROXIMATION preview notices are summarized per page as info (include_preview_notices:false omits them); specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
 		office_visual_parity: false, semantic_truth_verified: false, include_inherited: options.include_inherited, page_parts: BTreeSet::new() };
 	report.limitations.push("Template-owned SMALL_TEXT and FONT_FALLBACK are informational and aggregated by owner and element before the finding limit; affected_page_indices and affected_slide_ids retain coverage. include_inherited:false omits inherited-only findings, not interactions with slide objects or unprojected native content.".into());
+	report.limitations.push("THEME_FONT_UNSET reports text that depends on a theme font slot the template leaves empty or omits; it does not predict which font PowerPoint chooses, and a script-specific font in the font scheme (a:font script) counts as covering text of that script. It stays a warning for template-owned text; include_inherited:false omits the template's finding.".into());
 	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into(), "numbered_sequence_spacing".into(), "part_aspect".into(), "part_title_band".into(), "interactive_lab_frame".into()]);
 	report.limitations.push("Over-budget shadow, glow, soft-edge and reflection are omitted only from the diagnostic view at scale 1, with an EFFECT_APPROXIMATION finding; native content is unchanged and other renderer failures still reject.".into());
 	report.limitations.push("Reference URL detection uses normalized HTTP(S) tokens terminated by CJK prose; percent-encode CJK URL paths. Warnings do not echo private note URLs. Fixed-reference collisions require explicit repair, not automatic reflow.".into());
 	let projection_warnings = crate::native_projection::warnings(document, &selected)?;
+	let page_effects = crate::native_projection::effects(document, &selected)?;
+	report.checks.push("slide_transitions".into());
+	report.limitations.push("SLIDE_TRANSITION and SLIDE_ANIMATIONS read p:transition and p:timing from the package the document was opened from: a slide's own transition, else its layout's, else its master's. AISlide neither plays nor edits them and the preview omits them; the effect PowerPoint shows depends on its version. A transition without a visual effect is reported only when it advances the slide by itself or has a sound action (starts or stops a sound). include_inherited:false omits the ones a layout or master sets. Documents without an imported package report nothing.".into());
 	for page in selected {
 		let slide = &deck.slides[page];
+		if let Some(effects) = page_effects.iter().find(|effects| effects.page_index == page) {
+			if let Some((transition, source)) = &effects.transition {
+				if (source.scope == "slide" || options.include_inherited) && (transition.kind != "none" || transition.advance_after_ms.is_some() || transition.sound.is_some()) {
+					push_finding(&mut report, page, &slide.id, &[], "SLIDE_TRANSITION", "info", "document", &transition_message(transition, source),
+						&["AISlide cannot edit transitions; set or remove them in PowerPoint", "Strip a template's transitions while importing it with import_template options.strip_transitions"])?;
+				}
+			}
+			let animated: Vec<&crate::native_projection::EffectSource> = effects.animations.iter().filter(|source| source.scope == "slide" || options.include_inherited).collect();
+			if !animated.is_empty() {
+				let places = animated.iter().map(|source| source_label(source)).collect::<Vec<_>>().join("; ");
+				push_finding(&mut report, page, &slide.id, &[], "SLIDE_ANIMATIONS", "info", "document",
+					&format!("Animations (p:timing) are defined {places}; AISlide does not play, preview or edit them, and PowerPoint plays them in a slide show"),
+					&["AISlide cannot edit animations; set or remove them in PowerPoint", "Strip a template's animations while importing it with import_template options.strip_animations"])?;
+			}
+		}
 		let notes_only = crate::references::notes_only_count(document, page)?;
 		if notes_only > 0 {
 			push_finding(&mut report, page, &slide.id, &[], "SOURCE_URL_NOT_VISIBLE", "warning", "heuristic",
@@ -436,6 +477,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		}
 		let mut chart_notices: Vec<&Object<'_>> = Vec::new();
 		let mut shape_notices: Vec<(&Object<'_>, String)> = Vec::new();
+		let mut font_notices: Vec<(&Object<'_>, String)> = Vec::new();
 		for warning in rendered.warnings.into_iter().chain(projection_warnings.iter().filter(|warning| warning.page_index == page).cloned()) {
 			let object = if warning.code == "NATIVE_OBJECT_NOT_PREVIEWED" { None } else {
 				objects.iter().rev().find(|object| warning.scope.as_deref().is_none_or(|scope| scope == object.scope)
@@ -452,6 +494,12 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			if warning.code == crate::render::SHAPE_APPROXIMATION {
 				if let Some(object) = object {
 					if !shape_notices.iter().any(|(previous, _)| std::ptr::eq(*previous, object)) { shape_notices.push((object, crate::render::approximated_preset(&warning.message).to_owned())); }
+					continue;
+				}
+			}
+			if warning.code == crate::render::THEME_FONT_UNSET {
+				if let Some(object) = object {
+					if !font_notices.iter().any(|(previous, _)| std::ptr::eq(*previous, object)) { font_notices.push((object, warning.message)); }
 					continue;
 				}
 			}
@@ -482,6 +530,17 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			let presets: BTreeSet<&str> = group.iter().map(|(_, preset)| preset.as_str()).collect();
 			push_finding(&mut report, page, &slide.id, &shapes, crate::render::SHAPE_APPROXIMATION, "info", "renderer", &crate::render::shape_approximation_summary(shapes.len(), &presets),
 				&["Keep the preset shapes; the preview only approximates their geometry and the exported PPTX keeps the preset", "Compare the listed shapes in Office when exact geometry matters"])?;
+		}
+		// A theme font the template leaves empty is one finding per page and message. Template-owned text stays a warning (unlike FONT_FALLBACK),
+		// but is a separate finding, so that include_inherited:false omits only the template's.
+		for inherited in [false, true] {
+			let mut messages: Vec<&str> = Vec::new();
+			for (_, message) in font_notices.iter().filter(|(object, _)| (object.scope != "slide") == inherited) { if !messages.contains(&message.as_str()) { messages.push(message); } }
+			for message in messages {
+				let texts: Vec<&Object<'_>> = font_notices.iter().filter(|(object, text)| (object.scope != "slide") == inherited && text == message).map(|(object, _)| *object).collect();
+				push_finding(&mut report, page, &slide.id, &texts, crate::render::THEME_FONT_UNSET, "warning", "renderer", &format!("{message} ({} text element(s) on this page)", texts.len()),
+					&["Name the missing theme font with apply_theme or set_master_theme; an explicit value is always saved, even when it equals the font AISlide drew with", "Or give the text its own font_family", "Leave the slot empty only when PowerPoint's choice for the viewer's language is acceptable"])?;
+			}
 		}
 		container_findings(&mut report, page, &slide.id, &objects)?;
 		numbered_sequence_findings(&mut report, page, &slide.id, &objects)?;

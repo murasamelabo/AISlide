@@ -99,7 +99,7 @@ pub fn create_with_setup(id: String, title: String, setup: &PresentationSetup) -
         if let Some(font) = &setup.font_family {
             valid_text(font, 100)?;
             if font.trim().is_empty() || font.chars().any(char::is_control) { return Err(Error::Invalid("initial font family must be a nonempty font name".into())); }
-            theme.fonts = crate::design::ThemeFonts { major: font.clone(), minor: font.clone(), east_asian: font.clone(), complex_script: font.clone() };
+            theme.fonts = crate::design::ThemeFonts::new(font.clone(), font.clone(), font.clone(), font.clone());
         }
         deck = crate::design::apply_theme(deck, theme)?;
     }

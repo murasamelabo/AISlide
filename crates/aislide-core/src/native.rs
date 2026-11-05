@@ -1,4 +1,4 @@
-﻿use crate::{design::{Design, Master, SlideLayout, Theme, ThemeFonts}, model::{Bullet, Connection, Crop, Deck, Element, Placeholder, PlaceholderKind, Slide, TextAlign, TextFormat, VerticalAlign, validate_deck}, package::Package, pptx::{parse, relationship_targets, slide_paths}, Error, Result};
+﻿use crate::{design::{Design, Master, SlideLayout, Theme}, model::{Bullet, Connection, Crop, Deck, Element, Placeholder, PlaceholderKind, Slide, TextAlign, TextFormat, VerticalAlign, validate_deck}, package::Package, pptx::{parse, relationship_targets, slide_paths}, Error, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use roxmltree::Node;
 use std::collections::{BTreeMap, BTreeSet};
@@ -752,11 +752,7 @@ pub(crate) fn read_theme(package: &Package, path: &str) -> Result<Theme> {
         let rgb = child(entry, A, "srgbClr").and_then(|node| node.attribute("val")).or_else(|| child(entry, A, "sysClr").and_then(|node| node.attribute("lastClr"))).ok_or_else(|| Error::Unsupported("theme color representation".into()))?;
         theme.colors.insert(key.into(), rgb.into());
     }
-    if let Some(scheme) = child(elements, A, "fontScheme") {
-        let major = child(scheme, A, "majorFont"); let minor = child(scheme, A, "minorFont");
-        let face = |node: Option<Node<'_, '_>>, tag, fallback: &str| node.and_then(|node| child(node, A, tag)).and_then(|node| node.attribute("typeface")).filter(|value| !value.is_empty()).unwrap_or(fallback).to_owned();
-        theme.fonts = ThemeFonts { major: face(major, "latin", "Aptos"), minor: face(minor, "latin", "Aptos"), east_asian: face(minor, "ea", "Yu Gothic"), complex_script: face(minor, "cs", "Arial") };
-    }
+    theme.fonts = crate::theme_fonts::Scheme::read(child(elements, A, "fontScheme")).fonts();
     crate::design::validate_theme(&theme)?; Ok(theme)
 }
 
@@ -890,6 +886,8 @@ pub(crate) fn save(bytes: Vec<u8>, deck: &Deck) -> Result<Vec<u8>> {
     crate::native_projection::remember(&bytes, &package, &original)?;
     let mut compatible = deck.clone();
     if compatible.auxiliary_design.is_none() { compatible.auxiliary_design = original.deck.auxiliary_design.clone(); }
+    // A deck saved before font markers existed has none, and a marker on a slot the file specifies means nothing: compare what an edit changed.
+    crate::theme_fonts::align_with_file(&mut compatible, &original.deck);
     for slide in &mut compatible.slides {
         let source = slide.native_source_id.as_deref().unwrap_or(&slide.id);
         if let Some(before) = original.deck.slides.iter().find(|before| before.id == source) {

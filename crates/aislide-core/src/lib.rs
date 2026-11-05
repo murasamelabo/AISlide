@@ -56,6 +56,7 @@ pub mod import;
 pub mod extraction;
 pub mod publication;
 pub mod design;
+pub mod theme_fonts;
 pub mod canvas;
 pub mod templates;
 pub mod master_import;
@@ -69,6 +70,8 @@ mod native_projection;
 mod native_save;
 mod native_slides;
 mod native_design;
+mod template_effects;
+mod composition_mix;
 mod provenance;
 pub use protocol::execute_request;
 

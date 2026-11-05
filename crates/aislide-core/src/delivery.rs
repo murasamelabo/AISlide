@@ -90,7 +90,7 @@ pub fn prepare_delivery(document: &Document, expected_revision: u64, expected_ha
     let mut preview_pages = Vec::new();
     if options.pdf {
         let output = export_static::export_delivery_static(&document.deck, &ExportOptions { format: ExportFormat::Pdf, page_indices: Some(selected.clone()), max_output_bytes: bundle.remaining.min(export_static::MAX_OUTPUT_BYTES), ..Default::default() })?;
-        render_warnings.extend(crate::render::summarize_shape_approximations(output.warnings));
+        render_warnings.extend(crate::render::summarize_theme_font_notices(crate::render::summarize_shape_approximations(output.warnings)));
         for artifact in output.artifacts {
             bundle.add("pdf", ".pdf".into(), &artifact.mime_type, artifact.page_indices, artifact.bytes, None)?;
         }

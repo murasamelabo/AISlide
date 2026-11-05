@@ -6,6 +6,10 @@ For authorized slide planning and authoring, actively prefer explanatory visuals
 over bullet-only pages when they make the reader's task easier. Consider a
 primary diagram, chart, figure or managed part before choosing a text layout.
 Meaningful icons can support recognition; they do not replace the explanation.
+A request for more icons or a "visual" style is not a request to skip a
+relationship diagram: when the content relates, bounds or hands off named
+things, draw that relation (`diagram/custom`, `flow/swimlane` or
+`correlation/c4-container`); an icon beside each list item does not show it.
 This default is independent of language, industry and the optional icon-led
 technical briefing style.
 
@@ -32,9 +36,9 @@ where it adds interpretation, conditions or the reader's next step.
 
 | What must become clear | Candidate expression | Reject or verify |
 | --- | --- | --- |
-| System architecture, ownership or communication | Editable architecture graph with boundaries and labeled edges | Arrows need a stated meaning and direction; a grid is not automatic hierarchical layout |
+| System architecture, ownership or communication | Editable architecture graph (`diagram/custom`, or `correlation/c4-container` for a container view) with boundaries and labeled edges | Arrows need a stated meaning and direction; a grid is not automatic hierarchical layout |
 | A concept, definition and its instances | Concept map, entity-instance diagram or a compact annotated schematic | Do not invent relations, hierarchy or causation to fill a figure |
-| Sequence, handoff or branching | Flow, steps, swimlane or decision diagram | Equal peers are not stages; unsupported branches remain unknown |
+| Sequence, handoff or branching | Flow, steps, swimlane (`flow/swimlane`) or decision diagram | Equal peers are not stages; unsupported branches remain unknown |
 | Time, phase, dependency or milestone | Timeline, roadmap or dependency graph | Categorical spacing is not elapsed time; do not invent dates |
 | Magnitude, trend, composition or distribution | Editable native charts using verified values and suitable scales | Require units, population, period and denominators; no fabricated chart data or decorative curves |
 | Options on the same criteria | Comparison, matrix, aligned small multiples or a native table | Preserve criteria and scales; use a table when precise lookup matters |
@@ -50,6 +54,9 @@ Those general choices do not require that reference's optional technical style.
 
 - When using AISlide, discover needed tools and inspect `part_catalog`,
   `recommended`, `use_when`, `avoid_when` and the selected preset's example.
+  Search it by relation (`architecture`, `concept`, `relationship`) or ask for
+  `preset_id:"diagram/custom"` to reach the managed diagram, which `add_part`
+  (`data.kind:"diagram"`) and `add_graph` create.
   Use `recommend_recipes` only when its supported relation fits; accept no-fit
   rather than changing the explanation to fit a preset.
 - Prefer managed parts/graphs and native charts/tables for original diagrams
@@ -121,6 +128,15 @@ Do not invent data, relations or assets to meet a ratio. Avoid decorative icon
 sprinkling and multiple redundant visuals of the same point. Richness comes
 from legible, useful explanation and hierarchy, not a count of objects.
 
+The tools count for you, as information for review and never as a target:
+`validate_guided_presentation` returns `expression` and `preflight_presentation`
+returns `deck_composition` (slides per part preset, the longest runs of one
+preset, slides with a relationship diagram, and slides that hold no managed
+part). A deck of 49 slides with 27 `list/icon-rows` and no relationship diagram
+is a reason to reread the content: are those items equal peers, or do they
+relate, bound or hand off to one another? An explicit "no diagrams" request
+still wins, and hand-drawn or imported slides are not classified.
+
 Keep theme, typography, color semantics, spacing and component roles consistent
 while varying the expression by meaning. Preview representative pages and all
 required pages before delivery. Check the actual viewing size: labels, arrow
@@ -136,6 +152,7 @@ These are synthetic evaluation inputs, not user facts or prescribed outlines.
 | Input | Expected choice | Failure |
 | --- | --- | --- |
 | Components, trust boundaries and known calls; no style request | Architecture graph with labeled connections | A bullet list with decorative server icons instead of showing calls |
+| Components, owners and handoffs; the user asks for "more icons" or a "visual" deck | A relationship diagram or swimlane, with icons as labels | A list with one icon per item that hides who passes what to whom |
 | Ordered handoffs plus measured volume by stage | Flow and a native chart only if both answer distinct questions | One unrelated card template for both or a chart with invented counts |
 | A definition and examples, but no quantitative values | Concept/instance diagram or open labels | A fictional bar chart or forced causal arrows |
 | Same alternatives and criteria on consecutive pages | Consistent comparison layout and scale | Random layouts solely to increase variety |

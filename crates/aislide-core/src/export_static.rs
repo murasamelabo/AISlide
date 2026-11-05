@@ -325,7 +325,7 @@ fn preview_attempt(
         tile_height: montage.then_some(tile_height),
         tile_scale: montage.then_some(canvas_scale),
     }).collect();
-    let mut warnings = crate::render::summarize_shape_approximations(output.warnings);
+    let mut warnings = crate::render::summarize_theme_font_notices(crate::render::summarize_shape_approximations(output.warnings));
     warnings.extend(crate::native_projection::warnings(document, selected)?);
     if document.bindings.iter().any(|binding| binding.stale) {
         warnings.push(RenderWarning { code: "SOURCE_BINDINGS_STALE".into(), page_index: pages[0].page_index, element_id: String::new(), element_ids: Vec::new(), scope: None, message: "Preview includes stale source bindings; undo or rebind before export".into() });

@@ -214,6 +214,12 @@ fn installed_fonts() -> Result<std::sync::MutexGuard<'static, FontSystem>> {
     Ok(fonts)
 }
 
+/// Whether a family is installed where AISlide runs, which is what its preview and measurements can use; `None` when it cannot tell.
+pub(crate) fn font_installed(family: &str) -> Option<bool> {
+    let fonts = installed_fonts().ok()?;
+    Some(fonts.db().query(&cosmic_text::fontdb::Query { families: &[Family::Name(family)], ..Default::default() }).is_some())
+}
+
 /// Largest size from `maximum` down to `minimum` in 2px steps at which the text fits the frame.
 pub(crate) fn fit_size(text: &str, width: f64, height: f64, range: [f64; 2], bold: bool, format: &TextFormat, theme: &Theme) -> Result<Option<f64>> {
     let mut fonts = installed_fonts()?;

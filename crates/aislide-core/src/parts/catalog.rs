@@ -77,7 +77,23 @@ pub fn catalog() -> Value {
         entry
     }));
     presets.extend(crate::interactive::presets());
-    json!({"version":1,"presets":presets,"schema":schemars::schema_for!(PartSpec),"style":"Theme-linked minimal modern","default_bounds":{"x":64,"y":144,"width":1152,"height":512}})
+    json!({"version":1,"presets":presets,"related":related(),"schema":schemars::schema_for!(PartSpec),"style":"Theme-linked minimal modern","default_bounds":{"x":64,"y":144,"width":1152,"height":512}})
+}
+
+/// Parts a preset does not cover. `diagram/custom` is the managed graph behind `add_graph` and `graph_catalog`: it takes the nodes, edges and groups
+/// of a relationship diagram instead of a fixed layout, so it is found here by what it shows, with an example that `add_part` accepts.
+fn related() -> Vec<Value> {
+    // A graph part repeats the graph's own title and subtitle.
+    let graph = crate::graphs::catalog_examples()[0]["spec"].clone();
+    let example = json!({"version": 1, "preset": "diagram/custom", "title": graph["title"], "subtitle": graph["subtitle"], "data": {"kind": "diagram", "graph": graph}});
+    vec![json!({
+        "id": "diagram/custom", "category": "diagram", "category_name": "Custom diagram", "name": "Relationship, architecture or concept diagram", "family": "Diagrams", "recommended": true,
+        "keywords": ["architecture", "architecture diagram", "concept", "concept map", "relationship", "boundary", "boundaries", "handoff", "dependency", "system", "components", "topology", "network", "integration", "data flow", "構成図", "概念図", "関係図", "アーキテクチャ", "境界", "受け渡し"],
+        "use_when": "Relationships, boundaries or handoffs between named things: system architecture and the calls between components, a concept and its instances, who passes what to whom, dependencies. Editable nodes, labeled edges and grouped boundaries (managed graph, data.kind \"diagram\"; add_graph and graph_catalog describe the same part).",
+        "avoid_when": "Equal peers with no relation between them (use list/rows, list-horizontal/columns or list-enumeration/grid), a single ordered sequence (flow/open-steps), a process by actor (flow/swimlane) or a C4 container view (correlation/c4-container) when one of those fits; shared criteria belong in a table. Do not draw relations the content does not state, and do not replace the diagram with icons beside a list.",
+        "see": ["flow/swimlane", "correlation/c4-container", "graph_catalog", "add_graph"],
+        "example": example,
+    })]
 }
 
 fn briefing_example(kind: &str) -> PartData {

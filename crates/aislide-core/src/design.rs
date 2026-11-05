@@ -49,7 +49,16 @@ pub(crate) fn color_slot(value: &str) -> &str {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ThemeFonts { pub major: String, pub minor: String, pub east_asian: String, pub complex_script: String }
+pub struct ThemeFonts {
+    pub major: String, pub minor: String, pub east_asian: String, pub complex_script: String,
+    /// How the file leaves typeface slots unspecified (major and minor, each Latin, East Asian and complex script): `empty` for an element
+    /// with no typeface, `absent` for a missing element, or `written` once an edit has named a font for such a slot. The four names above
+    /// are then the fonts AISlide draws with, not the file's setting, and PowerPoint chooses its own for `empty` and `absent` slots.
+    /// Absent when the file specifies all six. Send it back unchanged to keep a slot unspecified; changing its font name, or leaving the
+    /// entry out, specifies the slot (`written`), and the name is then saved even when it equals the one shown.
+    // Boxed so that the many by-value copies of a Document in a debug build do not each carry the markers inline.
+    #[serde(default, skip_serializing_if = "crate::theme_fonts::UnsetFontSlots::is_empty")] pub unset: Box<crate::theme_fonts::UnsetFontSlots>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Theme { pub name: String, pub colors: BTreeMap<String, String>, pub fonts: ThemeFonts }
@@ -66,7 +75,7 @@ pub struct Design { pub theme: Theme, pub masters: Vec<Master>, pub layouts: Vec
 impl Default for Theme {
     fn default() -> Self {
         Self { name: "AISlide Report".into(), colors: COLOR_KEYS.into_iter().zip(["202525", "FFFFFF", "586563", "EDF3F0", "087F73", "CF5847", "416CA5", "C68B19", "677C54", "9A506B", "0066CC", "734C8C"]).map(|(key, value)| (key.into(), value.into())).collect(),
-            fonts: ThemeFonts { major: "Aptos".into(), minor: "Aptos".into(), east_asian: "Yu Gothic".into(), complex_script: "Arial".into() } }
+            fonts: ThemeFonts::new("Aptos", "Aptos", "Yu Gothic", "Arial") }
     }
 }
 
@@ -94,6 +103,7 @@ pub fn validate_theme(theme: &Theme) -> Result<()> {
     for font in [&theme.fonts.major, &theme.fonts.minor, &theme.fonts.east_asian, &theme.fonts.complex_script] {
         valid_text(font, 100)?; if font.trim().is_empty() || font.chars().any(char::is_control) { return Err(Error::Invalid("theme font names must be nonempty and contain no control characters".into())); }
     }
+    theme.fonts.validate()?;
     Ok(())
 }
 
@@ -161,8 +171,19 @@ pub(crate) fn validate_inheritance(slide: &Slide, design: Option<&Design>) -> Re
     Ok(())
 }
 
-pub fn update_design(mut deck: Deck, design: Design) -> Result<Deck> {
+/// A replaced design keeps a font slot unspecified only as `ThemeFonts::after_edit` allows, against the theme it replaces. A master the design
+/// did not have comes with its own theme, whose markers are the ones read from its source, so they stay as given.
+fn keep_unset_fonts(design: &mut Design, previous: &Design) {
+    design.theme.fonts.after_edit(&previous.theme.fonts);
+    for master in &mut design.masters {
+        let (Some(theme), Some(before)) = (master.theme.as_mut(), previous.masters.iter().find(|entry| entry.id == master.id)) else { continue };
+        theme.fonts.after_edit(&before.theme.as_ref().unwrap_or(&previous.theme).fonts);
+    }
+}
+
+pub fn update_design(mut deck: Deck, mut design: Design) -> Result<Deck> {
     validate_design_on_canvas(&design, deck.width, deck.height)?;
+    if let Some(previous) = &deck.design { keep_unset_fonts(&mut design, previous); }
     let previous = deck.design.replace(design);
     crate::fields::propagate_defaults(previous.as_ref(), &mut deck)?;
     let design = deck.design.take().ok_or_else(|| Error::Invalid("design missing".into()))?;
@@ -228,9 +249,10 @@ pub fn assign_layout_with_options(mut deck: Deck, slide_id: &str, layout_id: &st
     validate_deck(&deck)?; Ok(deck)
 }
 
-pub fn apply_theme(mut deck: Deck, theme: Theme) -> Result<Deck> {
+pub fn apply_theme(mut deck: Deck, mut theme: Theme) -> Result<Deck> {
     validate_theme(&theme)?;
     let previous = deck.design.as_ref().map(|design| design.theme.clone()).unwrap_or_default();
+    theme.fonts.after_edit(&previous.fonts);
     let bind = |color: &mut String| { if let Some((key, _)) = previous.colors.iter().find(|(_, value)| value.eq_ignore_ascii_case(color)) { *color = format!("@{key}"); } };
     fn visit(elements: &mut [Element], bind: &impl Fn(&mut String)) {
         for element in elements { match element {
@@ -287,8 +309,10 @@ pub fn slide_theme<'a>(slide: &Slide, design: Option<&'a Design>) -> Option<&'a 
 
 pub fn set_master_theme(mut deck: Deck, master_id: &str, theme: Option<Theme>) -> Result<Deck> {
     if let Some(theme) = &theme { validate_theme(theme)?; }
-    let master = deck.design.as_mut().and_then(|design| design.masters.iter_mut().find(|master| master.id == master_id)).ok_or_else(|| Error::Invalid("master not found".into()))?;
-    master.theme = theme;
+    let design = deck.design.as_mut().ok_or_else(|| Error::Invalid("master not found".into()))?;
+    let inherited = design.theme.fonts.clone();
+    let master = design.masters.iter_mut().find(|master| master.id == master_id).ok_or_else(|| Error::Invalid("master not found".into()))?;
+    master.theme = theme.map(|mut theme| { theme.fonts.after_edit(master.theme.as_ref().map_or(&inherited, |previous| &previous.fonts)); theme });
     validate_deck(&deck)?;
     Ok(deck)
 }

@@ -793,6 +793,31 @@ part that drew the shape would hide real differences. `export_static` keeps the
 per-shape renderer warnings (and `deny_warnings` still counts them);
 `prepare_delivery` reports the same page-level notice for its PDF and overview.
 
+`THEME_FONT_UNSET` states that text depends on a theme font slot the template
+leaves empty or omits, so PowerPoint chooses its font while the preview draws a
+stand-in; see [theme fonts](authoring/fonts.md#theme-fonts-a-template-leaves-empty).
+`preflight_presentation` reports it as a warning once per page and message and
+lists the text in `element_ids`. Unlike `FONT_FALLBACK`, template-owned text
+keeps severity `warning` and is not aggregated across pages; `include_inherited:false`
+omits the template's finding. Preview warnings and `prepare_delivery` list the
+affected elements once per page; `export_static` keeps the per-element warnings
+(and `deny_warnings` counts them).
+
+`SLIDE_TRANSITION` and `SLIDE_ANIMATIONS` are page-level `info` findings (evidence
+`document`) for documents opened from an imported package. `SLIDE_TRANSITION` names the
+transition a slide shows in a slide show and where it is set: the slide's own `p:transition`,
+else its layout's, else its master's, with the source ID and name (a transition without a
+visual effect overrides the inherited one and reports nothing unless it auto-advances or
+has a sound action; the automatic advance time is included when set). `SLIDE_ANIMATIONS` lists the
+slide, layout and master that define animations (a `p:timing` with animation behavior or media
+nodes; an empty one is not an animation); how PowerPoint inherits animations is not asserted.
+`include_inherited:false` omits the effects a layout or master sets and keeps the slide's own.
+They are computed from the origin package for the slides' current layouts, so slides added after
+the import report what their layout sets. AISlide neither plays nor edits either element and the
+preview omits them. Strip them while importing with `import_template` options
+`strip_transitions` / `strip_animations` (see Selective Template Factory). Documents
+AISlide created report neither.
+
 Default integral chart ticks omit a redundant `.0`. Both the Plotters and
 explicit-format Cartesian adapters reserve axis space from the actual shaped
 tick labels in the selected document font. Explicit number formats remain
@@ -880,18 +905,50 @@ or Office visual parity.
 `inspect_template({kind:"potx",base64})` inspects up to 8 masters, 256 layouts
 and 256 sample slides before the editable document's 32-layout limit. It
 returns exact package-part IDs, names, ownership, sample count, section/custom
-show flags, limits and `source_sha256`. The SDK method is `inspectTemplate`.
+show flags, limits and `source_sha256`, and `theme_fonts` per master: each
+typeface slot of the theme with the package's font, whether the template leaves it
+empty and whether AISlide has it installed
+([theme fonts](authoring/fonts.md#theme-fonts-a-template-leaves-empty)). The SDK method is `inspectTemplate`.
 Input bytes and capacity profiles retain the ordinary archive/request guards.
+
+Each inspected master and layout also reports what its XML sets directly, read with
+namespaces: `transition` (the `p:transition`, as `{kind,extended,speed?,duration_ms?,
+advance_after_ms?,sound?}`, or `null` when it sets none; `kind` is the effect element's local
+name, `none` for a transition without an effect, `sound` (`start` or `stop`) is present when it starts or stops a sound, and `extended` marks PowerPoint 2010+
+effects, which are read from the `mc:AlternateContent` choice), `animations` (whether it has a
+`p:timing` that defines an animation: behavior or media nodes, not an empty element) and `images` (the distinct internal image parts it references and their
+uncompressed bytes; a layout adds `with_master`, counting shared parts once). A layout also
+reports `effective_transition`, the one a slide on it inherits (its own, else its
+master's, with the `source`); a transition without an effect overrides the inherited one.
+`sample_slides` counts the samples that set their own, and `template_images` totals the
+distinct image parts of all masters and layouts. AISlide does not play or edit transitions or
+animations, and the preview omits them, but PowerPoint applies a master's or layout's
+transition to every slide that inherits it. Image counts and sizes are uncompressed
+bytes, not a measure of playback speed, and animation inheritance is not asserted.
+`inspect_template` also accepts the import `options` below and then adds `import`: the
+masters and layouts that import would retain, with the same fields after the options are
+applied, the retained `sample_slides`, `template_images` and `removed:{transitions,animations}`
+(one per transition removed, where an alternate-content wrapper that repeats it in its branches counts
+once, and one per animation removed; an empty `p:timing` is removed but not counted). It is a dry run of the
+same code on the same bytes and creates no document.
 
 `import_template` / SDK `importTemplate` accepts optional POTX-only `options`:
 `{include_sample_slides?,master_ids?,master_names?,layout_ids?,layout_names?,
-strip_sections?,source_sha256?}`. Defaults keep samples, all layouts and
-sections. ID/name selectors resolve exactly and unambiguously, with combined
+strip_sections?,strip_transitions?,strip_animations?,source_sha256?}`. Defaults keep samples, all layouts,
+sections, transitions and animations. ID/name selectors resolve exactly and unambiguously, with combined
 limits of 8 masters and 32 layouts. Master-only selection includes its layouts;
 layout selection includes its owning masters. Retained samples must use selected
 layouts. Set `include_sample_slides:false` to create one blank slide on the first
 selected layout in source order, including templates with no source slide list.
 Supply the inspected SHA to reject changed source bytes. THMX rejects options.
+`strip_transitions` and `strip_animations` are independent and default to `false`. They remove
+the `p:transition` / `p:timing` elements, including an `mc:AlternateContent` that holds only
+them, from the imported copy of the retained masters, layouts and kept sample slides; the
+source bytes are never modified, unselected payloads stay embedded and unchanged, and
+media a removed transition refers to remains as an unreferenced part. An alternate-content
+element that mixes the element with other markup is not guessed at: the import fails with the part
+named. MCP `import_template` returns `template_effects`, the `import` report of the
+same options (or `{unavailable}` with the reason when it cannot be produced).
 
 Inspected IDs such as `ppt/slideLayouts/slideLayout2.xml` are package-part
 identities used by import selectors, not document layout IDs. Imported layout
@@ -1066,7 +1123,7 @@ SDK: `client.createPresentation(id,title?,options?)`, `session.editSlides(operat
 | --- | --- | --- |
 | `best_practice_profiles` | None | Four purpose-specific English profiles and default color |
 | `best_practice_guide` | `profile_id` | English common/profile guide, pattern capabilities, limits and Rust-derived `GuidedInput` schema |
-| `validate_guided_presentation` | `input: GuidedInput` | Pure preflight `{ready,issues,diagnostics?,review_required,semantic_truth_verified:false,office_visual_parity:false}`. Slide problems from every slide (text that does not fit, a part that cannot be created) are collected in `issues`, each led by the input's slide ID and the part field path, and in `diagnostics` (`{code,slide_id,preset?,path?,message,measured_px?,available_px?}`) |
+| `validate_guided_presentation` | `input: GuidedInput` | Pure preflight `{ready,issues,diagnostics?,review_required,expression?,semantic_truth_verified:false,office_visual_parity:false}`. Slide problems from every slide (text that does not fit, a part that cannot be created) are collected in `issues`, each led by the input's slide ID and the part field path, and in `diagnostics` (`{code,slide_id,preset?,path?,message,measured_px?,available_px?}`). `expression` is the deck's part mix: `{slides,parts:[{preset,slides,instances}],other_presets?,longest_runs:[{preset,slides,first_slide_id,last_slide_id}],relationship_diagrams,relationship_presets,without_parts,note}`, information for review and never a quota |
 | `create_guided_presentation` | `id`, `input: GuidedInput` | New `{document,validation,profile_id,model_inference:false}`; no existing document or file is replaced |
 
 Profiles are `consulting-decision`, `technical-explainer`, `event-talk`, and `status-report`. The [guided authoring contract](authoring/README.md) defines the evidence, headline ledger, numeric JSON pointers and decision issue fields. All actual document behavior is computed in Rust; no model or source URL is contacted. `ready` means compilable input and measured text layout, not factual or semantic verification. Notes and creation records require privacy review before redistribution.
@@ -1167,7 +1224,7 @@ MCP exposes the same four operation names. It allocates an opaque new `deck_id` 
 
 | Operation | Request fields besides op | Result |
 | --- | --- | --- |
-| `part_catalog` | None | Version, 143 presets (including five interactive prototypes), Rust-derived `PartSpec` schema, style and default bounds |
+| `part_catalog` | None | Version, 143 presets (including five interactive prototypes), `related` (parts a preset does not cover: the managed `diagram/custom` graph with keywords, use_when/avoid_when and an `add_part` example), Rust-derived `PartSpec` schema, style and default bounds |
 | `create_part` | `id`, `spec`, optional `theme` | Validated ordinary `Element::Group`; does not create persistent metadata |
 | `insert_part` | `document`, `expected_revision`, `slide_id`, `id`, `spec` | Atomic `TransactionResult`, including part metadata and undo receipt |
 | `update_part` | Same as insert | Regenerates a current metadata part; retains placement unless an explicit layout changes it |
@@ -1625,7 +1682,7 @@ Review operations `modern_comment`, `set_table_headers`, `check_accessibility`, 
 - `design_tokens`: `deck`; returns the derived [design tokens](#design-tokens) without changing the deck.
 - `apply_design_preset`: `deck`, `preset_id`; accepts `public`, `minimal`, `stylish`, `pop`, `dynamic`, `trust` or `luxury`. Adds or replaces a verified dedicated preset master and seven layouts, retaining original masters and slide content. Foreign/edited templates, conflicting IDs and insufficient capacity fail before commit.
 - `update_design`: `deck`, `design`; validates the complete design and propagates inherited placeholder geometry/style while preserving text.
-- `apply_theme`: `deck`, `theme`; binds previous-palette RGB values to theme slots and retains unrelated custom colors. Does not install fonts or fetch resources.
+- `apply_theme`: `deck`, `theme`; binds previous-palette RGB values to theme slots and retains unrelated custom colors. A font you name is written even when it equals the one shown for a slot the template left empty; send `fonts.unset` back unchanged to keep a slot empty ([theme fonts](authoring/fonts.md#theme-fonts-a-template-leaves-empty)). Does not install fonts or fetch resources.
 - `set_master_theme` / `set_design_field`: owner-scoped theme overrides and dynamic-field/footer updates; see the [typed master-field contract](authoring/master-fields-themes.md#interfaces). `design_capabilities` reports the supported design subset and limitations.
 - `assign_layout`: `deck`, `slide_id`, `layout_id`; assigns/resets a layout, retains matching text, creates missing placeholders and detaches obsolete ones.
 - `create_picture`: `id`, `base64`, `mime_type`, `alt`; returns a decoded, fitted picture element.
@@ -1642,7 +1699,7 @@ Review operations `modern_comment`, `set_table_headers`, `check_accessibility`, 
 
 ## Authoring Model
 
-`deck.design` is optional and contains `{theme, masters, layouts}`. Each master is `{id, name, background, elements, theme?}`; each layout is `{id, name, master_id, source_id?, background?, elements}`. `source_id` records an imported package-part identity, not an alias accepted by layout assignment. A master's optional theme overrides the default design theme for its layouts and slides; omitting it restores inheritance. Background colors and element colors accept six-digit RGB or `@dk1`, `@lt1`, `@dk2`, `@lt2`, `@accent1` through `@accent6`, `@hlink`, `@folHlink`. Theme slots themselves must be RGB, not references. Theme fonts are `{major, minor, east_asian, complex_script}`.
+`deck.design` is optional and contains `{theme, masters, layouts}`. Each master is `{id, name, background, elements, theme?}`; each layout is `{id, name, master_id, source_id?, background?, elements}`. `source_id` records an imported package-part identity, not an alias accepted by layout assignment. A master's optional theme overrides the default design theme for its layouts and slides; omitting it restores inheritance. Background colors and element colors accept six-digit RGB or `@dk1`, `@lt1`, `@dk2`, `@lt2`, `@accent1` through `@accent6`, `@hlink`, `@folHlink`. Theme slots themselves must be RGB, not references. Theme fonts are `{major, minor, east_asian, complex_script, unset?}`; `unset` lists the typeface slots a template leaves empty (`empty`) or omits (`absent`), and the ones an edit has named since (`written`), where the four names are the fonts AISlide draws with rather than the file's setting ([theme fonts](authoring/fonts.md#theme-fonts-a-template-leaves-empty)).
 
 Native backgrounds, fills, text, explicit chart `schemeClr`, gradients and effects resolve through the 12-attribute color map (`p:clrMap`, layout/slide/notes `p:clrMapOvr` / `a:overrideClrMapping`, and `a:masterClrMapping` `sld -> sldLayout -> sldMaster` inheritance verified on PowerPoint 16.0 build 20430 in #32; chart `c:clrMapOvr`, `chartStyle`/`chartColorStyle` and auto palettes are not remapped), while `dk1`/`lt1`/`dk2`/`lt2` address theme slots directly. Masters without `<p:bg>` resolve `@bg1` via `p:clrMap`, and `import_masters` writes default `p:clrMap` while keeping `@slot` colors. Modern comment text belongs to no color map and resolves scheme colors through the default map.
 

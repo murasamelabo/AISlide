@@ -53,6 +53,7 @@ pub struct RenderedSlide {
 }
 
 pub(crate) const SHAPE_APPROXIMATION: &str = "SHAPE_APPROXIMATION";
+pub(crate) const THEME_FONT_UNSET: &str = "THEME_FONT_UNSET";
 
 // The preview draws the shapes that are not rect, ellipse, flowChartProcess or flowChartConnector from normalized geometry. The renderer
 // warns once per shape; previews and preflight report one notice per page (see summarize_shape_approximations).
@@ -94,6 +95,27 @@ pub(crate) fn summarize_shape_approximations(warnings: Vec<RenderWarning>) -> Ve
             code: SHAPE_APPROXIMATION.into(), page_index: warning.page_index, element_id: String::new(), element_ids: ids.clone(), scope: warning.scope,
             message: shape_approximation_summary(ids.len(), &presets.iter().map(String::as_str).collect()),
         });
+    }
+    summarized
+}
+
+/// Collapses the THEME_FONT_UNSET warnings that share a page, scope and message into one at the position of the first; its `element_ids`
+/// list the text elements. A warning for a single element stays as it is.
+pub(crate) fn summarize_theme_font_notices(warnings: Vec<RenderWarning>) -> Vec<RenderWarning> {
+    type Key = (usize, Option<String>, String);
+    let mut groups: std::collections::BTreeMap<Key, Vec<String>> = std::collections::BTreeMap::new();
+    for warning in warnings.iter().filter(|warning| warning.code == THEME_FONT_UNSET) {
+        let ids = groups.entry((warning.page_index, warning.scope.clone(), warning.message.clone())).or_default();
+        if !ids.contains(&warning.element_id) { ids.push(warning.element_id.clone()); }
+    }
+    let mut emitted: BTreeSet<Key> = BTreeSet::new();
+    let mut summarized = Vec::with_capacity(warnings.len());
+    for warning in warnings {
+        if warning.code != THEME_FONT_UNSET { summarized.push(warning); continue; }
+        let key = (warning.page_index, warning.scope.clone(), warning.message.clone());
+        if !emitted.insert(key.clone()) { continue; }
+        let ids = &groups[&key];
+        summarized.push(if ids.len() == 1 { warning } else { RenderWarning { element_id: String::new(), element_ids: ids.clone(), ..warning } });
     }
     summarized
 }
@@ -1023,6 +1045,7 @@ impl Scene<'_> {
         let mut top = 0.0;
         let mut used = BTreeSet::new();
         let mut requested = BTreeSet::new();
+        let mut unset_slots = BTreeSet::new();
         let mut fallbacks = std::collections::BTreeMap::<String, BTreeSet<String>>::new();
         let mut overflow = false;
         for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
@@ -1070,6 +1093,9 @@ impl Scene<'_> {
                 .map(|(run, style)| self.family(&run.text, style.font_family.as_deref()))
                 .collect();
             requested.extend(families.iter().cloned());
+            for (run, style) in runs.iter().zip(&styles) {
+                if let Some(slot) = crate::theme_fonts::unset_slot(&run.text, style.font_family.as_deref(), self.theme) { unset_slots.insert(slot); }
+            }
             let (maximum, line_height) = crate::rich_text::paragraph_metrics(&styles, size, paragraph.line_spacing);
             let (wrap_inset, inset) = crate::rich_text::paragraph_insets(paragraph, format, size);
             if paragraph.indent.is_some_and(|value| value != 0) || paragraph.level.is_some() {
@@ -1185,6 +1211,9 @@ impl Scene<'_> {
         if !fallbacks.is_empty() {
             let message = fallbacks.into_iter().map(|(family, actual)| format!("Requested {family}; used {}", actual.into_iter().collect::<Vec<_>>().join(", "))).collect::<Vec<_>>().join("; ");
             self.warning(id, "FONT_FALLBACK", message);
+        }
+        if !unset_slots.is_empty() {
+            self.warning(id, THEME_FONT_UNSET, crate::theme_fonts::unset_message(&unset_slots, self.theme));
         }
         let offset = match format.vertical {
             VerticalAlign::Top => 0.0,

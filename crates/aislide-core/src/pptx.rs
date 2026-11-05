@@ -440,11 +440,14 @@ pub(crate) fn theme(theme: &Theme) -> Vec<u8> {
         writer.end_element();
         writer.start_element("a:fontScheme");
         writer.write_attribute("name", "Office fonts");
-        for kind in ["a:majorFont", "a:minorFont"] {
+        for (kind, group) in [("a:majorFont", crate::theme_fonts::FontGroup::Major), ("a:minorFont", crate::theme_fonts::FontGroup::Minor)] {
             writer.start_element(kind);
-            empty(writer, "a:latin", &[("typeface", if kind == "a:majorFont" { &theme.fonts.major } else { &theme.fonts.minor })]);
-            empty(writer, "a:ea", &[("typeface", &theme.fonts.east_asian)]);
-            empty(writer, "a:cs", &[("typeface", &theme.fonts.complex_script)]);
+            for script in crate::theme_fonts::FontScript::ALL {
+                // a slot the document leaves unspecified stays empty; the stand-in AISlide draws with is not the file's setting
+                let typeface = if theme.fonts.unset.unspecified(group, script).is_some() { "" } else { theme.fonts.family(group, script) };
+                empty(writer, &format!("a:{}", script.element()), &[("typeface", typeface)]);
+            }
+            for (script, typeface) in &theme.fonts.unset.group(group).script_fonts { empty(writer, "a:font", &[("script", script), ("typeface", typeface)]); }
             writer.end_element();
         }
         writer.end_element();

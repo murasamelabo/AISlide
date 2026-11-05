@@ -351,7 +351,8 @@ fn element_fonts(elements: &mut [Element], from: &str, to: &str) {
 }
 
 /// Replace exact, case-sensitive explicit family names, including master/layout and theme fonts.
-/// Unspecified families and theme references such as @major remain unchanged.
+/// Unspecified families and theme references such as @major remain unchanged. A theme slot that the template leaves empty counts as the font
+/// AISlide draws it with, so replacing that name names a font for the slot, which is then saved (see `ThemeFonts::after_edit`).
 pub fn replace_font(mut deck: Deck, from: &str, to: &str) -> Result<Deck> {
     check_font(from)?;
     check_font(to)?;
@@ -362,9 +363,11 @@ pub fn replace_font(mut deck: Deck, from: &str, to: &str) -> Result<Deck> {
         for master in &mut design.masters { element_fonts(&mut master.elements, from, to); }
         for layout in &mut design.layouts { element_fonts(&mut layout.elements, from, to); }
         let fonts = &mut design.theme.fonts;
+        let previous = fonts.clone();
         for family in [&mut fonts.major, &mut fonts.minor, &mut fonts.east_asian, &mut fonts.complex_script] {
             if family == from { *family = to.into(); }
         }
+        fonts.after_edit(&previous);
     }
     validate_deck(&deck)?;
     Ok(deck)

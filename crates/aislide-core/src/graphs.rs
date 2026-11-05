@@ -1428,12 +1428,17 @@ pub(crate) fn create_with_label_boxes(id: &str, spec: &GraphSpec, theme: &Theme)
     Ok(result)
 }
 
-pub fn catalog() -> Value {
-    let examples = [
+/// The editable example graphs of `graph_catalog`; `part_catalog` offers the first as the example of `diagram/custom`.
+pub(crate) fn catalog_examples() -> [Value; 3] {
+    [
         json!({"id":"service","name":"Service architecture","spec":{"version":1,"title":"Service architecture","subtitle":"Editable example","nodes":[{"id":"user","label":"Client","kind":"rounded_rectangle","x":40,"y":220},{"id":"api","label":"API service","kind":"rectangle","x":390,"y":220},{"id":"data","label":"Database","kind":"cylinder","x":780,"y":220}],"edges":[{"id":"request","source":"user","target":"api","label":"HTTPS"},{"id":"query","source":"api","target":"data","label":"Query"}],"groups":[]}}),
         json!({"id":"approval","name":"Approval flow","spec":{"version":1,"title":"Approval flow","subtitle":"Editable example","nodes":[{"id":"input","label":"Request","x":40,"y":220},{"id":"review","label":"Review","kind":"diamond","x":390,"y":190,"width":200,"height":140},{"id":"approve","label":"Approved","kind":"rounded_rectangle","x":830,"y":120},{"id":"revise","label":"Revise","x":830,"y":340}],"edges":[{"id":"submit","source":"input","target":"review"},{"id":"yes","source":"review","target":"approve","label":"Yes"},{"id":"no","source":"review","target":"revise","label":"No"}],"groups":[]}}),
         json!({"id":"boundary","name":"Network boundary","spec":{"version":1,"title":"Network boundary","subtitle":"Editable example","nodes":[{"id":"client","label":"Client","x":40,"y":210},{"id":"app","label":"Application","x":430,"y":210,"group":"private"},{"id":"store","label":"Storage","kind":"cylinder","x":800,"y":210,"group":"private"}],"edges":[{"id":"access","source":"client","target":"app","label":"Authorized"},{"id":"data","source":"app","target":"store"}],"groups":[{"id":"private","label":"Private network","x":370,"y":120,"width":680,"height":300}]}}),
-    ];
+    ]
+}
+
+pub fn catalog() -> Value {
+    let examples = catalog_examples();
     json!({"version":1,"shapes":["rectangle","rounded_rectangle","ellipse","diamond","cylinder","cloud"],"ports":["auto","top","left","bottom","right"],"routes":["straight","elbow","manual"],"limits":{"nodes":MAX_NODES,"edges":MAX_EDGES,"groups":MAX_GROUPS,"group_depth":MAX_GROUP_DEPTH,"rendered_elements":256,"waypoints_per_edge":MAX_WAYPOINTS},"canvas":{"width":WIDTH,"height":HEIGHT,"content_top":CONTENT_TOP,"content_top_without_title":0.0},"node_text":{"detail_max_length":DETAIL_MAX,"detail_font_size_min":12,"detail_font_size_max":40,"detail_font_size_default":"max(12, font_size * 0.8)","detail_font_size_ceiling":"font_size","detail_fit":{"values":["wrap","shrink"],"default":"wrap","wrap":"keeps the detail size and accepts a short last line","shrink":"reduces the detail by 0.5px steps, down to 12px, to avoid a short last line, and reports GRAPH_NODE_DETAIL_SHRUNK"},"text_align":["left","center","right"],"default_alignment":"left with detail, center without detail","heading_bold_default":true},"edge_layout":{"position":"fraction of path length from semantic source to target","label_side":"above/below the segment; right/left for vertical segments","offset":"source_offset/target_offset are -0.5..0.5 of side length from center, increasing right/down","offset_shapes":["rectangle","rounded_rectangle","ellipse","diamond"],"manual":"1-16 graph-coordinate waypoints, including diagonal segments; nodes are not moved","move":"waypoints move with both endpoints, or when the edge itself is selected; otherwise intermediate points stay fixed"},"schema":schemars::schema_for!(GraphSpec),"operation_schema":schemars::schema_for!(GraphOperation),"examples":examples})
 }
 
