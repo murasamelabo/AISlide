@@ -29,6 +29,8 @@ pub const MIN_HEIGHT: f64 = 40.0;
 const MAX_X: f64 = WIDTH - MIN_WIDTH;
 const MAX_Y: f64 = HEIGHT - MIN_HEIGHT;
 const RENDER_LAYOUT_VERSION: u32 = 3;
+// The card padding floor of visual preflight (CONTAINER_PADDING). Node text gains it only where the measured text still fits.
+const MINIMUM_PADDING: f64 = 8.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -564,10 +566,8 @@ fn paragraphs_of(element: &Element) -> Vec<crate::rich_text::RichParagraph> {
 
 // Moves label text boxes into their shape so the label follows the shape when it is moved or resized in PowerPoint.
 fn embed_labels(children: &mut Vec<Element>, shape_id: &str, labels: Vec<Element>, theme: &Theme) -> Result<()> {
-    // Matches the visual preflight card padding floor; centered labels gain it only where their text still fits.
-    const MINIMUM_PADDING: f64 = 8.0;
     let labels: Vec<_> = labels.into_iter().filter(|label| matches!(label, Element::Text { text, .. } if !text.is_empty())).collect();
-    let Some(Element::Shape { x, y, width, height, text, font_size, color, bold, format, .. }) = children.iter_mut().find(|element| element.bounds().0 == shape_id) else {
+    let Some(Element::Shape { x, y, width, height, preset, fill, stroke_width, text, font_size, color, bold, format, .. }) = children.iter_mut().find(|element| element.bounds().0 == shape_id) else {
         return Err(Error::Invalid(format!("graph label target {shape_id} is missing")));
     };
     let Some(Element::Text { font_size: heading_size, color: heading_color, bold: heading_bold, format: heading_format, .. }) = labels.first() else { return Ok(()); };
@@ -587,13 +587,20 @@ fn embed_labels(children: &mut Vec<Element>, shape_id: &str, labels: Vec<Element
     *format = TextFormat { alignment: heading_format.alignment, vertical: heading_format.vertical, font_family: heading_format.font_family.clone(), paragraphs, ..Default::default() };
     *text = crate::rich_text::plain_text(&format.paragraphs);
     *font_size = *heading_size; *color = heading_color.clone(); *bold = *heading_bold;
+    let card = matches!(preset.as_str(), "rect" | "roundRect") && *width >= 100.0 && *height >= 60.0 && (fill != "none" || *stroke_width > 0.0);
     let shortfall = MINIMUM_PADDING - padding.top.min(padding.bottom);
-    if format.vertical == VerticalAlign::Middle && shortfall > 0.0 {
+    if shortfall > 0.0 && (format.vertical == VerticalAlign::Middle || card && format.vertical == VerticalAlign::Top) {
         let frame_width = *width - padding.left - padding.right; let frame_height = *height - padding.top - padding.bottom;
         let needed = f64::from(crate::layout::graph_rich_metrics(text, frame_width, frame_height, *font_size, *bold, format, theme)?.measured_height);
-        // Equal growth on both sides keeps the centered text where the separate text box placed it.
-        let growth = shortfall.min(((frame_height - needed) / 2.0 - 1.0).max(0.0));
-        padding.top += growth; padding.bottom += growth;
+        if format.vertical == VerticalAlign::Middle {
+            // Equal growth on both sides keeps the centered text where the separate text box placed it.
+            let growth = shortfall.min(((frame_height - needed) / 2.0 - 1.0).max(0.0));
+            padding.top += growth; padding.bottom += growth;
+        } else if frame_height - needed - (MINIMUM_PADDING - padding.top).max(0.0) - (MINIMUM_PADDING - padding.bottom).max(0.0) >= 1.0 {
+            // Text with a detail hangs from the top of a painted card (the cards preflight checks). Each side rises only to the floor, and only
+            // while the measured text still fits; otherwise the padding stays as laid out and diagnostics reports the shortfall.
+            padding.top = padding.top.max(MINIMUM_PADDING); padding.bottom = padding.bottom.max(MINIMUM_PADDING);
+        }
     }
     format.padding = Some(padding);
     Ok(())
@@ -940,7 +947,23 @@ pub(crate) fn diagnostics(id: &str, spec: &GraphSpec, element: &Element, theme: 
     for node in &spec.nodes {
         let shape_id = format!("{prefix}-n-{}", node.id);
         let Some(&(element, bounds)) = placed_children.iter().find(|(element, _)| element.bounds().0 == shape_id) else { report.status = "partial".into(); continue; };
-        let Element::Shape { format, .. } = element else { report.status = "partial".into(); continue; };
+        let Element::Shape { preset, fill: shape_fill, stroke_width: shape_stroke, text: shape_text, width: shape_width, height: shape_height, font_size: shape_font_size, bold: shape_bold, format, .. } = element else { report.status = "partial".into(); continue; };
+        // Cards of the kind and size that preflight's CONTAINER_PADDING checks; text that could not keep the floor was left as laid out (see embed_labels).
+        if let Some(padding) = format.padding.as_ref().filter(|padding| padding.top.min(padding.bottom) < MINIMUM_PADDING - 0.01) {
+            if matches!(preset.as_str(), "rect" | "roundRect") && !shape_text.trim().is_empty() && *shape_width >= 100.0 && *shape_height >= 60.0 && (shape_fill != "none" || *shape_stroke > 0.0) {
+                match crate::layout::graph_rich_metrics(shape_text, shape_width - padding.left - padding.right, shape_height - padding.top - padding.bottom, *shape_font_size, *shape_bold, format, theme) {
+                    Ok(metrics) => {
+                        let needed = f64::from(metrics.measured_height);
+                        report.push(GraphFinding {
+                            code: "GRAPH_NODE_PADDING".into(), severity: "warning".into(), graph_id: id.into(), entity_id: node.id.clone(), element_ids: vec![shape_id.clone()], bounds,
+                            message: format!("Node text is {needed:.0}px tall, so this {shape_height:.0}px node cannot keep the {MINIMUM_PADDING:.0}px top and bottom padding; make the node at least {:.0}px tall, widen it so the text wraps less, or shorten the text.", (needed + 2.0 * MINIMUM_PADDING + 1.0).ceil()),
+                            slide_id: None, lines: None, font_size: None,
+                        });
+                    }
+                    Err(_) => report.status = "partial".into(),
+                }
+            }
+        }
         let heading_lines = node.label.replace("\r\n", "\n").replace('\r', "\n").split('\n').count();
         let Some(heading) = format.paragraphs.get(..heading_lines).filter(|_| !node.label.is_empty()) else { continue; };
         let Some(style) = heading.first().and_then(|paragraph| paragraph.runs.first()).map(|run| &run.style) else { report.status = "partial".into(); continue; };
@@ -984,15 +1007,32 @@ pub(crate) fn annotate_transaction(mut result: crate::document::TransactionResul
     result
 }
 
-pub(crate) fn managed_badge_pairs(document: &crate::document::Document, slide_id: &str) -> BTreeSet<(String, String)> {
-    let mut pairs = BTreeSet::new();
-    let Some(slide) = document.deck.slides.iter().find(|slide| slide.id == slide_id) else { return pairs; };
-    for part in document.parts.iter().filter(|part| part.slide_id == slide_id && !part.stale) {
+// Managed diagrams whose element still is what their record rendered: the part is not stale and the render hash matches.
+fn verified_diagrams<'a>(document: &'a crate::document::Document, slide: &'a crate::model::Slide) -> Vec<(&'a Element, String, GraphSpec, f64)> {
+    let mut diagrams = Vec::new();
+    for part in document.parts.iter().filter(|part| part.slide_id == slide.id && !part.stale) {
         let crate::parts::PartData::Diagram { .. } = &part.spec.data else { continue; };
         let Some(element) = slide.elements.iter().find(|element| element.bounds().0 == part.element_id) else { continue; };
         if crate::parts::state::render_hash(element).map_or(true, |hash| hash != part.render_sha256) { continue; }
         let Ok((id, spec, content_height)) = crate::parts::graph_render_context(&part.element_id, &part.spec) else { continue; };
         let Ok(prefix) = render_prefix(&id, &spec) else { continue; };
+        diagrams.push((element, prefix, spec, content_height));
+    }
+    diagrams
+}
+
+/// The IDs of the group frames in verified managed diagrams. Such a frame is a drawn region with its heading as text, not a label box:
+/// the diagram draws connectors above it, so only the heading's own text can collide with one.
+pub(crate) fn managed_group_frames(document: &crate::document::Document, slide_id: &str) -> BTreeSet<String> {
+    let Some(slide) = document.deck.slides.iter().find(|slide| slide.id == slide_id) else { return BTreeSet::new(); };
+    verified_diagrams(document, slide).into_iter()
+        .flat_map(|(_, prefix, spec, _)| spec.groups.iter().map(|group| format!("{prefix}-g-{}", group.id)).collect::<Vec<_>>()).collect()
+}
+
+pub(crate) fn managed_badge_pairs(document: &crate::document::Document, slide_id: &str) -> BTreeSet<(String, String)> {
+    let mut pairs = BTreeSet::new();
+    let Some(slide) = document.deck.slides.iter().find(|slide| slide.id == slide_id) else { return pairs; };
+    for (element, prefix, spec, content_height) in verified_diagrams(document, slide) {
         let Element::Group { view_width, view_height, children, .. } = element else { continue; };
         let scale = [view_width / WIDTH, view_height / content_height];
         for edge in spec.edges.iter().filter(|edge| edge.badge.is_some()) {

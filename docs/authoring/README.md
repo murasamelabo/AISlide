@@ -344,6 +344,15 @@ and reports `GRAPH_NODE_LABEL_SHRINK_LIMIT`; ordinary additional wrapping is
 reported as informational `GRAPH_NODE_LABEL_WRAPPED`. Widen the node instead
 of assuming every label can become one line.
 
+Node text keeps at least 8px of top and bottom padding wherever the measured text
+fits, including the top-aligned text of a node with `detail`, so preflight does not
+report `CONTAINER_PADDING` for cards the engine laid out. When the heading and
+detail need more height than the node leaves, the engine keeps the layout, never
+changes an explicit node size, and reports `GRAPH_NODE_PADDING` with the node
+height that would fit. A connector that crosses a group's header band beside its
+heading, as every cross-lane connector of a swimlane does, is not reported as
+`CONNECTOR_LABEL_INTERFERENCE`; one over the heading text still is.
+
 Graph edges also accept `stroke_width` (0.5-12, default 2), `label_color`
 (default `@dk1`) and `label_font_size` (8-40, default 16). These sizes are in
 graph pixels, before any explicit part-region fitting. Explicit font sizes

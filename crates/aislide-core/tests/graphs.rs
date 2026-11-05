@@ -1971,3 +1971,118 @@ fn graph_operations_move_groups_align_and_remove_incident_edges_atomically() {
     execute_request(json!({"op":"create_graph","id":"arranged","spec":arranged})).unwrap();
     assert!(execute_request(json!({"op":"transform_graph","spec":graph(),"operations":[{"op":"move","ids":["client"],"dx":10000,"dy":0}]})).is_err());
 }
+
+fn lane_diagram() -> Value {
+    json!({"version":1,"title":"Swimlane","subtitle":"","show_title":false,
+        "groups":[
+            {"id":"L0","label":"Lane A","x":0,"y":0,"width":1152,"height":200},
+            {"id":"L1","label":"Lane B","x":0,"y":216,"width":1152,"height":240}
+        ],"nodes":[
+            {"id":"a","label":"Start","kind":"rounded_rectangle","x":40,"y":70,"width":160,"height":64,"group":"L0"},
+            {"id":"b","label":"Review","detail":"Check the request","kind":"rounded_rectangle","x":300,"y":290,"width":236,"height":100,"group":"L1"},
+            {"id":"c","label":"調査を任せる","detail":"playbook を実行","kind":"rounded_rectangle","x":700,"y":300,"width":150,"height":76,"group":"L1","font_size":16,"detail_font_size":14}
+        ],"edges":[
+            {"id":"e1","source":"a","target":"b","route":"elbow","source_port":"right","target_port":"top"},
+            {"id":"e2","source":"b","target":"c","route":"straight"}
+        ]})
+}
+
+fn lane_part(graph: Value) -> Value {
+    json!({"version":1,"preset":"diagram/custom","title":"Swimlane","data":{"kind":"diagram","graph":graph},"layout":{"x":64,"y":104,"width":1152,"height":512,"show_title":false}})
+}
+
+fn lane_result(graph: Value) -> Value {
+    let document = execute_request(json!({"op":"create_presentation","id":"lanes-document","title":"Lanes"})).unwrap();
+    execute_request(json!({"op":"apply_operations","document":document,"expected_revision":0,"expected_hash":document["hash"],"operations":[
+        {"op":"add_part","slide_id":"slide-1","id":"lanes","spec":lane_part(graph)}
+    ]})).unwrap()
+}
+
+fn preflight_codes(document: &Value, code: &str) -> Vec<Value> {
+    let report = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+    report["findings"].as_array().unwrap().iter().filter(|finding| finding["code"] == code).cloned().collect()
+}
+
+#[test]
+fn issue82_cross_lane_connectors_and_engine_set_node_padding_are_not_findings() {
+    let result = lane_result(lane_diagram());
+    let document = &result["document"];
+    assert_eq!(result["diagnostics"]["findings"], json!([]), "{result}");
+    assert!(preflight_codes(document, "CONNECTOR_LABEL_INTERFERENCE").is_empty());
+    assert!(preflight_codes(document, "CONTAINER_PADDING").is_empty());
+    let lanes = &document["deck"]["slides"][0]["elements"][0];
+    for node in ["-n-a", "-n-b", "-n-c"] {
+        let padding = &nested_child(lanes, node)["format"]["padding"];
+        assert!(padding["top"].as_f64().unwrap() >= 8.0 && padding["bottom"].as_f64().unwrap() >= 8.0, "{node}: {padding}");
+    }
+    // Raising the padding of the detail node keeps its text where the layout put it, within the node.
+    let node = nested_child(lanes, "-n-c");
+    assert_eq!((node["height"].as_f64(), node["format"]["padding"]["top"].as_f64(), node["format"]["padding"]["bottom"].as_f64()), (Some(76.0), Some(8.0), Some(8.0)));
+    assert_eq!(node["text"], "調査を任せる\nplaybook を実行");
+}
+
+#[test]
+fn issue82_a_connector_over_the_group_heading_is_reported_with_its_part() {
+    let mut graph = lane_diagram();
+    graph["nodes"].as_array_mut().unwrap().push(json!({"id":"d","label":"Done","kind":"rounded_rectangle","x":40,"y":330,"width":160,"height":64,"group":"L1"}));
+    graph["edges"].as_array_mut().unwrap().push(json!({"id":"e3","source":"a","target":"d","route":"manual","source_port":"left","target_port":"left","waypoints":[[30,102],[30,362]]}));
+    let result = lane_result(graph);
+    let findings = preflight_codes(&result["document"], "CONNECTOR_LABEL_INTERFERENCE");
+    assert_eq!(findings.len(), 1, "only the connector that crosses the heading text: {findings:?}");
+    let ids = findings[0]["element_ids"].as_array().unwrap();
+    assert!(ids[0].as_str().unwrap().ends_with("-g-L1") && ids[1].as_str().unwrap().ends_with("-e-e3"), "{ids:?}");
+    assert_eq!(findings[0]["severity"], "warning");
+    assert_eq!(findings[0]["part_ids"], json!(["lanes"]));
+}
+
+#[test]
+fn issue82_findings_name_the_managed_part_only_for_objects_inside_it() {
+    let result = lane_result(lane_diagram());
+    let document = &result["document"];
+    let added = execute_request(json!({"op":"apply_operations","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],"operations":[
+        {"op":"add_elements","slide_id":"slide-1","elements":[{"type":"text","id":"note","x":64,"y":640,"width":300,"height":30,"text":"Small note","font_size":10,"color":"000000","bold":false}]}
+    ]})).unwrap();
+    let findings = preflight_codes(&added["document"], "SMALL_TEXT");
+    let inside: Vec<_> = findings.iter().filter(|finding| finding["element_ids"][0].as_str().unwrap().contains("-n-")).collect();
+    assert!(!inside.is_empty() && inside.iter().all(|finding| finding["part_ids"] == json!(["lanes"])), "{findings:?}");
+    let note = findings.iter().find(|finding| finding["element_ids"] == json!(["note"])).unwrap();
+    assert!(note.get("part_ids").is_none(), "{note}");
+}
+
+#[test]
+fn issue82_a_changed_diagram_keeps_the_frame_test_for_its_group_headings() {
+    let result = lane_result(lane_diagram());
+    let saved = execute_request(json!({"op":"export_presentation","document":result["document"]})).unwrap();
+    let mut package = Package::open(STANDARD.decode(saved["base64"].as_str().unwrap()).unwrap()).unwrap();
+    let xml = package.text("ppt/slides/slide1.xml").unwrap().replace(">Start<", ">Begin<");
+    package.replace_part("ppt/slides/slide1.xml", xml.into_bytes()).unwrap();
+    let changed = execute_request(json!({"op":"open_presentation","id":"changed-lanes","base64":STANDARD.encode(package.save().unwrap())})).unwrap();
+    assert_eq!(changed["document"]["parts"][0]["stale"], true);
+    let findings = preflight_codes(&changed["document"], "CONNECTOR_LABEL_INTERFERENCE");
+    assert!(findings.iter().any(|finding| finding["element_ids"][0].as_str().unwrap().ends_with("-g-L1")), "an edited diagram is no longer verified: {findings:?}");
+}
+
+#[test]
+fn issue82_text_that_cannot_keep_the_padding_floor_is_reported_by_the_diagram() {
+    let mut graph = lane_diagram();
+    graph["nodes"].as_array_mut().unwrap().push(json!({"id":"tight","label":"Tight node","detail":"Detail text","kind":"rounded_rectangle","x":900,"y":300,"width":200,"height":60,"group":"L1","font_size":16,"detail_font_size":16}));
+    let result = lane_result(graph.clone());
+    let diagnostics = result["diagnostics"]["findings"].as_array().unwrap();
+    let finding = diagnostics.iter().find(|finding| finding["code"] == "GRAPH_NODE_PADDING").unwrap_or_else(|| panic!("{result}"));
+    assert_eq!((finding["severity"].as_str(), finding["entity_id"].as_str()), (Some("warning"), Some("tight")));
+    assert!(finding["element_ids"][0].as_str().unwrap().ends_with("-n-tight"));
+    assert_eq!(diagnostics.iter().filter(|finding| finding["code"] == "GRAPH_NODE_PADDING").count(), 1, "the nodes that fit are not reported");
+    // The layout is not pushed out to meet the floor; preflight still sees the card as it is, and names the part to edit.
+    let padding = preflight_codes(&result["document"], "CONTAINER_PADDING");
+    assert_eq!(padding.len(), 1, "{padding:?}");
+    assert!(padding[0]["element_ids"][0].as_str().unwrap().ends_with("-n-tight"));
+    assert_eq!(padding[0]["part_ids"], json!(["lanes"]));
+    // The reported height is enough: the same text then keeps the padding.
+    let message = finding["message"].as_str().unwrap();
+    let required: f64 = message.split("at least ").nth(1).unwrap().split("px").next().unwrap().parse().unwrap();
+    assert!(required > 60.0, "{message}");
+    graph["nodes"][3]["height"] = json!(required);
+    let grown = lane_result(graph);
+    assert_eq!(grown["diagnostics"]["findings"], json!([]), "{grown}");
+    assert!(preflight_codes(&grown["document"], "CONTAINER_PADDING").is_empty());
+}

@@ -35,6 +35,10 @@ pub struct Finding {
 	pub affected_page_indices: Vec<usize>,
 	pub affected_slide_ids: Vec<String>,
 	pub element_ids: Vec<String>,
+	/// IDs of the managed parts (a diagram or a briefing part) that hold the slide-owned objects of this finding. Edit them through the part
+	/// (`update_part`, `update_graph`), not through their child elements. Empty for findings about other objects.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub part_ids: Vec<String>,
 	pub scopes: Vec<String>,
 	pub bounds: Bounds,
 	pub message: String,
@@ -52,6 +56,8 @@ pub struct PreflightReport {
 	pub office_visual_parity: bool,
 	pub semantic_truth_verified: bool,
 	#[serde(skip)] include_inherited: bool,
+	// Element IDs of the managed parts on the page being checked.
+	#[serde(skip)] page_parts: BTreeSet<String>,
 }
 
 struct Object<'a> {
@@ -246,9 +252,10 @@ fn push_finding(report: &mut PreflightReport, page: usize, slide: &str, objects:
 	}
 	if report.findings.len() >= 256 { return Err(Error::Limit("visual preflight exceeds 256 findings; select fewer pages or resolve reported density".into())); }
 	let bounds = objects.iter().map(|object| object.bounds).reduce(|first, next| first.union(next)).unwrap_or(Rect::ZERO);
+	let part_ids: BTreeSet<&str> = objects.iter().filter(|object| object.scope == "slide").map(|object| object.owner.unwrap_or(object.id)).filter(|owner| report.page_parts.contains(*owner)).collect();
 	report.findings.push(Finding { code: code.into(), severity: if aggregate { "info".into() } else { severity.into() }, evidence: evidence.into(), page_index: page, slide_id: slide.into(),
 		affected_page_indices: vec![page], affected_slide_ids: vec![slide.into()],
-		element_ids: objects.iter().map(|object| object.id.into()).collect(), scopes: objects.iter().map(|object| object.scope.clone()).collect(), bounds: bounds.into(),
+		element_ids: objects.iter().map(|object| object.id.into()).collect(), part_ids: part_ids.into_iter().map(String::from).collect(), scopes: objects.iter().map(|object| object.scope.clone()).collect(), bounds: bounds.into(),
 		message: message.into(), suggestions: suggestions.iter().map(|suggestion| (*suggestion).into()).collect() });
 	Ok(())
 }
@@ -365,7 +372,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 	let mut report = PreflightReport { revision: document.revision, hash: document.hash.clone(), page_indices: selected.clone(), findings: Vec::new(),
 		checks: ["renderer_warnings", "off_slide", "text_overlap", "connector_label_interference", "connector_badge_overlap", "container_clearance", "small_text", "density"].map(String::from).to_vec(),
 		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed shaped-glyph metric bounds with alignment, padding and clipping, not exact ink intersection; warped text conservatively uses its content frame", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices and SHAPE_APPROXIMATION preview notices are summarized per page as info (include_preview_notices:false omits them); specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
-		office_visual_parity: false, semantic_truth_verified: false, include_inherited: options.include_inherited };
+		office_visual_parity: false, semantic_truth_verified: false, include_inherited: options.include_inherited, page_parts: BTreeSet::new() };
 	report.limitations.push("Template-owned SMALL_TEXT and FONT_FALLBACK are informational and aggregated by owner and element before the finding limit; affected_page_indices and affected_slide_ids retain coverage. include_inherited:false omits inherited-only findings, not interactions with slide objects or unprojected native content.".into());
 	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into(), "numbered_sequence_spacing".into(), "part_aspect".into(), "part_title_band".into(), "interactive_lab_frame".into()]);
 	report.limitations.push("Over-budget shadow, glow, soft-edge and reflection are omitted only from the diagnostic view at scale 1, with an EFFECT_APPROXIMATION finding; native content is unchanged and other renderer failures still reject.".into());
@@ -380,6 +387,8 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				&["Approve distribution-safe URLs before adding visible citations or a linked reference appendix", "Keep a readable URL as well as a hyperlink; never automatically publish private notes or file paths"])?;
 		}
 		let known_badges = crate::graphs::managed_badge_pairs(document, &slide.id);
+		let managed_frames = crate::graphs::managed_group_frames(document, &slide.id);
+		report.page_parts = document.parts.iter().filter(|part| part.slide_id == slide.id).map(|part| part.element_id.clone()).collect();
 		let mut objects = page_objects(deck, page)?;
 		// Text a managed part draws at sizes its preset fixes (tags, captions, badges) cannot be raised from the spec, so it is information;
 		// a body_size the author lowered below the floor stays a warning (see parts::fixed_typography).
@@ -490,8 +499,16 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			}
 			for (connector_index, connector) in objects.iter().enumerate().filter(|(_, candidate)| !candidate.route.is_empty()) {
 				if connector.scope == object.scope && connector.connections.contains(&object.id) { continue; }
-				let inverse = object.transform.inverse();
-				if connector.route.windows(2).any(|segment| crosses_frame(inverse * segment[0], inverse * segment[1], object.text_frame)) {
+				// A managed group frame is a drawn region whose heading is its only text, and a diagram draws its connectors above it. Every cross-lane
+				// connector crosses the header band, so only a connector over the heading's own text counts.
+				let crosses = if object.scope == "slide" && managed_frames.contains(object.id) {
+					let heading = object.text_bounds.inflate(4.0, 4.0);
+					object.text_bounds.area() > 0.0 && connector.route.windows(2).any(|segment| crosses_frame(segment[0], segment[1], heading))
+				} else {
+					let inverse = object.transform.inverse();
+					connector.route.windows(2).any(|segment| crosses_frame(inverse * segment[0], inverse * segment[1], object.text_frame))
+				};
+				if crosses {
 					if object.numbered_badge && index > connector_index && object.scope == connector.scope && route_crosses_badge_center(object, connector) {
 						if object.scope == "slide" && known_badges.contains(&(object.id.into(), connector.id.into())) { continue; }
 						push_finding(&mut report, page, &slide.id, &[object, connector], "CONNECTOR_BADGE_OVERLAP", "info", "heuristic", "A compact opaque numbered badge covers a connector near its center; this may be intentional", &["Keep the connector behind the badge", "Confirm that the number and nearby labels remain readable in the preview"])?;

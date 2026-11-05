@@ -1473,7 +1473,16 @@ at 32 KiB, and contain `code`, `severity`, `graph_id`, `entity_id`, `element_ids
 Bounds are in the final graph group's local coordinate space.
 
 Codes include `GRAPH_LABEL_BORDER_OVERLAP`, `GRAPH_LABEL_OVERLAP`,
-`GRAPH_NODE_LABEL_WRAPPED` (info), and `GRAPH_NODE_LABEL_SHRINK_LIMIT` (warning).
+`GRAPH_NODE_LABEL_WRAPPED` (info), `GRAPH_NODE_LABEL_SHRINK_LIMIT` (warning) and
+`GRAPH_NODE_PADDING` (warning). The engine raises the top and bottom padding of
+node text to the 8px floor of preflight's `CONTAINER_PADDING` whenever the
+measured text still fits with a pixel to spare: centered labels as before, and now
+also the top-aligned text of a node with a `detail`, whose padding used to stay at
+10% of the node height (7.6px for a 76px node). When the text does not fit, the
+layout is kept (explicit node sizes are never changed and text is never clipped).
+For `rectangle` and `rounded_rectangle` nodes of at least 100x60, the cards that
+preflight checks, `GRAPH_NODE_PADDING` then names the node, its text height and
+the node height that would keep the floor.
 Node-label findings name the node shape that holds the text and report its text
 frame as bounds; overlap findings and `on_overlap:error` messages likewise name
 the node or boundary shape rather than an internal label frame.
@@ -1495,7 +1504,15 @@ Diagnostics are not stored in documents, hashes, PPTX metadata or Undo receipts.
 Preflight omits a graph badge's overlap with its own connector only when
 current managed metadata, render fingerprints, actual badge attributes and
 the specified route agree. Hand-authored, stale, unverifiable and other-edge
-crossings remain reportable, as do badge/label collisions. Generic chart
+crossings remain reportable, as do badge/label collisions. The same verification
+decides how a connector is checked against a managed diagram's group frame: a
+verified frame is a drawn region that the diagram paints its connectors above, so
+only a connector over the heading's own text (with 4px of margin) is reported as
+`CONNECTOR_LABEL_INTERFERENCE`, and the cross-lane connectors every swimlane has
+are not. A changed or unverifiable diagram keeps the frame test. Findings about
+slide-owned objects inside a managed part carry `part_ids` (the part's element ID,
+for example `["lanes"]`), which tells you to repair them through `update_part` or
+`update_graph`; the field is omitted for other findings. Generic chart
 parity notices become one informational `CHART_PREVIEW` finding per selected
 page; specific `CHART_PRESENTATION` limits remain warnings. `SHAPE_APPROXIMATION`
 follows the same rule, one `info` finding per page and owner with the shapes in
