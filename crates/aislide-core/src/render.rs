@@ -1430,7 +1430,7 @@ impl Scene<'_> {
     }
 }
 
-fn effect_bounds(element: &Element) -> [f64; 4] {
+pub(crate) fn effect_bounds(element: &Element) -> [f64; 4] {
     let (_, _, _, width, height) = element.bounds();
     let mut bounds = [0.0_f64, 0.0_f64, width, height];
     if let Element::Group { view_width, view_height, children, .. } = element {

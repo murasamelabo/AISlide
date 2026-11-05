@@ -289,7 +289,7 @@ fn issue76_a_shapes_own_fill_is_the_backdrop_only_where_its_text_is_drawn_inside
 
 #[test]
 fn issue76_a_line_or_an_outline_across_the_text_leaves_its_backdrop_unknown() {
-    let line = |id: &str, bounds: [f64; 4]| json!({"type":"connector","id":id,"x":bounds[0],"y":bounds[1],"width":bounds[2],"height":bounds[3],"color":"000000","stroke_width":2,"arrow":false});
+    let line = |id: &str, bounds: [f64; 4], width: f64| json!({"type":"connector","id":id,"x":bounds[0],"y":bounds[1],"width":bounds[2],"height":bounds[3],"color":"000000","stroke_width":width,"arrow":false});
     let outlined = |id: &str, preset: &str, bounds: [f64; 4]| {
         let mut element = shape(id, preset, bounds, "none");
         element["stroke"] = json!("000000");
@@ -300,15 +300,15 @@ fn issue76_a_line_or_an_outline_across_the_text_leaves_its_backdrop_unknown() {
     bordered["stroke"] = json!("FFFFFF");
     bordered["stroke_width"] = json!(6);
     let report = report("FFFFFF", vec![
-        line("line", [0.0, 120.0, 400.0, 1.0]),
+        line("line", [0.0, 120.0, 400.0, 1.0], 2.0),
         text("crossed", [60.0, 100.0, 200.0, 40.0], "000000"),
         text("beside", [60.0, 200.0, 200.0, 40.0], "000000"),
         // A line under a covering shape is hidden by it; a line over the shape still crosses the text.
-        line("under", [0.0, 320.0, 400.0, 1.0]),
+        line("under", [0.0, 320.0, 400.0, 1.0], 2.0),
         rect("panel", [40.0, 290.0, 300.0, 60.0], DARK),
         text("on-panel", [60.0, 300.0, 200.0, 40.0], "FFFFFF"),
         rect("panel-2", [40.0, 390.0, 300.0, 60.0], DARK),
-        line("over", [0.0, 420.0, 400.0, 1.0]),
+        line("over", [0.0, 420.0, 400.0, 1.0], 2.0),
         text("through-panel", [60.0, 400.0, 200.0, 40.0], "FFFFFF"),
         // A shape with no fill draws only its outline: text inside it is on the slide, text on the outline is not.
         outlined("ring", "ellipse", [500.0, 60.0, 300.0, 300.0]),
@@ -323,11 +323,24 @@ fn issue76_a_line_or_an_outline_across_the_text_leaves_its_backdrop_unknown() {
         // The border of a filled shape is an edge of its fill, not a backdrop.
         bordered,
         text("in-bordered", [40.0, 560.0, 300.0, 60.0], "FFFFFF"),
+        // The stroke is as wide as it is drawn: its center line lies outside the frame, but its edge does not.
+        line("thick", [900.0, 250.0, 340.0, 1.0], 20.0),
+        text("near-thick", [960.0, 210.0, 200.0, 35.0], "000000"),
+        text("clear-of-thick", [960.0, 280.0, 200.0, 35.0], "000000"),
+        // A shadow or a reflection reaches past the shape that casts it; the shape itself still covers the text on it.
+        styled_rect("shadowed", [940.0, 360.0, 200.0, 80.0], DARK, json!({"shadow":{"color":"000000","opacity":0.4,"blur":6,"distance":4,"angle":45}})),
+        text("on-shadowed", [960.0, 380.0, 100.0, 30.0], "FFFFFF"),
+        text("in-halo", [1146.0, 400.0, 60.0, 30.0], "000000"),
+        text("clear-of-halo", [1180.0, 400.0, 60.0, 30.0], "000000"),
+        styled_rect("mirrored", [940.0, 480.0, 200.0, 40.0], DARK, json!({"reflection":{"blur":2,"distance":2,"start_opacity":0.5,"end_opacity":0.0,"end_position":0.5}})),
+        text("in-reflection", [960.0, 530.0, 100.0, 25.0], "000000"),
+        text("below-reflection", [960.0, 620.0, 100.0, 25.0], "000000"),
     ]);
-    for id in ["beside", "on-panel", "in-ring", "in-card", "in-bordered"] { assert!(outcome(&report, id).is_empty(), "{id}: {:?}", report.issues); }
-    for id in ["crossed", "through-panel", "on-ring", "on-card-edge", "in-chevron"] {
+    for id in ["beside", "on-panel", "in-ring", "in-card", "in-bordered", "clear-of-thick", "on-shadowed", "clear-of-halo", "below-reflection"] { assert!(outcome(&report, id).is_empty(), "{id}: {:?}", report.issues); }
+    for id in ["crossed", "through-panel", "on-ring", "on-card-edge", "in-chevron", "near-thick"] {
         assert_eq!(outcome(&report, id), ["contrast_background_unverified:unsupported_backdrop"], "{id}");
     }
+    for id in ["in-halo", "in-reflection"] { assert_eq!(outcome(&report, id), ["contrast_background_unverified:background_not_solid"], "{id}"); }
 }
 
 #[test]
