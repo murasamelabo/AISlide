@@ -337,6 +337,13 @@ render as paragraphs inside the node shape with an 8px space before the detail,
 subject to fitting, so the text moves and resizes with the shape in PowerPoint.
 Omitting the new fields preserves the earlier title/label presentation.
 
+Node `detail_fit` is `wrap` (default) or `shrink`. A detail keeps its size; with
+`shrink` it may be reduced by 0.5px steps down to 12px to avoid a last line of one
+CJK character, and `GRAPH_NODE_DETAIL_SHRUNK` then names the node and both sizes.
+Earlier versions reduced it silently. A diagram rendered again draws such a detail
+at its full size, so widen the node or shorten the detail where a short last line
+matters.
+
 Node `label_fit:"shrink"` prefers a single-line heading by reducing its font
 only as far as 12px; default `wrap` retains the original behavior. Hard
 newlines are never removed. A node too narrow at that floor retains wrapping

@@ -1437,7 +1437,7 @@ Graphs have a separate catalog, not an additional preset counted among the 111 p
 
 `GraphSpec` remains backward-compatible version 1: `{version:1,title,subtitle?,show_title?,nodes,edges?,groups?}`. Coordinates are absolute within 1152x512, with nodes/boundaries below the 88px title band by default. `show_title:false` omits title/subtitle objects and permits content from y=0; omission retains the band. Minimum size is 64x40; card nodes default to 176x80. There are 1-48 nodes, at most 64 edges and 16 boundaries, with boundary depth at most four. IDs are 1-24 ASCII letters/digits/hyphens/underscores, unique across all three collections. Root ID limit is 40 characters. Title/subtitle limits are 80/120; node labels 160, edge/boundary labels 64. The `schema` that `part_catalog` and `graph_catalog` return publishes these bounds as `minLength`/`maxLength`, `minItems`/`maxItems` and `minimum`/`maximum` on `GraphSpec`, `GraphNode`, `GraphEdge` and `GraphGroup`, so callers can read them without a failed call. Because a node or boundary has to fit the canvas, `x` is published up to 1088 and `y` up to 472 (the canvas minus the 64x40 minimum), `width` and `height` up to 1152 and 512; a position that satisfies each bound can still fail together with the size, and `y` below 88 needs `show_title:false`. Route points of a manual edge lie within 0-1152 and 0-512 (from y=88 while the title band is shown). The rendered scene still obeys 256 elements per slide and document size limits; not every combination of collection maxima fits.
 
-- Node: `{id,label,label_fit?,detail?,detail_font_size?,text_align?,heading_bold?,kind?,x,y,width?,height?,fill?,stroke?,color?,font_size?,group?,icon?,presentation?}`. Kinds: `rectangle`, `rounded_rectangle`, `ellipse`, `diamond`, `cylinder`, `cloud`. Font size 12-40, default 18; colors accept RGB/theme references. Default fill/outline/text: `@lt1`/`@accent1`/`@dk1`. `presentation` is `card` (default) or `icon`; icon mode requires an icon and retains the six kinds and four logical ports.
+- Node: `{id,label,label_fit?,detail?,detail_font_size?,detail_fit?,text_align?,heading_bold?,kind?,x,y,width?,height?,fill?,stroke?,color?,font_size?,group?,icon?,presentation?}`. Kinds: `rectangle`, `rounded_rectangle`, `ellipse`, `diamond`, `cylinder`, `cloud`. Font size 12-40, default 18; colors accept RGB/theme references. Default fill/outline/text: `@lt1`/`@accent1`/`@dk1`. `presentation` is `card` (default) or `icon`; icon mode requires an icon and retains the six kinds and four logical ports.
 - Edge: `{id,source,target,source_port?,target_port?,label?,route?,color?,arrow?,start_arrow?,dashed?}`. Ports: `auto`, `top`, `left`, `bottom`, `right`. Route: `straight` (default) or `elbow`. End arrow defaults true; start arrow/dashed false; color `@dk2`. Endpoints must reference distinct existing nodes.
 - Boundary: `{id,label,x,y,width,height,fill?,stroke?,parent?,icon?}`. Defaults `@lt2`/`@dk2`, with solid outlines. A member or child boundary must fit below its parent's 40px heading with 8px side/bottom padding. Missing parents, cycles, excess depth and containment violations reject. Core coordinates stay absolute; React Flow uses relative child positions only in the UI, with stable outer-first rendering.
 
@@ -1459,7 +1459,23 @@ color. `GraphNode.label_fit` is `wrap` (default, omitted from serialization)
 or `shrink`. Shrink prefers one line, testing the final text frame in 0.5px
 steps down to 12px without altering hard newlines. If one line still cannot
 fit, normal readable wrapping remains and diagnostics report the limit.
-These options preserve legacy rendering when omitted.
+These options preserve legacy rendering when omitted, except `detail_fit`.
+
+`GraphNode.detail_fit` is `wrap` (default, omitted from serialization) or
+`shrink`. A detail keeps the size it asks for: `detail_font_size`, or 80% of the
+heading size (at least 12px). Earlier versions silently reduced it by 0.5px steps,
+down to 12px, whenever a wrapped last line held only one CJK character, without a
+diagnostic. That reduction now happens only with `shrink`, and each detail it
+reduced is reported as `GRAPH_NODE_DETAIL_SHRUNK` (information, with the node ID,
+the starting and final sizes, and whether the node specified the size or uses the
+default). Existing documents keep the geometry they were saved with. A diagram
+that is rendered again, for example by `update_part`, draws such a detail at its
+full size and wraps with a short last line; widen the node, shorten the detail or
+add a line break where that matters, or choose `shrink`. Text that is smaller than
+the preflight floor in a node of a verified managed diagram is reported by
+`SMALL_TEXT` with the node ID, whether the detail or the heading is small, its
+drawn and requested sizes, and the repairs to make through `update_part` or
+`update_graph`.
 
 ### Graph Diagnostics
 
@@ -1473,7 +1489,8 @@ at 32 KiB, and contain `code`, `severity`, `graph_id`, `entity_id`, `element_ids
 Bounds are in the final graph group's local coordinate space.
 
 Codes include `GRAPH_LABEL_BORDER_OVERLAP`, `GRAPH_LABEL_OVERLAP`,
-`GRAPH_NODE_LABEL_WRAPPED` (info), `GRAPH_NODE_LABEL_SHRINK_LIMIT` (warning) and
+`GRAPH_NODE_LABEL_WRAPPED` (info), `GRAPH_NODE_LABEL_SHRINK_LIMIT` (warning),
+`GRAPH_NODE_DETAIL_SHRUNK` (info) and
 `GRAPH_NODE_PADDING` (warning). The engine raises the top and bottom padding of
 node text to the 8px floor of preflight's `CONTAINER_PADDING` whenever the
 measured text still fits with a pixel to spare: centered labels as before, and now

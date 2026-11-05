@@ -206,6 +206,34 @@ pub(crate) fn visible_reference_ids(deck: &Deck, page: usize) -> Result<BTreeSet
 		.map(|object| object.id.to_owned()).collect())
 }
 
+// The message and repair advice for text below the floor in a node of a verified managed diagram, from the sizes the diagram drew.
+// `effective` is the smallest size on the page, which fixes the scale between the diagram's own coordinates and the page.
+fn node_small_text(node: &crate::graphs::ManagedNodeText, effective: f64, floor: f64) -> Option<(String, Vec<String>)> {
+	let scale = effective / [node.heading, node.detail].into_iter().flatten().reduce(f64::min)?;
+	let (heading, detail) = (node.heading.map(|size| size * scale), node.detail.map(|size| size * scale));
+	let below = |size: Option<f64>| size.is_some_and(|size| size + 0.01 < floor);
+	let (detail_below, heading_below) = (below(detail), below(heading));
+	if !detail_below && !heading_below { return None; }
+	let mut drawn = Vec::new();
+	if detail_below { drawn.push(format!("its detail is drawn at {:.1}px", detail.unwrap_or_default())); }
+	if heading_below { drawn.push(format!("its heading is drawn at {:.1}px", heading.unwrap_or_default())); }
+	let requested = match node.detail_requested.map(|size| size * scale) {
+		Some(size) if detail_below && detail.is_some_and(|drawn| drawn + 0.01 < size) => format!(" (the node asks for {size:.1}px {}; its detail_fit is {})",
+			if node.detail_explicit { "through detail_font_size" } else { "by default" }, if node.detail_fit == crate::graphs::GraphDetailFit::Shrink { "shrink" } else { "wrap" }),
+		_ => String::new(),
+	};
+	let message = format!("Node '{}' of diagram '{}': {}, below the requested {floor}px floor{requested}", node.node_id, node.part_id, drawn.join(" and "));
+	let mut suggestions = Vec::new();
+	if detail_below {
+		suggestions.push(format!("Widen node '{}' or shorten its detail so that the text wraps without a short last line", node.node_id));
+		if node.detail_fit == crate::graphs::GraphDetailFit::Shrink { suggestions.push(format!("Set detail_fit to 'wrap' on node '{}' so that its detail keeps the size it asks for", node.node_id)); }
+		if node.detail_requested.is_some_and(|size| size * scale + 0.01 < floor) { suggestions.push(format!("Raise detail_font_size on node '{}' to at least {floor}; it cannot exceed the heading font_size", node.node_id)); }
+	}
+	if heading_below { suggestions.push(format!("Raise font_size on node '{}' to at least {floor} or widen the node; label_fit 'shrink' lowers the heading down to 12px", node.node_id)); }
+	suggestions.push(format!("Change it through update_part or update_graph on '{}', not by editing the node's text elements", node.part_id));
+	Some((message, suggestions))
+}
+
 fn crosses_frame(start: Point, end: Point, rect: Rect) -> bool {
 	let mut low = 0.0_f64;
 	let mut high = 1.0_f64;
@@ -388,6 +416,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		}
 		let known_badges = crate::graphs::managed_badge_pairs(document, &slide.id);
 		let managed_frames = crate::graphs::managed_group_frames(document, &slide.id);
+		let node_text = crate::graphs::managed_node_text(document, &slide.id);
 		report.page_parts = document.parts.iter().filter(|part| part.slide_id == slide.id).map(|part| part.element_id.clone()).collect();
 		let mut objects = page_objects(deck, page)?;
 		// Text a managed part draws at sizes its preset fixes (tags, captions, badges) cannot be raised from the spec, so it is information;
@@ -482,11 +511,15 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 					Some(part) => push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "info", "heuristic",
 						&format!("Part {} ({}) draws this text at a fixed {:.0}px, below the requested {}px floor; its preset does not let you change the size", part.element_id, part.spec.preset, object.font_size.unwrap_or_default(), options.min_font_size),
 						&["Choose a preset whose typography meets the floor, or accept the preset's fixed sizes", "Split the content across slides"])?,
-					None => match guided_annotation(object) {
-						Some(role) => push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "info", "heuristic",
+					None => if let Some(role) = guided_annotation(object) {
+						push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "info", "heuristic",
 							&format!("Guided creation draws this {role} at a fixed {:.0}px, below the requested {}px floor; the guided input does not resize it and the body floor does not cover citations and page numbers", object.font_size.unwrap_or_default(), options.min_font_size),
-							&["Keep the fixed size, or raise this element's font size yourself; it is then checked against the floor like any other text", "Keep citations short instead of shrinking them"])?,
-						None => push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &format!("Effective font is below the requested {}px floor", options.min_font_size), &["Increase font size and enlarge or reflow the frame", "Split dense content into another slide"])?,
+							&["Keep the fixed size, or raise this element's font size yourself; it is then checked against the floor like any other text", "Keep citations short instead of shrinking them"])?;
+					} else if let Some((message, suggestions)) = node_text.get(object.id).filter(|_| object.scope == "slide")
+						.and_then(|node| node_small_text(node, object.font_size.unwrap_or_default(), options.min_font_size)) {
+						push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &message, &suggestions.iter().map(String::as_str).collect::<Vec<_>>())?;
+					} else {
+						push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &format!("Effective font is below the requested {}px floor", options.min_font_size), &["Increase font size and enlarge or reflow the frame", "Split dense content into another slide"])?;
 					},
 				}
 			}

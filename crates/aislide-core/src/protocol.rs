@@ -238,8 +238,9 @@ fn execute(request: Request, profile: crate::limits::CapacityProfile) -> Result<
         Request::CreateGraphIcon { base64, mime_type, alt } => Ok(serde_json::to_value(crate::graphs::create_icon(base64, &mime_type, &alt)?)?),
         Request::CreateGraph { id, spec, theme, include_diagnostics } => {
             let theme = theme.unwrap_or_default();
-            let element = crate::graphs::create(&id, &spec, &theme)?;
-            if include_diagnostics { Ok(serde_json::json!({"diagnostics":crate::graphs::diagnostics(&id, &spec, &element, &theme),"element":element})) }
+            let (element, shrinks) = crate::graphs::with_detail_shrinks(|| crate::graphs::create(&id, &spec, &theme));
+            let element = element?;
+            if include_diagnostics { Ok(serde_json::json!({"diagnostics":crate::graphs::diagnostics(&id, &spec, &element, &theme, &shrinks),"element":element})) }
             else { Ok(serde_json::to_value(element)?) }
         },
         Request::InsertGraph { document, expected_revision, slide_id, id, spec } => Ok(serde_json::to_value(crate::graphs::change(&document, expected_revision, &slide_id, &id, &spec, false)?)?),

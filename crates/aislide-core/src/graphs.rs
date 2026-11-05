@@ -71,6 +71,7 @@ pub struct GraphLayoutNode {
     pub id: String, pub label: String,
     #[serde(default)] pub detail: Option<String>,
     #[serde(default)] pub detail_font_size: Option<f64>,
+    #[serde(default)] pub detail_fit: GraphDetailFit,
     #[serde(default)] pub text_align: Option<GraphTextAlign>,
     #[serde(default = "enabled")] pub heading_bold: bool,
     #[serde(default)] pub label_fit: GraphLabelFit,
@@ -95,7 +96,7 @@ pub fn layout_graph(input: &GraphLayoutInput) -> Result<GraphSpec> {
     let spec = GraphSpec {
         version: input.version, title: input.title.clone(), subtitle: input.subtitle.clone(), show_title: input.show_title,
         nodes: input.nodes.iter().map(|node| GraphNode {
-            id: node.id.clone(), label: node.label.clone(), detail: node.detail.clone(), detail_font_size: node.detail_font_size,
+            id: node.id.clone(), label: node.label.clone(), detail: node.detail.clone(), detail_font_size: node.detail_font_size, detail_fit: node.detail_fit,
             text_align: node.text_align, heading_bold: node.heading_bold, label_fit: node.label_fit, kind: node.kind, presentation: node.presentation,
             x: 0.0, y: if input.show_title { CONTENT_TOP } else { 0.0 }, width: node.width, height: node.height,
             fill: node.fill.clone(), stroke: node.stroke.clone(), color: node.color.clone(), font_size: node.font_size,
@@ -190,6 +191,15 @@ impl GraphLabelFit {
     fn is_wrap(&self) -> bool { *self == Self::Wrap }
 }
 
+/// How a node's `detail` meets a short last line. `wrap` (default) keeps the detail size and accepts the short line; `shrink` may reduce
+/// the size by 0.5px steps, down to 12px, until the last line is no longer short, and reports `GRAPH_NODE_DETAIL_SHRUNK` when it did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphDetailFit { #[default] Wrap, Shrink }
+impl GraphDetailFit {
+    fn is_wrap(&self) -> bool { *self == Self::Wrap }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GraphLabelPlacement {
@@ -238,6 +248,7 @@ pub struct GraphNode {
     #[schemars(length(max = DETAIL_MAX))] pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 12, max = 40))] pub detail_font_size: Option<f64>,
+    #[serde(default, skip_serializing_if = "GraphDetailFit::is_wrap")] pub detail_fit: GraphDetailFit,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub text_align: Option<GraphTextAlign>,
     #[serde(default = "enabled", skip_serializing_if = "is_true")] pub heading_bold: bool,
     #[serde(default, skip_serializing_if = "GraphLabelFit::is_wrap")] pub label_fit: GraphLabelFit,
@@ -918,7 +929,7 @@ impl GraphDiagnostics {
     }
 }
 
-pub(crate) fn diagnostics(id: &str, spec: &GraphSpec, element: &Element, theme: &Theme) -> GraphDiagnostics {
+pub(crate) fn diagnostics(id: &str, spec: &GraphSpec, element: &Element, theme: &Theme, shrinks: &[DetailShrink]) -> GraphDiagnostics {
     let mut report = GraphDiagnostics::default();
     let Element::Group { children, .. } = element else { report.status = "unavailable".into(); return report; };
     let Ok(prefix) = render_prefix(id, spec) else { report.status = "unavailable".into(); return report; };
@@ -964,6 +975,14 @@ pub(crate) fn diagnostics(id: &str, spec: &GraphSpec, element: &Element, theme: 
                 }
             }
         }
+        for shrink in shrinks.iter().filter(|shrink| shrink.node_id == node.id) {
+            let origin = if node.detail_font_size.is_some() { "specifies detail_font_size" } else { "uses the default detail size" };
+            report.push(GraphFinding {
+                code: "GRAPH_NODE_DETAIL_SHRUNK".into(), severity: "info".into(), graph_id: id.into(), entity_id: node.id.clone(), element_ids: vec![shape_id.clone()], bounds,
+                message: format!("Node detail was reduced from {:.1}px to {:.1}px so that its last line is not a short fragment, because detail_fit is shrink; the node {origin} {:.1}px. Set detail_fit to wrap to keep the size, or widen the node or shorten the detail.", shrink.from, shrink.to, detail_size(node)),
+                slide_id: None, lines: None, font_size: Some(shrink.to),
+            });
+        }
         let heading_lines = node.label.replace("\r\n", "\n").replace('\r', "\n").split('\n').count();
         let Some(heading) = format.paragraphs.get(..heading_lines).filter(|_| !node.label.is_empty()) else { continue; };
         let Some(style) = heading.first().and_then(|paragraph| paragraph.runs.first()).map(|run| &run.style) else { report.status = "partial".into(); continue; };
@@ -996,7 +1015,14 @@ pub(crate) fn annotate_transaction(mut result: crate::document::TransactionResul
         let Ok((render_id, spec, _)) = crate::parts::graph_render_context(id, &part.spec) else { report.status = "partial".into(); continue; };
         let fallback = Theme::default();
         let theme = crate::design::slide_theme(slide, result.document.deck.design.as_ref()).unwrap_or(&fallback);
-        let found = diagnostics(&render_id, &spec, element, theme);
+        // Only a new render shows which details the widow fit reduced, so a diagram that does not allow it is not rendered again.
+        let shrinks = if spec.nodes.iter().any(|node| node.detail.is_some() && node.detail_fit == GraphDetailFit::Shrink) {
+            match with_detail_shrinks(|| crate::parts::create_with_theme(id, &part.spec, theme)) {
+                (Ok(rendered), shrinks) if crate::parts::state::render_hash(&rendered).is_ok_and(|hash| hash == part.render_sha256) => shrinks,
+                _ => { report.status = "partial".into(); Vec::new() }
+            }
+        } else { Vec::new() };
+        let found = diagnostics(&render_id, &spec, element, theme, &shrinks);
         if found.status != "complete" { report.status = "partial".into(); }
         for mut finding in found.findings {
             finding.graph_id = id.clone(); finding.slide_id = Some(slide_id.clone());
@@ -1027,6 +1053,43 @@ pub(crate) fn managed_group_frames(document: &crate::document::Document, slide_i
     let Some(slide) = document.deck.slides.iter().find(|slide| slide.id == slide_id) else { return BTreeSet::new(); };
     verified_diagrams(document, slide).into_iter()
         .flat_map(|(_, prefix, spec, _)| spec.groups.iter().map(|group| format!("{prefix}-g-{}", group.id)).collect::<Vec<_>>()).collect()
+}
+
+/// What a verified managed diagram says about the text of one node, so that a SMALL_TEXT finding can name the node and say what to change.
+pub(crate) struct ManagedNodeText {
+    pub part_id: String,
+    pub node_id: String,
+    /// The smallest drawn size of the heading and of the detail, in the coordinates of the diagram's children.
+    pub heading: Option<f64>,
+    pub detail: Option<f64>,
+    /// The detail size the node asks for: its `detail_font_size`, or the default.
+    pub detail_requested: Option<f64>,
+    pub detail_explicit: bool,
+    pub detail_fit: GraphDetailFit,
+}
+
+/// The text sizes of the node shapes of verified managed diagrams on a slide, by shape ID. A node is identified by the shape ID that the
+/// diagram's own prefix and the node ID produce, never by taking an ID apart.
+pub(crate) fn managed_node_text(document: &crate::document::Document, slide_id: &str) -> BTreeMap<String, ManagedNodeText> {
+    let mut nodes = BTreeMap::new();
+    let Some(slide) = document.deck.slides.iter().find(|slide| slide.id == slide_id) else { return nodes; };
+    for (element, prefix, spec, _) in verified_diagrams(document, slide) {
+        let Element::Group { id: part_id, children, .. } = element else { continue; };
+        let placed_children = placed(children);
+        for node in &spec.nodes {
+            let shape_id = format!("{prefix}-n-{}", node.id);
+            let Some((Element::Shape { font_size, format, .. }, _)) = placed_children.iter().find(|(element, _)| element.bounds().0 == shape_id) else { continue; };
+            let heading_lines = if node.label.is_empty() { 0 } else { node.label.replace("\r\n", "\n").replace('\r', "\n").split('\n').count() };
+            let (heading, detail) = format.paragraphs.split_at(heading_lines.min(format.paragraphs.len()));
+            let smallest = |paragraphs: &[crate::rich_text::RichParagraph]| paragraphs.iter().flat_map(|paragraph| &paragraph.runs)
+                .filter(|run| !run.text.trim().is_empty()).map(|run| run.style.font_size.unwrap_or(*font_size)).reduce(f64::min);
+            nodes.insert(shape_id, ManagedNodeText {
+                part_id: part_id.clone(), node_id: node.id.clone(), heading: smallest(heading), detail: node.detail.as_ref().and_then(|_| smallest(detail)),
+                detail_requested: node.detail.as_ref().map(|_| detail_size(node)), detail_explicit: node.detail_font_size.is_some(), detail_fit: node.detail_fit,
+            });
+        }
+    }
+    nodes
 }
 
 pub(crate) fn managed_badge_pairs(document: &crate::document::Document, slide_id: &str) -> BTreeSet<(String, String)> {
@@ -1126,9 +1189,24 @@ pub(crate) fn fit_node_labels(id: &str, spec: &GraphSpec, children: &mut [Elemen
     Ok(())
 }
 
+/// A node detail that `fit_detail_widows` reduced, with the sizes it started and ended at.
+#[derive(Clone, Debug)]
+pub(crate) struct DetailShrink { pub node_id: String, pub from: f64, pub to: f64 }
+
+thread_local! { static DETAIL_SHRINKS: std::cell::RefCell<Option<Vec<DetailShrink>>> = const { std::cell::RefCell::new(None) }; }
+
+/// Runs `render` and returns which details `fit_detail_widows` reduced while it ran, so diagnostics can report them.
+pub(crate) fn with_detail_shrinks<T>(render: impl FnOnce() -> T) -> (T, Vec<DetailShrink>) {
+    let outer = DETAIL_SHRINKS.with(|records| records.replace(Some(Vec::new())));
+    let value = render();
+    let records = DETAIL_SHRINKS.with(|records| records.replace(outer)).unwrap_or_default();
+    (value, records)
+}
+
 pub(crate) fn fit_detail_widows(id: &str, spec: &GraphSpec, children: &mut [Element], theme: &Theme) -> Result<()> {
     let prefix = render_prefix(id, spec)?;
-    for node in spec.nodes.iter().filter(|node| node.detail.is_some()) {
+    // Only a node that asked for detail_fit:"shrink" may have its detail reduced; wrapping keeps the size and accepts a short last line.
+    for node in spec.nodes.iter().filter(|node| node.detail.is_some() && node.detail_fit == GraphDetailFit::Shrink) {
         let detail_id = format!("{prefix}-nd-{}", node.id);
         for child in children.iter_mut() {
             let Element::Text { id, text, width, height, font_size, bold, .. } = child else { continue; };
@@ -1139,7 +1217,10 @@ pub(crate) fn fit_detail_widows(id: &str, spec: &GraphSpec, children: &mut [Elem
             while size > 12.0 {
                 size = (size - 0.5).max(12.0);
                 let (metrics, orphan) = crate::layout::graph_text_metrics(text, *width, *height, size, *bold, theme)?;
-                if !metrics.overflow && metrics.missing_glyphs == 0 && !orphan { *font_size = size; break; }
+                if !metrics.overflow && metrics.missing_glyphs == 0 && !orphan {
+                    DETAIL_SHRINKS.with(|records| if let Some(records) = records.borrow_mut().as_mut() { records.push(DetailShrink { node_id: node.id.clone(), from: *font_size, to: size }); });
+                    *font_size = size; break;
+                }
             }
         }
     }
@@ -1287,7 +1368,7 @@ pub fn catalog() -> Value {
         json!({"id":"approval","name":"Approval flow","spec":{"version":1,"title":"Approval flow","subtitle":"Editable example","nodes":[{"id":"input","label":"Request","x":40,"y":220},{"id":"review","label":"Review","kind":"diamond","x":390,"y":190,"width":200,"height":140},{"id":"approve","label":"Approved","kind":"rounded_rectangle","x":830,"y":120},{"id":"revise","label":"Revise","x":830,"y":340}],"edges":[{"id":"submit","source":"input","target":"review"},{"id":"yes","source":"review","target":"approve","label":"Yes"},{"id":"no","source":"review","target":"revise","label":"No"}],"groups":[]}}),
         json!({"id":"boundary","name":"Network boundary","spec":{"version":1,"title":"Network boundary","subtitle":"Editable example","nodes":[{"id":"client","label":"Client","x":40,"y":210},{"id":"app","label":"Application","x":430,"y":210,"group":"private"},{"id":"store","label":"Storage","kind":"cylinder","x":800,"y":210,"group":"private"}],"edges":[{"id":"access","source":"client","target":"app","label":"Authorized"},{"id":"data","source":"app","target":"store"}],"groups":[{"id":"private","label":"Private network","x":370,"y":120,"width":680,"height":300}]}}),
     ];
-    json!({"version":1,"shapes":["rectangle","rounded_rectangle","ellipse","diamond","cylinder","cloud"],"ports":["auto","top","left","bottom","right"],"routes":["straight","elbow","manual"],"limits":{"nodes":MAX_NODES,"edges":MAX_EDGES,"groups":MAX_GROUPS,"group_depth":MAX_GROUP_DEPTH,"rendered_elements":256,"waypoints_per_edge":MAX_WAYPOINTS},"canvas":{"width":WIDTH,"height":HEIGHT,"content_top":CONTENT_TOP,"content_top_without_title":0.0},"node_text":{"detail_max_length":DETAIL_MAX,"detail_font_size_min":12,"detail_font_size_max":40,"detail_font_size_default":"max(12, font_size * 0.8)","detail_font_size_ceiling":"font_size","text_align":["left","center","right"],"default_alignment":"left with detail, center without detail","heading_bold_default":true},"edge_layout":{"position":"fraction of path length from semantic source to target","label_side":"above/below the segment; right/left for vertical segments","offset":"source_offset/target_offset are -0.5..0.5 of side length from center, increasing right/down","offset_shapes":["rectangle","rounded_rectangle","ellipse","diamond"],"manual":"1-16 graph-coordinate waypoints, including diagonal segments; nodes are not moved","move":"waypoints move with both endpoints, or when the edge itself is selected; otherwise intermediate points stay fixed"},"schema":schemars::schema_for!(GraphSpec),"operation_schema":schemars::schema_for!(GraphOperation),"examples":examples})
+    json!({"version":1,"shapes":["rectangle","rounded_rectangle","ellipse","diamond","cylinder","cloud"],"ports":["auto","top","left","bottom","right"],"routes":["straight","elbow","manual"],"limits":{"nodes":MAX_NODES,"edges":MAX_EDGES,"groups":MAX_GROUPS,"group_depth":MAX_GROUP_DEPTH,"rendered_elements":256,"waypoints_per_edge":MAX_WAYPOINTS},"canvas":{"width":WIDTH,"height":HEIGHT,"content_top":CONTENT_TOP,"content_top_without_title":0.0},"node_text":{"detail_max_length":DETAIL_MAX,"detail_font_size_min":12,"detail_font_size_max":40,"detail_font_size_default":"max(12, font_size * 0.8)","detail_font_size_ceiling":"font_size","detail_fit":{"values":["wrap","shrink"],"default":"wrap","wrap":"keeps the detail size and accepts a short last line","shrink":"reduces the detail by 0.5px steps, down to 12px, to avoid a short last line, and reports GRAPH_NODE_DETAIL_SHRUNK"},"text_align":["left","center","right"],"default_alignment":"left with detail, center without detail","heading_bold_default":true},"edge_layout":{"position":"fraction of path length from semantic source to target","label_side":"above/below the segment; right/left for vertical segments","offset":"source_offset/target_offset are -0.5..0.5 of side length from center, increasing right/down","offset_shapes":["rectangle","rounded_rectangle","ellipse","diamond"],"manual":"1-16 graph-coordinate waypoints, including diagonal segments; nodes are not moved","move":"waypoints move with both endpoints, or when the edge itself is selected; otherwise intermediate points stay fixed"},"schema":schemars::schema_for!(GraphSpec),"operation_schema":schemars::schema_for!(GraphOperation),"examples":examples})
 }
 
 pub fn change(document: &crate::document::Document, expected_revision: u64, slide_id: &str, id: &str, spec: &GraphSpec, update: bool) -> Result<crate::document::TransactionResult> {

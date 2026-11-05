@@ -2516,6 +2516,8 @@ test('graph feedback MCP schemas and committed diagnostics stay bounded and sing
     for (const value of [null, 'true', 1]) assert.equal(schema.safeParse({ id: 'graph', spec, include_diagnostics: value }).success, false);
     for (const label_fit of ['wrap', 'shrink']) assert.ok(schema.safeParse({ id: 'graph', spec: { ...spec, nodes: [{ ...node, label_fit }] } }).success);
     for (const label_fit of [null, 'truncate', true]) assert.equal(schema.safeParse({ id: 'graph', spec: { ...spec, nodes: [{ ...node, label_fit }] } }).success, false);
+    for (const detail_fit of ['wrap', 'shrink']) assert.ok(schema.safeParse({ id: 'graph', spec: { ...spec, nodes: [{ ...node, detail: 'Detail', detail_fit }] } }).success);
+    for (const detail_fit of [null, 'truncate', true]) assert.equal(schema.safeParse({ id: 'graph', spec: { ...spec, nodes: [{ ...node, detail: 'Detail', detail_fit }] } }).success, false);
     for (const header_color of ['123ABC', '@dk1', null]) assert.ok(schema.safeParse({ id: 'graph', spec: { ...spec, groups: [{ ...group, header_color }] } }).success);
     for (const header_color of ['red', '@bad', 123]) assert.equal(schema.safeParse({ id: 'graph', spec: { ...spec, groups: [{ ...group, header_color }] } }).success, false);
     assert.ok(registrations.get('transform_graph').config.inputSchema.safeParse({ spec, operations: [{ op: 'put_node', node }, { op: 'put_group', group }] }).success);
