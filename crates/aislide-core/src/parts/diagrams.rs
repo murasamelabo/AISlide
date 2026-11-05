@@ -84,7 +84,7 @@ fn comparison_panels(drawing: &mut Drawing, data: &PartData, theme: &crate::desi
             if let Some(icon) = &item.icon {
                 let badge_top = top + (row_height - 44.0) / 2.0;
                 drawing.shape("ellipse", [left + 24.0, badge_top, 44.0, 44.0], icon_fill, icon_fill);
-                let mut picture = crate::media::create_picture(&drawing.id(), icon.base64.clone(), &icon.mime_type, &icon.alt)?;
+                let mut picture = crate::graphs::icon_element(&drawing.id(), icon)?;
                 if let Element::Picture { x, y, width, height, .. } = &mut picture {
                     let scale = 28.0 / width.max(*height);
                     *width *= scale; *height *= scale;

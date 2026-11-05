@@ -269,7 +269,7 @@ pub(super) fn body_size(value: Option<f64>) -> Result<()> {
 }
 
 fn picture(value: &Option<GraphIcon>) -> Result<()> {
-    if let Some(value) = value { valid_text(&value.alt, crate::graphs::ICON_ALT_MAX)?; }
+    if let Some(value) = value { crate::graphs::validate_icon(value)?; }
     Ok(())
 }
 
@@ -335,7 +335,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
         PartData::ScreenshotCallouts { image, callouts, detail_views, accent, body_size: size, message: band } => {
             count(callouts.len(), 1, 6)?;
             if *detail_views && callouts.len() > 3 { return Err(Error::Invalid("screenshot detail views require 1-3 callouts; split overview and detail pages".into())); }
-            valid_text(&image.alt, crate::graphs::ICON_ALT_MAX)?;
+            crate::graphs::validate_icon(image)?;
             for callout in callouts {
                 if ![callout.x, callout.y].iter().all(|value| value.is_finite() && (0.0..=1.0).contains(value)) {
                     return Err(Error::Invalid("callout x/y must be 0-1 fractions of the source image".into()));
@@ -519,7 +519,7 @@ pub(super) fn shape(drawing: &mut Drawing, style: Fill<'_>, bounds: [f64; 4], co
 pub(super) fn label(value: &str, size: f64, color: &str, bold: bool) -> Vec<RichParagraph> { Rich::default().add(value, size, color, bold, 0).finish() }
 
 fn icon(drawing: &mut Drawing, icon: &GraphIcon, center: [f64; 2], size: f64) -> Result<()> {
-    let mut picture = crate::media::create_picture(&drawing.id(), icon.base64.clone(), &icon.mime_type, &icon.alt)?;
+    let mut picture = crate::graphs::icon_element(&drawing.id(), icon)?;
     if let Element::Picture { x, y, width, height, .. } = &mut picture {
         let scale = size / width.max(*height);
         *width *= scale; *height *= scale;
@@ -536,7 +536,7 @@ pub(super) fn badge(drawing: &mut Drawing, value: &GraphIcon, origin: [f64; 2], 
 
 fn cover(drawing: &mut Drawing, image: &GraphIcon, bounds: [f64; 4]) -> Result<()> {
     let info = crate::media::inspect_raster(&image.base64, &image.mime_type)?;
-    let mut picture = crate::media::create_picture(&drawing.id(), image.base64.clone(), &image.mime_type, &image.alt)?;
+    let mut picture = crate::graphs::icon_element(&drawing.id(), image)?;
     if let Element::Picture { x, y, width, height, crop, .. } = &mut picture {
         [*x, *y, *width, *height] = bounds;
         let source = f64::from(info.width) / f64::from(info.height);
@@ -762,7 +762,7 @@ fn screenshot_details(drawing: &mut Drawing, image: &GraphIcon, callouts: &[Call
     let scale = ((width * 0.42) / source_width).min(height / source_height);
     let image_width = source_width * scale;
     let image_height = source_height * scale;
-    let mut original = crate::media::create_picture(&drawing.id(), image.base64.clone(), &image.mime_type, &image.alt)?;
+    let mut original = crate::graphs::icon_element(&drawing.id(), image)?;
     if let Element::Picture { x, y, width, height, .. } = &mut original { [*x, *y, *width, *height] = [left, top, image_width, image_height]; }
     drawing.elements.push(original);
     let detail_left = left + image_width + 72.0;
@@ -788,7 +788,7 @@ fn screenshot_details(drawing: &mut Drawing, image: &GraphIcon, callouts: &[Call
         let crop_left = (center[0] * source_width - crop_width / 2.0).clamp(0.0, source_width - crop_width) / source_width;
         let crop_top = (center[1] * source_height - crop_height / 2.0).clamp(0.0, source_height - crop_height) / source_height;
         let crop = Crop { left: crop_left, top: crop_top, right: (1.0 - crop_left - crop_width / source_width).max(0.0), bottom: (1.0 - crop_top - crop_height / source_height).max(0.0) };
-        let mut detail = crate::media::create_picture(&drawing.id(), image.base64.clone(), &image.mime_type, &image.alt)?;
+        let mut detail = crate::graphs::icon_element(&drawing.id(), image)?;
         if let Element::Picture { x, y, width, height, crop: target, .. } = &mut detail {
             [*x, *y, *width, *height] = [detail_left, row_top + content_height + 12.0, detail_width, detail_height];
             *target = crop;
@@ -817,7 +817,7 @@ fn screenshot_callouts(drawing: &mut Drawing, image: &GraphIcon, callouts: &[Cal
     let info = crate::media::inspect_raster(&image.base64, &image.mime_type)?;
     let aspect = f64::from(info.width) / f64::from(info.height);
     let (image_width, image_height) = if area_width / height > aspect { (height * aspect, height) } else { (area_width, area_width / aspect) };
-    let mut picture = crate::media::create_picture(&drawing.id(), image.base64.clone(), &image.mime_type, &image.alt)?;
+    let mut picture = crate::graphs::icon_element(&drawing.id(), image)?;
     if let Element::Picture { x, y, width, height, .. } = &mut picture { [*x, *y, *width, *height] = [left, top, image_width, image_height]; }
     drawing.elements.push(picture);
     shape(drawing, Fill { preset: "rect", fill: "none", stroke: &mix("@dk2", theme, 0.70), stroke_width: 1.0, radius: None }, [left, top, image_width, image_height], None);

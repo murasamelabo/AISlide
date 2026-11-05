@@ -1234,6 +1234,39 @@ fn issue74_a_layout_that_does_not_fit_is_still_reported_next_to_the_slides_that_
 }
 
 #[test]
+fn issue80_guided_parts_record_the_pictures_their_definition_declares_decorative() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><rect width="32" height="16" fill="#008080"/></svg>"##;
+    let asset = execute_request(json!({"op":"create_asset","id":"icon","base64":STANDARD.encode(svg),"mime_type":"image/svg+xml","alt":"Synthetic icon","size":48})).unwrap();
+    let icon = |decorative: bool| { let mut icon = json!({"base64":asset["base64"],"mime_type":asset["mime_type"],"alt":""}); if decorative { icon["decorative"] = json!(true); } icon };
+    let mut slide = issue74_slide("rows", "終わり", json!({"version":1,"preset":"list/icon-rows","title":"Rows","data":{"kind":"icon_rows","rows":[
+        {"label":"First","detail":"Decorative icon","icon":icon(true)},{"label":"Second","detail":"Described later","icon":icon(false)}]}}));
+    slide["support"][0]["body_paths"] = json!(["/data/rows/0/label"]);
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue80-guided","input":issue74_input(vec![slide])})).unwrap();
+    let document = &created["document"];
+    let mut pictures = Vec::new();
+    collect_pictures(&document["deck"]["slides"][0]["elements"], &mut pictures);
+    assert_eq!(pictures.len(), 2);
+    let entries = &document["deck"]["slides"][0]["review"]["accessibility"];
+    assert_eq!(entries[&pictures[0]]["decorative"], true, "{entries}");
+    assert!(entries.get(&pictures[1]).is_none(), "an icon that does not declare it is not decorative: {entries}");
+    let report = execute_request(json!({"op":"check_accessibility","document":document})).unwrap();
+    let missing: Vec<_> = report["issues"].as_array().unwrap().iter().filter(|issue| issue["code"] == "image_alt_missing").map(|issue| issue["element_id"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(missing, [pictures[1].clone()], "{report}");
+}
+
+fn collect_pictures(value: &Value, output: &mut Vec<String>) {
+    match value {
+        Value::Array(values) => for value in values { collect_pictures(value, output); },
+        Value::Object(object) => {
+            if object.get("type").is_some_and(|kind| kind == "picture") { output.push(object["id"].as_str().unwrap().to_owned()); }
+            for child in object.values() { collect_pictures(child, output); }
+        }
+        _ => {}
+    }
+}
+
+#[test]
 fn guided_record_is_inspected_and_removed_by_explicit_clean_copy() {
     for mode in ["summary","none"] {
         let mut input=brief("status-report");

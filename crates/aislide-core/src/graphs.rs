@@ -231,12 +231,40 @@ pub struct GraphIcon {
     #[schemars(length(min = 1, max = crate::media::MAX_IMAGE_BASE64_LEN))] pub base64: String,
     #[schemars(extend("enum" = ["image/png", "image/jpeg"]))] pub mime_type: String,
     #[serde(default)] #[schemars(length(max = ICON_ALT_MAX))] pub alt: String,
+    /// `true` marks the picture drawn from this icon decorative, which add_part, update_part, add_graph and update_graph record on the
+    /// picture's accessibility settings each time the part is drawn. A decorative picture has no description, so `alt` must be empty.
+    /// An empty `alt` without `decorative` is still reported by check_accessibility as `image_alt_missing`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub decorative: bool,
 }
 
 pub fn create_icon(base64: String, mime_type: &str, alt: &str) -> Result<GraphIcon> {
     valid_text(alt, ICON_ALT_MAX)?;
     let (base64, mime_type) = crate::media::icon_raster(base64, mime_type)?;
-    Ok(GraphIcon { base64, mime_type, alt: alt.into() })
+    Ok(GraphIcon { base64, mime_type, alt: alt.into(), decorative: false })
+}
+
+/// The checks every part applies to an icon or image of its definition.
+pub(crate) fn validate_icon(icon: &GraphIcon) -> Result<()> {
+    valid_text(&icon.alt, ICON_ALT_MAX)?;
+    if icon.decorative && !icon.alt.trim().is_empty() { return Err(Error::Invalid("icon decorative:true requires an empty alt; a decorative picture has no description".into())); }
+    Ok(())
+}
+
+thread_local! { static DECORATIVE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) }; }
+
+/// Runs `render` and returns the IDs of the pictures it drew from icons that declare `decorative`.
+pub(crate) fn with_decorative_pictures<T>(render: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let outer = DECORATIVE.with(|records| records.replace(Some(Vec::new())));
+    let value = render();
+    let records = DECORATIVE.with(|records| records.replace(outer)).unwrap_or_default();
+    (value, records)
+}
+
+/// The picture of an icon or image of a part definition, noted when the definition declares it decorative.
+pub(crate) fn icon_element(id: &str, icon: &GraphIcon) -> Result<Element> {
+    let picture = crate::media::create_picture(id, icon.base64.clone(), &icon.mime_type, &icon.alt)?;
+    if icon.decorative { DECORATIVE.with(|records| if let Some(records) = records.borrow_mut().as_mut() { records.push(id.into()); }); }
+    Ok(picture)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -429,7 +457,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
             if !contains(ancestor, [region.x, region.y, region.width, region.height]) { return Err(containment_error("group", &region.id, ancestor, [region.x, region.y, region.width, region.height])); }
         }
         if let Some(icon) = &region.icon {
-            valid_text(&icon.alt, ICON_ALT_MAX)?;
+            validate_icon(icon)?;
             crate::media::inspect_raster(&icon.base64, &icon.mime_type)?;
         }
     }
@@ -450,7 +478,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
         }
         if node.presentation == GraphPresentation::Icon && (node.icon.is_none() || icon_height(node) <= 0.0) { return Err(Error::Invalid("icon presentation requires an icon and room for an image, gap and two-line label".into())); }
         if let Some(icon) = &node.icon {
-            valid_text(&icon.alt, ICON_ALT_MAX)?;
+            validate_icon(icon)?;
             crate::media::inspect_raster(&icon.base64, &icon.mime_type)?;
         }
         if let Some(parent) = &node.group {
@@ -644,7 +672,7 @@ pub(crate) fn embed_text(id: &str, spec: &GraphSpec, children: &mut Vec<Element>
 
 fn icon_picture(id: &str, icon: &GraphIcon, rect: [f64; 4]) -> Result<Element> {
     let [left, top, box_width, box_height] = rect;
-    let mut picture = crate::media::create_picture(id, icon.base64.clone(), &icon.mime_type, &icon.alt)?;
+    let mut picture = icon_element(id, icon)?;
     if let Element::Picture { x, y, width, height, .. } = &mut picture {
         let scale = (box_width / *width).min(box_height / *height);
         *width *= scale; *height *= scale;
@@ -881,6 +909,44 @@ fn render_prefix(id: &str, spec: &GraphSpec) -> Result<String> {
     Ok(format!("{id}-{}", &format!("{:x}", Sha256::digest(crate::canonical::bytes(&(RENDER_LAYOUT_VERSION, spec))?))[..10]))
 }
 
+/// How a managed diagram names what it draws: `{prefix}-{role}-{entity}`, from its own spec. A node, an edge and a group each have fixed
+/// roles, so an element's role and entity say what it is in the diagram whatever the prefix, which hashes the whole spec.
+pub(crate) struct ManagedNames { prefix: String, nodes: BTreeSet<String>, edges: BTreeSet<String>, groups: BTreeSet<String> }
+
+const NODE_ROLES: [&str; 4] = ["n", "ni", "nt", "nd"];
+const EDGE_ROLES: [&str; 3] = ["e", "et", "eb"];
+const GROUP_ROLES: [&str; 4] = ["g", "gg", "gi", "gt"];
+
+impl ManagedNames {
+    /// What `id` is in this diagram: its role and the node, edge or group it belongs to. `None` for any other ID.
+    pub(crate) fn classify(&self, id: &str) -> Option<(&'static str, String)> {
+        let rest = id.strip_prefix(self.prefix.as_str())?.strip_prefix('-')?;
+        if let Some(title) = ["title", "subtitle"].into_iter().find(|name| *name == rest) { return Some((title, String::new())); }
+        let (role, entity) = rest.split_once('-')?;
+        let find = |roles: &[&'static str], entities: &BTreeSet<String>| roles.iter().copied().find(|candidate| *candidate == role && entities.contains(entity));
+        find(&NODE_ROLES, &self.nodes).or_else(|| find(&EDGE_ROLES, &self.edges)).or_else(|| find(&GROUP_ROLES, &self.groups)).map(|role| (role, entity.to_owned()))
+    }
+
+    pub(crate) fn id(&self, role: &str, entity: &str) -> String {
+        if entity.is_empty() { format!("{}-{role}", self.prefix) } else { format!("{}-{role}-{entity}", self.prefix) }
+    }
+}
+
+/// The naming of the diagram that `spec` draws for the part `id`; `None` when the part is not a managed diagram.
+pub(crate) fn managed_names(id: &str, spec: &crate::parts::PartSpec) -> Option<ManagedNames> {
+    if !matches!(spec.data, crate::parts::PartData::Diagram { .. }) { return None; }
+    let (render_id, graph, _) = crate::parts::graph_render_context(id, spec).ok()?;
+    let prefix = render_prefix(&render_id, &graph).ok()?;
+    Some(ManagedNames { prefix, nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(), edges: graph.edges.iter().map(|edge| edge.id.clone()).collect(), groups: graph.groups.iter().map(|group| group.id.clone()).collect() })
+}
+
+/// The icons a diagram draws as pictures, with the role (`ni` for a node, `gi` for a group) and entity of each.
+pub(crate) fn diagram_icons(spec: &crate::parts::PartSpec) -> Vec<(&'static str, &str, &GraphIcon)> {
+    let crate::parts::PartData::Diagram { graph } = &spec.data else { return Vec::new(); };
+    graph.nodes.iter().filter_map(|node| node.icon.as_ref().map(|icon| ("ni", node.id.as_str(), icon)))
+        .chain(graph.groups.iter().filter_map(|group| group.icon.as_ref().map(|icon| ("gi", group.id.as_str(), icon)))).collect()
+}
+
 pub(crate) fn validate_label_overlaps(id: &str, spec: &GraphSpec, children: &[Element]) -> Result<()> {
     let prefix = render_prefix(id, spec)?;
     let obstacles = label_obstacles(&prefix, spec, children);
@@ -1011,14 +1077,14 @@ pub(crate) fn annotate_transaction(mut result: crate::document::TransactionResul
         if !matches!(part.spec.data, crate::parts::PartData::Diagram { .. }) { continue; }
         let Some(slide) = result.document.deck.slides.iter().find(|slide| slide.id == *slide_id) else { report.status = "partial".into(); continue; };
         let Some(element) = slide.elements.iter().find(|element| element.bounds().0 == id) else { report.status = "partial".into(); continue; };
-        if part.stale || crate::parts::state::render_hash(element).map_or(true, |hash| hash != part.render_sha256) { report.status = "partial".into(); continue; }
+        if part.stale || !crate::parts::state::render_matches(element, &part.render_sha256) { report.status = "partial".into(); continue; }
         let Ok((render_id, spec, _)) = crate::parts::graph_render_context(id, &part.spec) else { report.status = "partial".into(); continue; };
         let fallback = Theme::default();
         let theme = crate::design::slide_theme(slide, result.document.deck.design.as_ref()).unwrap_or(&fallback);
         // Only a new render shows which details the widow fit reduced, so a diagram that does not allow it is not rendered again.
         let shrinks = if spec.nodes.iter().any(|node| node.detail.is_some() && node.detail_fit == GraphDetailFit::Shrink) {
             match with_detail_shrinks(|| crate::parts::create_with_theme(id, &part.spec, theme)) {
-                (Ok(rendered), shrinks) if crate::parts::state::render_hash(&rendered).is_ok_and(|hash| hash == part.render_sha256) => shrinks,
+                (Ok(rendered), shrinks) if crate::parts::state::render_matches(&rendered, &part.render_sha256) => shrinks,
                 _ => { report.status = "partial".into(); Vec::new() }
             }
         } else { Vec::new() };
@@ -1039,7 +1105,7 @@ fn verified_diagrams<'a>(document: &'a crate::document::Document, slide: &'a cra
     for part in document.parts.iter().filter(|part| part.slide_id == slide.id && !part.stale) {
         let crate::parts::PartData::Diagram { .. } = &part.spec.data else { continue; };
         let Some(element) = slide.elements.iter().find(|element| element.bounds().0 == part.element_id) else { continue; };
-        if crate::parts::state::render_hash(element).map_or(true, |hash| hash != part.render_sha256) { continue; }
+        if !crate::parts::state::render_matches(element, &part.render_sha256) { continue; }
         let Ok((id, spec, content_height)) = crate::parts::graph_render_context(&part.element_id, &part.spec) else { continue; };
         let Ok(prefix) = render_prefix(&id, &spec) else { continue; };
         diagrams.push((element, prefix, spec, content_height));
@@ -1301,7 +1367,7 @@ pub(crate) fn create_with_label_boxes(id: &str, spec: &GraphSpec, theme: &Theme)
             content[3] = node.height * 0.6 - 2.0;
         }
         if let Some(icon) = &node.icon {
-            let mut picture = crate::media::create_picture(&format!("{prefix}-ni-{}", node.id), icon.base64.clone(), &icon.mime_type, &icon.alt)?;
+            let mut picture = icon_element(&format!("{prefix}-ni-{}", node.id), icon)?;
             let size = (content[2] / 4.0).min(content[3]).min(48.0);
             if let Element::Picture { x, y, width, height, .. } = &mut picture {
                 let scale = size / width.max(*height);

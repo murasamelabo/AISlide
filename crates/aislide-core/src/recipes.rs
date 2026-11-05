@@ -391,7 +391,7 @@ pub fn prepare(deck: &Deck, input: &RecipeInput, variant: &str) -> Result<Prepar
                 if ![callout.x, callout.y].iter().all(|value| value.is_finite() && (0.0..=1.0).contains(value)) { return Err(Error::Invalid("callout coordinates must be supplied 0-1 source-image fractions".into())); }
             }
             slots.insert("primary".into(), part("list-enumeration/screenshot-callouts", PartData::ScreenshotCallouts {
-                image: crate::graphs::GraphIcon { base64: image.base64.clone(), mime_type: image.mime_type.clone(), alt: image.alt.clone() },
+                image: crate::graphs::GraphIcon { base64: image.base64.clone(), mime_type: image.mime_type.clone(), alt: image.alt.clone(), decorative: false },
                 callouts: callouts.clone(), detail_views: input.component_profile.is_some(), accent: None, body_size: Some(18.0), message: None,
             }));
             ("screenshot-reading", "focus/full", true)

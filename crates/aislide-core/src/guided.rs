@@ -554,6 +554,7 @@ fn build(input:&GuidedInput,id:&str,diagnostics:&mut Vec<Diagnostic>)->Result<Op
     // One slide's page and part. A slide that cannot be built is reported with its own ID and the others are still compiled.
     let build_slide=|index:usize,slide:&GuidedSlide|->std::result::Result<(crate::model::Slide,Option<PartInstance>),SlideFailure> {
         let mut part=None;
+        let mut decorative=Vec::new();
         let double=if input.language=="ja" {slide.headline.chars().count()>36} else {slide.headline.chars().count()>80};
         let mut body_top=if double {168.0} else {144.0};let mut body_height=if double {474.0} else {498.0};
         let citations:Vec<_>=input.evidence.iter().filter(|entry|slide.support.iter().any(|support|support.evidence_ids.contains(&entry.id))).collect();
@@ -571,7 +572,9 @@ fn build(input:&GuidedInput,id:&str,diagnostics:&mut Vec<Diagnostic>)->Result<Op
         }
         if let Some(spec)=&slide.part {
             let element_id=format!("guided-part-{}",index+1);
-            let mut element=crate::parts::create_detailed(&element_id,spec,&design.theme).map_err(SlideFailure::Part)?;
+            let (created,declared)=crate::graphs::with_decorative_pictures(||crate::parts::create_detailed(&element_id,spec,&design.theme));
+            decorative=declared;
+            let mut element=created.map_err(SlideFailure::Part)?;
             let fixed=crate::parts::fixed_annotation_ids(&element_id,spec,&element)?;
             let margin=authoring.as_ref().map_or(64.0,|settings|settings.margin);
             let body_width=1280.0-2.0*margin;
@@ -620,6 +623,7 @@ fn build(input:&GuidedInput,id:&str,diagnostics:&mut Vec<Diagnostic>)->Result<Op
         let notes=slide_notes(input,slide,&citations)?;
         let mut page=serde_json::from_value(json!({"id":slide.id,"title":slide.headline,"background":"@lt1","layout_id":LAYOUT_ID,"inherit_background":true,"elements":elements,"notes":notes}))?;
         describe_visuals(&mut page,slide.part.as_ref())?;
+        crate::parts::state::declare_decoration(&mut page.review,&decorative);
         Ok((page,part))
     };
     for (index,slide) in input.slides.iter().enumerate() {

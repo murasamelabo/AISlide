@@ -583,8 +583,9 @@ Use a client deadline longer than the core budget; progress does not override
 a client's hard total timeout. This is not a measured speed improvement.
 
 Create the target first, then call `set_accessibility` with its slide/element
-IDs and current revision. Accessibility is not an `apply_operations` variant
-or an inline managed-part field yet; each changed call has its own Undo.
+IDs and current revision. `set_accessibility` is also an `apply_operations` variant (see the
+batch contract), and an icon or image of a part definition can declare `decorative`
+inline ([Accessibility Of Managed Parts](#accessibility-of-managed-parts)); a separate call has its own Undo.
 After a timeout, inspect the current document/recovery state before deciding
 whether to retry. Do not fall back to unmanaged groups to bypass a timeout.
 
@@ -602,6 +603,30 @@ globally suppress preflight warnings because some overlaps are intentional.
 
 The reported 52-slide PowerPoint comparison and accessibility results are user
 feedback, not a new independently reproduced visual or accessibility qualification.
+
+### Accessibility Of Managed Parts
+
+The children of a managed part are named after its definition (`part-…-ni-b`), so drawing the part again with a changed definition
+gives them new IDs. `update_part` and `update_graph` are one core step, and it moves the review state with the children:
+
+- **Diagrams** (`diagram/custom`): a child whose role and node, edge or group is still drawn keeps its `set_accessibility`
+  settings under its new ID. A picture also keeps a description set with `set_accessibility` (it lives in the picture's `alt`)
+  unless the definition's own `alt` changed. Settings of removed nodes, edges and groups are dropped; a renamed node is a
+  different node, so nothing is guessed across a rename. The root's settings, other parts and loose elements keep theirs, and a
+  part never inherits from another part that has the same node names.
+- **Other parts** name their children by drawing order, so nothing can be matched: settings on children that are gone are
+  dropped (the update no longer fails because of them), and pictures declare `decorative` in the definition instead.
+- A description on a picture is not a manual edit: it does not make the part stale.
+- `decorative: true` on an icon or image of a definition (a node or group icon, and the icons and images of the presets that take
+  them; `alt` must then be empty) marks the picture drawn from it decorative. `add_part`, `update_part`, `add_graph`,
+  `update_graph` and guided creation record that each time the part is drawn, so it needs no `set_accessibility` and survives
+  updates. The definition is authoritative for what it declares: a setting cleared by hand comes back while the definition still
+  declares it, and removing `decorative` from the definition takes the decoration back. An empty `alt` without `decorative` is
+  still reported as `image_alt_missing`; nothing treats an empty `alt` as a decoration.
+- A setting that names a missing element is rejected with the element and the slide, `accessibility target missing: <id> is not an
+  element of slide <slide>`; `set_accessibility` with `metadata:null` for that `element_id` removes it.
+- The update is one transaction, so a failed update leaves the document unchanged. In a batch, a `set_accessibility` placed before
+  the update applies before it, and one placed after it addresses the new IDs.
 
 ### Managed Batch MCP Acceptance
 

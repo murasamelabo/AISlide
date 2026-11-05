@@ -1,7 +1,7 @@
 ﻿use super::briefing::{badge, body_size, colors, field, label, mix, shape, text, too_small, Drawn, Fill, Rich, BODY};
 use super::business::single;
 use super::{Drawing, PartData};
-use crate::{design::Theme, graphs::GraphIcon, model::{valid_text, Element, TextAlign, VerticalAlign}, Error, Result};
+use crate::{design::Theme, graphs::GraphIcon, model::{Element, TextAlign, VerticalAlign}, Error, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -87,7 +87,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
                 field(&item.label, 48, "icon column label", true)?;
                 field(&item.detail, 200, "icon column detail", false)?;
                 if !item.detail_emphasis.is_empty() { return Err(Error::Unsupported("icon columns do not draw detail_emphasis; use list/icon-rows to emphasize a phrase".into())); }
-                if let Some(icon) = &item.icon { valid_text(&icon.alt, crate::graphs::ICON_ALT_MAX)?; }
+                if let Some(icon) = &item.icon { crate::graphs::validate_icon(icon)?; }
                 colors(&[&item.accent])?;
             }
         }
@@ -109,7 +109,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
         PartData::ImageColumns { items } => {
             if !(2..=4).contains(&items.len()) { return Err(Error::Invalid("image columns require 2-4 items".into())); }
             for item in items {
-                valid_text(&item.image.alt, crate::graphs::ICON_ALT_MAX)?;
+                crate::graphs::validate_icon(&item.image)?;
                 field(&item.label, 48, "image column label", true)?;
                 field(&item.detail, 160, "image column detail", false)?;
                 field(&item.caption, 80, "image caption", false)?;
@@ -247,7 +247,7 @@ fn fact_columns(drawing: &mut Drawing, items: &[FactColumn], columns: Option<usi
 }
 
 fn contained_image(drawing: &mut Drawing, image: &GraphIcon, bounds: [f64; 4]) -> Result<()> {
-    let mut picture = crate::media::create_picture(&drawing.id(), image.base64.clone(), &image.mime_type, &image.alt)?;
+    let mut picture = crate::graphs::icon_element(&drawing.id(), image)?;
     if let Element::Picture { x, y, width, height, .. } = &mut picture {
         let scale = (bounds[2] / *width).min(bounds[3] / *height);
         *width *= scale; *height *= scale;

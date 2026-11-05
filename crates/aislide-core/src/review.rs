@@ -30,10 +30,10 @@ pub fn validate_slide(slide: &Slide) -> Result<()> {
     if let Some(threads) = &review.modern_threads { crate::comments::modern::validate(threads)?; }
     let ids: BTreeSet<_> = element_list(&slide.elements).iter().map(|element| element.bounds().0).collect();
     for id in review.table_headers.keys() {
-        if !element_list(&slide.elements).iter().any(|element| matches!(element, crate::model::Element::Table { id: table_id, .. } if table_id == id)) { return Err(Error::Invalid("table header target missing".into())); }
+        if !element_list(&slide.elements).iter().any(|element| matches!(element, crate::model::Element::Table { id: table_id, .. } if table_id == id)) { return Err(Error::Invalid(format!("table header target missing: {id} is not a table on slide {}", slide.id))); }
     }
     for (id, metadata) in &review.accessibility {
-        if !ids.contains(id.as_str()) { return Err(Error::Invalid("accessibility target missing".into())); }
+        if !ids.contains(id.as_str()) { return Err(Error::Invalid(format!("accessibility target missing: {id} is not an element of slide {}; set_accessibility with metadata null removes the setting (update_part and update_graph move the settings of the children they draw again)", slide.id))); }
         if let Some(title) = &metadata.title { valid_text(title, 500)?; }
         if let Some(description) = &metadata.description { valid_text(description, 4000)?; }
         if metadata.title.iter().chain(metadata.description.iter()).any(|value| value.chars().any(char::is_control)) { return Err(Error::Invalid("native accessibility attributes cannot contain control characters".into())); }
