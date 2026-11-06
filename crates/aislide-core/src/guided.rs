@@ -687,7 +687,7 @@ fn evaluate(input:&GuidedInput,id:&str)->(Option<Document>,Review) {
     issues.extend(diagnostics.iter().map(Diagnostic::issue));
     if omitted>0 {issues.push(format!("{omitted} more problems in the slides are not listed; fix the listed ones and validate again"));}
     issues.extend(failure);
-    let expression=(!input.slides.is_empty()).then(||crate::composition_mix::mix(&input.slides.iter().map(|slide|crate::composition_mix::SlideParts{id:slide.id.clone(),presets:slide.part.iter().map(|part|part.preset.clone()).collect()}).collect::<Vec<_>>()));
+    let expression=(!input.slides.is_empty()).then(||crate::composition_mix::mix(&input.slides.iter().map(|slide|crate::composition_mix::SlideParts{id:slide.id.clone(),presets:slide.part.iter().map(|part|part.preset.clone()).collect()}).collect::<Vec<_>>(),0));
     let review=Review{ready:document.is_some(),issues,diagnostics,review_required:vec!["Verify source authenticity, assumptions and headline entailment; declared references are not proof.".into(),"Review material quantities embedded in prose, arithmetic, qualitative scores, and logical completeness.".into(),"Inspect actual Office rendering, chart scales, figure conventions, shape-label collisions and orphan lines.".into(),"Native parts are primitives, not implementations of every consulting compound pattern.".into(),"Review the part mix in expression: where the content relates, bounds or hands off named things, a relationship diagram (diagram/custom, flow/swimlane or correlation/c4-container) shows it and a list with icons does not. This is information, not a quota, and an explicit no-diagram request wins.".into()],expression,semantic_truth_verified:false,office_visual_parity:false};
     (document,review)
 }

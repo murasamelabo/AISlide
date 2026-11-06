@@ -104,4 +104,32 @@ fn issue85_preflight_reports_the_whole_decks_mix_whatever_pages_it_checks() {
     assert!(report["findings"].as_array().unwrap().iter().all(|finding| !finding["code"].as_str().unwrap().contains("COMPOSITION") && !finding["code"].as_str().unwrap().contains("MIX")));
     let other = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
     assert_eq!(other["deck_composition"], *composition);
+    assert!(composition.get("stale_parts").is_none(), "nothing was edited by hand: {composition}");
+}
+
+#[test]
+fn issue85_preflight_counts_the_managed_parts_that_were_edited_by_hand_after_they_were_created() {
+    let slides: Vec<Value> = (1..=2).map(|index| json!({"id":format!("s{index}"),"title":format!("Slide {index}"),"background":"FFFFFF","notes":"","elements":[]})).collect();
+    let deck = json!({"version":1,"title":"Mix","width":1280,"height":720,"slides":slides});
+    let mut document = execute_request(json!({"op":"new_document","id":"stale-mix","deck":deck})).unwrap();
+    for slide in ["s1", "s2"] {
+        let revision = document["revision"].as_u64().unwrap();
+        document = execute_request(json!({"op":"insert_part","document":document,"expected_revision":revision,"slide_id":slide,"id":format!("part-{slide}"),"spec":example("list/icon-rows")})).unwrap()["document"].clone();
+    }
+    let fresh = execute_request(json!({"op":"preflight_presentation","document":document})).unwrap();
+    assert!(fresh["deck_composition"].get("stale_parts").is_none(), "{}", fresh["deck_composition"]);
+    assert!(!fresh["deck_composition"]["note"].as_str().unwrap().contains("stale"));
+
+    // Recoloring one label inside the first part leaves its record behind what is drawn.
+    let label = document["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap().iter().position(|child| child["type"] == "text").expect("a text child");
+    let edited = execute_request(json!({"op":"transaction","document":document,"transaction":{"expected_revision":document["revision"],"expected_hash":document["hash"],
+        "operations":[{"op":"replace","path":format!("/deck/slides/0/elements/0/children/{label}/color"),"value":"123456"}]}})).unwrap()["document"].clone();
+    assert_eq!(edited["parts"][0]["stale"], true);
+    let report = execute_request(json!({"op":"preflight_presentation","document":edited})).unwrap();
+    let composition = &report["deck_composition"];
+    assert_eq!(composition["stale_parts"], 1);
+    // The record is counted as it stands, and the note says what that means.
+    assert_eq!(composition["parts"], json!([{"preset":"list/icon-rows","slides":2,"instances":2}]));
+    let note = composition["note"].as_str().unwrap();
+    assert!(note.starts_with("Information for review, not a target or a quota.") && note.contains("1 of the counted parts are stale"), "{note}");
 }

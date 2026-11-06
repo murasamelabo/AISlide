@@ -1,7 +1,8 @@
 ﻿//! A deck's mix of managed part presets: how many slides use each, the longest runs of one preset and how many slides draw a relationship.
 //!
 //! It is information for a review, never a target: it counts managed parts only, so hand-drawn shapes, imported slides and text-only slides
-//! are reported as holding no part rather than classified.
+//! are reported as holding no part rather than classified. A part edited by hand after it was created (stale) is counted under the preset
+//! recorded for it, and `stale_parts` says how many there are, since what is drawn may no longer match.
 
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,6 +13,7 @@ pub(crate) const RELATIONSHIP_PRESETS: [&str; 5] = ["diagram/custom", "correlati
 const LISTED_PRESETS: usize = 12;
 const MINIMUM_RUN: usize = 3;
 const LISTED_RUNS: usize = 5;
+const NOTE: &str = "Information for review, not a target or a quota. Counts cover managed parts only: slides without one (text-only, hand-drawn, imported) are counted in without_parts, not classified. Equal peers belong in a list; when many slides repeat one preset while the content relates, bounds or hands off named things, reread it for a relationship diagram. An explicit no-diagram request wins.";
 
 fn relationship(preset: &str) -> bool {
     RELATIONSHIP_PRESETS.iter().any(|entry| entry.strip_suffix('*').map_or(*entry == preset, |prefix| preset.starts_with(prefix)))
@@ -20,7 +22,8 @@ fn relationship(preset: &str) -> bool {
 /// One slide, in deck order: its ID and the presets of the managed parts it holds (none when it holds no part).
 pub(crate) struct SlideParts { pub id: String, pub presets: Vec<String> }
 
-pub(crate) fn mix(slides: &[SlideParts]) -> Value {
+/// `stale_parts` is how many of the counted parts were edited by hand after they were created; it is reported only when it is not zero.
+pub(crate) fn mix(slides: &[SlideParts], stale_parts: usize) -> Value {
     let mut by_preset: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     for slide in slides {
         let mut seen = BTreeSet::new();
@@ -57,8 +60,12 @@ pub(crate) fn mix(slides: &[SlideParts]) -> Value {
         "relationship_diagrams": slides.iter().filter(|slide| slide.presets.iter().any(|preset| relationship(preset))).count(),
         "relationship_presets": RELATIONSHIP_PRESETS,
         "without_parts": slides.iter().filter(|slide| slide.presets.is_empty()).count(),
-        "note": "Information for review, not a target or a quota. Counts cover managed parts only: slides without one (text-only, hand-drawn, imported) are counted in without_parts, not classified. Equal peers belong in a list; when many slides repeat one preset while the content relates, bounds or hands off named things, reread it for a relationship diagram. An explicit no-diagram request wins.",
+        "note": NOTE,
     });
     if other > 0 { value["other_presets"] = json!(other); }
+    if stale_parts > 0 {
+        value["stale_parts"] = json!(stale_parts);
+        value["note"] = json!(format!("{NOTE} {stale_parts} of the counted parts are stale: they were edited by hand after they were created, so the preset recorded for them may no longer describe what is drawn."));
+    }
     value
 }
