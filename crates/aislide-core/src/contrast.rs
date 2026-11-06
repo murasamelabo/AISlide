@@ -7,8 +7,9 @@
 //! frame the text is drawn in lies inside a rectangle, rounded rectangle or ellipse, or else the laid-out text does (centered
 //! text in a circle or a pill usually does). The outline is read in the shape's own coordinates, so a turned shape is judged
 //! like an upright one. A line is no backdrop of its own: a connector, or the outline of a shape that has no fill, leaves the text
-//! unsupported where its stroke crosses the text frame, as wide as it is drawn and with the corners and arrowheads it ends in, while
-//! the border of a filled shape is an edge of that fill. The shadow, glow and reflection of a shape reach past it, out to the extent
+//! unsupported where its stroke crosses the text frame, as wide as it is drawn and with the corners and arrowheads it ends in (these are
+//! covered by squares and rectangles a little larger than the paint, so the check errs toward unsupported), while the border of a filled
+//! shape is an edge of that fill. The shadow, glow and reflection of a shape reach past it, out to the extent
 //! the renderer draws them, and text there is unsupported unless a shape above them covers it. A partial cover, a picture, chart or
 //! table, a gradient, transparency, a soft edge, an outline this module cannot measure (a custom path or another preset), or rotation
 //! and skew when the background has to be found behind the text is reported with a reason. Nothing is guessed to be white.
@@ -239,9 +240,12 @@ fn outline(preset: &str, style: &VisualStyle, width: f64, height: f64) -> Option
     })
 }
 
-// The stroke as the renderer draws it, in page coordinates, as quadrilaterals that together cover it: a band as wide as the line along
-// each segment, a square at every join and the rectangle of each arrowhead. A connector joins with a miter, which the renderer limits
-// to four line widths, so its squares reach that far; a shape joins round, and the ends of an open route are flat.
+// The stroke as the renderer draws it, in page coordinates, covered by quadrilaterals: a band as wide as the line along each segment, a
+// square at every join and a rectangle around each arrowhead. The squares and rectangles hold the paint but are larger than it, so text a
+// few pixels from a corner or an arrowhead can be reported although the paint does not reach it. A shape joins round, so its squares reach
+// half a line width, the radius of the join. A connector joins with a miter: the renderer keeps SVG's miter limit of 4, which caps the
+// miter's length at four line widths, so its tip lies at most two line widths (four half-widths) from the vertex and its squares reach
+// that far. The ends of an open route are flat.
 fn quads(stroke: &Stroke, route: &[[f64; 2]], transform: Affine) -> Vec<[Point; 4]> {
     let half_width = stroke.width / 2.0;
     let closed = route.len() > 2 && route.first() == route.last();
@@ -260,7 +264,7 @@ fn quads(stroke: &Stroke, route: &[[f64; 2]], transform: Affine) -> Vec<[Point; 
         let reach = if stroke.miter { half_width * 4.0 } else { half_width };
         quads.push(page([[point[0] - reach, point[1] - reach], [point[0] + reach, point[1] - reach], [point[0] + reach, point[1] + reach], [point[0] - reach, point[1] + reach]]));
     }
-    // The renderer draws an arrowhead four line widths long and 3.2 wide, its tip on the end of the route.
+    // The renderer draws an arrowhead four line widths long and 3.2 line widths wide, its tip on the end of the route.
     let ends = [(stroke.arrowheads[0], route.get(1), route.first()), (stroke.arrowheads[1], route.len().checked_sub(2).and_then(|index| route.get(index)), route.last())];
     for (drawn, from, tip) in ends {
         let (true, Some(from), Some(tip)) = (drawn, from, tip) else { continue; };

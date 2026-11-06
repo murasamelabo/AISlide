@@ -30,6 +30,12 @@ fn picture(id: &str, bounds: [f64; 4]) -> Value {
     json!({"type":"picture","id":id,"x":bounds[0],"y":bounds[1],"width":bounds[2],"height":bounds[3],"base64":"AA==","mime_type":"image/png","alt":"Synthetic picture"})
 }
 
+fn connector(id: &str, bounds: [f64; 4], width: f64, arrow: bool, routing: Option<Value>) -> Value {
+    let mut element = json!({"type":"connector","id":id,"x":bounds[0],"y":bounds[1],"width":bounds[2],"height":bounds[3],"color":"000000","stroke_width":width,"arrow":arrow});
+    if let Some(routing) = routing { element["routing"] = routing; }
+    element
+}
+
 fn deck(slide: Value, design: Option<Value>) -> Deck {
     let mut value = json!({"version":1,"title":"Synthetic","width":1280,"height":720,"slides":[slide]});
     if let Some(design) = design { value["design"] = design; }
@@ -345,11 +351,6 @@ fn issue76_a_line_or_an_outline_across_the_text_leaves_its_backdrop_unknown() {
 
 #[test]
 fn issue76_the_corners_and_arrowheads_of_a_line_are_part_of_its_stroke_and_its_flat_ends_are_not() {
-    let connector = |id: &str, bounds: [f64; 4], width: f64, arrow: bool, routing: Option<Value>| {
-        let mut element = json!({"type":"connector","id":id,"x":bounds[0],"y":bounds[1],"width":bounds[2],"height":bounds[3],"color":"000000","stroke_width":width,"arrow":arrow});
-        if let Some(routing) = routing { element["routing"] = routing; }
-        element
-    };
     let mut ghost = connector("ghost", [100.0, 600.0, 200.0, 0.01], 10.0, true, None);
     ghost["visual"] = json!({"hidden":true});
     let report = report("FFFFFF", vec![
@@ -372,6 +373,33 @@ fn issue76_the_corners_and_arrowheads_of_a_line_are_part_of_its_stroke_and_its_f
         assert_eq!(outcome(&report, id), ["contrast_background_unverified:unsupported_backdrop"], "{id}");
     }
     for id in ["beyond-the-miter", "beside-the-plain-line", "past-the-flat-end", "under-the-hidden-line"] { assert!(outcome(&report, id).is_empty(), "{id}: {:?}", report.issues); }
+}
+
+#[test]
+fn issue76_a_start_arrowhead_closed_joins_and_the_transform_of_a_group_are_followed_too() {
+    // Drawn from the end of the route back to its start: the tip is at (500, 650) and points left.
+    let backwards = connector("backwards", [500.0, 650.0, 200.0, 0.01], 10.0, false, Some(json!({"points":[[0,0],[1,0]],"start_arrow":true})));
+    // A triangle with a 20 px outline and no fill: the round join at its apex (900, 400) reaches 10 px above it, past both bands.
+    let triangle = json!({"type":"polygon","id":"triangle","x":800,"y":400,"width":200,"height":200,"points":[[0.5,0.0],[1.0,1.0],[0.0,1.0]],"fill":"none","stroke":"000000","stroke_width":20});
+    // The group doubles what it holds: the 4 px line becomes 8 px and its arrowhead 32 px long, with the tip at (340, 140).
+    let doubled = group("doubled", [200.0, 100.0, 200.0, 100.0], [100.0, 50.0], None, vec![connector("scaled-line", [10.0, 20.0, 60.0, 0.01], 4.0, true, None)]);
+    // The group turns a quarter: the 6 px line runs down from (550, 110) to the tip at (550, 190), and the arrowhead is 24 px long.
+    let turned = group("turned", [500.0, 100.0, 100.0, 100.0], [100.0, 100.0], Some(json!({"rotation":90})), vec![connector("turned-line", [10.0, 50.0, 80.0, 0.01], 6.0, true, None)]);
+    let report = report("FFFFFF", vec![
+        backwards, triangle, doubled, turned,
+        text("beside-the-start-arrowhead", [510.0, 636.0, 20.0, 6.0], "000000"),
+        text("beside-the-far-end", [670.0, 636.0, 20.0, 6.0], "000000"),
+        text("over-the-apex", [896.0, 391.0, 8.0, 3.0], "000000"),
+        text("far-above-the-apex", [896.0, 370.0, 8.0, 8.0], "000000"),
+        text("beside-the-scaled-arrowhead", [312.0, 128.0, 18.0, 6.0], "000000"),
+        text("clear-of-the-scaled-arrowhead", [312.0, 100.0, 18.0, 6.0], "000000"),
+        text("beside-the-turned-arrowhead", [556.0, 170.0, 14.0, 6.0], "000000"),
+        text("clear-of-the-turned-arrowhead", [572.0, 170.0, 10.0, 6.0], "000000"),
+    ]);
+    for id in ["beside-the-start-arrowhead", "over-the-apex", "beside-the-scaled-arrowhead", "beside-the-turned-arrowhead"] {
+        assert_eq!(outcome(&report, id), ["contrast_background_unverified:unsupported_backdrop"], "{id}");
+    }
+    for id in ["beside-the-far-end", "far-above-the-apex", "clear-of-the-scaled-arrowhead", "clear-of-the-turned-arrowhead"] { assert!(outcome(&report, id).is_empty(), "{id}: {:?}", report.issues); }
 }
 
 #[test]
