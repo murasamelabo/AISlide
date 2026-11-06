@@ -344,6 +344,37 @@ fn issue76_a_line_or_an_outline_across_the_text_leaves_its_backdrop_unknown() {
 }
 
 #[test]
+fn issue76_the_corners_and_arrowheads_of_a_line_are_part_of_its_stroke_and_its_flat_ends_are_not() {
+    let connector = |id: &str, bounds: [f64; 4], width: f64, arrow: bool, routing: Option<Value>| {
+        let mut element = json!({"type":"connector","id":id,"x":bounds[0],"y":bounds[1],"width":bounds[2],"height":bounds[3],"color":"000000","stroke_width":width,"arrow":arrow});
+        if let Some(routing) = routing { element["routing"] = routing; }
+        element
+    };
+    let mut ghost = connector("ghost", [100.0, 600.0, 200.0, 0.01], 10.0, true, None);
+    ghost["visual"] = json!({"hidden":true});
+    let report = report("FFFFFF", vec![
+        // A turn of 30 degrees: the miter at the corner (300, 100) reaches 19 px past it, beyond the bands of both segments.
+        connector("sharp", [100.0, 100.0, 200.0, 100.0], 10.0, false, Some(json!({"points":[[0,0],[1,0],[0.134,1]]}))),
+        // A 10 px line ends in an arrowhead 40 px long and 32 px wide, much wider than the line itself.
+        connector("pointing", [100.0, 300.0, 200.0, 0.01], 10.0, true, None),
+        connector("plain", [100.0, 500.0, 200.0, 0.01], 10.0, false, None),
+        connector("flat", [500.0, 300.0, 200.0, 0.01], 10.0, false, None),
+        ghost,
+        text("in-the-miter", [308.0, 96.0, 4.0, 3.0], "000000"),
+        text("beyond-the-miter", [340.0, 96.0, 4.0, 3.0], "000000"),
+        text("beside-the-arrowhead", [270.0, 286.0, 20.0, 6.0], "000000"),
+        text("beside-the-plain-line", [270.0, 486.0, 20.0, 6.0], "000000"),
+        text("on-the-flat-end", [680.0, 295.0, 15.0, 10.0], "000000"),
+        text("past-the-flat-end", [702.0, 295.0, 30.0, 10.0], "000000"),
+        text("under-the-hidden-line", [150.0, 595.0, 50.0, 10.0], "000000"),
+    ]);
+    for id in ["in-the-miter", "beside-the-arrowhead", "on-the-flat-end"] {
+        assert_eq!(outcome(&report, id), ["contrast_background_unverified:unsupported_backdrop"], "{id}");
+    }
+    for id in ["beyond-the-miter", "beside-the-plain-line", "past-the-flat-end", "under-the-hidden-line"] { assert!(outcome(&report, id).is_empty(), "{id}: {:?}", report.issues); }
+}
+
+#[test]
 fn issue76_counts_cover_every_text_element_and_low_contrast_counts_as_checked() {
     let mut decorative = text("decoration", [60.0, 300.0, 200.0, 40.0], "FFFFFF");
     decorative["text"] = json!("Ornament");

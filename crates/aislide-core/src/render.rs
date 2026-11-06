@@ -215,14 +215,19 @@ pub(crate) enum EffectPolicy { Strict, Preview, Preflight, DeliveryPdf }
 pub(crate) fn render_layers(deck: &Deck, page_index: usize) -> Result<Vec<(String, &[Element])>> {
     let slide = deck.slides.get(page_index)
         .ok_or_else(|| Error::Invalid("render page index out of range".into()))?;
+    Ok(slide_layers(deck, slide))
+}
+
+/// The master, layout and slide content of `slide` in the order they are painted. The master drops out when the slide hides its graphics.
+pub(crate) fn slide_layers<'a>(deck: &'a Deck, slide: &'a crate::model::Slide) -> Vec<(String, &'a [Element])> {
     let layout = deck.design.as_ref().and_then(|design| {
         slide.layout_id.as_ref().and_then(|id| design.layouts.iter().find(|layout| &layout.id == id))
             .or_else(|| design.layouts.first())
     });
     let master = layout.and_then(|layout| deck.design.as_ref()?.masters.iter().find(|master| master.id == layout.master_id));
-    Ok(master.filter(|_| !slide.hide_master_graphics).map(|master| (format!("master:{}", master.id), master.elements.as_slice())).into_iter()
+    master.filter(|_| !slide.hide_master_graphics).map(|master| (format!("master:{}", master.id), master.elements.as_slice())).into_iter()
         .chain(layout.map(|layout| (format!("layout:{}", layout.id), layout.elements.as_slice())))
-        .chain(std::iter::once(("slide".into(), slide.elements.as_slice()))).collect())
+        .chain(std::iter::once(("slide".into(), slide.elements.as_slice()))).collect()
 }
 
 fn page_effect_budget(deck: &Deck, page_index: usize, scale: f64) -> Result<EffectBudget> {
