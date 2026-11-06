@@ -2,7 +2,10 @@
 use std::io::{Read, Write};
 use std::path::Path;
 
-// The dispatch of a debug build keeps the temporaries of every request on the stack; a PDF export then needs about 1 MiB, which is all the main thread has.
+// A debug build of `execute` keeps the temporaries of every request in one stack frame, so a PDF export (`prepare_delivery`,
+// `finalize_presentation`) needs about 0.95 MiB of stack, measured by lowering the limit until it overflowed. A Windows main thread has
+// 1 MiB, which left no room, so the CLI works on a 16 MiB thread. MCP runs this binary; Studio and the tests run `execute` on threads of
+// at least 2 MiB (the tokio blocking pool, the test harness). Splitting `execute` into smaller frames would remove the need.
 const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 fn main() {
