@@ -162,7 +162,7 @@ The evidence-led guided path remains available through discovery:
 1. `best_practice_profiles` lists the four profiles.
 2. `best_practice_guide({profile_id})` returns combined English guidance, pattern capabilities, limits and the Rust-derived `input_schema`.
 3. The assistant resolves the audience, purpose, evidence, logical ledger and body content. Missing quantities stay `xx` or are explicitly sourced assumptions.
-4. `validate_guided_presentation({input})` checks input relationships and compiles a temporary native layout. It creates no persistent handle or file.
+4. `validate_guided_presentation({input})` checks input relationships and compiles a temporary native layout. It creates no persistent handle or file. Every slide's part is compiled, and each text that does not fit is returned with the slide ID and its field path (see [What Ready Means](#what-ready-means)).
 5. `create_guided_presentation({input})` repeats the same validation, then returns a new `deck_id`, actual `revision`, slide count and review report. No existing document is replaced.
 6. Use `preview_presentation({deck_id})` for a compact 640px JPEG contact sheet. Explicitly select later pages and/or a larger size when needed; specify `format:"png"` for lossless images. `detail:"full"` restores core defaults. No file write is needed.
 7. Run `preflight_presentation({deck_id,options:{page_indices:[0],min_font_size:24}})` for renderer warnings, possible collisions and readability heuristics. Review the image before treating geometry findings as defects.
@@ -337,12 +337,28 @@ render as paragraphs inside the node shape with an 8px space before the detail,
 subject to fitting, so the text moves and resizes with the shape in PowerPoint.
 Omitting the new fields preserves the earlier title/label presentation.
 
+Node `detail_fit` is `wrap` (default) or `shrink`. A detail keeps its size; with
+`shrink` it may be reduced by 0.5px steps down to 12px to avoid a last line of one
+CJK character, and `GRAPH_NODE_DETAIL_SHRUNK` then names the node and both sizes.
+Earlier versions reduced it silently. A diagram rendered again draws such a detail
+at its full size, so widen the node or shorten the detail where a short last line
+matters.
+
 Node `label_fit:"shrink"` prefers a single-line heading by reducing its font
 only as far as 12px; default `wrap` retains the original behavior. Hard
 newlines are never removed. A node too narrow at that floor retains wrapping
 and reports `GRAPH_NODE_LABEL_SHRINK_LIMIT`; ordinary additional wrapping is
 reported as informational `GRAPH_NODE_LABEL_WRAPPED`. Widen the node instead
 of assuming every label can become one line.
+
+Node text keeps at least 8px of top and bottom padding wherever the measured text
+fits, including the top-aligned text of a node with `detail`, so preflight does not
+report `CONTAINER_PADDING` for cards the engine laid out. When the heading and
+detail need more height than the node leaves, the engine keeps the layout, never
+changes an explicit node size, and reports `GRAPH_NODE_PADDING` with the node
+height that would fit. A connector that crosses a group's header band beside its
+heading, as every cross-lane connector of a swimlane does, is not reported as
+`CONNECTOR_LABEL_INTERFERENCE`; one over the heading text still is.
 
 Graph edges also accept `stroke_width` (0.5-12, default 2), `label_color`
 (default `@dk1`) and `label_font_size` (8-40, default 16). These sizes are in
@@ -537,6 +553,24 @@ before applying a repair. Do not silently infer semantic roles, change reading
 order, move user content or globally suppress overlap findings. These checks
 are heuristics, not Office visual parity or accessibility certification.
 
+### Text And Decorative Colors
+
+Presets keep `@accent1`-`@accent6` for rules, fills, markers and outlines. Text
+takes an accent only while it is readable on the color behind it, and otherwise
+the preset draws that text in `@dk1`. The check is WCAG 2 contrast against the
+background the preset actually paints (`@lt1`, `@lt2`, or the accent fill under
+light text): 3:1 for text of 24px or more and for bold text of 56/3px or more,
+4.5:1 for other text. A palette whose accents already meet the ratio renders as
+before; a pale brand color changes only the text, never the decoration. Group
+headings (`data.kind:"groups"`) are always `@dk1`, and the accent stays on the
+rule above them. Guided decks draw the 12px source and page annotations in
+`@dk2` (`5F6F78`), at least 4.5:1 on `@lt1` and on `@lt2`.
+
+The rule applies when a part or guided deck is created or regenerated.
+Saved decks keep their colors and are not migrated. `@dk1` is not checked
+against a custom `@lt1`/`@lt2`, so a theme with unusual neutrals is outside this
+guarantee, and `check_accessibility` and preflight remain separate checks.
+
 ### Regeneration Feedback
 
 `set_accessibility` uses at least 65 seconds, with larger documents receiving
@@ -549,8 +583,9 @@ Use a client deadline longer than the core budget; progress does not override
 a client's hard total timeout. This is not a measured speed improvement.
 
 Create the target first, then call `set_accessibility` with its slide/element
-IDs and current revision. Accessibility is not an `apply_operations` variant
-or an inline managed-part field yet; each changed call has its own Undo.
+IDs and current revision. `set_accessibility` is also an `apply_operations` variant (see the
+batch contract), and an icon or image of a part definition can declare `decorative`
+inline ([Accessibility Of Managed Parts](#accessibility-of-managed-parts)); a separate call has its own Undo.
 After a timeout, inspect the current document/recovery state before deciding
 whether to retry. Do not fall back to unmanaged groups to bypass a timeout.
 
@@ -568,6 +603,30 @@ globally suppress preflight warnings because some overlaps are intentional.
 
 The reported 52-slide PowerPoint comparison and accessibility results are user
 feedback, not a new independently reproduced visual or accessibility qualification.
+
+### Accessibility Of Managed Parts
+
+The children of a managed part are named after its definition (`part-…-ni-b`), so drawing the part again with a changed definition
+gives them new IDs. `update_part` and `update_graph` are one core step, and it moves the review state with the children:
+
+- **Diagrams** (`diagram/custom`): a child whose role and node, edge or group is still drawn keeps its `set_accessibility`
+  settings under its new ID. A picture also keeps a description set with `set_accessibility` (it lives in the picture's `alt`)
+  unless the definition's own `alt` changed. Settings of removed nodes, edges and groups are dropped; a renamed node is a
+  different node, so nothing is guessed across a rename. The root's settings, other parts and loose elements keep theirs, and a
+  part never inherits from another part that has the same node names.
+- **Other parts** name their children by drawing order, so nothing can be matched: settings on children that are gone are
+  dropped (the update no longer fails because of them), and pictures declare `decorative` in the definition instead.
+- A description on a picture is not a manual edit: it does not make the part stale.
+- `decorative: true` on an icon or image of a definition (a node or group icon, and the icons and images of the presets that take
+  them; `alt` must then be empty) marks the picture drawn from it decorative. `add_part`, `update_part`, `add_graph`,
+  `update_graph` and guided creation record that each time the part is drawn, so it needs no `set_accessibility` and survives
+  updates. The definition is authoritative for what it declares: a setting cleared by hand comes back while the definition still
+  declares it, and removing `decorative` from the definition takes the decoration back. An empty `alt` without `decorative` is
+  still reported as `image_alt_missing`; nothing treats an empty `alt` as a decoration.
+- A setting that names a missing element is rejected with the element and the slide, `accessibility target missing: <id> is not an
+  element of slide <slide>`; `set_accessibility` with `metadata:null` for that `element_id` removes it.
+- The update is one transaction, so a failed update leaves the document unchanged. In a batch, a `set_accessibility` placed before
+  the update applies before it, and one placed after it addresses the new IDs.
 
 ### Managed Batch MCP Acceptance
 
@@ -933,6 +992,8 @@ Omitting `authoring` retains the previous layout and typography. Supplying `{}` 
 
 The effective body floor applies recursively to text, shape labels and table text, including rich runs and scaled groups. Citations, section labels, page numbers and chart-internal labels are not governed by that floor. Dense content that does not fit rejects instead of silently shrinking below the floor. Large headlines reserve two lines; decision tables and schedules reserve the citation region. These settings apply at guided creation, not as a persistent restyling policy for later `update_part` calls. Use previews and diagnostics after edits.
 
+That exemption is about the body floor. `preflight_presentation` runs its own check against `options.min_font_size` (default 16) and would flag the 12px source line and page number that guided creation draws on every slide, which the guided input cannot resize. It therefore reports those two text boxes (`source` and `page` on a slide that uses the `guided-content` layout) as `SMALL_TEXT` information instead of a warning. The information level lasts while the element still has the generated size: editing its wording, saving and reopening the PPTX, and duplicating the slide keep it, whereas an element whose size (or the size of any run) was changed, same-named text on a slide of another layout or in a hand-made deck, and every other text below the floor remain warnings. Raise the element's font size yourself when you want it checked against the floor. Other guided text, such as the 18px section label under a higher `min_font_size`, is not covered.
+
 Evidence entries have `id`, `kind` (`source`, `assumption`, `unknown`), `reference` and `statement`. Put a precise source locator or an assumption's method in `reference`; use a concise supporting statement, especially when it must fit an executive-summary cell. These declarations are not authenticated source documents or the SDK's live data bindings.
 
 Each slide contains `id`, `section`, `headline`, `sentence_form`, `pattern_id`, `question`, `parent_message`, `transition`, `parallel_basis`, `support`, optional `numbers`, optional `speaker_notes`, and a `part` for `native-part`. The parent is `governing` or an earlier slide ID. Supported sentence forms are causal, conditional, contrast, causal-focus, evaluation, proposal, explanation, comparison and outcome.
@@ -1058,6 +1119,16 @@ The returned `candidate_id` refers to at most 128KiB of immutable edit instructi
 
 `ready:true` means the typed input, references and measured native text layout are compilable. It does **not** mean semantic truth, causal entailment, complete argumentation, universal absence of visual collisions, or Office parity. Every response retains `semantic_truth_verified:false`, `office_visual_parity:false`, and explicit `review_required` items. `ready:false` includes unmet checks; creation rejects that input without returning a handle.
 
+Part and slide problems are collected over all slides and returned together, so one validation shows every text that does not fit instead of the first. Each is a sentence in `issues`, led by the input's slide ID and, when the preset names the text, its JSON Pointer in that slide's part, in the same form as `support.body_paths`: `r2 / /data/rows/0/from: before-after/shift text "…" does not fit at its fixed font size (rows[0].from: measured 37px > available 35px, over by 2px); …`. The same problems are in the optional `diagnostics` array, which is absent when there are none: `{code, slide_id, preset?, path?, message, measured_px?, available_px?}` with `code` one of `PART_TEXT_OVERFLOW`, `PART_MISSING_GLYPHS`, `PART_INVALID` (the part could not be created) and `SLIDE_INVALID`. Several texts of one part are all listed, in drawing order, and the order follows the input's slide order. The slide ID comes from the input, never from an element ID such as `guided-part-2-…`. An input that fails its other checks still gets the diagnostics of its parts after those checks, and a layout that does not fit (`TEXT_OVERFLOW`) is still reported for the slides that compiled. At most 200 problems are listed; a final issue gives the number left out. `validate_guided_presentation` and `create_guided_presentation` share this check, and a failed creation stores nothing. `create_part` and `add_part` keep reporting the first text that does not fit.
+
+### Finding Relationship Diagrams And Reviewing The Deck's Mix
+
+The default is to consider an explanatory visual before a bullet-only page, and the part follows the relation the content states. Where it relates, bounds or hands off named things (system architecture, who passes what to whom, a concept and its instances) the parts are `diagram/custom`, `flow/swimlane` and `correlation/c4-container`; a list with an icon per item does not show the relation, and a request for more icons or a "visual" style does not replace one. A request for text only, or for no diagrams (globally or for named pages), still wins; there is no new parameter, quota or toggle.
+
+`part_catalog` reaches `diagram/custom`, which is the managed graph behind `add_graph` and `graph_catalog` and not one of the 143 presets. The core response lists it under `related` with `keywords`, `use_when`, `avoid_when` and an example that `add_part` accepts (`data.kind:"diagram"`). MCP `part_catalog` searches it with the presets when `query` or `preset_id` is given (`architecture`, `concept`, `relationship`, `boundary`, `handoff`, or `preset_id:"diagram/custom"`), placing it first; the paged listing without a query is unchanged. The same guidance is in the server's initialization text, the descriptions of `part_catalog`, `create_part`, `add_part`, `validate_guided_presentation` and `create_guided_presentation`, `authoring_capabilities.visual_default` and the authoring workflow.
+
+The deck's mix is returned for review, not as a target. `validate_guided_presentation` returns `expression` and `preflight_presentation` returns `deck_composition`, both `{slides, parts:[{preset,slides,instances}], other_presets?, longest_runs:[{preset,slides,first_slide_id,last_slide_id}], relationship_diagrams, relationship_presets, without_parts, note}`. `slides` counts the slides that hold a preset at least once and `instances` every part of it; `longest_runs` lists consecutive slides that hold the same preset, only for runs of three or more. `relationship_diagrams` counts slides holding `diagram/custom`, `correlation/*`, `radiation/*`, `tree/*` or `flow/swimlane`. Only managed parts are classified: slides with none (text-only, hand-drawn, imported) are counted in `without_parts`, and relations drawn by hand are not recognized. A result such as `list/icon-rows` on 27 of 49 slides with no relationship diagram is a prompt to reread the content, not an error. `deck_composition` covers the whole deck whatever pages the preflight selects.
+
 Actual charts retain their existing renderer's conventions. Common-axis small multiples, forecast line styles, direct end labels and quantitative area plots may require manual composition. An arbitrary part is not automatically transformed into a fully compliant consulting compound visual. Follow the capability metadata and inspect the actual PPTX.
 
 The complete ledger and evidence text are preserved in notes for `full`, and in the separate creation record for `summary`/`none`, including assumptions and source references. Review them before redistribution. Subsequent manual edits can invalidate the original reasoning or source declarations; they are not continuously revalidated by the guided compiler. Existing native part fingerprints continue to protect manual changes from destructive regeneration.
@@ -1067,7 +1138,8 @@ The complete ledger and evidence text are preserved in notes for `full`, and in 
 Typed batches reduce separate edit requests; they do not make the core a
 stateful document service or add SVG caching. A general report-layout catalog,
 preflight overlap aggregation, finding prioritization and preflight contrast
-analysis are not implemented by this feedback work. Existing bounded findings
+analysis are not implemented by this feedback work (`check_accessibility` compares
+text with known solid backgrounds; see [Phase 6 review](review-phase6.md)). Existing bounded findings
 and separate accessibility checks remain as documented, not a combined
 automatic quality verdict. These are future candidates, not delivered features.
 

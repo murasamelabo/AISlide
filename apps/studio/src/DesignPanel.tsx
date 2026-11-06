@@ -2,6 +2,7 @@
 import { ArrowLeft, Calendar, Check, Copy, Hash, ImagePlus, LayoutTemplate, Palette, Plus, Square, Trash2, Type } from 'lucide-react'
 import { core, fileBase64 } from './api'
 import { SlideSurface } from './SlideSurface'
+import { ThemeFontHint } from './ThemeFontHint'
 import { ColorField, TextControls } from './TextControls'
 import { Tool } from './Tool'
 import type { AuxiliaryDesign, Deck, Design, DesignField, DesignPreset, Element, Placeholder, Slide, Theme } from './types'
@@ -155,6 +156,7 @@ export function DesignPanel({ design, deck, preserveStructure = false, onSave, o
           {!auxiliaryKey && <label className="checkbox"><input type="checkbox" checked={!ownerMaster.theme} onChange={(event) => setTheme(event.target.checked ? null : structuredClone(theme))} />Use default theme</label>}
           <fieldset disabled={!auxiliaryKey && !ownerMaster.theme}><label className="field">Theme name<input aria-label="Master theme name" value={theme.name} maxLength={80} onChange={(event) => setTheme({ ...theme, name: event.target.value })} /></label>
             {(['major', 'minor', 'east_asian', 'complex_script'] as const).map((key) => <label className="field" key={key}>{key.replaceAll('_', ' ')}<input aria-label={`Master ${key} font`} value={theme.fonts[key]} maxLength={100} onChange={(event) => setTheme({ ...theme, fonts: { ...theme.fonts, [key]: event.target.value } })} /></label>)}
+            {(['major', 'minor', 'east_asian', 'complex_script'] as const).map((key) => <ThemeFontHint key={key} theme={theme} fontKey={key} onChange={setTheme} />)}
             {Object.entries(theme.colors).map(([key, value]) => <ColorField key={key} label={`Master theme ${key}`} value={value} theme={theme} onChange={(color) => setTheme({ ...theme, colors: { ...theme.colors, [key]: color } })} />)}
           </fieldset>
         </details>

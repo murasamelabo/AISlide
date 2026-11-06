@@ -862,6 +862,410 @@ fn guided_ledger_notes_record_is_bounded_hashed_and_recoverable() {
     }
 }
 
+fn two_page_guided_document() -> Value {
+    let mut input = authoring_brief("status-report");
+    let mut second = input["slides"][0].clone(); second["id"] = json!("second");
+    input["slides"].as_array_mut().unwrap().push(second);
+    execute_request(json!({"op":"create_guided_presentation","id":"fixed-annotations","input":input})).unwrap()["document"].clone()
+}
+
+fn small_text_findings(document: &Value, options: Value, slide_id: &str, element_id: &str) -> Vec<Value> {
+    let report = execute_request(json!({"op":"preflight_presentation","document":document,"options":options})).unwrap();
+    report["findings"].as_array().unwrap().iter()
+        .filter(|finding| finding["code"] == "SMALL_TEXT" && finding["slide_id"] == slide_id && finding["element_ids"] == json!([element_id])).cloned().collect()
+}
+
+fn severities(document: &Value, slide_id: &str) -> Vec<Value> {
+    ["source", "page"].iter().flat_map(|element| small_text_findings(document, json!({"page_indices":[0,1]}), slide_id, element)).map(|finding| finding["severity"].clone()).collect()
+}
+
+#[test]
+fn issue77_guided_source_lines_and_page_numbers_are_information_for_every_selection_and_floor() {
+    let document = two_page_guided_document();
+    for slide in document["deck"]["slides"].as_array().unwrap() {
+        let element = |id: &str| slide["elements"].as_array().unwrap().iter().find(|element| element["id"] == id).unwrap().clone();
+        assert_eq!((element("source")["font_size"].as_f64(), element("page")["font_size"].as_f64()), (Some(12.0), Some(12.0)));
+    }
+    for options in [json!({"page_indices":[0,1]}), json!({"page_indices":[0,1],"include_inherited":false}), json!({"page_indices":[0,1],"min_font_size":24})] {
+        for (page, slide) in ["evidence-slide", "second"].into_iter().enumerate() {
+            for (element, role) in [("source", "source line"), ("page", "page number")] {
+                let findings = small_text_findings(&document, options.clone(), slide, element);
+                assert_eq!(findings.len(), 1, "{options} {slide}/{element}: {findings:?}");
+                assert_eq!(findings[0]["severity"], "info");
+                assert_eq!(findings[0]["page_index"], page);
+                let message = findings[0]["message"].as_str().unwrap();
+                assert!(message.contains(role) && message.contains("fixed 12px") && message.contains("guided input does not resize"), "{message}");
+                assert!(!findings[0]["suggestions"].as_array().unwrap().is_empty());
+            }
+        }
+    }
+    let selected = small_text_findings(&document, json!({"page_indices":[1]}), "second", "source");
+    assert_eq!(selected.len(), 1);
+    assert!(small_text_findings(&document, json!({"page_indices":[1]}), "evidence-slide", "source").is_empty(), "only the selected page is reported");
+    for element in ["source", "page"] {
+        assert!(small_text_findings(&document, json!({"page_indices":[0,1],"min_font_size":12}), "second", element).is_empty(), "12px meets a 12px floor");
+    }
+}
+
+#[test]
+fn issue77_the_exemption_ends_for_text_that_is_not_the_generated_annotation() {
+    let document = two_page_guided_document();
+    let apply = |document: &Value, operations: Value| execute_request(json!({"op":"apply_operations","document":document,
+        "expected_revision":document["revision"],"expected_hash":document["hash"],"operations":operations})).unwrap()["document"].clone();
+    assert_eq!(severities(&document, "second"), [json!("info"), json!("info")]);
+
+    // What the text says is not what the preset fixes.
+    let reworded = apply(&document, json!([{"op":"set_rich_text","slide_id":"second","id":"source","paragraphs":[{"runs":[{"text":"[source-a] A different locator"}]}]}]));
+    assert_eq!(severities(&reworded, "second"), [json!("info"), json!("info")]);
+
+    // A size the author chose is theirs: below the floor it is a warning, at or above it there is nothing to report.
+    for (size, expected) in [(14, Some("warning")), (16, None), (20, None), (12, Some("info"))] {
+        let resized = apply(&document, json!([{"op":"set_text_style","slide_id":"second","ids":["source"],"style":{"font_size":size}}]));
+        let findings = small_text_findings(&resized, json!({"page_indices":[0,1]}), "second", "source");
+        assert_eq!(findings.iter().map(|finding| finding["severity"].as_str().unwrap()).collect::<Vec<_>>(), expected.into_iter().collect::<Vec<_>>(), "size {size}");
+        assert_eq!(severities(&resized, "evidence-slide"), [json!("info"), json!("info")], "the other slide is untouched");
+    }
+    // One smaller run is enough to make the frame ordinary text again.
+    let run = apply(&document, json!([{"op":"set_rich_text","slide_id":"second","id":"source","paragraphs":[{"runs":[{"text":"[source-a] "},{"text":"fine print","style":{"font_size":10}}]}]}]));
+    let findings = small_text_findings(&run, json!({"page_indices":[0,1]}), "second", "source");
+    assert_eq!(findings.iter().map(|finding| finding["severity"].as_str().unwrap()).collect::<Vec<_>>(), ["warning"]);
+}
+
+#[test]
+fn issue77_same_named_text_outside_a_guided_slide_stays_a_warning() {
+    let document = two_page_guided_document();
+    // The slide leaves the guided layout: its text is no longer drawn by guided creation.
+    let mut deck = document["deck"].clone();
+    deck["slides"][1]["layout_id"] = Value::Null;
+    let moved = execute_request(json!({"op":"new_document","id":"left-layout","deck":deck})).unwrap();
+    for element in ["source", "page"] {
+        assert_eq!(small_text_findings(&moved, json!({"page_indices":[0,1]}), "evidence-slide", element)[0]["severity"], "info");
+        assert_eq!(small_text_findings(&moved, json!({"page_indices":[0,1]}), "second", element)[0]["severity"], "warning");
+    }
+    // A hand-made deck with the same IDs and sizes has nothing that guided creation drew.
+    let mut plain = execute_request(json!({"op":"create_presentation","id":"plain","title":"Plain"})).unwrap()["deck"].clone();
+    plain["slides"][0]["elements"] = json!([
+        {"type":"text","id":"source","x":64,"y":658,"width":600,"height":30,"text":"Source: synthetic","font_size":12,"color":"000000","bold":false},
+        {"type":"text","id":"page","x":1132,"y":676,"width":84,"height":26,"text":"1 / 1","font_size":12,"color":"000000","bold":false}
+    ]);
+    let plain = execute_request(json!({"op":"new_document","id":"plain-annotations","deck":plain})).unwrap();
+    let slide_id = plain["deck"]["slides"][0]["id"].clone();
+    for element in ["source", "page"] {
+        let findings = small_text_findings(&plain, json!({"page_indices":[0]}), slide_id.as_str().unwrap(), element);
+        assert_eq!(findings.len(), 1, "{element}");
+        assert_eq!(findings[0]["severity"], "warning");
+    }
+    // Body text on a guided slide is not an annotation either.
+    let mut body = document["deck"].clone();
+    body["slides"][1]["elements"].as_array_mut().unwrap().push(json!({"type":"text","id":"footnote","x":64,"y":600,"width":600,"height":30,"text":"Small body note","font_size":12,"color":"000000","bold":false}));
+    let body = execute_request(json!({"op":"new_document","id":"guided-body","deck":body})).unwrap();
+    assert_eq!(small_text_findings(&body, json!({"page_indices":[0,1]}), "second", "footnote")[0]["severity"], "warning");
+}
+
+#[test]
+fn issue77_the_exemption_survives_native_reopening_and_slide_duplication() {
+    let document = two_page_guided_document();
+    let exported = execute_request(json!({"op":"export_presentation","document":document})).unwrap();
+    let reopened = execute_request(json!({"op":"open_presentation","id":"fixed-annotations-native","base64":exported["base64"]})).unwrap()["document"].clone();
+    for slide in ["evidence-slide", "second"] {
+        assert_eq!(severities(&reopened, slide), [json!("info"), json!("info")], "{slide} after reopening");
+    }
+    let duplicated = execute_request(json!({"op":"edit_slides","document":document,"expected_revision":document["revision"],"operations":[{"op":"duplicate","slide_id":"evidence-slide","id":"copy"}]})).unwrap();
+    let copied = &duplicated["document"];
+    assert_eq!(copied["deck"]["slides"][1]["id"], "copy");
+    let report = execute_request(json!({"op":"preflight_presentation","document":copied,"options":{"page_indices":[0,1,2]}})).unwrap();
+    for element in ["source", "page"] {
+        let findings: Vec<_> = report["findings"].as_array().unwrap().iter()
+            .filter(|finding| finding["code"] == "SMALL_TEXT" && finding["slide_id"] == "copy" && finding["element_ids"] == json!([element])).collect();
+        assert_eq!(findings.len(), 1, "{element}");
+        assert_eq!(findings[0]["severity"], "info");
+    }
+}
+
+fn wcag_contrast(foreground: &str, background: &str) -> f64 {
+    let luminance = |color: &str| [(0, 0.2126), (2, 0.7152), (4, 0.0722)].into_iter().map(|(offset, weight)| {
+        let channel = f64::from(u8::from_str_radix(&color[offset..offset + 2], 16).unwrap()) / 255.0;
+        weight * if channel <= 0.04045 { channel / 12.92 } else { ((channel + 0.055) / 1.055).powf(2.4) }
+    }).sum::<f64>();
+    let (first, second) = (luminance(foreground), luminance(background));
+    (first.max(second) + 0.05) / (first.min(second) + 0.05)
+}
+
+fn theme_color(deck: &Value, color: &str) -> String {
+    color.strip_prefix('@').map_or_else(|| color.to_owned(), |key| deck["design"]["theme"]["colors"][key].as_str().unwrap_or_else(|| panic!("theme color {key}")).to_owned())
+}
+
+fn collect_text(value: &Value, output: &mut Vec<Value>) {
+    match value {
+        Value::Array(values) => for value in values { collect_text(value, output); },
+        Value::Object(object) => {
+            if object.get("type").is_some_and(|kind| kind == "text") { output.push(value.clone()); }
+            for child in object.values() { collect_text(child, output); }
+        }
+        _ => {}
+    }
+}
+
+fn issue75_input() -> Value {
+    json!({"version":1,"title":"Repro","language":"ja","profile_id":"technical-explainer","audience":"検証担当","purpose":"不具合の再現","governing_message":"合成データで不具合を再現する",
+        "authoring":{"context":"reading","headline_style":"keyword","ledger_notes":"summary"},
+        "evidence":[{"id":"E1","kind":"source","reference":"synthetic","statement":"合成データ"}],
+        "slides":[{"id":"r1","section":"再現","headline":"グループの一覧","question":"何があるか","parent_message":"governing","pattern_id":"native-part","sentence_form":"outcome","parallel_basis":"領域","transition":"終わり",
+            "support":[{"clause":"グループの一覧","body_paths":["/data/groups/0/items/0"],"evidence_ids":["E1"]}],
+            "part":{"version":1,"preset":"list-set/balanced","title":"領域ごとの項目","data":{"kind":"groups","groups":(1..=5).map(|index| json!({"label":format!("Domain {index}"),"items":["Plan","Build","Measure"]})).collect::<Vec<_>>()}}}]})
+}
+
+#[test]
+fn issue75_guided_group_headings_and_annotations_are_readable_for_any_brand_color() {
+    for brand in [None, Some("1976D2"), Some("FFEB3B"), Some("F5F5F5"), Some("0B1F3A"), Some("E53935")] {
+        let mut input = issue75_input();
+        if let Some(brand) = brand { input["brand_color"] = json!(brand); }
+        let created = execute_request(json!({"op":"create_guided_presentation","id":"issue75","input":input})).unwrap_or_else(|error| panic!("{brand:?}: {error}"));
+        let deck = &created["document"]["deck"];
+        let mut texts = Vec::new();
+        collect_text(&deck["slides"][0]["elements"], &mut texts);
+        let background = theme_color(deck, deck["slides"][0]["background"].as_str().unwrap());
+        let headings: Vec<_> = texts.iter().filter(|text| text["text"].as_str().is_some_and(|text| text.starts_with("Domain "))).collect();
+        assert_eq!(headings.len(), 5, "{brand:?}");
+        for heading in headings {
+            let ratio = wcag_contrast(&theme_color(deck, heading["color"].as_str().unwrap()), &background);
+            assert!(ratio >= 4.5, "{brand:?}: {} is {ratio:.2}:1 on {background}", heading["text"]);
+            assert_eq!(heading["color"], "@dk1", "headings are text; the group accent stays on the rule above it");
+        }
+        for id in ["source", "page"] {
+            let text = texts.iter().find(|text| text["id"] == id).unwrap();
+            assert_eq!(text["font_size"], 12.0);
+            let ratio = wcag_contrast(&theme_color(deck, text["color"].as_str().unwrap()), &background);
+            assert!(ratio >= 4.5, "{brand:?}: {id} is {ratio:.2}:1");
+        }
+        // Decoration keeps the pale tints, so the repair does not darken the accents.
+        let colors = &deck["design"]["theme"]["colors"];
+        assert!(wcag_contrast(colors["accent4"].as_str().unwrap(), "FFFFFF") < 3.0 || brand == Some("0B1F3A") || brand == Some("E53935"), "{brand:?}");
+        assert!(wcag_contrast(colors["dk2"].as_str().unwrap(), colors["lt2"].as_str().unwrap()) >= 4.5, "the annotation color also reads on the neutral panel");
+    }
+}
+
+#[test]
+fn issue75_no_guided_part_draws_text_in_a_pale_accent_tint() {
+    let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
+    let mut checked = 0;
+    let mut pale = Vec::new();
+    for entry in catalog["presets"].as_array().unwrap() {
+        let preset = entry["id"].as_str().unwrap();
+        let mut input = authoring_brief("status-report");
+        input["slides"][0]["part"] = entry["example"].clone();
+        input["slides"][0]["support"][0]["body_paths"] = json!(["/data"]);
+        input["slides"][0]["numbers"] = catalog_brief(preset)["slides"][0]["numbers"].clone();
+        let Ok(created) = execute_request(json!({"op":"create_guided_presentation","id":"issue75-catalog","input":input})) else { continue; };
+        checked += 1;
+        let deck = &created["document"]["deck"];
+        let mut texts = Vec::new();
+        collect_text(&deck["slides"][0]["elements"], &mut texts);
+        for text in texts {
+            let color = text["color"].as_str().unwrap();
+            if !color.starts_with("@accent") { continue; }
+            // The darker of the two light backgrounds a part draws on.
+            if wcag_contrast(&theme_color(deck, color), &theme_color(deck, "@lt2")) < 3.0 { pale.push(format!("{preset}: {} {color}", text["text"])); }
+        }
+    }
+    assert!(checked >= 40, "only {checked} presets could be checked");
+    assert!(pale.is_empty(), "text in an accent that is pale on the panel color: {pale:#?}");
+}
+
+fn recolor_text(value: &mut Value, text: &str, color: &str) -> Option<String> {
+    match value {
+        Value::Array(values) => values.iter_mut().find_map(|value| recolor_text(value, text, color)),
+        Value::Object(object) => {
+            if object.get("type").is_some_and(|kind| kind == "text") && object.get("text").is_some_and(|value| value == text) {
+                object.insert("color".into(), json!(color));
+                return object.get("id").and_then(Value::as_str).map(str::to_owned);
+            }
+            object.values_mut().find_map(|child| recolor_text(child, text, color))
+        }
+        _ => None,
+    }
+}
+
+#[test]
+fn issue76_guided_deck_text_is_checked_and_a_pale_heading_is_reported() {
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue76","input":issue75_input()})).unwrap();
+    let document = &created["document"];
+    assert_eq!(document["deck"]["slides"][0]["inherit_background"], true);
+    let report = execute_request(json!({"op":"check_accessibility","document":document})).unwrap();
+    let low = |report: &Value| report["issues"].as_array().unwrap().iter().filter(|issue| issue["code"] == "text_contrast_low").count();
+    assert_eq!(low(&report), 0, "{report}");
+    // 4 slide texts (section, headline, source, page) and the 21 texts of the part, all inside groups on an inherited background.
+    assert_eq!((report["contrast_checked"].as_u64(), report["contrast_unsupported"].as_u64()), (Some(25), Some(0)), "{report}");
+    assert!(report["issues"].as_array().unwrap().iter().all(|issue| issue["code"] != "contrast_background_unverified"), "{report}");
+
+    // The pale tint of the report: drawn in the fourth accent again, the heading is found.
+    let mut deck = document["deck"].clone();
+    let id = recolor_text(&mut deck["slides"][0]["elements"], "Domain 4", "@accent4").expect("the fourth group heading");
+    let expected = wcag_contrast(&theme_color(&deck, "@accent4"), &theme_color(&deck, "@lt1"));
+    assert!(expected < 3.0, "the default brand's fourth accent is pale: {expected:.2}:1");
+    let pale = aislide_core::review::check_accessibility(&serde_json::from_value(deck).unwrap());
+    let found: Vec<_> = pale.issues.iter().filter(|issue| issue.code == "text_contrast_low").collect();
+    assert_eq!(found.len(), 1, "{:?}", pale.issues);
+    assert_eq!(found[0].element_id.as_deref(), Some(id.as_str()));
+    assert!((found[0].contrast_ratio.unwrap() - expected).abs() < 0.01, "{:?} vs {expected}", found[0].contrast_ratio);
+    assert!([Some(3.0), Some(4.5)].contains(&found[0].required_ratio), "{:?}", found[0].required_ratio);
+    assert_eq!((pale.contrast_checked, pale.contrast_unsupported), (25, 0));
+}
+
+fn issue74_part(long: &[(usize, &str)]) -> Value {
+    let mut rows: Vec<Value> = (0..5).map(|index| json!({"from":format!("旧方式 {index}"),"to":format!("新方式 {index}"),"detail":"説明"})).collect();
+    for (row, field) in long { rows[*row][*field] = json!(if *field == "detail" { "説明".repeat(100) } else { "あ".repeat(48) }); }
+    json!({"version":1,"preset":"before-after/shift","title":"変更点","data":{"kind":"shift_rows","from_label":"前","to_label":"後",
+        "message":{"text":"選定の基準を統一した","detail":"全体の説明は別の資料にある"},"rows":rows}})
+}
+
+fn issue74_slide(id: &str, transition: &str, part: Value) -> Value {
+    json!({"id":id,"section":"再現","headline":format!("変更点 {id}"),"question":"何が変わるか","parent_message":"governing","pattern_id":"native-part","sentence_form":"outcome","parallel_basis":"変更","transition":transition,
+        "support":[{"clause":format!("変更点 {id}"),"body_paths":["/data/rows/0/from","/data/rows/0/to"],"evidence_ids":["E1"]}],"part":part})
+}
+
+fn issue74_input(slides: Vec<Value>) -> Value {
+    let mut input = issue75_input();
+    input["slides"] = json!(slides);
+    input
+}
+
+fn issue74_diagnostics(checked: &Value) -> Vec<(String, String, Option<String>)> {
+    checked["diagnostics"].as_array().map_or_else(Vec::new, |list| list.iter().map(|entry| (entry["code"].as_str().unwrap().to_owned(), entry["slide_id"].as_str().unwrap().to_owned(), entry["path"].as_str().map(str::to_owned))).collect())
+}
+
+#[test]
+fn issue74_validation_reports_every_text_that_does_not_fit_with_its_slide_and_field() {
+    let first = issue75_input()["slides"][0].clone();
+    let slides = vec![
+        first,
+        issue74_slide("r2", "次へ", issue74_part(&[(0, "from"), (2, "detail")])),
+        issue74_slide("r3", "終わり", issue74_part(&[(1, "to"), (3, "from")])),
+    ];
+    let input = issue74_input(slides);
+    // The two shift parts really do not fit: the single-error `create_part` still reports the first text only.
+    let single = execute_request(json!({"op":"create_part","id":"single","spec":input["slides"][1]["part"]})).unwrap_err().to_string();
+    assert!(single.contains("does not fit at its fixed font size") && single.contains("rows[0].from"), "{single}");
+
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"], false, "{checked}");
+    let found = issue74_diagnostics(&checked);
+    let shown: Vec<_> = found.iter().map(|(_, slide, path)| (slide.as_str(), path.as_deref().unwrap_or(""))).collect();
+    assert_eq!(shown, [("r2", "/data/rows/0/from"), ("r2", "/data/rows/2/detail"), ("r3", "/data/rows/1/to"), ("r3", "/data/rows/3/from")], "{checked}");
+    assert!(found.iter().all(|(code, ..)| ["PART_TEXT_OVERFLOW", "PART_MISSING_GLYPHS"].contains(&code.as_str())), "{found:?}");
+    for entry in checked["diagnostics"].as_array().unwrap() {
+        assert_eq!(entry["preset"], "before-after/shift");
+        if entry["code"] == "PART_TEXT_OVERFLOW" { assert!(entry["measured_px"].as_u64().unwrap() > entry["available_px"].as_u64().unwrap(), "{entry}"); }
+    }
+    // Every problem is also a sentence, led by the input's slide ID and the spec path, in the same order.
+    let issues: Vec<_> = checked["issues"].as_array().unwrap().iter().map(|issue| issue.as_str().unwrap()).collect();
+    assert_eq!(issues.len(), 4, "{checked}");
+    for (issue, (slide, path)) in issues.iter().zip(&shown) { assert!(issue.starts_with(&format!("{slide} / {path}: before-after/shift text ")), "{issue}"); }
+
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue74","input":input})).unwrap_err().to_string();
+    assert!(created.contains("r2 / /data/rows/0/from") && created.contains("r3 / /data/rows/3/from"), "{created}");
+
+    // Moving a slide moves its diagnostics with it; the slide ID never comes from the element number.
+    let mut swapped = input.clone();
+    swapped["slides"].as_array_mut().unwrap().swap(1, 2);
+    swapped["slides"][1]["transition"] = json!("次へ");
+    swapped["slides"][2]["transition"] = json!("終わり");
+    let after = issue74_diagnostics(&execute_request(json!({"op":"validate_guided_presentation","input":swapped})).unwrap());
+    let slide_ids: Vec<_> = after.iter().map(|(_, slide, _)| slide.as_str()).collect();
+    assert_eq!(slide_ids, ["r3", "r3", "r2", "r2"], "{after:?}");
+
+    // Once every text fits, the input is ready again and nothing is reported.
+    let fixed = issue74_input(vec![issue75_input()["slides"][0].clone(), issue74_slide("r2", "次へ", issue74_part(&[])), issue74_slide("r3", "終わり", issue74_part(&[]))]);
+    let ready = execute_request(json!({"op":"validate_guided_presentation","input":fixed})).unwrap();
+    assert_eq!(ready["ready"], true, "{ready}");
+    assert!(ready.get("diagnostics").is_none() && ready["issues"].as_array().unwrap().is_empty(), "{ready}");
+    execute_request(json!({"op":"create_guided_presentation","id":"issue74-fixed","input":fixed})).unwrap();
+}
+
+#[test]
+fn issue74_slides_are_checked_independently_of_each_other_and_of_other_input_problems() {
+    let mut broken = issue75_input()["slides"][0].clone();
+    broken["part"]["data"]["groups"] = json!([{"label":"Only one","items":["Plan"]}]);
+    let slides = vec![broken, issue74_slide("r2", "次へ", issue74_part(&[(0, "from")])), issue74_slide("r3", "終わり", issue74_part(&[(1, "to")]))];
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":issue74_input(slides.clone())})).unwrap();
+    let found = issue74_diagnostics(&checked);
+    let shown: Vec<_> = found.iter().map(|(code, slide, path)| (code.as_str(), slide.as_str(), path.as_deref())).collect();
+    assert_eq!(shown[0], ("PART_INVALID", "r1", None), "{checked}");
+    assert_eq!(shown[1..].iter().map(|(_, slide, path)| (*slide, *path)).collect::<Vec<_>>(), [("r2", Some("/data/rows/0/from")), ("r3", Some("/data/rows/1/to"))], "{checked}");
+
+    // An input that fails its other checks still gets the diagnostics of its parts, after those checks.
+    let mut unchecked = issue74_input(slides);
+    unchecked["audience"] = json!("");
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":unchecked})).unwrap();
+    let issues: Vec<_> = checked["issues"].as_array().unwrap().iter().map(|issue| issue.as_str().unwrap()).collect();
+    assert!(issues[0].starts_with("audience:"), "{issues:?}");
+    assert!(issues.iter().any(|issue| issue.starts_with("r2 / /data/rows/0/from: ")) && issues.iter().any(|issue| issue.starts_with("r3 / /data/rows/1/to: ")), "{issues:?}");
+    assert_eq!(checked["ready"], false);
+}
+
+#[test]
+fn issue74_a_response_that_has_to_be_cut_says_how_much_was_left_out() {
+    let all = [(0, "from"), (0, "to"), (0, "detail"), (1, "from"), (1, "to"), (1, "detail"), (2, "from"), (2, "to"), (2, "detail"), (3, "from"), (3, "to"), (3, "detail"), (4, "from"), (4, "to"), (4, "detail")];
+    let slides: Vec<_> = (1..=32).map(|index| issue74_slide(&format!("s{index:02}"), if index == 32 { "終わり" } else { "次へ" }, issue74_part(&all))).collect();
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":issue74_input(slides)})).unwrap();
+    assert_eq!(checked["diagnostics"].as_array().unwrap().len(), 200, "the list is cut at 200");
+    let issues = checked["issues"].as_array().unwrap();
+    let last = issues.last().unwrap().as_str().unwrap();
+    assert!(last.contains("more problems in the slides are not listed"), "{last}");
+    assert_eq!(issues.len(), 201);
+    let omitted: usize = last.split(' ').next().unwrap().parse().unwrap();
+    assert!(omitted > 0 && omitted + 200 <= 480, "{omitted}");
+}
+
+#[test]
+fn issue74_a_layout_that_does_not_fit_is_still_reported_next_to_the_slides_that_do_not_compile() {
+    let mut matrix = issue74_slide("m1", "終わり", json!({"version":1,"preset":"matrix/labeled","title":"Review","subtitle":"Decisions","data":{"kind":"matrix","rows":["Now","Next"],"columns":["A","B"],"cells":[["A\nB\nC","No"],["No","Yes"]]}}));
+    matrix["support"][0]["body_paths"] = json!(["/data/cells"]);
+    let mut input = issue74_input(vec![issue74_slide("r2", "次へ", issue74_part(&[(0, "from")])), matrix]);
+    input["authoring"] = json!({"body_font_min":28,"spacing":"relaxed","font_family":"Arial","headline_style":"keyword","ledger_notes":"summary"});
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"], false, "{checked}");
+    assert_eq!(issue74_diagnostics(&checked).iter().map(|(_, slide, path)| (slide.as_str(), path.as_deref())).collect::<Vec<_>>(), [("r2", Some("/data/rows/0/from"))], "{checked}");
+    let issues: Vec<_> = checked["issues"].as_array().unwrap().iter().map(|issue| issue.as_str().unwrap()).collect();
+    assert_eq!(issues.len(), 2, "{checked}");
+    assert!(issues[0].starts_with("r2 / /data/rows/0/from: "), "{issues:?}");
+    assert!(issues[1].contains("guided layout does not fit") && issues[1].contains("TEXT_OVERFLOW") && issues[1].contains("m1"), "the compiled slide keeps its layout check: {issues:?}");
+    assert!(!issues[1].contains("r2"), "the slide that did not compile is not measured: {issues:?}");
+}
+
+#[test]
+fn issue80_guided_parts_record_the_pictures_their_definition_declares_decorative() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><rect width="32" height="16" fill="#008080"/></svg>"##;
+    let asset = execute_request(json!({"op":"create_asset","id":"icon","base64":STANDARD.encode(svg),"mime_type":"image/svg+xml","alt":"Synthetic icon","size":48})).unwrap();
+    let icon = |decorative: bool| { let mut icon = json!({"base64":asset["base64"],"mime_type":asset["mime_type"],"alt":""}); if decorative { icon["decorative"] = json!(true); } icon };
+    let mut slide = issue74_slide("rows", "終わり", json!({"version":1,"preset":"list/icon-rows","title":"Rows","data":{"kind":"icon_rows","rows":[
+        {"label":"First","detail":"Decorative icon","icon":icon(true)},{"label":"Second","detail":"Described later","icon":icon(false)}]}}));
+    slide["support"][0]["body_paths"] = json!(["/data/rows/0/label"]);
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue80-guided","input":issue74_input(vec![slide])})).unwrap();
+    let document = &created["document"];
+    let mut pictures = Vec::new();
+    collect_pictures(&document["deck"]["slides"][0]["elements"], &mut pictures);
+    assert_eq!(pictures.len(), 2);
+    let entries = &document["deck"]["slides"][0]["review"]["accessibility"];
+    assert_eq!(entries[&pictures[0]]["decorative"], true, "{entries}");
+    assert!(entries.get(&pictures[1]).is_none(), "an icon that does not declare it is not decorative: {entries}");
+    let report = execute_request(json!({"op":"check_accessibility","document":document})).unwrap();
+    let missing: Vec<_> = report["issues"].as_array().unwrap().iter().filter(|issue| issue["code"] == "image_alt_missing").map(|issue| issue["element_id"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(missing, [pictures[1].clone()], "{report}");
+}
+
+fn collect_pictures(value: &Value, output: &mut Vec<String>) {
+    match value {
+        Value::Array(values) => for value in values { collect_pictures(value, output); },
+        Value::Object(object) => {
+            if object.get("type").is_some_and(|kind| kind == "picture") { output.push(object["id"].as_str().unwrap().to_owned()); }
+            for child in object.values() { collect_pictures(child, output); }
+        }
+        _ => {}
+    }
+}
+
 #[test]
 fn guided_record_is_inspected_and_removed_by_explicit_clean_copy() {
     for mode in ["summary","none"] {

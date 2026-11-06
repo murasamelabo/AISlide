@@ -29,6 +29,8 @@ pub const MIN_HEIGHT: f64 = 40.0;
 const MAX_X: f64 = WIDTH - MIN_WIDTH;
 const MAX_Y: f64 = HEIGHT - MIN_HEIGHT;
 const RENDER_LAYOUT_VERSION: u32 = 3;
+// The card padding floor of visual preflight (CONTAINER_PADDING). Node text gains it only where the measured text still fits.
+const MINIMUM_PADDING: f64 = 8.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -69,6 +71,7 @@ pub struct GraphLayoutNode {
     pub id: String, pub label: String,
     #[serde(default)] pub detail: Option<String>,
     #[serde(default)] pub detail_font_size: Option<f64>,
+    #[serde(default)] pub detail_fit: GraphDetailFit,
     #[serde(default)] pub text_align: Option<GraphTextAlign>,
     #[serde(default = "enabled")] pub heading_bold: bool,
     #[serde(default)] pub label_fit: GraphLabelFit,
@@ -93,7 +96,7 @@ pub fn layout_graph(input: &GraphLayoutInput) -> Result<GraphSpec> {
     let spec = GraphSpec {
         version: input.version, title: input.title.clone(), subtitle: input.subtitle.clone(), show_title: input.show_title,
         nodes: input.nodes.iter().map(|node| GraphNode {
-            id: node.id.clone(), label: node.label.clone(), detail: node.detail.clone(), detail_font_size: node.detail_font_size,
+            id: node.id.clone(), label: node.label.clone(), detail: node.detail.clone(), detail_font_size: node.detail_font_size, detail_fit: node.detail_fit,
             text_align: node.text_align, heading_bold: node.heading_bold, label_fit: node.label_fit, kind: node.kind, presentation: node.presentation,
             x: 0.0, y: if input.show_title { CONTENT_TOP } else { 0.0 }, width: node.width, height: node.height,
             fill: node.fill.clone(), stroke: node.stroke.clone(), color: node.color.clone(), font_size: node.font_size,
@@ -188,6 +191,15 @@ impl GraphLabelFit {
     fn is_wrap(&self) -> bool { *self == Self::Wrap }
 }
 
+/// How a node's `detail` meets a short last line. `wrap` (default) keeps the detail size and accepts the short line; `shrink` may reduce
+/// the size by 0.5px steps, down to 12px, until the last line is no longer short, and reports `GRAPH_NODE_DETAIL_SHRUNK` when it did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphDetailFit { #[default] Wrap, Shrink }
+impl GraphDetailFit {
+    fn is_wrap(&self) -> bool { *self == Self::Wrap }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GraphLabelPlacement {
@@ -219,12 +231,40 @@ pub struct GraphIcon {
     #[schemars(length(min = 1, max = crate::media::MAX_IMAGE_BASE64_LEN))] pub base64: String,
     #[schemars(extend("enum" = ["image/png", "image/jpeg"]))] pub mime_type: String,
     #[serde(default)] #[schemars(length(max = ICON_ALT_MAX))] pub alt: String,
+    /// `true` marks the picture drawn from this icon decorative, which add_part, update_part, add_graph and update_graph record on the
+    /// picture's accessibility settings each time the part is drawn. A decorative picture has no description, so `alt` must be empty.
+    /// An empty `alt` without `decorative` is still reported by check_accessibility as `image_alt_missing`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub decorative: bool,
 }
 
 pub fn create_icon(base64: String, mime_type: &str, alt: &str) -> Result<GraphIcon> {
     valid_text(alt, ICON_ALT_MAX)?;
     let (base64, mime_type) = crate::media::icon_raster(base64, mime_type)?;
-    Ok(GraphIcon { base64, mime_type, alt: alt.into() })
+    Ok(GraphIcon { base64, mime_type, alt: alt.into(), decorative: false })
+}
+
+/// The checks every part applies to an icon or image of its definition.
+pub(crate) fn validate_icon(icon: &GraphIcon) -> Result<()> {
+    valid_text(&icon.alt, ICON_ALT_MAX)?;
+    if icon.decorative && !icon.alt.trim().is_empty() { return Err(Error::Invalid("icon decorative:true requires an empty alt; a decorative picture has no description".into())); }
+    Ok(())
+}
+
+thread_local! { static DECORATIVE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) }; }
+
+/// Runs `render` and returns the IDs of the pictures it drew from icons that declare `decorative`.
+pub(crate) fn with_decorative_pictures<T>(render: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let outer = DECORATIVE.with(|records| records.replace(Some(Vec::new())));
+    let value = render();
+    let records = DECORATIVE.with(|records| records.replace(outer)).unwrap_or_default();
+    (value, records)
+}
+
+/// The picture of an icon or image of a part definition, noted when the definition declares it decorative.
+pub(crate) fn icon_element(id: &str, icon: &GraphIcon) -> Result<Element> {
+    let picture = crate::media::create_picture(id, icon.base64.clone(), &icon.mime_type, &icon.alt)?;
+    if icon.decorative { DECORATIVE.with(|records| if let Some(records) = records.borrow_mut().as_mut() { records.push(id.into()); }); }
+    Ok(picture)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -236,6 +276,7 @@ pub struct GraphNode {
     #[schemars(length(max = DETAIL_MAX))] pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 12, max = 40))] pub detail_font_size: Option<f64>,
+    #[serde(default, skip_serializing_if = "GraphDetailFit::is_wrap")] pub detail_fit: GraphDetailFit,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub text_align: Option<GraphTextAlign>,
     #[serde(default = "enabled", skip_serializing_if = "is_true")] pub heading_bold: bool,
     #[serde(default, skip_serializing_if = "GraphLabelFit::is_wrap")] pub label_fit: GraphLabelFit,
@@ -416,7 +457,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
             if !contains(ancestor, [region.x, region.y, region.width, region.height]) { return Err(containment_error("group", &region.id, ancestor, [region.x, region.y, region.width, region.height])); }
         }
         if let Some(icon) = &region.icon {
-            valid_text(&icon.alt, ICON_ALT_MAX)?;
+            validate_icon(icon)?;
             crate::media::inspect_raster(&icon.base64, &icon.mime_type)?;
         }
     }
@@ -437,7 +478,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
         }
         if node.presentation == GraphPresentation::Icon && (node.icon.is_none() || icon_height(node) <= 0.0) { return Err(Error::Invalid("icon presentation requires an icon and room for an image, gap and two-line label".into())); }
         if let Some(icon) = &node.icon {
-            valid_text(&icon.alt, ICON_ALT_MAX)?;
+            validate_icon(icon)?;
             crate::media::inspect_raster(&icon.base64, &icon.mime_type)?;
         }
         if let Some(parent) = &node.group {
@@ -564,10 +605,8 @@ fn paragraphs_of(element: &Element) -> Vec<crate::rich_text::RichParagraph> {
 
 // Moves label text boxes into their shape so the label follows the shape when it is moved or resized in PowerPoint.
 fn embed_labels(children: &mut Vec<Element>, shape_id: &str, labels: Vec<Element>, theme: &Theme) -> Result<()> {
-    // Matches the visual preflight card padding floor; centered labels gain it only where their text still fits.
-    const MINIMUM_PADDING: f64 = 8.0;
     let labels: Vec<_> = labels.into_iter().filter(|label| matches!(label, Element::Text { text, .. } if !text.is_empty())).collect();
-    let Some(Element::Shape { x, y, width, height, text, font_size, color, bold, format, .. }) = children.iter_mut().find(|element| element.bounds().0 == shape_id) else {
+    let Some(Element::Shape { x, y, width, height, preset, fill, stroke_width, text, font_size, color, bold, format, .. }) = children.iter_mut().find(|element| element.bounds().0 == shape_id) else {
         return Err(Error::Invalid(format!("graph label target {shape_id} is missing")));
     };
     let Some(Element::Text { font_size: heading_size, color: heading_color, bold: heading_bold, format: heading_format, .. }) = labels.first() else { return Ok(()); };
@@ -587,13 +626,20 @@ fn embed_labels(children: &mut Vec<Element>, shape_id: &str, labels: Vec<Element
     *format = TextFormat { alignment: heading_format.alignment, vertical: heading_format.vertical, font_family: heading_format.font_family.clone(), paragraphs, ..Default::default() };
     *text = crate::rich_text::plain_text(&format.paragraphs);
     *font_size = *heading_size; *color = heading_color.clone(); *bold = *heading_bold;
+    let card = matches!(preset.as_str(), "rect" | "roundRect") && *width >= 100.0 && *height >= 60.0 && (fill != "none" || *stroke_width > 0.0);
     let shortfall = MINIMUM_PADDING - padding.top.min(padding.bottom);
-    if format.vertical == VerticalAlign::Middle && shortfall > 0.0 {
+    if shortfall > 0.0 && (format.vertical == VerticalAlign::Middle || card && format.vertical == VerticalAlign::Top) {
         let frame_width = *width - padding.left - padding.right; let frame_height = *height - padding.top - padding.bottom;
         let needed = f64::from(crate::layout::graph_rich_metrics(text, frame_width, frame_height, *font_size, *bold, format, theme)?.measured_height);
-        // Equal growth on both sides keeps the centered text where the separate text box placed it.
-        let growth = shortfall.min(((frame_height - needed) / 2.0 - 1.0).max(0.0));
-        padding.top += growth; padding.bottom += growth;
+        if format.vertical == VerticalAlign::Middle {
+            // Equal growth on both sides keeps the centered text where the separate text box placed it.
+            let growth = shortfall.min(((frame_height - needed) / 2.0 - 1.0).max(0.0));
+            padding.top += growth; padding.bottom += growth;
+        } else if frame_height - needed - (MINIMUM_PADDING - padding.top).max(0.0) - (MINIMUM_PADDING - padding.bottom).max(0.0) >= 1.0 {
+            // Text with a detail hangs from the top of a painted card (the cards preflight checks). Each side rises only to the floor, and only
+            // while the measured text still fits; otherwise the padding stays as laid out and diagnostics reports the shortfall.
+            padding.top = padding.top.max(MINIMUM_PADDING); padding.bottom = padding.bottom.max(MINIMUM_PADDING);
+        }
     }
     format.padding = Some(padding);
     Ok(())
@@ -626,7 +672,7 @@ pub(crate) fn embed_text(id: &str, spec: &GraphSpec, children: &mut Vec<Element>
 
 fn icon_picture(id: &str, icon: &GraphIcon, rect: [f64; 4]) -> Result<Element> {
     let [left, top, box_width, box_height] = rect;
-    let mut picture = crate::media::create_picture(id, icon.base64.clone(), &icon.mime_type, &icon.alt)?;
+    let mut picture = icon_element(id, icon)?;
     if let Element::Picture { x, y, width, height, .. } = &mut picture {
         let scale = (box_width / *width).min(box_height / *height);
         *width *= scale; *height *= scale;
@@ -863,6 +909,44 @@ fn render_prefix(id: &str, spec: &GraphSpec) -> Result<String> {
     Ok(format!("{id}-{}", &format!("{:x}", Sha256::digest(crate::canonical::bytes(&(RENDER_LAYOUT_VERSION, spec))?))[..10]))
 }
 
+/// How a managed diagram names what it draws: `{prefix}-{role}-{entity}`, from its own spec. A node, an edge and a group each have fixed
+/// roles, so an element's role and entity say what it is in the diagram whatever the prefix, which hashes the whole spec.
+pub(crate) struct ManagedNames { prefix: String, nodes: BTreeSet<String>, edges: BTreeSet<String>, groups: BTreeSet<String> }
+
+const NODE_ROLES: [&str; 4] = ["n", "ni", "nt", "nd"];
+const EDGE_ROLES: [&str; 3] = ["e", "et", "eb"];
+const GROUP_ROLES: [&str; 4] = ["g", "gg", "gi", "gt"];
+
+impl ManagedNames {
+    /// What `id` is in this diagram: its role and the node, edge or group it belongs to. `None` for any other ID.
+    pub(crate) fn classify(&self, id: &str) -> Option<(&'static str, String)> {
+        let rest = id.strip_prefix(self.prefix.as_str())?.strip_prefix('-')?;
+        if let Some(title) = ["title", "subtitle"].into_iter().find(|name| *name == rest) { return Some((title, String::new())); }
+        let (role, entity) = rest.split_once('-')?;
+        let find = |roles: &[&'static str], entities: &BTreeSet<String>| roles.iter().copied().find(|candidate| *candidate == role && entities.contains(entity));
+        find(&NODE_ROLES, &self.nodes).or_else(|| find(&EDGE_ROLES, &self.edges)).or_else(|| find(&GROUP_ROLES, &self.groups)).map(|role| (role, entity.to_owned()))
+    }
+
+    pub(crate) fn id(&self, role: &str, entity: &str) -> String {
+        if entity.is_empty() { format!("{}-{role}", self.prefix) } else { format!("{}-{role}-{entity}", self.prefix) }
+    }
+}
+
+/// The naming of the diagram that `spec` draws for the part `id`; `None` when the part is not a managed diagram.
+pub(crate) fn managed_names(id: &str, spec: &crate::parts::PartSpec) -> Option<ManagedNames> {
+    if !matches!(spec.data, crate::parts::PartData::Diagram { .. }) { return None; }
+    let (render_id, graph, _) = crate::parts::graph_render_context(id, spec).ok()?;
+    let prefix = render_prefix(&render_id, &graph).ok()?;
+    Some(ManagedNames { prefix, nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(), edges: graph.edges.iter().map(|edge| edge.id.clone()).collect(), groups: graph.groups.iter().map(|group| group.id.clone()).collect() })
+}
+
+/// The icons a diagram draws as pictures, with the role (`ni` for a node, `gi` for a group) and entity of each.
+pub(crate) fn diagram_icons(spec: &crate::parts::PartSpec) -> Vec<(&'static str, &str, &GraphIcon)> {
+    let crate::parts::PartData::Diagram { graph } = &spec.data else { return Vec::new(); };
+    graph.nodes.iter().filter_map(|node| node.icon.as_ref().map(|icon| ("ni", node.id.as_str(), icon)))
+        .chain(graph.groups.iter().filter_map(|group| group.icon.as_ref().map(|icon| ("gi", group.id.as_str(), icon)))).collect()
+}
+
 pub(crate) fn validate_label_overlaps(id: &str, spec: &GraphSpec, children: &[Element]) -> Result<()> {
     let prefix = render_prefix(id, spec)?;
     let obstacles = label_obstacles(&prefix, spec, children);
@@ -911,7 +995,7 @@ impl GraphDiagnostics {
     }
 }
 
-pub(crate) fn diagnostics(id: &str, spec: &GraphSpec, element: &Element, theme: &Theme) -> GraphDiagnostics {
+pub(crate) fn diagnostics(id: &str, spec: &GraphSpec, element: &Element, theme: &Theme, shrinks: &[DetailShrink]) -> GraphDiagnostics {
     let mut report = GraphDiagnostics::default();
     let Element::Group { children, .. } = element else { report.status = "unavailable".into(); return report; };
     let Ok(prefix) = render_prefix(id, spec) else { report.status = "unavailable".into(); return report; };
@@ -940,7 +1024,31 @@ pub(crate) fn diagnostics(id: &str, spec: &GraphSpec, element: &Element, theme: 
     for node in &spec.nodes {
         let shape_id = format!("{prefix}-n-{}", node.id);
         let Some(&(element, bounds)) = placed_children.iter().find(|(element, _)| element.bounds().0 == shape_id) else { report.status = "partial".into(); continue; };
-        let Element::Shape { format, .. } = element else { report.status = "partial".into(); continue; };
+        let Element::Shape { preset, fill: shape_fill, stroke_width: shape_stroke, text: shape_text, width: shape_width, height: shape_height, font_size: shape_font_size, bold: shape_bold, format, .. } = element else { report.status = "partial".into(); continue; };
+        // Cards of the kind and size that preflight's CONTAINER_PADDING checks; text that could not keep the floor was left as laid out (see embed_labels).
+        if let Some(padding) = format.padding.as_ref().filter(|padding| padding.top.min(padding.bottom) < MINIMUM_PADDING - 0.01) {
+            if matches!(preset.as_str(), "rect" | "roundRect") && !shape_text.trim().is_empty() && *shape_width >= 100.0 && *shape_height >= 60.0 && (shape_fill != "none" || *shape_stroke > 0.0) {
+                match crate::layout::graph_rich_metrics(shape_text, shape_width - padding.left - padding.right, shape_height - padding.top - padding.bottom, *shape_font_size, *shape_bold, format, theme) {
+                    Ok(metrics) => {
+                        let needed = f64::from(metrics.measured_height);
+                        report.push(GraphFinding {
+                            code: "GRAPH_NODE_PADDING".into(), severity: "warning".into(), graph_id: id.into(), entity_id: node.id.clone(), element_ids: vec![shape_id.clone()], bounds,
+                            message: format!("Node text is {needed:.0}px tall, so this {shape_height:.0}px node cannot keep the {MINIMUM_PADDING:.0}px top and bottom padding; make the node at least {:.0}px tall, widen it so the text wraps less, or shorten the text.", (needed + 2.0 * MINIMUM_PADDING + 1.0).ceil()),
+                            slide_id: None, lines: None, font_size: None,
+                        });
+                    }
+                    Err(_) => report.status = "partial".into(),
+                }
+            }
+        }
+        for shrink in shrinks.iter().filter(|shrink| shrink.node_id == node.id) {
+            let origin = if node.detail_font_size.is_some() { "specifies detail_font_size" } else { "uses the default detail size" };
+            report.push(GraphFinding {
+                code: "GRAPH_NODE_DETAIL_SHRUNK".into(), severity: "info".into(), graph_id: id.into(), entity_id: node.id.clone(), element_ids: vec![shape_id.clone()], bounds,
+                message: format!("Node detail was reduced from {:.1}px to {:.1}px so that its last line is not a short fragment, because detail_fit is shrink; the node {origin} {:.1}px. Set detail_fit to wrap to keep the size, or widen the node or shorten the detail.", shrink.from, shrink.to, detail_size(node)),
+                slide_id: None, lines: None, font_size: Some(shrink.to),
+            });
+        }
         let heading_lines = node.label.replace("\r\n", "\n").replace('\r', "\n").split('\n').count();
         let Some(heading) = format.paragraphs.get(..heading_lines).filter(|_| !node.label.is_empty()) else { continue; };
         let Some(style) = heading.first().and_then(|paragraph| paragraph.runs.first()).map(|run| &run.style) else { report.status = "partial".into(); continue; };
@@ -969,11 +1077,18 @@ pub(crate) fn annotate_transaction(mut result: crate::document::TransactionResul
         if !matches!(part.spec.data, crate::parts::PartData::Diagram { .. }) { continue; }
         let Some(slide) = result.document.deck.slides.iter().find(|slide| slide.id == *slide_id) else { report.status = "partial".into(); continue; };
         let Some(element) = slide.elements.iter().find(|element| element.bounds().0 == id) else { report.status = "partial".into(); continue; };
-        if part.stale || crate::parts::state::render_hash(element).map_or(true, |hash| hash != part.render_sha256) { report.status = "partial".into(); continue; }
+        if part.stale || !crate::parts::state::render_matches(element, &part.render_sha256) { report.status = "partial".into(); continue; }
         let Ok((render_id, spec, _)) = crate::parts::graph_render_context(id, &part.spec) else { report.status = "partial".into(); continue; };
         let fallback = Theme::default();
         let theme = crate::design::slide_theme(slide, result.document.deck.design.as_ref()).unwrap_or(&fallback);
-        let found = diagnostics(&render_id, &spec, element, theme);
+        // Only a new render shows which details the widow fit reduced, so a diagram that does not allow it is not rendered again.
+        let shrinks = if spec.nodes.iter().any(|node| node.detail.is_some() && node.detail_fit == GraphDetailFit::Shrink) {
+            match with_detail_shrinks(|| crate::parts::create_with_theme(id, &part.spec, theme)) {
+                (Ok(rendered), shrinks) if crate::parts::state::render_matches(&rendered, &part.render_sha256) => shrinks,
+                _ => { report.status = "partial".into(); Vec::new() }
+            }
+        } else { Vec::new() };
+        let found = diagnostics(&render_id, &spec, element, theme, &shrinks);
         if found.status != "complete" { report.status = "partial".into(); }
         for mut finding in found.findings {
             finding.graph_id = id.clone(); finding.slide_id = Some(slide_id.clone());
@@ -984,15 +1099,69 @@ pub(crate) fn annotate_transaction(mut result: crate::document::TransactionResul
     result
 }
 
+// Managed diagrams whose element still is what their record rendered: the part is not stale and the render hash matches.
+fn verified_diagrams<'a>(document: &'a crate::document::Document, slide: &'a crate::model::Slide) -> Vec<(&'a Element, String, GraphSpec, f64)> {
+    let mut diagrams = Vec::new();
+    for part in document.parts.iter().filter(|part| part.slide_id == slide.id && !part.stale) {
+        let crate::parts::PartData::Diagram { .. } = &part.spec.data else { continue; };
+        let Some(element) = slide.elements.iter().find(|element| element.bounds().0 == part.element_id) else { continue; };
+        if !crate::parts::state::render_matches(element, &part.render_sha256) { continue; }
+        let Ok((id, spec, content_height)) = crate::parts::graph_render_context(&part.element_id, &part.spec) else { continue; };
+        let Ok(prefix) = render_prefix(&id, &spec) else { continue; };
+        diagrams.push((element, prefix, spec, content_height));
+    }
+    diagrams
+}
+
+/// The IDs of the group frames in verified managed diagrams. Such a frame is a drawn region with its heading as text, not a label box:
+/// the diagram draws connectors above it, so only the heading's own text can collide with one.
+pub(crate) fn managed_group_frames(document: &crate::document::Document, slide_id: &str) -> BTreeSet<String> {
+    let Some(slide) = document.deck.slides.iter().find(|slide| slide.id == slide_id) else { return BTreeSet::new(); };
+    verified_diagrams(document, slide).into_iter()
+        .flat_map(|(_, prefix, spec, _)| spec.groups.iter().map(|group| format!("{prefix}-g-{}", group.id)).collect::<Vec<_>>()).collect()
+}
+
+/// What a verified managed diagram says about the text of one node, so that a SMALL_TEXT finding can name the node and say what to change.
+pub(crate) struct ManagedNodeText {
+    pub part_id: String,
+    pub node_id: String,
+    /// The smallest drawn size of the heading and of the detail, in the coordinates of the diagram's children.
+    pub heading: Option<f64>,
+    pub detail: Option<f64>,
+    /// The detail size the node asks for: its `detail_font_size`, or the default.
+    pub detail_requested: Option<f64>,
+    pub detail_explicit: bool,
+    pub detail_fit: GraphDetailFit,
+}
+
+/// The text sizes of the node shapes of verified managed diagrams on a slide, by shape ID. A node is identified by the shape ID that the
+/// diagram's own prefix and the node ID produce, never by taking an ID apart.
+pub(crate) fn managed_node_text(document: &crate::document::Document, slide_id: &str) -> BTreeMap<String, ManagedNodeText> {
+    let mut nodes = BTreeMap::new();
+    let Some(slide) = document.deck.slides.iter().find(|slide| slide.id == slide_id) else { return nodes; };
+    for (element, prefix, spec, _) in verified_diagrams(document, slide) {
+        let Element::Group { id: part_id, children, .. } = element else { continue; };
+        let placed_children = placed(children);
+        for node in &spec.nodes {
+            let shape_id = format!("{prefix}-n-{}", node.id);
+            let Some((Element::Shape { font_size, format, .. }, _)) = placed_children.iter().find(|(element, _)| element.bounds().0 == shape_id) else { continue; };
+            let heading_lines = if node.label.is_empty() { 0 } else { node.label.replace("\r\n", "\n").replace('\r', "\n").split('\n').count() };
+            let (heading, detail) = format.paragraphs.split_at(heading_lines.min(format.paragraphs.len()));
+            let smallest = |paragraphs: &[crate::rich_text::RichParagraph]| paragraphs.iter().flat_map(|paragraph| &paragraph.runs)
+                .filter(|run| !run.text.trim().is_empty()).map(|run| run.style.font_size.unwrap_or(*font_size)).reduce(f64::min);
+            nodes.insert(shape_id, ManagedNodeText {
+                part_id: part_id.clone(), node_id: node.id.clone(), heading: smallest(heading), detail: node.detail.as_ref().and_then(|_| smallest(detail)),
+                detail_requested: node.detail.as_ref().map(|_| detail_size(node)), detail_explicit: node.detail_font_size.is_some(), detail_fit: node.detail_fit,
+            });
+        }
+    }
+    nodes
+}
+
 pub(crate) fn managed_badge_pairs(document: &crate::document::Document, slide_id: &str) -> BTreeSet<(String, String)> {
     let mut pairs = BTreeSet::new();
     let Some(slide) = document.deck.slides.iter().find(|slide| slide.id == slide_id) else { return pairs; };
-    for part in document.parts.iter().filter(|part| part.slide_id == slide_id && !part.stale) {
-        let crate::parts::PartData::Diagram { .. } = &part.spec.data else { continue; };
-        let Some(element) = slide.elements.iter().find(|element| element.bounds().0 == part.element_id) else { continue; };
-        if crate::parts::state::render_hash(element).map_or(true, |hash| hash != part.render_sha256) { continue; }
-        let Ok((id, spec, content_height)) = crate::parts::graph_render_context(&part.element_id, &part.spec) else { continue; };
-        let Ok(prefix) = render_prefix(&id, &spec) else { continue; };
+    for (element, prefix, spec, content_height) in verified_diagrams(document, slide) {
         let Element::Group { view_width, view_height, children, .. } = element else { continue; };
         let scale = [view_width / WIDTH, view_height / content_height];
         for edge in spec.edges.iter().filter(|edge| edge.badge.is_some()) {
@@ -1086,9 +1255,24 @@ pub(crate) fn fit_node_labels(id: &str, spec: &GraphSpec, children: &mut [Elemen
     Ok(())
 }
 
+/// A node detail that `fit_detail_widows` reduced, with the sizes it started and ended at.
+#[derive(Clone, Debug)]
+pub(crate) struct DetailShrink { pub node_id: String, pub from: f64, pub to: f64 }
+
+thread_local! { static DETAIL_SHRINKS: std::cell::RefCell<Option<Vec<DetailShrink>>> = const { std::cell::RefCell::new(None) }; }
+
+/// Runs `render` and returns which details `fit_detail_widows` reduced while it ran, so diagnostics can report them.
+pub(crate) fn with_detail_shrinks<T>(render: impl FnOnce() -> T) -> (T, Vec<DetailShrink>) {
+    let outer = DETAIL_SHRINKS.with(|records| records.replace(Some(Vec::new())));
+    let value = render();
+    let records = DETAIL_SHRINKS.with(|records| records.replace(outer)).unwrap_or_default();
+    (value, records)
+}
+
 pub(crate) fn fit_detail_widows(id: &str, spec: &GraphSpec, children: &mut [Element], theme: &Theme) -> Result<()> {
     let prefix = render_prefix(id, spec)?;
-    for node in spec.nodes.iter().filter(|node| node.detail.is_some()) {
+    // Only a node that asked for detail_fit:"shrink" may have its detail reduced; wrapping keeps the size and accepts a short last line.
+    for node in spec.nodes.iter().filter(|node| node.detail.is_some() && node.detail_fit == GraphDetailFit::Shrink) {
         let detail_id = format!("{prefix}-nd-{}", node.id);
         for child in children.iter_mut() {
             let Element::Text { id, text, width, height, font_size, bold, .. } = child else { continue; };
@@ -1099,7 +1283,10 @@ pub(crate) fn fit_detail_widows(id: &str, spec: &GraphSpec, children: &mut [Elem
             while size > 12.0 {
                 size = (size - 0.5).max(12.0);
                 let (metrics, orphan) = crate::layout::graph_text_metrics(text, *width, *height, size, *bold, theme)?;
-                if !metrics.overflow && metrics.missing_glyphs == 0 && !orphan { *font_size = size; break; }
+                if !metrics.overflow && metrics.missing_glyphs == 0 && !orphan {
+                    DETAIL_SHRINKS.with(|records| if let Some(records) = records.borrow_mut().as_mut() { records.push(DetailShrink { node_id: node.id.clone(), from: *font_size, to: size }); });
+                    *font_size = size; break;
+                }
             }
         }
     }
@@ -1180,7 +1367,7 @@ pub(crate) fn create_with_label_boxes(id: &str, spec: &GraphSpec, theme: &Theme)
             content[3] = node.height * 0.6 - 2.0;
         }
         if let Some(icon) = &node.icon {
-            let mut picture = crate::media::create_picture(&format!("{prefix}-ni-{}", node.id), icon.base64.clone(), &icon.mime_type, &icon.alt)?;
+            let mut picture = icon_element(&format!("{prefix}-ni-{}", node.id), icon)?;
             let size = (content[2] / 4.0).min(content[3]).min(48.0);
             if let Element::Picture { x, y, width, height, .. } = &mut picture {
                 let scale = size / width.max(*height);
@@ -1241,13 +1428,18 @@ pub(crate) fn create_with_label_boxes(id: &str, spec: &GraphSpec, theme: &Theme)
     Ok(result)
 }
 
-pub fn catalog() -> Value {
-    let examples = [
+/// The editable example graphs of `graph_catalog`; `part_catalog` offers the first as the example of `diagram/custom`.
+pub(crate) fn catalog_examples() -> [Value; 3] {
+    [
         json!({"id":"service","name":"Service architecture","spec":{"version":1,"title":"Service architecture","subtitle":"Editable example","nodes":[{"id":"user","label":"Client","kind":"rounded_rectangle","x":40,"y":220},{"id":"api","label":"API service","kind":"rectangle","x":390,"y":220},{"id":"data","label":"Database","kind":"cylinder","x":780,"y":220}],"edges":[{"id":"request","source":"user","target":"api","label":"HTTPS"},{"id":"query","source":"api","target":"data","label":"Query"}],"groups":[]}}),
         json!({"id":"approval","name":"Approval flow","spec":{"version":1,"title":"Approval flow","subtitle":"Editable example","nodes":[{"id":"input","label":"Request","x":40,"y":220},{"id":"review","label":"Review","kind":"diamond","x":390,"y":190,"width":200,"height":140},{"id":"approve","label":"Approved","kind":"rounded_rectangle","x":830,"y":120},{"id":"revise","label":"Revise","x":830,"y":340}],"edges":[{"id":"submit","source":"input","target":"review"},{"id":"yes","source":"review","target":"approve","label":"Yes"},{"id":"no","source":"review","target":"revise","label":"No"}],"groups":[]}}),
         json!({"id":"boundary","name":"Network boundary","spec":{"version":1,"title":"Network boundary","subtitle":"Editable example","nodes":[{"id":"client","label":"Client","x":40,"y":210},{"id":"app","label":"Application","x":430,"y":210,"group":"private"},{"id":"store","label":"Storage","kind":"cylinder","x":800,"y":210,"group":"private"}],"edges":[{"id":"access","source":"client","target":"app","label":"Authorized"},{"id":"data","source":"app","target":"store"}],"groups":[{"id":"private","label":"Private network","x":370,"y":120,"width":680,"height":300}]}}),
-    ];
-    json!({"version":1,"shapes":["rectangle","rounded_rectangle","ellipse","diamond","cylinder","cloud"],"ports":["auto","top","left","bottom","right"],"routes":["straight","elbow","manual"],"limits":{"nodes":MAX_NODES,"edges":MAX_EDGES,"groups":MAX_GROUPS,"group_depth":MAX_GROUP_DEPTH,"rendered_elements":256,"waypoints_per_edge":MAX_WAYPOINTS},"canvas":{"width":WIDTH,"height":HEIGHT,"content_top":CONTENT_TOP,"content_top_without_title":0.0},"node_text":{"detail_max_length":DETAIL_MAX,"detail_font_size_min":12,"detail_font_size_max":40,"detail_font_size_default":"max(12, font_size * 0.8)","detail_font_size_ceiling":"font_size","text_align":["left","center","right"],"default_alignment":"left with detail, center without detail","heading_bold_default":true},"edge_layout":{"position":"fraction of path length from semantic source to target","label_side":"above/below the segment; right/left for vertical segments","offset":"source_offset/target_offset are -0.5..0.5 of side length from center, increasing right/down","offset_shapes":["rectangle","rounded_rectangle","ellipse","diamond"],"manual":"1-16 graph-coordinate waypoints, including diagonal segments; nodes are not moved","move":"waypoints move with both endpoints, or when the edge itself is selected; otherwise intermediate points stay fixed"},"schema":schemars::schema_for!(GraphSpec),"operation_schema":schemars::schema_for!(GraphOperation),"examples":examples})
+    ]
+}
+
+pub fn catalog() -> Value {
+    let examples = catalog_examples();
+    json!({"version":1,"shapes":["rectangle","rounded_rectangle","ellipse","diamond","cylinder","cloud"],"ports":["auto","top","left","bottom","right"],"routes":["straight","elbow","manual"],"limits":{"nodes":MAX_NODES,"edges":MAX_EDGES,"groups":MAX_GROUPS,"group_depth":MAX_GROUP_DEPTH,"rendered_elements":256,"waypoints_per_edge":MAX_WAYPOINTS},"canvas":{"width":WIDTH,"height":HEIGHT,"content_top":CONTENT_TOP,"content_top_without_title":0.0},"node_text":{"detail_max_length":DETAIL_MAX,"detail_font_size_min":12,"detail_font_size_max":40,"detail_font_size_default":"max(12, font_size * 0.8)","detail_font_size_ceiling":"font_size","detail_fit":{"values":["wrap","shrink"],"default":"wrap","wrap":"keeps the detail size and accepts a short last line","shrink":"reduces the detail by 0.5px steps, down to 12px, to avoid a short last line, and reports GRAPH_NODE_DETAIL_SHRUNK"},"text_align":["left","center","right"],"default_alignment":"left with detail, center without detail","heading_bold_default":true},"edge_layout":{"position":"fraction of path length from semantic source to target","label_side":"above/below the segment; right/left for vertical segments","offset":"source_offset/target_offset are -0.5..0.5 of side length from center, increasing right/down","offset_shapes":["rectangle","rounded_rectangle","ellipse","diamond"],"manual":"1-16 graph-coordinate waypoints, including diagonal segments; nodes are not moved","move":"waypoints move with both endpoints, or when the edge itself is selected; otherwise intermediate points stay fixed"},"schema":schemars::schema_for!(GraphSpec),"operation_schema":schemars::schema_for!(GraphOperation),"examples":examples})
 }
 
 pub fn change(document: &crate::document::Document, expected_revision: u64, slide_id: &str, id: &str, spec: &GraphSpec, update: bool) -> Result<crate::document::TransactionResult> {

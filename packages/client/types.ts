@@ -4,13 +4,15 @@ export type StaticExportOptions = { format?: StaticExportFormat; page_indices?: 
 export type PreviewOptions = { page_indices?: number[] | null; max_dimension?: number; layout?: 'pages' | 'contact_sheet'; max_output_bytes?: number; format?: 'png' | 'jpeg'; overflow?: 'shrink' | 'error' }
 export type PreviewImage = { base64: string; mime_type: 'image/png' | 'image/jpeg'; width: number; height: number; byte_length: number; sha256: string; canvas_scale?: number; downscaled_from_canvas?: boolean; tile_width?: number; tile_height?: number; tile_scale?: number }
 export type PresentationPreview = { revision: number; hash: string; canvas_width: number; canvas_height: number; canvas_scale: number; downscaled_from_canvas: boolean; requested_max_dimension: number; actual_max_dimension: number; quality_reduced: boolean; pages: { page_index: number; slide_id: string; image_index: number; x: number; y: number; width: number; height: number }[]; images: PreviewImage[]; warnings: StaticExport['warnings']; office_visual_parity: false }
-export type PreflightOptions = { page_indices?: number[] | null; min_font_size?: number; include_inherited?: boolean }
+export type PreflightOptions = { page_indices?: number[] | null; min_font_size?: number; include_inherited?: boolean; include_preview_notices?: boolean }
 export type ReferenceEntry = { id: string; name: string; url: string; slide_ids: string[]; publish?: boolean }
 export type ReferencePublication = { supplied: number; published: number; excluded: number }
 export type ReferenceOptions = { entries: ReferenceEntry[]; placement?: 'auto' | 'footnotes' | 'appendix' | 'appendix_only'; title?: string; font_size?: number }
 export type ReferenceState = { options: Required<ReferenceOptions>; elements: { slide_id: string; id: string; sha256: string }[]; slides: string[]; page_sha256: Record<string, string> }
-export type PreflightFinding = { code: string; severity: 'info' | 'warning' | 'error'; evidence: 'renderer' | 'geometry' | 'heuristic' | 'document'; page_index: number; slide_id: string; affected_page_indices: number[]; affected_slide_ids: string[]; element_ids: string[]; scopes: string[]; bounds: { x: number; y: number; width: number; height: number }; message: string; suggestions: string[] }
-export type PreflightReport = { revision: number; hash: string; page_indices: number[]; findings: PreflightFinding[]; checks: string[]; limitations: string[]; office_visual_parity: false; semantic_truth_verified: false }
+export type PreflightFinding = { code: string; severity: 'info' | 'warning' | 'error'; evidence: 'renderer' | 'geometry' | 'heuristic' | 'document'; page_index: number; slide_id: string; affected_page_indices: number[]; affected_slide_ids: string[]; element_ids: string[]; part_ids?: string[]; scopes: string[]; bounds: { x: number; y: number; width: number; height: number }; message: string; suggestions: string[] }
+/** A deck's mix of managed part presets, as `preflight_presentation` (`deck_composition`) and the guided review (`expression`) report it. Information for a review, never a target or a quota; slides without a managed part are counted in `without_parts`. */
+export type DeckComposition = { slides: number; parts: { preset: string; slides: number; instances: number }[]; other_presets?: number; longest_runs: { preset: string; slides: number; first_slide_id: string; last_slide_id: string }[]; relationship_diagrams: number; relationship_presets: string[]; without_parts: number; note: string }
+export type PreflightReport = { revision: number; hash: string; page_indices: number[]; findings: PreflightFinding[]; checks: string[]; limitations: string[]; deck_composition?: DeckComposition; office_visual_parity: false; semantic_truth_verified: false }
 export type RevisionEdit = { op: 'translate'; ids: string[]; dx: number; dy: number } | { op: 'align'; ids: string[]; alignment: 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom'; relative_to: 'selection' | 'page' } | { op: 'set_text_frame'; id: string; x: number; y: number; width: number; height: number } | { op: 'replace_text'; id: string; text: string } | { op: 'update_part'; id: string; spec: PartSpec } | { op: 'update_graph'; id: string; spec: GraphSpec }
 export type RevisionPreview = { slide_id: string; base_revision: number; base_hash: string; candidate_hash: string; affected_ids: string[]; stale_part_ids: string[]; source_bindings_stale: boolean; native_preservation_checked: boolean; office_visual_parity: false; before: PresentationPreview; after: PresentationPreview }
 export type RecipeRelationship = 'layers' | 'evidence_reading' | 'activity_outcome' | 'entity_instance' | 'screenshot' | 'comparison' | 'peers' | 'sequence' | 'milestones' | 'architecture'
@@ -43,7 +45,7 @@ export type DeliveryChecks = { document_verified: true; pptx_exported: true; nat
 export type DeliveryManifest = { format: 'aislide.delivery'; version: 1; producer: { name: string; version: string; git_commit: string; core_version?: string; core_git_commit?: string; transport?: string; engine: 'aislide-core'; contract_version: 1 }; document: { id: string; revision: number; hash: string; title: string; slide_count: number }; options: Required<DeliveryOptions>; files: (Omit<DeliveryFile, 'base64' | 'width' | 'height'> & { width: number | null; height: number | null })[]; preview_pages: PresentationPreview['pages']; multi_file_atomic: false; checks: DeliveryChecks; preflight: PreflightReport | null; render_warnings: StaticExport['warnings']; privacy: { pptx_includes_notes: true; pptx_may_include_sources_and_bindings: true; pptx_includes_guided_record?: true; separate_notes_requested: boolean; separate_source_report_requested: boolean }; limitations: string[] }
 export type PreparedDelivery = { revision: number; hash: string; files: DeliveryFile[]; manifest: DeliveryManifest }
 export type StaticExportFile = { filename: string; base64: string; byte_length: number; mime_type: 'image/png' | 'image/jpeg' | 'application/pdf'; page_indices: number[]; width: number; height: number }
-export type StaticExport = { files: StaticExportFile[]; warnings: { code: string; page_index: number; element_id: string; scope?: string; message: string }[]; office_parity_verified: false; pdf_rasterized: false; pdf_text_outlined: boolean; pdf_editable_text: false; pdf_tagged: boolean; pdf_searchable_text: boolean; pdf_selectable_text: boolean; pdf_semantic_overlay: boolean; pdf_ua_certified: false }
+export type StaticExport = { files: StaticExportFile[]; warnings: { code: string; page_index: number; element_id: string; element_ids?: string[]; scope?: string; message: string }[]; office_parity_verified: false; pdf_rasterized: false; pdf_text_outlined: boolean; pdf_editable_text: false; pdf_tagged: boolean; pdf_searchable_text: boolean; pdf_selectable_text: boolean; pdf_semantic_overlay: boolean; pdf_ua_certified: false }
 export type ImmutableValue<Value> = Value extends object ? { readonly [Key in keyof Value]: ImmutableValue<Value[Key]> } : Value
 export type VerifiedRecoveryDocument = ImmutableValue<AislideDocument>
 export type ChartKind = 'column' | 'bar' | 'line' | 'pie' | 'doughnut' | 'area' | 'scatter' | 'stacked_column' | 'stacked_bar' | 'percent_stacked_column' | 'percent_stacked_bar' | 'combo' | 'bubble' | 'radar' | 'radar_filled' | 'column3d' | 'bar3d' | 'pie3d' | 'funnel' | 'waterfall' | 'histogram' | 'box_whisker' | 'treemap' | 'sunburst'
@@ -85,7 +87,22 @@ export type RichParagraph = {
 }
 export type TextPadding = { left?: number; right?: number; top?: number; bottom?: number }
 export type TextFormat = { italic?: boolean; underline?: boolean; alignment?: 'left' | 'center' | 'right' | 'justify'; vertical?: 'top' | 'middle' | 'bottom'; bullet?: 'none' | 'bullet' | 'numbered'; font_family?: string | null; hyperlink?: string | null; placeholder?: Placeholder | null; inherit_layout?: boolean; paragraphs?: RichParagraph[]; padding?: TextPadding | null }
-export type Theme = { name: string; colors: Record<string, string>; fonts: { major: string; minor: string; east_asian: string; complex_script: string } }
+/** How a typeface slot stands: `empty` is typeface="" and `absent` a missing element in the template; `written` means an edit named a font for such a slot, which is saved even when it equals the one shown. */
+export type UnsetFontState = 'empty' | 'absent' | 'written'
+/** The unspecified slots of one font collection. `script_fonts` maps script tags (`Jpan`, `Hans`, ...) to the collection's script-specific fonts, which PowerPoint uses for that script while the slot is unspecified; read-only. */
+export type UnsetFonts = { latin?: UnsetFontState; east_asian?: UnsetFontState; complex_script?: UnsetFontState; script_fonts?: Record<string, string> }
+/**
+ * `major`, `minor`, `east_asian` and `complex_script` are the fonts AISlide draws with. `unset` (omitted when the file specifies all six slots)
+ * lists the slots the template leaves empty or omits, where PowerPoint chooses a font by language and installation instead, and the ones an edit
+ * has named since (`written`). Send it back unchanged to keep a slot unspecified; changing the slot's font name, or leaving the entry out,
+ * specifies it, and the name is saved even when it equals the one shown.
+ */
+export type ThemeFonts = { major: string; minor: string; east_asian: string; complex_script: string; unset?: { major?: UnsetFonts; minor?: UnsetFonts } }
+export type Theme = { name: string; colors: Record<string, string>; fonts: ThemeFonts }
+/** One typeface slot as `inspect_template`, `import_template` and `design_tokens` report it: `font` is what AISlide draws with, the file's own when `state` is `specified`; `installed` is null when it cannot be determined. */
+export type ThemeFontSlot = { state: 'specified' | 'empty' | 'absent'; font: string; installed: boolean | null }
+export type ThemeFontCollection = { latin: ThemeFontSlot; east_asian: ThemeFontSlot; complex_script: ThemeFontSlot; script_fonts?: Record<string, string> }
+export type ThemeFontReport = { name: string; major: ThemeFontCollection; minor: ThemeFontCollection; notes: string[]; scope?: string; master_id?: string; theme_part?: string }
 export type PresentationSetup = { design_preset?: 'public' | 'minimal' | 'stylish' | 'pop' | 'dynamic' | 'trust' | 'luxury'; theme?: Theme; font_family?: string }
 export type CompositionStyle = { title_size?: number; body_size?: number; footer_size?: number; padding?: number; card_fill?: string; accent?: string }
 export type CompositionBlock =
@@ -124,6 +141,8 @@ export type DesignTokens = {
   colors: { ink: string; muted: string; background: string; surface: string; accent: string; accent_alt: string; on_accent: string }
   card: { fill: string; rule: number; padding: number; band_padding: number }
   layout_id: string | null; master_graphics: boolean
+  /** The design theme (`scope: 'default'`) and each master's own theme, with the typeface slots a template leaves empty. */
+  theme_fonts: ThemeFontReport[]
 }
 export type CompileOptions = { design_preset?: PresentationSetup['design_preset'] }
 export type Master = { id: string; name: string; background: string; elements: Element[]; theme?: Theme | null }
@@ -189,8 +208,9 @@ export type ModernCommentOperation =
 export type TableHeaders = 'unknown' | 'none' | 'first_row' | 'first_column' | 'both'
 export type ElementAccessibility = { title?: string | null; description?: string | null; decorative?: boolean | null }
 export type SlideReview = { comments?: Comment[]; modern_threads?: ModernThread[] | null; table_headers?: Record<string, TableHeaders>; accessibility?: Record<string, ElementAccessibility>; reading_order?: string[] }
-export type AccessibilityIssue = { code: string; slide_id: string; element_id: string | null; status: string; contrast_ratio: number | null; required_ratio: number | null; repair_target: 'alternative_text' | 'table_headers' | null }
-export type AccessibilityReport = { issues: AccessibilityIssue[]; checked_features: string[]; limitations: string[]; wcag_certified: false }
+export type AccessibilityIssue = { code: string; slide_id: string; element_id: string | null; status: string; contrast_ratio: number | null; required_ratio: number | null; repair_target: 'alternative_text' | 'table_headers' | null; reason?: 'background_not_solid' | 'partial_cover' | 'unsupported_backdrop' | 'transformed_text' | 'text_highlight_or_baseline' }
+/** `contrast_checked` / `contrast_unsupported` count text elements (not runs); low contrast counts as checked. `checked_features` lists what the checker can evaluate, not what it did in this deck. */
+export type AccessibilityReport = { issues: AccessibilityIssue[]; checked_features: string[]; contrast_checked: number; contrast_unsupported: number; limitations: string[]; wcag_certified: false }
 export type InspectionCategory = 'sources' | 'custom_xml' | 'comments' | 'notes' | 'unused_media' | 'off_slide' | 'invisible'
 export type PersonalDataCandidate = { rule: 'email_candidate' | 'phone_candidate' | 'personal_property_candidate'; scope: 'current_deck' | 'embedded_origin'; surface: string; count: number; locations: number[][]; masked_value: '[REDACTED]' }
 export type DocumentInspection = { findings: { category: InspectionCategory; count: number; paths: string[] }[]; candidates: PersonalDataCandidate[]; candidate_scan_truncated: boolean; limitations: string[]; complete_personal_data_detection: false }
@@ -363,7 +383,9 @@ export type PartData =
 export type PartLayout = Frame & { show_title?: boolean; fit?: 'stretch' | 'contain' }
 export type PartSpec = { version: 1; preset: string; title: string; subtitle?: string; data: PartData; layout?: PartLayout | null }
 export type PartPreset = { id: string; category: string; category_name: string; name: string; family: 'Charts' | 'Diagrams'; example: PartSpec; recommended?: boolean; specialized?: boolean; use_when?: string; avoid_when?: string }
-export type PartCatalog = { version: 1; presets: PartPreset[]; schema: unknown; style: string; default_bounds: Omit<Bounds, 'id'> }
+/** A part the catalog lists outside its presets: `diagram/custom`, the managed graph, found by what it shows (`keywords`) rather than by a fixed layout. `part_catalog` with a `query` or `preset_id` returns it first. */
+export type RelatedPart = PartPreset & { keywords: string[]; see: string[] }
+export type PartCatalog = { version: 1; presets: PartPreset[]; related?: RelatedPart[]; schema: unknown; style: string; default_bounds: Omit<Bounds, 'id'> }
 export type LayoutSlotKind = 'visual' | 'thumbnail' | 'panel' | 'card' | 'text' | 'statement' | 'band' | 'tile' | 'label' | 'marker'
 export type LayoutPattern = { id: string; family: string; name: string; ratio: string; relationships: string[]; use_when: string; avoid_when: string; parts: string[]; fallback: string | null; full_page: boolean; message_band: boolean; count: { min: number; max: number; default: number } | null }
 export type LayoutPatternCatalog = { version: 1; canvas_default: { width: number; height: number }; tokens: Record<string, unknown>; guidance: string[]; patterns: (LayoutPattern & { slots: { id: string; kind: LayoutSlotKind }[] })[] }
@@ -384,7 +406,9 @@ export type GuidedAuthoring = { context?: 'reading' | 'projection' | null; densi
 export type GuidedSlide = { id: string; section: string; headline: string; sentence_form: 'causal' | 'conditional' | 'contrast' | 'causal-focus' | 'evaluation' | 'proposal' | 'explanation' | 'comparison' | 'outcome'; pattern_id: string; question: string; parent_message: string; transition: string; parallel_basis: string; part?: PartSpec | null; support: ClauseSupport[]; numbers?: NumberEvidence[]; speaker_notes?: string | null }
 export type GuidedInput = { version: 1; profile_id: AuthoringProfile; title: string; audience: string; purpose: string; governing_message: string; language: 'en' | 'ja'; brand_color?: string | null; authoring?: GuidedAuthoring | null; evidence: GuidedEvidence[]; issues?: DecisionIssue[]; slides: GuidedSlide[] }
 export type GuidedRecord = { version: 1; input: Omit<GuidedInput, 'slides'> & { slides: Omit<GuidedSlide, 'speaker_notes'>[] } }
-export type GuidedReview = { ready: boolean; issues: string[]; review_required: string[]; semantic_truth_verified: false; office_visual_parity: false }
+export type GuidedDiagnostic = { code: 'PART_TEXT_OVERFLOW' | 'PART_MISSING_GLYPHS' | 'PART_INVALID' | 'SLIDE_INVALID'; slide_id: string; preset?: string; /** JSON Pointer into the slide's part, as in support.body_paths. */ path?: string; message: string; measured_px?: number; available_px?: number }
+/** `diagnostics` is the structured form of the slide problems among `issues`; it is absent when there are none. `expression` is the mix of part presets across the input's slides, for review. */
+export type GuidedReview = { ready: boolean; issues: string[]; diagnostics?: GuidedDiagnostic[]; expression?: DeckComposition; review_required: string[]; semantic_truth_verified: false; office_visual_parity: false }
 export type BestPracticeGuide = { version: 1; profile_id: AuthoringProfile; title: string; language: 'en'; markdown: string; patterns: { id: string; name: string; purpose: string; capability: 'native-template' | 'composition-required' | 'guidance-only'; rule: string }[]; input_schema: unknown; automatic_patterns: string[]; semantic_truth_verified: false; limits: { slides: number; maximum_slides: number; evidence: number; issues: number; speaker_notes_scalars: number; slide_notes_scalars: number; guided_record_bytes: number }; creation: string }
 export type BestPracticeProfiles = { version: 1; profiles: { id: AuthoringProfile; title: string; language: 'en'; default_primary: string }[] }
 
@@ -392,10 +416,11 @@ export type GraphNodeKind = 'rectangle' | 'rounded_rectangle' | 'ellipse' | 'dia
 export type GraphPresentation = 'card' | 'icon'
 export type GraphPort = 'auto' | 'top' | 'left' | 'bottom' | 'right'
 export type GraphRoute = 'straight' | 'elbow' | 'manual'
-export type GraphIcon = { base64: string; mime_type: 'image/png' | 'image/jpeg'; alt?: string }
+export type GraphIcon = { base64: string; mime_type: 'image/png' | 'image/jpeg'; alt?: string; /** Marks the picture decorative (alt must be empty); parts record it each time they are drawn. */ decorative?: boolean }
 export type GraphTextAlign = 'left' | 'center' | 'right'
 export type GraphLabelFit = 'wrap' | 'shrink'
-export type GraphNode = { id: string; label: string; label_fit?: GraphLabelFit; detail?: string | null; detail_font_size?: number | null; text_align?: GraphTextAlign | null; heading_bold?: boolean; kind?: GraphNodeKind; presentation?: GraphPresentation; x: number; y: number; width?: number; height?: number; fill?: string; stroke?: string; color?: string; font_size?: number; group?: string | null; icon?: GraphIcon | null }
+export type GraphDetailFit = 'wrap' | 'shrink'
+export type GraphNode = { id: string; label: string; label_fit?: GraphLabelFit; detail?: string | null; detail_font_size?: number | null; detail_fit?: GraphDetailFit; text_align?: GraphTextAlign | null; heading_bold?: boolean; kind?: GraphNodeKind; presentation?: GraphPresentation; x: number; y: number; width?: number; height?: number; fill?: string; stroke?: string; color?: string; font_size?: number; group?: string | null; icon?: GraphIcon | null }
 export type GraphLabelPlacement = { position: number; side?: 'above' | 'below'; offset?: number; on_overlap?: 'warn' | 'error' }
 export type GraphBadge = { number: number; position?: number; size?: number; font_size?: number; fill?: string; color?: string }
 export type GraphEdge = { id: string; source: string; target: string; source_port?: GraphPort; target_port?: GraphPort; label?: string; route?: GraphRoute; color?: string; arrow?: boolean; start_arrow?: boolean; dashed?: boolean; stroke_width?: number | null; label_color?: string | null; label_font_size?: number | null; source_offset?: number | null; target_offset?: number | null; waypoints?: [number, number][]; label_placement?: GraphLabelPlacement | null; badge?: GraphBadge | null }
@@ -468,9 +493,19 @@ export type ReplaceTextContentInput = { id: string; text: string }
 export type UpdateParagraphsInput = { id: string; paragraphs: RichParagraph[] }
 export type CanvasResizeInput = { width: number; height: number; mode: 'scale' | 'keep' }
 export type TemplateKind = 'potx' | 'thmx'
-export type TemplateImportOptions = { include_sample_slides?: boolean; layout_ids?: string[]; layout_names?: string[]; master_ids?: string[]; master_names?: string[]; strip_sections?: boolean; source_sha256?: string | null }
+export type TemplateImportOptions = { include_sample_slides?: boolean; layout_ids?: string[]; layout_names?: string[]; master_ids?: string[]; master_names?: string[]; strip_sections?: boolean; strip_transitions?: boolean; strip_animations?: boolean; source_sha256?: string | null }
 export type TemplateInput = { kind: TemplateKind; base64: string; options?: TemplateImportOptions }
-export type TemplateInspection = { source_sha256: string; masters: { id: string; name: string }[]; layouts: { id: string; name: string; master_id: string }[]; sample_slide_count: number; has_sections: boolean; has_custom_shows: boolean; limits: { masters: number; layouts: number; sample_slides: number; selected_masters: number; selected_layouts: number }; warnings: string[]; office_visual_parity: false }
+/** A part's own `p:transition`: `kind` is the effect element's local name (`fade`, `push`, `vortex`, ...) or `none`; `extended` marks PowerPoint 2010+ effects; `sound` is present when the transition starts or stops a sound. */
+export type TemplateTransition = { kind: string; extended: boolean; speed?: string; duration_ms?: number; advance_after_ms?: number; sound?: 'start' | 'stop' }
+/** Image parts a part references: distinct internal parts and their uncompressed bytes (external references make template inspection reject the file, so none are counted). */
+export type TemplateImages = { count: number; bytes: number }
+export type TemplateMasterInfo = { id: string; name: string; transition: TemplateTransition | null; animations: boolean; images: TemplateImages }
+/** `transition` is the layout's own; `effective_transition` is what a slide on it inherits (the layout's, else its master's), `null` when neither sets one. `images.with_master` counts shared parts once. */
+export type TemplateLayoutInfo = { id: string; name: string; master_id: string; transition: TemplateTransition | null; animations: boolean; effective_transition: { transition: TemplateTransition; source: { scope: 'layout' | 'master'; id: string } } | null; images: TemplateImages & { with_master: TemplateImages } }
+export type TemplateSampleSlides = { count: number; with_transition: number; with_animations: number }
+/** What `import_template` with the same options retains and removes, from a dry run on the same bytes. */
+export type TemplateImportPreview = { masters: TemplateMasterInfo[]; layouts: TemplateLayoutInfo[]; template_images: TemplateImages; sample_slides: TemplateSampleSlides; removed: { transitions: number; animations: number } }
+export type TemplateInspection = { source_sha256: string; masters: TemplateMasterInfo[]; layouts: TemplateLayoutInfo[]; sample_slide_count: number; sample_slides: TemplateSampleSlides; template_images: TemplateImages; has_sections: boolean; has_custom_shows: boolean; theme_fonts: ThemeFontReport[]; import?: TemplateImportPreview; limits: { masters: number; layouts: number; sample_slides: number; selected_masters: number; selected_layouts: number }; warnings: string[]; office_visual_parity: false }
 export type TemplateExport = { base64: string; filename: 'template.potx' | 'template.thmx' }
 export type ImageOutputFormat = { kind: 'png' } | { kind: 'jpeg'; quality: number; matte?: [number, number, number] | null }
 export type ImageEditParams = { brightness?: number; contrast?: number; saturation?: number; grayscale?: boolean; background_key?: { color: [number, number, number]; tolerance: number } | null; resize_longest_side?: number | null; format?: ImageOutputFormat }

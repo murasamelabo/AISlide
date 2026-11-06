@@ -67,7 +67,8 @@ export class AislideClient {
   searchText(deck: Deck, input: SearchOptions, options?: RequestOptions): Promise<TextSearchResult>
   /** Pure local image preparation. Use session.applyImageEdit separately to mutate a picture. */
   editImage(input: ImageEditInput, options?: RequestOptions): Promise<EditedImage>
-  inspectTemplate(input: { kind: 'potx'; base64: string }, options?: RequestOptions): Promise<import('./types').TemplateInspection>
+  /** Reads the package's transitions, animations, images and theme fonts; with `options` it also reports (as `import`) what `importTemplate` with the same options would retain and remove. */
+  inspectTemplate(input: { kind: 'potx'; base64: string; options?: import('./types').TemplateImportOptions }, options?: RequestOptions): Promise<import('./types').TemplateInspection>
   /** Explicit POTX/THMX factory returning a new revision-zero document, never modifying another session. */
   importTemplate(id: string, input: TemplateInput, options?: RequestOptions): Promise<DocumentSession>
   ingest(input: SourceInput, options?: RequestOptions): Promise<SourceDocument>

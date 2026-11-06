@@ -1,7 +1,7 @@
 ﻿use super::briefing::{badge, body_size, colors, field, label, mix, shape, text, too_small, Drawn, Fill, Rich, BODY};
 use super::business::single;
 use super::{Drawing, PartData};
-use crate::{design::Theme, graphs::GraphIcon, model::{valid_text, Element, TextAlign, VerticalAlign}, Error, Result};
+use crate::{design::Theme, graphs::GraphIcon, model::{Element, TextAlign, VerticalAlign}, Error, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -87,7 +87,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
                 field(&item.label, 48, "icon column label", true)?;
                 field(&item.detail, 200, "icon column detail", false)?;
                 if !item.detail_emphasis.is_empty() { return Err(Error::Unsupported("icon columns do not draw detail_emphasis; use list/icon-rows to emphasize a phrase".into())); }
-                if let Some(icon) = &item.icon { valid_text(&icon.alt, crate::graphs::ICON_ALT_MAX)?; }
+                if let Some(icon) = &item.icon { crate::graphs::validate_icon(icon)?; }
                 colors(&[&item.accent])?;
             }
         }
@@ -109,7 +109,7 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
         PartData::ImageColumns { items } => {
             if !(2..=4).contains(&items.len()) { return Err(Error::Invalid("image columns require 2-4 items".into())); }
             for item in items {
-                valid_text(&item.image.alt, crate::graphs::ICON_ALT_MAX)?;
+                crate::graphs::validate_icon(&item.image)?;
                 field(&item.label, 48, "image column label", true)?;
                 field(&item.detail, 160, "image column detail", false)?;
                 field(&item.caption, 80, "image caption", false)?;
@@ -157,7 +157,7 @@ fn open_steps(drawing: &mut Drawing, steps: &[EditorialStep], accent: &str, fram
     for (index, step) in steps.iter().enumerate() {
         marker(drawing, [center(index), axis], index + 1, accent);
         let content = Rich::default().add(&step.label, 18.0, "@dk1", true, 500).add(&step.detail, 16.0, "@dk2", false, 0).finish();
-        drawing.name_next(format!("item {} (steps[{index}])", index + 1));
+        drawing.name_next_at(format!("item {} (steps[{index}])", index + 1), format!("/data/steps/{index}"));
         text(drawing, [left + index as f64 * (column + gap), top + 66.0, column, height - 66.0], content, TextAlign::Left, VerticalAlign::Top);
     }
     Ok(Drawn { bottom: top + height, flexible: Vec::new() })
@@ -172,7 +172,7 @@ fn rail_steps(drawing: &mut Drawing, steps: &[EditorialStep], accent: &str, size
     for (index, step) in steps.iter().enumerate() {
         marker(drawing, [left + 16.0, center(index)], index + 1, accent);
         let content = Rich::default().add(&step.label, 18.0, "@dk1", true, 300).add(&step.detail, size, "@dk2", false, 0).finish();
-        drawing.name_next(format!("item {} (steps[{index}])", index + 1));
+        drawing.name_next_at(format!("item {} (steps[{index}])", index + 1), format!("/data/steps/{index}"));
         text(drawing, [left + 64.0, top + index as f64 * pitch + 3.0, width - 64.0, pitch - 9.0], content, TextAlign::Left, VerticalAlign::Top);
     }
     Ok(Drawn { bottom: top + pitch * steps.len() as f64, flexible: Vec::new() })
@@ -195,7 +195,7 @@ fn roadmap(drawing: &mut Drawing, phases: &[RoadmapPhase], accent: &str, frame: 
         let mut content = Rich::default();
         content.add(&phase.label, 18.0, "@dk1", true, 400).add(&phase.detail, 16.0, "@dk2", false, 400);
         for point in &phase.points { content.bullet(point, 16.0, "@dk1", 300); }
-        drawing.name_next(format!("item {} (phases[{index}])", index + 1));
+        drawing.name_next_at(format!("item {} (phases[{index}])", index + 1), format!("/data/phases/{index}"));
         text(drawing, [x, top + 78.0, column, height - 78.0 - reserved], content.finish(), TextAlign::Left, VerticalAlign::Top);
         if !phase.outcome.is_empty() {
             line(drawing, [x, top + height - 58.0], [x + column, top + height - 58.0], accent, false);
@@ -217,7 +217,7 @@ fn icon_columns(drawing: &mut Drawing, items: &[IconColumn], frame: [f64; 4], th
         let accent = item.accent.as_deref().unwrap_or("@accent1");
         if let Some(icon) = &item.icon { badge(drawing, icon, [x, top], 48.0, &mix(accent, theme, 0.9))?; }
         let content = Rich::default().add(&item.label, 18.0, "@dk1", true, 600).add(&item.detail, 16.0, "@dk2", false, 0).finish();
-        drawing.name_next(format!("item {} (items[{index}])", index + 1));
+        drawing.name_next_at(format!("item {} (items[{index}])", index + 1), format!("/data/items/{index}"));
         text(drawing, [x, top + text_top, column, height - text_top], content, TextAlign::Left, VerticalAlign::Top);
     }
     Ok(Drawn { bottom: top + height, flexible: Vec::new() })
@@ -240,14 +240,14 @@ fn fact_columns(drawing: &mut Drawing, items: &[FactColumn], columns: Option<usi
         let unit = if item.unit.is_empty() { String::new() } else { format!(" {}", item.unit) };
         let content = Rich::default().runs(&[(&item.value, 44.0, accent, true), (&unit, 22.0, accent, true)], 500)
             .add(&item.label, 18.0, "@dk1", true, 300).add(&item.detail, size, "@dk1", false, 400).add(&item.qualifier, 14.0, "@dk2", false, 0).finish();
-        drawing.name_next(format!("item {} (items[{index}])", index + 1));
+        drawing.name_next_at(format!("item {} (items[{index}])", index + 1), format!("/data/items/{index}"));
         text(drawing, [x, y + 14.0, column, row - 14.0], content, TextAlign::Left, VerticalAlign::Top);
     }
     Ok(Drawn { bottom: top + height, flexible: Vec::new() })
 }
 
 fn contained_image(drawing: &mut Drawing, image: &GraphIcon, bounds: [f64; 4]) -> Result<()> {
-    let mut picture = crate::media::create_picture(&drawing.id(), image.base64.clone(), &image.mime_type, &image.alt)?;
+    let mut picture = crate::graphs::icon_element(&drawing.id(), image)?;
     if let Element::Picture { x, y, width, height, .. } = &mut picture {
         let scale = (bounds[2] / *width).min(bounds[3] / *height);
         *width *= scale; *height *= scale;
@@ -271,7 +271,7 @@ fn image_columns(drawing: &mut Drawing, items: &[ImageColumn], frame: [f64; 4]) 
         contained_image(drawing, &item.image, [x, top, column, image_height])?;
         if !item.caption.is_empty() { text(drawing, [x, top + image_height + 8.0, column, 32.0], label(&item.caption, 14.0, "@dk2", false), TextAlign::Left, VerticalAlign::Top); }
         let content = Rich::default().add(&item.label, 18.0, "@dk1", true, 500).add(&item.detail, 16.0, "@dk1", false, 0).finish();
-        drawing.name_next(format!("item {} (items[{index}])", index + 1));
+        drawing.name_next_at(format!("item {} (items[{index}])", index + 1), format!("/data/items/{index}"));
         text(drawing, [x, top + text_top, column, height - text_top], content, TextAlign::Left, VerticalAlign::Top);
     }
     Ok(Drawn { bottom: top + height, flexible: Vec::new() })

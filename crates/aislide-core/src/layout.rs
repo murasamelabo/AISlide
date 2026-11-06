@@ -64,6 +64,28 @@ pub(crate) fn graph_rich_metrics(text: &str, width: f64, height: f64, size: f64,
     Ok(measure(&mut fonts, "graph", "text", text, width, height, size, bold, format, theme))
 }
 
+/// The width and height the laid-out text of each element takes inside its content frame, in order. `None` where it cannot be
+/// measured: no installed fonts, text that does not validate, or an element without text.
+pub(crate) fn text_extents(deck: &Deck, slide: &crate::model::Slide, elements: &[&Element]) -> Vec<Option<(f64, f64)>> {
+    let measured = || -> Option<Vec<Option<(f64, f64)>>> {
+        let mut fonts = FONTS.get_or_init(|| Mutex::new(crate::fonts::system())).lock().ok()?;
+        let mut document_fonts = crate::fonts::document_system(&fonts, deck).ok()?;
+        let fonts = document_fonts.as_mut().unwrap_or(&mut fonts);
+        if fonts.db().faces().next().is_none() { return None; }
+        let fallback = Theme::default();
+        let theme = crate::design::slide_theme(slide, deck.design.as_ref()).unwrap_or(&fallback);
+        Some(elements.iter().map(|element| {
+            let (Element::Text { text, font_size, bold, format, .. } | Element::Shape { text, font_size, bold, format, .. }) = element else { return None; };
+            crate::rich_text::validate_element(element).ok()?;
+            let (id, _, _, width, height) = element.bounds();
+            let frame = format.content_frame(width, height, matches!(element, Element::Shape { .. }));
+            let measurement = measure(fonts, &slide.id, id, text, frame[2], frame[3], *font_size, *bold, format, theme);
+            Some((f64::from(measurement.measured_width), f64::from(measurement.measured_height)))
+        }).collect())
+    };
+    measured().unwrap_or_else(|| vec![None; elements.len()])
+}
+
 fn measure_rich(fonts: &mut FontSystem, slide: &str, id: &str, text: &str, width: f64, height: f64, size: f64, bold: bool, format: &TextFormat, theme: &Theme) -> Measurement {
     use crate::rich_text::{RunStyle, Spacing};
     let mut measured_width = 0.0f32; let mut measured_height = 0.0f32; let mut lines = 0; let mut missing = 0;
@@ -212,6 +234,12 @@ fn installed_fonts() -> Result<std::sync::MutexGuard<'static, FontSystem>> {
     let fonts = FONTS.get_or_init(|| Mutex::new(crate::fonts::system())).lock().map_err(|_| Error::Invalid("font measurement state unavailable".into()))?;
     if fonts.db().faces().next().is_none() { return Err(Error::Unsupported("installed fonts are required for text fitting".into())); }
     Ok(fonts)
+}
+
+/// Whether a family is installed where AISlide runs, which is what its preview and measurements can use; `None` when it cannot tell.
+pub(crate) fn font_installed(family: &str) -> Option<bool> {
+    let fonts = installed_fonts().ok()?;
+    Some(fonts.db().query(&cosmic_text::fontdb::Query { families: &[Family::Name(family)], ..Default::default() }).is_some())
 }
 
 /// Largest size from `maximum` down to `minimum` in 2px steps at which the text fits the frame.

@@ -2,8 +2,14 @@
 use std::io::{Read, Write};
 use std::path::Path;
 
+// The dispatch of a debug build keeps the temporaries of every request on the stack; a PDF export then needs about 1 MiB, which is all the main thread has.
+const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+
 fn main() {
-    if let Err(error) = run() {
+    let outcome = std::thread::Builder::new().name("aislide-cli".into()).stack_size(WORKER_STACK_BYTES).spawn(run)
+        .map_err(Error::Io)
+        .and_then(|worker| worker.join().unwrap_or_else(|payload| std::panic::resume_unwind(payload)));
+    if let Err(error) = outcome {
         eprintln!("{}", serde_json::json!({"error":error.to_string()}));
         std::process::exit(1);
     }

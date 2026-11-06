@@ -33,7 +33,7 @@ pub(super) fn render(drawing: &mut Drawing, category: &str, variant: usize, data
         let value = series[0].values.last().copied().unwrap_or(0.0);
         let value = if kind == ChartKind::PercentStackedColumn {format!("{}%",display(value / series.iter().map(|entry|entry.values.last().copied().unwrap_or(0.0)).sum::<f64>() * 100.0))} else {display(value)};
         drawing.rect([824.0,120.0,3.0,304.0],"@accent1");
-        drawing.text(&value,[856.0,172.0,264.0,74.0],52.0,"@accent1",true,TextAlign::Left);
+        drawing.text_on(&value,[856.0,172.0,264.0,74.0],52.0,"@accent1","@lt1",true,TextAlign::Left);
         drawing.text(categories.last().map(String::as_str).unwrap_or(""),[856.0,252.0,264.0,52.0],24.0,"@dk1",true,TextAlign::Left);
         drawing.text(&series[0].name,[856.0,318.0,264.0,68.0],18.0,"@dk2",false,TextAlign::Left);
     } else if variant == 2 {
@@ -61,7 +61,7 @@ fn waterfall(drawing: &mut Drawing, variant: usize, data: &PartData, titleless: 
         let left=64.0+index as f64*slot+slot*0.16; let width=slot*0.68; let upper=ordinate(from.max(*to)); let lower=ordinate(from.min(*to));
         let shade=if step.total {"@dk1"} else if step.value>=0.0 {"@accent1"} else {"@accent2"};
         drawing.rect([left,upper,width,(lower-upper).max(0.01)],shade);
-        drawing.text(&display(step.value),[left-10.0,upper-30.0,width+20.0,26.0],if variant==1 && step.total {22.0} else {16.0},shade,true,TextAlign::Center);
+        drawing.text_on(&display(step.value),[left-10.0,upper-30.0,width+20.0,26.0],if variant==1 && step.total {22.0} else {16.0},shade,"@lt1",true,TextAlign::Center);
         drawing.text(&step.label,[left-slot*0.1,bottom+12.0,slot*0.88,52.0],16.0,"@dk1",false,TextAlign::Center);
         if index+1<steps.len() { drawing.line([left+width,ordinate(*to)],[left+slot,ordinate(*to)],false,"@dk2"); }
         if variant==2 { drawing.text(&format!("= {}",display(*to)),[left-6.0,472.0,width+12.0,28.0],15.0,"@dk2",false,TextAlign::Center); }
@@ -77,7 +77,7 @@ fn infographic(drawing: &mut Drawing, variant: usize, data: &PartData) -> Result
     for (index,item) in items.iter().enumerate() {
         let value=item.value.unwrap_or(0.0); let top=96.0+index as f64*row_height; let shade=accent(index);
         drawing.text(&item.label,[24.0,top,232.0,48.0],20.0,"@dk1",true,TextAlign::Left);
-        drawing.text(&format!("{}%",display(value)),[960.0,top,168.0,52.0],32.0,&shade,true,TextAlign::Right);
+        drawing.text_on(&format!("{}%",display(value)),[960.0,top,168.0,52.0],32.0,&shade,"@lt1",true,TextAlign::Right);
         if variant==2 { drawing.rect([280.0,top+12.0,640.0,26.0],"@lt2"); drawing.rect([280.0,top+12.0,640.0*value/100.0,26.0],&shade); }
         else {
             for dot in 0..20 { let filled=(value/5.0-dot as f64).clamp(0.0,1.0); let bounds=[280.0+dot as f64*32.0,top+12.0,22.0,22.0];

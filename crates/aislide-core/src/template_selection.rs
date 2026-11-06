@@ -1,5 +1,5 @@
 ﻿use super::{TemplateImportOptions, CT, POTX, PPTX};
-use crate::{native::{child, relations_path, P, R, REL}, native_save::{apply, insert_child}, package::Package, pptx::{parse, relationship_targets, resolve}, Error, Result};
+use crate::{native::{child, relations_path, A, P, R, REL}, native_save::{apply, insert_child}, package::Package, pptx::{parse, relationship_targets, resolve}, Error, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -9,9 +9,9 @@ const DESIGN: &str = "urn:aislide:design:1";
 const P14: &str = "http://schemas.microsoft.com/office/powerpoint/2010/main";
 const PROVENANCE: &str = "urn:aislide:provenance:1";
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct Master { id: String, name: String }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct Layout { id: String, name: String, master_id: String }
 struct Topology { main: String, masters: Vec<Master>, layouts: Vec<Layout>, slides: Vec<(String, String)>, sections: bool, custom_shows: bool }
 
@@ -136,14 +136,87 @@ fn validate_design_identities(package: &Package, topology: &Topology) -> Result<
     Ok(())
 }
 
-pub(super) fn inspect(bytes: Vec<u8>) -> Result<Value> {
+/// The theme fonts of each master, read from the package: every typeface slot with the file's own font, and the ones it leaves empty.
+fn theme_fonts(package: &Package, topology: &Topology) -> Result<Vec<Value>> {
+    let mut reports = Vec::new();
+    for master in &topology.masters {
+        let targets = relationship_targets(package, &master.id, "theme")?;
+        let (1, Some(path)) = (targets.len(), targets.values().next()) else { continue };
+        let parsed = parse(package.text(path)?)?;
+        let root = parsed.root_element();
+        let scheme = child(root, A, "themeElements").and_then(|elements| child(elements, A, "fontScheme"));
+        let mut report = crate::theme_fonts::Scheme::read(scheme).report(&root.attribute("name").unwrap_or("").chars().take(80).collect::<String>());
+        report["master_id"] = json!(master.id);
+        report["theme_part"] = json!(path);
+        reports.push(report);
+    }
+    Ok(reports)
+}
+
+/// Transitions, animations and images of each master and layout, as the package sets them. A layout also reports the transition a slide on it
+/// inherits (its own, else its master's) and the images it shows together with its master's; shared image parts count once.
+fn part_reports(package: &Package, masters: &[Master], layouts: &[Layout]) -> Result<(Vec<Value>, Vec<Value>, Value)> {
+    use crate::template_effects::{image_report, images, read, transition_json};
+    let mut by_master = std::collections::BTreeMap::new();
+    let mut all_images: BTreeSet<String> = BTreeSet::new();
+    let mut master_reports = Vec::new();
+    for master in masters {
+        let effects = read(package, &master.id)?;
+        let parts = images(package, &master.id)?;
+        master_reports.push(json!({"id": master.id, "name": master.name, "transition": transition_json(&effects.transition), "animations": effects.animations, "images": image_report(package, &parts)}));
+        all_images.extend(parts.iter().cloned());
+        by_master.insert(master.id.as_str(), (effects, parts));
+    }
+    let mut layout_reports = Vec::new();
+    for layout in layouts {
+        let effects = read(package, &layout.id)?;
+        let parts = images(package, &layout.id)?;
+        let inherited = by_master.get(layout.master_id.as_str());
+        let effective = match (&effects.transition, inherited.and_then(|(master, _)| master.transition.as_ref())) {
+            (Some(transition), _) => json!({"transition": transition, "source": {"scope": "layout", "id": layout.id}}),
+            (None, Some(transition)) => json!({"transition": transition, "source": {"scope": "master", "id": layout.master_id}}),
+            (None, None) => Value::Null,
+        };
+        let mut together = parts.clone();
+        if let Some((_, master_parts)) = inherited { together.extend(master_parts.iter().cloned()); }
+        let mut shown = image_report(package, &parts);
+        shown["with_master"] = image_report(package, &together);
+        layout_reports.push(json!({"id": layout.id, "name": layout.name, "master_id": layout.master_id, "transition": transition_json(&effects.transition), "animations": effects.animations, "effective_transition": effective, "images": shown}));
+        all_images.extend(parts);
+    }
+    Ok((master_reports, layout_reports, image_report(package, &all_images)))
+}
+
+/// How many sample slides set a transition or animations of their own.
+fn sample_report(package: &Package, slides: &[String]) -> Result<Value> {
+    let (mut transitions, mut animations) = (0, 0);
+    for slide in slides {
+        let effects = crate::template_effects::read(package, slide)?;
+        if effects.transition.is_some() { transitions += 1; }
+        if effects.animations { animations += 1; }
+    }
+    Ok(json!({"count": slides.len(), "with_transition": transitions, "with_animations": animations}))
+}
+
+pub(super) fn inspect(bytes: Vec<u8>, options: Option<&TemplateImportOptions>) -> Result<Value> {
     let hash = format!("{:x}", Sha256::digest(&bytes));
+    let spare = options.map(|_| bytes.clone());
     let package = checked_source(bytes)?;
     let topology = topology(&package)?;
-    Ok(json!({"source_sha256":hash,"masters":topology.masters,"layouts":topology.layouts,
-        "sample_slide_count":topology.slides.len(),"has_sections":topology.sections,"has_custom_shows":topology.custom_shows,
+    let (masters, layouts, images) = part_reports(&package, &topology.masters, &topology.layouts)?;
+    let slides: Vec<String> = topology.slides.iter().map(|(path, _)| path.clone()).collect();
+    let mut inspection = json!({"source_sha256":hash,"masters":masters,"layouts":layouts,
+        "sample_slide_count":topology.slides.len(),"sample_slides":sample_report(&package, &slides)?,"template_images":images,"has_sections":topology.sections,"has_custom_shows":topology.custom_shows,
+        "theme_fonts":theme_fonts(&package, &topology)?,
         "limits":{"masters":8,"layouts":256,"sample_slides":256,"selected_masters":8,"selected_layouts":32},
-        "warnings":["IDs are exact source package part names, not filesystem paths. Selection is not sanitization; unselected payloads remain embedded.","Metadata inspection does not certify editable content or Office visual parity."],"office_visual_parity":false}))
+        "warnings":["IDs are exact source package part names, not filesystem paths. Selection is not sanitization; unselected payloads remain embedded.","Metadata inspection does not certify editable content or Office visual parity.","Transitions and animations are read from the package; AISlide does not play or edit them, and the preview omits them. PowerPoint applies a master's or layout's transition to every slide that inherits it. Image counts and sizes are uncompressed bytes of the image parts a part references, not a measure of playback speed."],"office_visual_parity":false});
+    if let (Some(options), Some(bytes)) = (options, spare) {
+        let selected = select_with_report(bytes, options, true)?;
+        let (masters, layouts, images) = part_reports(&selected.package, &selected.masters, &selected.layouts)?;
+        inspection["import"] = json!({"masters":masters,"layouts":layouts,"template_images":images,"sample_slides":sample_report(&selected.package, &selected.slides)?,
+            "removed":{"transitions":selected.removed.transitions,"animations":selected.removed.animations}});
+    }
+    Ok(inspection)
 }
 
 fn selectors(ids: &[String], names: &[String], available: &[(String, String)], limit: usize, kind: &str) -> Result<BTreeSet<String>> {
@@ -249,16 +322,25 @@ fn blank_slide(package: &mut Package, main: &str, layout: &str) -> Result<()> {
 }
 
 pub(super) fn select(bytes: Vec<u8>, options: &TemplateImportOptions) -> Result<Package> {
+    Ok(select_with_report(bytes, options, false)?.package)
+}
+
+/// The imported copy of a template and what it retains. `masters`, `layouts` and `slides` are listed only when the selection was resolved,
+/// which an import without selection, stripping or `report` does not need.
+pub(super) struct Selected { package: Package, masters: Vec<Master>, layouts: Vec<Layout>, slides: Vec<String>, removed: crate::template_effects::Removed }
+
+pub(super) fn select_with_report(bytes: Vec<u8>, options: &TemplateImportOptions, report: bool) -> Result<Selected> {
     if let Some(expected) = &options.source_sha256 {
         if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) { return Err(Error::Invalid("source_sha256 must be 64 lowercase hexadecimal characters".into())); }
         if *expected != format!("{:x}", Sha256::digest(&bytes)) { return Err(Error::Conflict("template source SHA-256 changed; inspect the current source again".into())); }
     }
     let mut package = checked_source(bytes)?;
     let has_selection = !options.master_ids.is_empty() || !options.master_names.is_empty() || !options.layout_ids.is_empty() || !options.layout_names.is_empty();
-    if !has_selection && options.include_sample_slides {
+    let strip = options.strip_transitions || options.strip_animations;
+    if !has_selection && options.include_sample_slides && !strip && !report {
         let main = super::main_part(&package)?;
         if options.strip_sections { super::strip_sections(&mut package, &main)?; }
-        return Package::open(super::convert(package, POTX, PPTX)?);
+        return Ok(Selected { package: Package::open(super::convert(package, POTX, PPTX)?)?, masters: Vec::new(), layouts: Vec::new(), slides: Vec::new(), removed: Default::default() });
     }
     let topology = topology(&package)?;
     let requested_masters = selectors(&options.master_ids, &options.master_names, &topology.masters.iter().map(|master| (master.id.clone(), master.name.clone())).collect::<Vec<_>>(), 8, "master")?;
@@ -285,5 +367,17 @@ pub(super) fn select(bytes: Vec<u8>, options: &TemplateImportOptions) -> Result<
         let layout = topology.layouts.iter().find(|layout| layouts.contains(&layout.id)).ok_or_else(|| Error::Invalid("selected template layout missing".into()))?;
         blank_slide(&mut package, &topology.main, &layout.id)?;
     }
-    Package::open(super::convert(package, POTX, PPTX)?)
+    let mut removed = crate::template_effects::Removed::default();
+    if strip {
+        // The imported copy only: the retained masters and layouts a slide can inherit from, and the sample slides that stay.
+        let slides: Vec<&String> = if options.include_sample_slides { topology.slides.iter().map(|(path, _)| path).collect() } else { Vec::new() };
+        for path in masters.iter().chain(layouts.iter()).chain(slides) {
+            let part = crate::template_effects::strip(&mut package, path, options.strip_transitions, options.strip_animations)?;
+            removed.transitions += part.transitions; removed.animations += part.animations;
+        }
+    }
+    let kept_masters = topology.masters.iter().filter(|master| masters.contains(&master.id)).cloned().collect();
+    let kept_layouts = topology.layouts.iter().filter(|layout| layouts.contains(&layout.id)).cloned().collect();
+    let slides = if options.include_sample_slides { topology.slides.iter().map(|(path, _)| path.clone()).collect() } else { Vec::new() };
+    Ok(Selected { package: Package::open(super::convert(package, POTX, PPTX)?)?, masters: kept_masters, layouts: kept_layouts, slides, removed })
 }

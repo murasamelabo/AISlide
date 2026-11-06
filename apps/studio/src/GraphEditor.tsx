@@ -174,7 +174,7 @@ function NodeProperties({ node, groups, contentTop, theme, onApply, onChooseIcon
       event.currentTarget.setCustomValidity([...detail].length > 240 ? 'Detail must contain at most 240 characters.' : '')
       const next = { ...draft }
       if (detail.trim()) next.detail = detail
-      else { delete next.detail; delete next.detail_font_size }
+      else { delete next.detail; delete next.detail_font_size; delete next.detail_fit }
       setDraft(next)
     }} /></label>
     <div className="graph-text-options" role="group" aria-label="Node text style">
@@ -195,6 +195,12 @@ function NodeProperties({ node, groups, contentTop, theme, onApply, onChooseIcon
       else delete next.detail_font_size
       setDraft(next)
     }} /></label>
+    <label className="field">Detail fit<select aria-label="Node detail fit" disabled={!draft.detail} value={draft.detail_fit ?? 'wrap'} onChange={(event) => {
+      const next = { ...draft }
+      if (event.target.value === 'wrap') delete next.detail_fit
+      else next.detail_fit = 'shrink'
+      setDraft(next)
+    }}><option value="wrap">Wrap (keep size)</option><option value="shrink">Shrink (may reduce size)</option></select></label>
     <button className="secondary" type="submit"><Check size={16} />Apply node</button>
   </form>
 }

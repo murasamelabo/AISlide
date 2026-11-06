@@ -30,10 +30,10 @@ pub fn validate_slide(slide: &Slide) -> Result<()> {
     if let Some(threads) = &review.modern_threads { crate::comments::modern::validate(threads)?; }
     let ids: BTreeSet<_> = element_list(&slide.elements).iter().map(|element| element.bounds().0).collect();
     for id in review.table_headers.keys() {
-        if !element_list(&slide.elements).iter().any(|element| matches!(element, crate::model::Element::Table { id: table_id, .. } if table_id == id)) { return Err(Error::Invalid("table header target missing".into())); }
+        if !element_list(&slide.elements).iter().any(|element| matches!(element, crate::model::Element::Table { id: table_id, .. } if table_id == id)) { return Err(Error::Invalid(format!("table header target missing: {id} is not a table on slide {}", slide.id))); }
     }
     for (id, metadata) in &review.accessibility {
-        if !ids.contains(id.as_str()) { return Err(Error::Invalid("accessibility target missing".into())); }
+        if !ids.contains(id.as_str()) { return Err(Error::Invalid(format!("accessibility target missing: {id} is not an element of slide {}; set_accessibility with metadata null removes the setting (update_part and update_graph move the settings of the children they draw again)", slide.id))); }
         if let Some(title) = &metadata.title { valid_text(title, 500)?; }
         if let Some(description) = &metadata.description { valid_text(description, 4000)?; }
         if metadata.title.iter().chain(metadata.description.iter()).any(|value| value.chars().any(char::is_control)) { return Err(Error::Invalid("native accessibility attributes cannot contain control characters".into())); }
@@ -253,11 +253,16 @@ pub fn set_reading_order(deck: &crate::model::Deck, slide_id: &str, order: Vec<S
     crate::model::validate_deck(&next)?; Ok(next)
 }
 
+/// `reason` explains an `unsupported` contrast check: `background_not_solid`, `partial_cover`, `unsupported_backdrop`,
+/// `transformed_text` or `text_highlight_or_baseline`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AccessibilityIssue { pub code: String, pub slide_id: String, pub element_id: Option<String>, pub status: String, pub contrast_ratio: Option<f64>, pub required_ratio: Option<f64>, pub repair_target: Option<String> }
+pub struct AccessibilityIssue { pub code: String, pub slide_id: String, pub element_id: Option<String>, pub status: String, pub contrast_ratio: Option<f64>, pub required_ratio: Option<f64>, pub repair_target: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] pub reason: Option<String> }
 
+/// `contrast_checked` counts the text elements (not runs) whose every text color was compared with a known solid background, low
+/// contrast included; `contrast_unsupported` counts those that could not be, each with an `unsupported` issue. Together they cover
+/// every text element that is not marked decorative. `checked_features` lists what the checker can evaluate, not what it did in this deck.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AccessibilityReport { pub issues: Vec<AccessibilityIssue>, pub checked_features: Vec<String>, pub limitations: Vec<String>, pub wcag_certified: bool }
+pub struct AccessibilityReport { pub issues: Vec<AccessibilityIssue>, pub checked_features: Vec<String>, #[serde(default)] pub contrast_checked: usize, #[serde(default)] pub contrast_unsupported: usize, pub limitations: Vec<String>, pub wcag_certified: bool }
 
 pub fn contrast_ratio(foreground: &str, background: &str) -> Result<f64> {
     fn luminance(color: &str) -> Result<f64> {
@@ -274,11 +279,14 @@ pub fn contrast_ratio(foreground: &str, background: &str) -> Result<f64> {
 }
 
 pub fn check_accessibility(deck: &crate::model::Deck) -> AccessibilityReport {
-    use crate::model::Element;
+    use crate::{contrast::{self, Backdrop}, model::Element};
     let mut issues = Vec::new();
-    for slide in &deck.slides {
+    let (mut contrast_checked, mut contrast_unsupported) = (0usize, 0usize);
+    for (page, slide) in deck.slides.iter().enumerate() {
+        let backdrops = contrast::text_backdrops(deck, page);
+        let reason = std::cell::Cell::new(None::<&'static str>);
         let resolve = |color: &str| crate::design::resolve_color(color, crate::design::slide_theme(slide, deck.design.as_ref()));
-        let mut issue = |code: &str, element: Option<&str>, status: &str, ratio, required| issues.push(AccessibilityIssue { code: code.into(), slide_id: slide.id.clone(), element_id: element.map(str::to_owned), status: status.into(), contrast_ratio: ratio, required_ratio: required, repair_target: if code.contains("alt_missing") { Some("alternative_text".into()) } else if code.starts_with("table_") { Some("table_headers".into()) } else { None } });
+        let mut issue = |code: &str, element: Option<&str>, status: &str, ratio, required| issues.push(AccessibilityIssue { code: code.into(), slide_id: slide.id.clone(), element_id: element.map(str::to_owned), status: status.into(), contrast_ratio: ratio, required_ratio: required, repair_target: if code.contains("alt_missing") { Some("alternative_text".into()) } else if code.starts_with("table_") { Some("table_headers".into()) } else { None }, reason: reason.take().map(str::to_owned) });
         if slide.title.trim().is_empty() { issue("title_missing", None, "finding", None, None); }
         if slide.review.as_ref().is_none_or(|review| review.reading_order.is_empty()) { issue("reading_order_review", None, "manual_review", None, None); }
         for element in element_list(&slide.elements) {
@@ -303,17 +311,28 @@ pub fn check_accessibility(deck: &crate::model::Deck) -> AccessibilityReport {
                     if !format.merges.is_empty() { issue("table_merged_semantics_unverified", Some(id), "manual_review", None, None); }
                 }
                 Element::Text { text, color, font_size, bold, format, .. } | Element::Shape { text, color, font_size, bold, format, .. } if !text.trim().is_empty() => {
-                    let (_, left, top, width, height) = element.bounds();
-                    let simple = element.visual().is_none() && !slide.inherit_background && !format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.style.highlight.as_deref().is_some_and(|value| value != "none") || run.style.baseline.is_some_and(|value| value != 0)) && slide.elements.iter().any(|candidate| candidate.bounds().0 == id)
-                        && !slide.elements.iter().any(|other| { let (other_id, other_left, other_top, other_width, other_height) = other.bounds(); other_id != id && left < other_left + other_width && other_left < left + width && top < other_top + other_height && other_top < top + height });
-                    if !simple { issue("contrast_background_unverified", Some(id), "unsupported", None, None); continue; }
-                    let background = match element { Element::Shape { fill, .. } if fill != "none" => resolve(fill), _ => resolve(&slide.background) };
-                    let mut check = |color: &str, size: f64, bold: bool| {
-                        let required = if size >= 24.0 || (bold && size >= 56.0 / 3.0) { 3.0 } else { 4.5 };
-                        match contrast_ratio(&resolve(color), &background) { Ok(ratio) if ratio < required => issue("text_contrast_low", Some(id), "finding", Some(ratio), Some(required)), Err(_) => issue("contrast_color_unverified", Some(id), "unsupported", None, None), _ => {} }
-                    };
-                    if format.paragraphs.is_empty() { check(color, *font_size, *bold); }
-                    else { for run in format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).filter(|run| !run.text.trim().is_empty()) { check(run.style.color.as_deref().unwrap_or(color), run.style.font_size.unwrap_or(*font_size), run.style.bold.unwrap_or(*bold)); } }
+                    let styled = format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.style.highlight.as_deref().is_some_and(|value| value != "none") || run.style.baseline.is_some_and(|value| value != 0));
+                    let site = backdrops.get(id);
+                    match if styled { Backdrop::Unsupported(contrast::TEXT_STYLE) } else { site.map_or(Backdrop::Unsupported(contrast::UNSUPPORTED_BACKDROP), |site| site.backdrop.clone()) } {
+                        Backdrop::Unsupported(why) => { reason.set(Some(why)); issue("contrast_background_unverified", Some(id), "unsupported", None, None); contrast_unsupported += 1; }
+                        Backdrop::Solid(background) => {
+                            let background = resolve(&background);
+                            let scale = site.map_or(1.0, |site| site.scale);
+                            let mut verified = true;
+                            let mut check = |color: &str, size: f64, bold: bool| {
+                                let size = size * scale;
+                                let required = if size >= 24.0 || (bold && size >= 56.0 / 3.0) { 3.0 } else { 4.5 };
+                                match contrast_ratio(&resolve(color), &background) {
+                                    Ok(ratio) if ratio < required => issue("text_contrast_low", Some(id), "finding", Some(ratio), Some(required)),
+                                    Err(_) => { verified = false; issue("contrast_color_unverified", Some(id), "unsupported", None, None) }
+                                    _ => {}
+                                }
+                            };
+                            if format.paragraphs.is_empty() { check(color, *font_size, *bold); }
+                            else { for run in format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).filter(|run| !run.text.trim().is_empty()) { check(run.style.color.as_deref().unwrap_or(color), run.style.font_size.unwrap_or(*font_size), run.style.bold.unwrap_or(*bold)); } }
+                            if verified { contrast_checked += 1; } else { contrast_unsupported += 1; }
+                        }
+                    }
                 }
                 Element::Chart { .. } | Element::Group { .. } => {
                     if metadata.and_then(|metadata| metadata.description.as_deref()).is_none_or(|description| description.trim().is_empty()) { issue(if matches!(element, Element::Chart { .. }) { "chart_alt_missing" } else { "group_alt_missing" }, Some(id), "finding", None, None); }
@@ -323,7 +342,7 @@ pub fn check_accessibility(deck: &crate::model::Deck) -> AccessibilityReport {
             }
         }
     }
-    AccessibilityReport { issues, checked_features: ["slide_titles", "image_descriptions", "solid_rgb_text_contrast", "table_header_presence", "merged_table_flags", "top_level_reading_order", "decoration_flags"].map(str::to_owned).to_vec(), limitations: ["Not a WCAG certification or screen-reader test", "Alternative text meaning and arbitrary personal data are not inferred", "Complex backgrounds, inherited content, table header associations and group reading order require review"].map(str::to_owned).to_vec(), wcag_certified: false }
+    AccessibilityReport { issues, checked_features: ["slide_titles", "image_descriptions", "solid_rgb_text_contrast", "table_header_presence", "merged_table_flags", "top_level_reading_order", "decoration_flags"].map(str::to_owned).to_vec(), contrast_checked, contrast_unsupported, limitations: ["Not a WCAG certification or screen-reader test", "Alternative text meaning and arbitrary personal data are not inferred", "Text contrast is compared only with one known solid color behind the text: the fill of the shape that holds it, where the outline of a rectangle, rounded rectangle or ellipse contains the text (a turned shape included), a shape that covers it, or the slide background; images, charts, tables, gradients, transparency, partial covers, soft edges, other or custom outlines, a connector or an unfilled outline whose stroke crosses the text frame, and the reach of a shadow, glow or reflection stay unsupported with a reason, and so does rotated or skewed text whose background is not its own fill", "Table header associations and group reading order require review"].map(str::to_owned).to_vec(), wcag_certified: false }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

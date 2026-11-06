@@ -52,6 +52,74 @@ pub struct RenderedSlide {
     pub(crate) objects: Vec<(String, String)>,
 }
 
+pub(crate) const SHAPE_APPROXIMATION: &str = "SHAPE_APPROXIMATION";
+pub(crate) const THEME_FONT_UNSET: &str = "THEME_FONT_UNSET";
+
+// The preview draws the shapes that are not rect, ellipse, flowChartProcess or flowChartConnector from normalized geometry. The renderer
+// warns once per shape; previews and preflight report one notice per page (see summarize_shape_approximations).
+fn shape_approximation_message(preset: &str) -> String {
+    format!("{preset}: normalized preset preview geometry, not Office parity")
+}
+
+/// The preset that a per-shape SHAPE_APPROXIMATION warning names.
+pub(crate) fn approximated_preset(message: &str) -> &str {
+    message.split(':').next().unwrap_or(message)
+}
+
+/// What a page-level SHAPE_APPROXIMATION notice says about `count` shapes drawn from the given presets.
+pub(crate) fn shape_approximation_summary(count: usize, presets: &BTreeSet<&str>) -> String {
+    format!(
+        "{count} shape(s) use normalized preset preview geometry ({}); the preview is not Office visual parity, so compare in Office when exact shape geometry matters (the exported PPTX keeps the native preset)",
+        presets.iter().copied().collect::<Vec<_>>().join(", ")
+    )
+}
+
+/// Collapses the per-shape SHAPE_APPROXIMATION warnings of each page and scope into one notice at the position of the first of them.
+/// The notice lists the shapes in `element_ids`; other warnings keep their order and content.
+pub(crate) fn summarize_shape_approximations(warnings: Vec<RenderWarning>) -> Vec<RenderWarning> {
+    type Key = (usize, Option<String>);
+    let mut groups: std::collections::BTreeMap<Key, (Vec<String>, BTreeSet<String>)> = std::collections::BTreeMap::new();
+    for warning in warnings.iter().filter(|warning| warning.code == SHAPE_APPROXIMATION) {
+        let (ids, presets) = groups.entry((warning.page_index, warning.scope.clone())).or_default();
+        if !ids.contains(&warning.element_id) { ids.push(warning.element_id.clone()); }
+        presets.insert(approximated_preset(&warning.message).to_owned());
+    }
+    let mut emitted: BTreeSet<Key> = BTreeSet::new();
+    let mut summarized = Vec::with_capacity(warnings.len());
+    for warning in warnings {
+        if warning.code != SHAPE_APPROXIMATION { summarized.push(warning); continue; }
+        let key = (warning.page_index, warning.scope.clone());
+        if !emitted.insert(key.clone()) { continue; }
+        let (ids, presets) = &groups[&key];
+        summarized.push(RenderWarning {
+            code: SHAPE_APPROXIMATION.into(), page_index: warning.page_index, element_id: String::new(), element_ids: ids.clone(), scope: warning.scope,
+            message: shape_approximation_summary(ids.len(), &presets.iter().map(String::as_str).collect()),
+        });
+    }
+    summarized
+}
+
+/// Collapses the THEME_FONT_UNSET warnings that share a page, scope and message into one at the position of the first; its `element_ids`
+/// list the text elements. A warning for a single element stays as it is.
+pub(crate) fn summarize_theme_font_notices(warnings: Vec<RenderWarning>) -> Vec<RenderWarning> {
+    type Key = (usize, Option<String>, String);
+    let mut groups: std::collections::BTreeMap<Key, Vec<String>> = std::collections::BTreeMap::new();
+    for warning in warnings.iter().filter(|warning| warning.code == THEME_FONT_UNSET) {
+        let ids = groups.entry((warning.page_index, warning.scope.clone(), warning.message.clone())).or_default();
+        if !ids.contains(&warning.element_id) { ids.push(warning.element_id.clone()); }
+    }
+    let mut emitted: BTreeSet<Key> = BTreeSet::new();
+    let mut summarized = Vec::with_capacity(warnings.len());
+    for warning in warnings {
+        if warning.code != THEME_FONT_UNSET { summarized.push(warning); continue; }
+        let key = (warning.page_index, warning.scope.clone(), warning.message.clone());
+        if !emitted.insert(key.clone()) { continue; }
+        let ids = &groups[&key];
+        summarized.push(if ids.len() == 1 { warning } else { RenderWarning { element_id: String::new(), element_ids: ids.clone(), ..warning } });
+    }
+    summarized
+}
+
 pub(crate) struct RenderedText {
     pub element_id: String,
     pub scope: String,
@@ -144,7 +212,7 @@ pub(crate) fn render_preview_at_scale(
 
 pub(crate) enum EffectPolicy { Strict, Preview, Preflight, DeliveryPdf }
 
-fn render_layers(deck: &Deck, page_index: usize) -> Result<Vec<(String, &[Element])>> {
+pub(crate) fn render_layers(deck: &Deck, page_index: usize) -> Result<Vec<(String, &[Element])>> {
     let slide = deck.slides.get(page_index)
         .ok_or_else(|| Error::Invalid("render page index out of range".into()))?;
     let layout = deck.design.as_ref().and_then(|design| {
@@ -189,7 +257,7 @@ pub(crate) fn validated_authoring_effect_warnings(deck: &Deck, page_indices: &[u
     for &page_index in page_indices {
         match page_effect_budget(deck, page_index, scale) {
             Ok(budget) => warnings.extend(budget.warning(&deck.slides[page_index].id, page_index, scale, None)),
-            Err(Error::Limit(message)) => warnings.push(RenderWarning { code: "EFFECT_ANALYSIS_UNAVAILABLE".into(), page_index, element_id: String::new(), scope: None, message: format!("Effect budget prediction unavailable at scale={scale}: {message}. The edit is accepted; actual rendering limits remain enforced.") }),
+            Err(Error::Limit(message)) => warnings.push(RenderWarning { code: "EFFECT_ANALYSIS_UNAVAILABLE".into(), page_index, element_id: String::new(), element_ids: Vec::new(), scope: None, message: format!("Effect budget prediction unavailable at scale={scale}: {message}. The edit is accepted; actual rendering limits remain enforced.") }),
             Err(error) => return Err(error),
         }
     }
@@ -218,20 +286,6 @@ pub(crate) fn render_with_effect_policy(
         .ok_or_else(|| Error::Invalid("render page index out of range".into()))?;
     let fallback = Theme::default();
     let theme = crate::design::slide_theme(slide, deck.design.as_ref()).unwrap_or(&fallback);
-    let layout = deck.design.as_ref().and_then(|design| {
-        slide
-            .layout_id
-            .as_ref()
-            .and_then(|id| design.layouts.iter().find(|layout| &layout.id == id))
-            .or_else(|| design.layouts.first())
-    });
-    let master = layout.and_then(|layout| {
-        deck.design
-            .as_ref()?
-            .masters
-            .iter()
-            .find(|master| master.id == layout.master_id)
-    });
     let layers = render_layers(deck, page_index)?;
     let mut characters = 0usize;
     let mut points = 0usize;
@@ -308,14 +362,7 @@ pub(crate) fn render_with_effect_policy(
         .writer
         .write_attribute("viewBox", &format!("0 0 {} {}", deck.width, deck.height));
     if !transparent {
-        let background = if slide.inherit_background {
-            layout
-                .and_then(|layout| layout.background.as_deref())
-                .or_else(|| master.map(|master| master.background.as_str()))
-                .unwrap_or(&slide.background)
-        } else {
-            &slide.background
-        };
+        let background = crate::design::rendered_background(slide, deck.design.as_ref());
         scene.rectangle(
             [0.0, 0.0, deck.width as f64, deck.height as f64],
             &scene.color(background),
@@ -382,6 +429,7 @@ impl Scene<'_> {
                 code: code.into(),
                 page_index: self.page_index,
                 element_id: id.into(),
+                element_ids: Vec::new(),
                 scope: Some(self.scope.clone()),
                 message,
             });
@@ -603,11 +651,7 @@ impl Scene<'_> {
                     preset.as_str(),
                     "rect" | "ellipse" | "flowChartProcess" | "flowChartConnector"
                 ) {
-                    self.warning(
-                        id,
-                        "SHAPE_APPROXIMATION",
-                        format!("{preset}: normalized preset preview geometry, not Office parity"),
-                    );
+                    self.warning(id, SHAPE_APPROXIMATION, shape_approximation_message(preset));
                 }
                 self.path(&path, fill, stroke, *stroke_width, visual)?;
                 for extra in shape_details(preset, width, height) {
@@ -1001,6 +1045,7 @@ impl Scene<'_> {
         let mut top = 0.0;
         let mut used = BTreeSet::new();
         let mut requested = BTreeSet::new();
+        let mut unset_slots = BTreeSet::new();
         let mut fallbacks = std::collections::BTreeMap::<String, BTreeSet<String>>::new();
         let mut overflow = false;
         for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
@@ -1048,6 +1093,9 @@ impl Scene<'_> {
                 .map(|(run, style)| self.family(&run.text, style.font_family.as_deref()))
                 .collect();
             requested.extend(families.iter().cloned());
+            for (run, style) in runs.iter().zip(&styles) {
+                if let Some(slot) = crate::theme_fonts::unset_slot(&run.text, style.font_family.as_deref(), self.theme) { unset_slots.insert(slot); }
+            }
             let (maximum, line_height) = crate::rich_text::paragraph_metrics(&styles, size, paragraph.line_spacing);
             let (wrap_inset, inset) = crate::rich_text::paragraph_insets(paragraph, format, size);
             if paragraph.indent.is_some_and(|value| value != 0) || paragraph.level.is_some() {
@@ -1163,6 +1211,9 @@ impl Scene<'_> {
         if !fallbacks.is_empty() {
             let message = fallbacks.into_iter().map(|(family, actual)| format!("Requested {family}; used {}", actual.into_iter().collect::<Vec<_>>().join(", "))).collect::<Vec<_>>().join("; ");
             self.warning(id, "FONT_FALLBACK", message);
+        }
+        if !unset_slots.is_empty() {
+            self.warning(id, THEME_FONT_UNSET, crate::theme_fonts::unset_message(&unset_slots, self.theme));
         }
         let offset = match format.vertical {
             VerticalAlign::Top => 0.0,
@@ -1379,7 +1430,7 @@ impl Scene<'_> {
     }
 }
 
-fn effect_bounds(element: &Element) -> [f64; 4] {
+pub(crate) fn effect_bounds(element: &Element) -> [f64; 4] {
     let (_, _, _, width, height) = element.bounds();
     let mut bounds = [0.0_f64, 0.0_f64, width, height];
     if let Element::Group { view_width, view_height, children, .. } = element {
@@ -1440,7 +1491,7 @@ impl EffectBudget {
     }
 
     fn warning(&self, slide_id: &str, page_index: usize, scale: f64, mode: Option<&str>) -> Option<RenderWarning> {
-        self.exceeded().then(|| RenderWarning { code: "EFFECT_APPROXIMATION".into(), page_index, element_id: self.highest_id.clone(), scope: None,
+        self.exceeded().then(|| RenderWarning { code: "EFFECT_APPROXIMATION".into(), page_index, element_id: self.highest_id.clone(), element_ids: Vec::new(), scope: None,
             message: format!("{}; {}: shadow, glow, soft-edge and reflection {} omitted from the disposable rendered view on this page; fills, text, opacity and native PPTX are unchanged. This budget check does not validate other renderer resources.",
                 self.description(slide_id, scale), mode.unwrap_or("budget analysis for preview/preflight/delivery"), if mode.is_some() { "are" } else { "would be" }) })
     }

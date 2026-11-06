@@ -690,8 +690,12 @@ fn issue61_graph_icon_schema_tracks_the_struct_and_core_rejects_asset_handles() 
     let catalog = execute_request(json!({"op":"part_catalog"})).unwrap();
     let schema = &catalog["schema"]["$defs"]["GraphIcon"];
 
-    // Every field core serializes is documented, and nothing else is.
-    let serialized = icon(32, 32);
+    // Every field core serializes is documented, and nothing else is. `decorative` is left out while false, so serialize one that sets it.
+    assert!(icon(32, 32).get("decorative").is_none());
+    let mut declared: aislide_core::graphs::GraphIcon = serde_json::from_value(icon(32, 32)).unwrap();
+    declared.decorative = true;
+    declared.alt.clear();
+    let serialized = serde_json::to_value(&declared).unwrap();
     let mut core_fields: Vec<&str> = serialized.as_object().unwrap().keys().map(String::as_str).collect();
     let mut documented: Vec<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).collect();
     core_fields.sort_unstable();

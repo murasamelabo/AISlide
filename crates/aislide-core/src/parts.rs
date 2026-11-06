@@ -408,33 +408,36 @@ fn graph_context(id: &str, spec: &PartSpec, graph: &crate::graphs::GraphSpec) ->
     Ok((format!("part-{}", &identity[..24]), rendered_graph, content_height))
 }
 
-pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme) -> Result<Element> {
-    valid_text(id,40)?; if id.is_empty() {return Err(Error::Invalid("part identity".into()));}
+pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme) -> Result<Element> { create_detailed(id, spec, theme).map_err(PartFailure::into_error) }
+
+/// `create_with_theme`, except that every fixed-size text that does not fit is returned, not only the first.
+pub(crate) fn create_detailed(id: &str, spec: &PartSpec, theme: &crate::design::Theme) -> std::result::Result<Element, PartFailure> {
+    valid_text(id,40)?; if id.is_empty() {return Err(Error::Invalid("part identity".into()).into());}
     crate::design::validate_theme(theme)?;
     let (category,variant)=validate_spec(spec)?;
     if let PartData::Interactive { spec: interactive } = &spec.data {
-        return crate::interactive::create(id,spec,interactive,&interactive.initial_state,theme);
+        return crate::interactive::create(id,spec,interactive,&interactive.initial_state,theme).map_err(PartFailure::from);
     }
-    if let Some(graph) = process::graph(spec, theme)? { return graph_part(id, spec, &graph, theme); }
+    if let Some(graph) = process::graph(spec, theme)? { return graph_part(id, spec, &graph, theme).map_err(PartFailure::from); }
     if briefing::kind(&spec.data).is_some() { return briefing::create(id, spec, theme); }
     if let PartData::Diagram { graph } = &spec.data {
-        if category != "diagram" { return Err(Error::Invalid("graph data requires diagram/custom".into())); }
-        return graph_part(id, spec, graph, theme);
+        if category != "diagram" { return Err(Error::Invalid("graph data requires diagram/custom".into()).into()); }
+        return graph_part(id, spec, graph, theme).map_err(PartFailure::from);
     }
     let identity = crate::canonical::bytes(spec)?;
     use sha2::{Digest, Sha256};
-    let mut drawing = Drawing::new(&format!("{id}-{}", &format!("{:x}",Sha256::digest(identity))[..10]));
+    let mut drawing = Drawing::new(&format!("{id}-{}", &format!("{:x}",Sha256::digest(identity))[..10])).with_theme(theme);
     drawing.text(&spec.title, [16.0, 0.0, 1120.0, 40.0], 28.0, "@dk1", true, TextAlign::Left);
     drawing.text(&spec.subtitle, [16.0, 44.0, 1120.0, 26.0], 16.0, "@dk2", false, TextAlign::Left);
     if catalog::CATEGORIES.iter().take(10).any(|entry| entry.0 == category) { charts::render(&mut drawing, category, variant, &spec.data, spec.layout.as_ref().is_some_and(|layout| !layout.show_title))?; }
     else { diagrams::render(&mut drawing, category, variant, &spec.data, theme)?; }
     let fixed_sizes: std::collections::BTreeMap<_, _> = drawing.elements.iter().filter_map(|element| match element {
-        Element::Text { id, text, font_size, .. } if category == "contrast" && variant == 3 && !text.is_empty() => Some((id.clone(), (*font_size, drawing.place_of(id).map(str::to_owned)))),
+        Element::Text { id, text, font_size, .. } if category == "contrast" && variant == 3 && !text.is_empty() => Some((id.clone(), (*font_size, drawing.place_of(id).map(str::to_owned), drawing.pointer_of(id).map(str::to_owned)))),
         _ => None,
     }).collect();
     let fit_error = |error| match error {
         Error::Invalid(message) => {
-            for (id, (_, place)) in &fixed_sizes {
+            for (id, (_, place, _)) in &fixed_sizes {
                 if let Some(place) = place {
                     if let Some(reason) = message.strip_prefix(&format!("part text {id} ")) {
                         return Error::Invalid(format!("part text {place} {reason}"));
@@ -458,15 +461,18 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
             other => fit_error(other),
         })?;
     }
+    let mut shrunk = Vec::new();
     for element in crate::model::element_list(std::slice::from_ref(&result)) {
         if let Element::Text { id, font_size, .. } = element {
-            if let Some((expected, place)) = fixed_sizes.get(id) {
+            if let Some((expected, place, pointer)) = fixed_sizes.get(id) {
                 if *font_size < *expected {
-                    return Err(Error::Invalid(format!("comparison panel text {} does not fit its fixed font size; shorten the text, enlarge the part or split the slide", place.as_deref().unwrap_or(id))));
+                    shrunk.push(PartOverflow { pointer: pointer.clone(), missing_glyphs: false, measured: None, available: None,
+                        message: format!("comparison panel text {} does not fit its fixed font size; shorten the text, enlarge the part or split the slide", place.as_deref().unwrap_or(id)) });
                 }
             }
         }
     }
+    if !shrunk.is_empty() { return Err(PartFailure::Overflow(shrunk)); }
     Ok(result)
 }
 
@@ -618,10 +624,36 @@ pub(crate) struct LayoutOverflow {
     pub available_height: f64,
 }
 
-pub(crate) fn layout_overflow(element: &Element, theme: &crate::design::Theme) -> Result<Option<LayoutOverflow>> {
+/// A fixed-size text of a part that does not fit (or lacks glyphs): the `create_part` message for it and where the preset says it is.
+pub(crate) struct PartOverflow {
+    /// JSON Pointer into the part spec (`/data/rows/0/from`) when the preset names the text; otherwise the message names its element.
+    pub pointer: Option<String>,
+    pub message: String,
+    pub missing_glyphs: bool,
+    pub measured: Option<u32>,
+    pub available: Option<u32>,
+}
+
+/// Why a part could not be created. Texts that do not fit at their fixed size are all collected, so a caller can report every one
+/// of them; `create_part` and the other single-error callers report the first.
+pub(crate) enum PartFailure { Error(Error), Overflow(Vec<PartOverflow>) }
+
+impl From<Error> for PartFailure { fn from(error: Error) -> Self { Self::Error(error) } }
+
+impl PartFailure {
+    pub(crate) fn into_error(self) -> Error {
+        match self {
+            Self::Error(error) => error,
+            Self::Overflow(overflows) => Error::Invalid(overflows.into_iter().next().map_or_else(|| "part text does not fit".into(), |overflow| overflow.message)),
+        }
+    }
+}
+
+/// Every text of the part that overflows its frame or lacks glyphs, in drawing order.
+pub(crate) fn layout_overflows(element: &Element, theme: &crate::design::Theme) -> Result<Vec<LayoutOverflow>> {
     let measured = crate::layout::measure_layout(&measurement_deck(element, theme))?;
     let elements = crate::model::element_list(std::slice::from_ref(element));
-    Ok(measured.measurements.iter().find(|measurement| measurement.overflow || measurement.missing_glyphs > 0).map(|measurement| {
+    Ok(measured.measurements.iter().filter(|measurement| measurement.overflow || measurement.missing_glyphs > 0).map(|measurement| {
         let text = elements.iter().find_map(|candidate| match candidate {
             Element::Text { id, text, .. } | Element::Shape { id, text, .. } if *id == measurement.element_id => {
                 Some(text.replace('\n', " ").chars().take(40).collect::<String>())
@@ -635,15 +667,37 @@ pub(crate) fn layout_overflow(element: &Element, theme: &crate::design::Theme) -
             measured_height: measurement.measured_height.ceil() as u32,
             available_height: measurement.height,
         }
-    }))
+    }).collect())
 }
 
-pub(crate) struct Drawing { prefix: String, pub elements: Vec<Element>, places: std::collections::BTreeMap<String, String> }
+pub(crate) fn layout_overflow(element: &Element, theme: &crate::design::Theme) -> Result<Option<LayoutOverflow>> {
+    Ok(layout_overflows(element, theme)?.into_iter().next())
+}
+
+pub(crate) struct Drawing { prefix: String, pub elements: Vec<Element>, places: std::collections::BTreeMap<String, String>, pointers: std::collections::BTreeMap<String, String>, theme: Option<crate::design::Theme> }
 impl Drawing {
-    pub fn new(prefix: &str) -> Self { Self { prefix: prefix.into(), elements: Vec::new(), places: Default::default() } }
-    /// Name the spec field the NEXT element stands for, so an error can say `panels[0].label` instead of an element ID.
-    pub fn name_next(&mut self, place: String) { self.places.insert(self.id(), place); }
+    pub fn new(prefix: &str) -> Self { Self { prefix: prefix.into(), elements: Vec::new(), places: Default::default(), pointers: Default::default(), theme: None } }
+    /// Lets `accent_text` choose by contrast against the colors of this theme.
+    pub fn with_theme(mut self, theme: &crate::design::Theme) -> Self { self.theme = Some(theme.clone()); self }
+    /// `color` as the color of text of `size` and weight `bold` on `background`: kept while it meets WCAG 2 (3:1 for large text, 4.5:1
+    /// otherwise), else `@dk1` when `@dk1` reads better. An accent stays the color of lines and fills; only text falls back. A palette
+    /// whose accents all meet the ratio renders as before, and without a theme the color is kept.
+    pub fn readable_color(&self, color: &str, background: &str, size: f64, bold: bool) -> String {
+        let Some(theme) = &self.theme else { return color.into(); };
+        let ratio = |value: &str| crate::review::contrast_ratio(&crate::design::resolve_color(value, Some(theme)), &crate::design::resolve_color(background, Some(theme))).unwrap_or(f64::MAX);
+        let needed = if size >= 24.0 || (bold && size >= 56.0 / 3.0) { 3.0 } else { 4.5 };
+        if ratio(color) >= needed || ratio(color) >= ratio("@dk1") { color.into() } else { "@dk1".into() }
+    }
+    /// `text` with a preferred `color` that gives way to `@dk1` when it is too pale for `background` (see `readable_color`).
+    pub fn text_on(&mut self, text: &str, bounds: [f64; 4], size: f64, color: &str, background: &str, bold: bool, alignment: TextAlign) {
+        let color = self.readable_color(color, background, size, bold);
+        self.text(text, bounds, size, &color, bold, alignment);
+    }
+    /// Name the spec field the NEXT element stands for, so an error can say `panels[0].label` instead of an element ID, and where
+    /// that field is in the part spec as a JSON Pointer (`/data/rows/0/from`).
+    pub fn name_next_at(&mut self, place: String, pointer: String) { let id = self.id(); self.places.insert(id.clone(), place); self.pointers.insert(id, pointer); }
     pub fn place_of(&self, id: &str) -> Option<&str> { self.places.get(id).map(String::as_str) }
+    pub fn pointer_of(&self, id: &str) -> Option<&str> { self.pointers.get(id).map(String::as_str) }
     pub fn id(&self) -> String { format!("{}-{}", self.prefix, self.elements.len()) }
     pub fn text(&mut self, text: &str, bounds: [f64; 4], size: f64, color: &str, bold: bool, alignment: TextAlign) {
         let [x, y, width, height] = bounds;

@@ -116,7 +116,7 @@ enum Request {
     EditSelection { document: crate::document::Document, expected_revision: u64, slide_id: String, operation: crate::selection::SelectionOperation, #[serde(default)] clipboard: Option<crate::selection::ElementBundle> },
     ResizeCanvas { document: crate::document::Document, expected_revision: u64, width: u32, height: u32, mode: crate::canvas::ResizeMode },
     ImportTemplate { id: String, kind: crate::authoring_ops::TemplateKind, base64: String, #[serde(default)] options: Option<crate::templates::TemplateImportOptions> },
-    InspectTemplate { kind: crate::authoring_ops::TemplateKind, base64: String },
+    InspectTemplate { kind: crate::authoring_ops::TemplateKind, base64: String, #[serde(default)] options: Option<crate::templates::TemplateImportOptions> },
     InspectMasterSource { kind: crate::master_import::SourceKind, base64: String },
     PreviewMasterImport { document: crate::document::Document, expected_revision: u64, expected_hash: String, input: crate::master_import::MasterImportInput },
     ImportMasters { document: crate::document::Document, expected_revision: u64, expected_hash: String, input: crate::master_import::MasterImportInput, expected_candidate_hash: String },
@@ -238,8 +238,9 @@ fn execute(request: Request, profile: crate::limits::CapacityProfile) -> Result<
         Request::CreateGraphIcon { base64, mime_type, alt } => Ok(serde_json::to_value(crate::graphs::create_icon(base64, &mime_type, &alt)?)?),
         Request::CreateGraph { id, spec, theme, include_diagnostics } => {
             let theme = theme.unwrap_or_default();
-            let element = crate::graphs::create(&id, &spec, &theme)?;
-            if include_diagnostics { Ok(serde_json::json!({"diagnostics":crate::graphs::diagnostics(&id, &spec, &element, &theme),"element":element})) }
+            let (element, shrinks) = crate::graphs::with_detail_shrinks(|| crate::graphs::create(&id, &spec, &theme));
+            let element = element?;
+            if include_diagnostics { Ok(serde_json::json!({"diagnostics":crate::graphs::diagnostics(&id, &spec, &element, &theme, &shrinks),"element":element})) }
             else { Ok(serde_json::to_value(element)?) }
         },
         Request::InsertGraph { document, expected_revision, slide_id, id, spec } => Ok(serde_json::to_value(crate::graphs::change(&document, expected_revision, &slide_id, &id, &spec, false)?)?),
@@ -251,7 +252,13 @@ fn execute(request: Request, profile: crate::limits::CapacityProfile) -> Result<
         Request::OcrStatus {} => Ok(serde_json::to_value(crate::extraction::ocr_status())?),
         Request::DesignDefaults {} => Ok(serde_json::to_value(crate::design::Design::default())?),
         Request::DesignPresets {} => Ok(serde_json::to_value(crate::design_presets::catalog()?)?),
-        Request::DesignTokens { deck } => { validate_deck(&deck)?; Ok(serde_json::to_value(crate::design_tokens::resolve(&deck)?)?) }
+        Request::DesignTokens { deck } => {
+            validate_deck(&deck)?;
+            let mut tokens = serde_json::to_value(crate::design_tokens::resolve(&deck)?)?;
+            // The fonts the deck's themes name, whichever tokens apply; the slots a template leaves empty are listed per theme.
+            tokens["theme_fonts"] = crate::theme_fonts::report(&deck.design.clone().unwrap_or_default());
+            Ok(tokens)
+        }
         Request::ComponentStyles { deck, profile } => { validate_deck(&deck)?; crate::design_tokens::component_styles(&deck, profile) }
         Request::ApplyDesignPreset { deck, preset_id } => Ok(serde_json::to_value(crate::design_presets::apply(deck, &preset_id)?)?),
         Request::ObjectCatalog {} => Ok(crate::objects::catalog()),
@@ -354,8 +361,8 @@ fn execute(request: Request, profile: crate::limits::CapacityProfile) -> Result<
         Request::EditSelection { document, expected_revision, slide_id, operation, clipboard } => Ok(serde_json::to_value(crate::authoring_ops::edit_selection(&document, expected_revision, &slide_id, &operation, clipboard.as_ref())?)?),
         Request::ResizeCanvas { document, expected_revision, width, height, mode } => Ok(serde_json::to_value(crate::authoring_ops::resize_canvas(&document, expected_revision, width, height, mode)?)?),
         Request::ImportTemplate { id, kind, base64, options } => Ok(serde_json::to_value(crate::authoring_ops::import_template_with_options(id, kind, decode(&base64)?, options.as_ref())?)?),
-        Request::InspectTemplate { kind, base64 } => match kind {
-            crate::authoring_ops::TemplateKind::Potx => crate::templates::inspect_potx(decode(&base64)?),
+        Request::InspectTemplate { kind, base64, options } => match kind {
+            crate::authoring_ops::TemplateKind::Potx => crate::templates::inspect_potx_with_options(decode(&base64)?, options.as_ref()),
             crate::authoring_ops::TemplateKind::Thmx => Err(Error::Unsupported("template topology inspection requires POTX".into())),
         },
         Request::InspectMasterSource { kind, base64 } => crate::master_import::inspect(kind, &base64, profile),

@@ -102,15 +102,17 @@ fn open_list_catalog_recommends_new_compositions_and_retains_legacy_ids() {
 #[test]
 fn open_list_additions_preserve_all_nine_legacy_native_exports() {
     use sha2::{Digest, Sha256};
+    // Numerals take their accent only while it is readable on white. The default palette's fourth accent (2.96:1) falls back to @dk1,
+    // which changes the four presets that number four or more items; the other five bundles are byte-identical to their first release.
     for (preset, expected) in [
-        ("list/balanced", "e38ff079fe057ceda156936d1e069bb34cdafad379d1a568573d7985e9bb47f0"),
-        ("list/focus", "58d7ab7756459714054fff9e982c17d0802a4f66c4fb0f671055b44681e82c41"),
+        ("list/balanced", "42f66a2d238b771627f95c0c74e800d202e986147173c2351cd927fb1a32a4f5"),
+        ("list/focus", "5f72d0ab5e62e3987448555aef9fa0db79856b969905ff29fcceaa64d3a754c9"),
         ("list/labeled", "00a8b100ed2bab08451eb8963a10c7f3b0405aff1f218694e46b6d7bc2b0b84b"),
         ("list-horizontal/balanced", "a7d172e038d7d7e27c721418e9d0e427086a4f31a12e9b9cdf9eaeb590489ac8"),
-        ("list-horizontal/focus", "7fd322fdde880490b5463b90f312baa7a37d789ebf5097df1aaa27cc8865824f"),
+        ("list-horizontal/focus", "81aae494cd99534141df99f93e76937fae7b64885914f3d2b7ad63b08fc100e3"),
         ("list-horizontal/labeled", "6aadeea6cda76e61facec77eacd2eff2e804af42cc7bf976835dc71963f4634e"),
         ("list-enumeration/balanced", "0b92562809471a59b9b9669604744613f74acc4d8ff0990b455f8028c3a4655a"),
-        ("list-enumeration/focus", "db82082f14462d5a685fd08737722daa4f5a6b50f231942c5d20f0bdb715f478"),
+        ("list-enumeration/focus", "d2c217f0f9f6ae6114f244fbbffeb82fddcdd237f5643b9509ff4f7675c0c35f"),
         ("list-enumeration/labeled", "f0309f4c451c887f7918fd04c73401a60e36eb4e5e6bc0847a2de65f9337888d"),
     ] {
         let rendered = execute_request(json!({"op":"create_part","id":"legacy-list","spec":open_list_spec(preset)})).unwrap();

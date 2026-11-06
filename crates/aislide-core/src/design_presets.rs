@@ -146,7 +146,7 @@ fn build(style: &Style) -> Result<Preset> {
         layout("three-cards", "Three points", None, cards),
         layout("visual-content", "Text and visual", None, vec![title(), text("body", [margin, body_top, column, body_height], style.body, "Key insight", PlaceholderKind::Body, 1), rectangle("preset-visual-region", [visual_x, body_top, column, body_height], "@lt2")]),
     ];
-    let design = Design { theme: Theme { name: style.name.into(), colors: COLOR_KEYS.into_iter().zip(style.colors).map(|(key, value)| (key.into(), value.into())).collect(), fonts: ThemeFonts { major: style.major.into(), minor: style.minor.into(), east_asian: style.east_asian.into(), complex_script: style.minor.into() } }, masters: vec![master], layouts };
+    let design = Design { theme: Theme { name: style.name.into(), colors: COLOR_KEYS.into_iter().zip(style.colors).map(|(key, value)| (key.into(), value.into())).collect(), fonts: ThemeFonts::new(style.major, style.minor, style.east_asian, style.minor) }, masters: vec![master], layouts };
     crate::design::validate_design(&design)?;
     let mut regions = Vec::new();
     for target in ["blank", "title-content", "two-columns", "three-cards", "visual-content"] {

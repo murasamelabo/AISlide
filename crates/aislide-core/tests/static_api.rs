@@ -439,6 +439,74 @@ fn chart_parity_notices_are_summarized_without_hiding_specific_preview_limits() 
 }
 
 #[test]
+fn shape_approximation_notices_are_one_info_per_page_and_owner_and_can_be_omitted() {
+    let mut deck = document()["deck"].clone();
+    for master in deck["design"]["masters"].as_array_mut().unwrap() { master["elements"] = json!([]); }
+    let layout_id = deck["design"]["layouts"][0]["id"].clone();
+    let shape = |id: &str, preset: &str, x: u32| json!({"type":"shape","id":id,"preset":preset,"x":x,"y":120,"width":100,"height":80,
+        "fill":"FFFFFF","stroke":"087F73","stroke_width":1,"text":"","font_size":16,"color":"000000","bold":false});
+    deck["design"]["layouts"][0]["elements"] = json!([shape("template-badge", "hexagon", 1000)]);
+    let mut slide = deck["slides"][0].clone();
+    slide["layout_id"] = layout_id;
+    slide["elements"] = json!([shape("card-a", "roundRect", 24), shape("card-b", "roundRect", 144), shape("card-c", "hexagon", 264), shape("exact", "rect", 384),
+        {"type":"text","id":"small","x":24,"y":300,"width":400,"height":40,"text":"Small note","font_size":10,"color":"000000","bold":false}]);
+    deck["slides"] = json!((0..2).map(|index| { let mut page = slide.clone(); page["id"] = json!(format!("page-{index}")); page }).collect::<Vec<_>>());
+    let document = execute_request(json!({"op":"new_document","id":"shape-notices","deck":deck})).unwrap();
+    let preflight = |options: Value| execute_request(json!({"op":"preflight_presentation","document":document,"options":options})).unwrap()["findings"].as_array().unwrap().clone();
+    let notices = |findings: &[Value]| findings.iter().filter(|finding| finding["code"] == "SHAPE_APPROXIMATION").cloned().collect::<Vec<_>>();
+    let others = |findings: &[Value]| findings.iter().filter(|finding| finding["code"] != "SHAPE_APPROXIMATION").cloned().collect::<Vec<_>>();
+
+    let findings = preflight(json!({"page_indices":[0,1]}));
+    let owned = notices(&findings);
+    let local: Vec<_> = owned.iter().filter(|finding| finding["scopes"][0] == "slide").collect();
+    assert_eq!(local.len(), 2, "{owned:?}");
+    for (page, finding) in local.iter().enumerate() {
+        assert_eq!(finding["severity"], "info");
+        assert_eq!(finding["page_index"], page);
+        assert_eq!(finding["slide_id"], format!("page-{page}"));
+        assert_eq!(finding["element_ids"], json!(["card-a", "card-b", "card-c"]), "the exact rect is not approximated");
+        let message = finding["message"].as_str().unwrap();
+        assert!(message.contains("3 shape(s)") && message.contains("hexagon, roundRect") && message.contains("not Office visual parity"), "{message}");
+        assert!(!finding["suggestions"].as_array().unwrap().is_empty());
+    }
+    let inherited: Vec<_> = owned.iter().filter(|finding| finding["scopes"][0] != "slide").collect();
+    assert_eq!(inherited.len(), 1, "template-owned notices aggregate across pages like other inherited findings: {owned:?}");
+    assert_eq!(inherited[0]["severity"], "info");
+    assert_eq!(inherited[0]["element_ids"], json!(["template-badge"]));
+    assert_eq!(inherited[0]["affected_page_indices"], json!([0, 1]));
+    assert!(others(&findings).iter().any(|finding| finding["code"] == "SMALL_TEXT"), "the fixture must keep an actionable finding");
+
+    let selected = notices(&preflight(json!({"page_indices":[1]})));
+    assert_eq!(selected.len(), 2);
+    assert!(selected.iter().all(|finding| finding["page_index"] == 1 && finding["affected_page_indices"] == json!([1])), "{selected:?}");
+
+    let slide_owned = notices(&preflight(json!({"page_indices":[0,1],"include_inherited":false})));
+    assert_eq!(slide_owned.len(), 2);
+    assert!(slide_owned.iter().all(|finding| finding["scopes"][0] == "slide"));
+
+    let without = preflight(json!({"page_indices":[0,1],"include_preview_notices":false}));
+    assert!(notices(&without).is_empty(), "{without:?}");
+    assert_eq!(others(&without), others(&findings), "omitting the notices leaves every other finding as it was");
+
+    let preview = execute_request(json!({"op":"preview_presentation","document":document,"options":{"page_indices":[0,1],"max_dimension":320}})).unwrap();
+    let warnings: Vec<_> = preview["warnings"].as_array().unwrap().iter().filter(|warning| warning["code"] == "SHAPE_APPROXIMATION").collect();
+    assert_eq!(warnings.len(), 4, "one notice per page and owner: {warnings:?}");
+    for page in 0..2 {
+        let local = warnings.iter().find(|warning| warning["page_index"] == page && warning["scope"] == "slide").unwrap();
+        assert_eq!(local["element_id"], "");
+        assert_eq!(local["element_ids"], json!(["card-a", "card-b", "card-c"]));
+        assert!(local["message"].as_str().unwrap().contains("3 shape(s)"));
+        let template = warnings.iter().find(|warning| warning["page_index"] == page && warning["scope"] != "slide").unwrap();
+        assert_eq!(template["element_ids"], json!(["template-badge"]));
+    }
+
+    let delivery = execute_request(json!({"op":"prepare_delivery","document":document,"expected_revision":document["revision"],"expected_hash":document["hash"],
+        "options":{"page_indices":[0],"max_dimension":320,"pdf":true,"preflight":false}})).unwrap();
+    let delivered: Vec<_> = delivery["manifest"]["render_warnings"].as_array().unwrap().iter().filter(|warning| warning["code"] == "SHAPE_APPROXIMATION").collect();
+    assert_eq!(delivered.len(), 2, "the PDF and the overview report each owner's notice once: {delivered:?}");
+}
+
+#[test]
 fn authoring_preflight_reports_renderer_clipping_and_connector_label_interference() {
     let elements = json!([
         {"type":"rect","id":"background","x":0,"y":0,"width":640,"height":360,"fill":"FFFFFF"},

@@ -750,7 +750,7 @@ The shared core additionally exposes the following bounded read/preview/apply op
 | Core operation | Inputs besides op | Result |
 | --- | --- | --- |
 | `preview_presentation` | `document`, optional `options:{page_indices,max_dimension,layout,max_output_bytes,format,overflow}` | `revision`, `hash`, requested/actual max dimension, quality-reduction flag, ordered page IDs/image coordinates, PNG/JPEG images with base64/size/SHA-256 and renderer warnings |
-| `preflight_presentation` | `document`, optional `options:{page_indices,min_font_size,include_inherited}` | Bounded findings with IDs/scopes/bounds/evidence/suggestions; no mutation |
+| `preflight_presentation` | `document`, optional `options:{page_indices,min_font_size,include_inherited,include_preview_notices}` | Bounded findings with IDs/scopes/bounds/evidence/suggestions; no mutation |
 | `preview_slide_revision` | `document`, `expected_revision`, `expected_hash`, `slide_id`, `edits`, optional `max_dimension` | Base/candidate hashes, before/after previews, affected IDs and stale part/source impact; no mutation |
 | `apply_slide_revision` | Same base and edits, plus `candidate_hash`, without `max_dimension` | Normal atomic transaction result with one inverse Undo receipt |
 
@@ -775,6 +775,48 @@ Renderer warnings include their optional `scope` for this distinction.
 `options.include_inherited` defaults to `true`; `false` omits inherited-only
 findings, not collisions involving slide-owned objects or unprojected native
 content. This is a diagnostic filter, not a change to document content.
+
+`SHAPE_APPROXIMATION` states that the preview draws a preset from normalized
+geometry (every preset except `rect`, `ellipse`, `flowChartProcess` and
+`flowChartConnector`); the exported PPTX keeps the native preset. It is a limit
+of the preview, not a defect to repair shape by shape, so `preview_presentation`
+and `preflight_presentation` report one notice per page and owner (the slide
+itself, or the template it inherits from) and list the shapes in `element_ids`.
+The `element_id` of such a preview warning is empty. In preflight the notice has
+severity `info`; template-owned notices are aggregated across pages like the
+other inherited findings, so `include_inherited:false` omits them and keeps the
+slide-owned ones. `options.include_preview_notices` defaults to `true`; `false`
+omits `SHAPE_APPROXIMATION` and the generic `CHART_PREVIEW` parity notice, and
+leaves every other finding as it was. No preset is excluded automatically: a
+"small difference" has no defined threshold, and excluding by preset or by the
+part that drew the shape would hide real differences. `export_static` keeps the
+per-shape renderer warnings (and `deny_warnings` still counts them);
+`prepare_delivery` reports the same page-level notice for its PDF and overview.
+
+`THEME_FONT_UNSET` states that text depends on a theme font slot the template
+leaves empty or omits, so PowerPoint chooses its font while the preview draws a
+stand-in; see [theme fonts](authoring/fonts.md#theme-fonts-a-template-leaves-empty).
+`preflight_presentation` reports it as a warning once per page and message and
+lists the text in `element_ids`. Unlike `FONT_FALLBACK`, template-owned text
+keeps severity `warning` and is not aggregated across pages; `include_inherited:false`
+omits the template's finding. Preview warnings and `prepare_delivery` list the
+affected elements once per page; `export_static` keeps the per-element warnings
+(and `deny_warnings` counts them).
+
+`SLIDE_TRANSITION` and `SLIDE_ANIMATIONS` are page-level `info` findings (evidence
+`document`) for documents opened from an imported package. `SLIDE_TRANSITION` names the
+transition a slide shows in a slide show and where it is set: the slide's own `p:transition`,
+else its layout's, else its master's, with the source ID and name (a transition without a
+visual effect overrides the inherited one and reports nothing unless it auto-advances or
+has a sound action; the automatic advance time is included when set). `SLIDE_ANIMATIONS` lists the
+slide, layout and master that define animations (a `p:timing` with animation behavior or media
+nodes; an empty one is not an animation); how PowerPoint inherits animations is not asserted.
+`include_inherited:false` omits the effects a layout or master sets and keeps the slide's own.
+They are computed from the origin package for the slides' current layouts, so slides added after
+the import report what their layout sets. AISlide neither plays nor edits either element and the
+preview omits them. Strip them while importing with `import_template` options
+`strip_transitions` / `strip_animations` (see Selective Template Factory). Documents
+AISlide created report neither.
 
 Default integral chart ticks omit a redundant `.0`. Both the Plotters and
 explicit-format Cartesian adapters reserve axis space from the actual shaped
@@ -863,18 +905,50 @@ or Office visual parity.
 `inspect_template({kind:"potx",base64})` inspects up to 8 masters, 256 layouts
 and 256 sample slides before the editable document's 32-layout limit. It
 returns exact package-part IDs, names, ownership, sample count, section/custom
-show flags, limits and `source_sha256`. The SDK method is `inspectTemplate`.
+show flags, limits and `source_sha256`, and `theme_fonts` per master: each
+typeface slot of the theme with the package's font, whether the template leaves it
+empty and whether AISlide has it installed
+([theme fonts](authoring/fonts.md#theme-fonts-a-template-leaves-empty)). The SDK method is `inspectTemplate`.
 Input bytes and capacity profiles retain the ordinary archive/request guards.
+
+Each inspected master and layout also reports what its XML sets directly, read with
+namespaces: `transition` (the `p:transition`, as `{kind,extended,speed?,duration_ms?,
+advance_after_ms?,sound?}`, or `null` when it sets none; `kind` is the effect element's local
+name, `none` for a transition without an effect, `sound` (`start` or `stop`) is present when it starts or stops a sound, and `extended` marks PowerPoint 2010+
+effects, which are read from the `mc:AlternateContent` choice), `animations` (whether it has a
+`p:timing` that defines an animation: behavior or media nodes, not an empty element) and `images` (the distinct internal image parts it references and their
+uncompressed bytes; a layout adds `with_master`, counting shared parts once). A layout also
+reports `effective_transition`, the one a slide on it inherits (its own, else its
+master's, with the `source`); a transition without an effect overrides the inherited one.
+`sample_slides` counts the samples that set their own, and `template_images` totals the
+distinct image parts of all masters and layouts. AISlide does not play or edit transitions or
+animations, and the preview omits them, but PowerPoint applies a master's or layout's
+transition to every slide that inherits it. Image counts and sizes are uncompressed
+bytes, not a measure of playback speed, and animation inheritance is not asserted.
+`inspect_template` also accepts the import `options` below and then adds `import`: the
+masters and layouts that import would retain, with the same fields after the options are
+applied, the retained `sample_slides`, `template_images` and `removed:{transitions,animations}`
+(one per transition removed, where an alternate-content wrapper that repeats it in its branches counts
+once, and one per animation removed; an empty `p:timing` is removed but not counted). It is a dry run of the
+same code on the same bytes and creates no document.
 
 `import_template` / SDK `importTemplate` accepts optional POTX-only `options`:
 `{include_sample_slides?,master_ids?,master_names?,layout_ids?,layout_names?,
-strip_sections?,source_sha256?}`. Defaults keep samples, all layouts and
-sections. ID/name selectors resolve exactly and unambiguously, with combined
+strip_sections?,strip_transitions?,strip_animations?,source_sha256?}`. Defaults keep samples, all layouts,
+sections, transitions and animations. ID/name selectors resolve exactly and unambiguously, with combined
 limits of 8 masters and 32 layouts. Master-only selection includes its layouts;
 layout selection includes its owning masters. Retained samples must use selected
 layouts. Set `include_sample_slides:false` to create one blank slide on the first
 selected layout in source order, including templates with no source slide list.
 Supply the inspected SHA to reject changed source bytes. THMX rejects options.
+`strip_transitions` and `strip_animations` are independent and default to `false`. They remove
+the `p:transition` / `p:timing` elements, including an `mc:AlternateContent` that holds only
+them, from the imported copy of the retained masters, layouts and kept sample slides; the
+source bytes are never modified, unselected payloads stay embedded and unchanged, and
+media a removed transition refers to remains as an unreferenced part. An alternate-content
+element that mixes the element with other markup is not guessed at: the import fails with the part
+named. MCP `import_template` returns `template_effects`, the `import` report of the
+same options (or `{unavailable}` with the reason when it cannot be produced).
 
 Inspected IDs such as `ppt/slideLayouts/slideLayout2.xml` are package-part
 identities used by import selectors, not document layout IDs. Imported layout
@@ -1049,7 +1123,7 @@ SDK: `client.createPresentation(id,title?,options?)`, `session.editSlides(operat
 | --- | --- | --- |
 | `best_practice_profiles` | None | Four purpose-specific English profiles and default color |
 | `best_practice_guide` | `profile_id` | English common/profile guide, pattern capabilities, limits and Rust-derived `GuidedInput` schema |
-| `validate_guided_presentation` | `input: GuidedInput` | Pure preflight `{ready,issues,review_required,semantic_truth_verified:false,office_visual_parity:false}` |
+| `validate_guided_presentation` | `input: GuidedInput` | Pure preflight `{ready,issues,diagnostics?,review_required,expression?,semantic_truth_verified:false,office_visual_parity:false}`. Slide problems from every slide (text that does not fit, a part that cannot be created) are collected in `issues`, each led by the input's slide ID and the part field path, and in `diagnostics` (`{code,slide_id,preset?,path?,message,measured_px?,available_px?}`). `expression` is the deck's part mix: `{slides,parts:[{preset,slides,instances}],other_presets?,longest_runs:[{preset,slides,first_slide_id,last_slide_id}],relationship_diagrams,relationship_presets,without_parts,note}`, information for review and never a quota |
 | `create_guided_presentation` | `id`, `input: GuidedInput` | New `{document,validation,profile_id,model_inference:false}`; no existing document or file is replaced |
 
 Profiles are `consulting-decision`, `technical-explainer`, `event-talk`, and `status-report`. The [guided authoring contract](authoring/README.md) defines the evidence, headline ledger, numeric JSON pointers and decision issue fields. All actual document behavior is computed in Rust; no model or source URL is contacted. `ready` means compilable input and measured text layout, not factual or semantic verification. Notes and creation records require privacy review before redistribution.
@@ -1150,7 +1224,7 @@ MCP exposes the same four operation names. It allocates an opaque new `deck_id` 
 
 | Operation | Request fields besides op | Result |
 | --- | --- | --- |
-| `part_catalog` | None | Version, 143 presets (including five interactive prototypes), Rust-derived `PartSpec` schema, style and default bounds |
+| `part_catalog` | None | Version, 143 presets (including five interactive prototypes), `related` (parts a preset does not cover: the managed `diagram/custom` graph with keywords, use_when/avoid_when and an `add_part` example), Rust-derived `PartSpec` schema, style and default bounds |
 | `create_part` | `id`, `spec`, optional `theme` | Validated ordinary `Element::Group`; does not create persistent metadata |
 | `insert_part` | `document`, `expected_revision`, `slide_id`, `id`, `spec` | Atomic `TransactionResult`, including part metadata and undo receipt |
 | `update_part` | Same as insert | Regenerates a current metadata part; retains placement unless an explicit layout changes it |
@@ -1420,7 +1494,7 @@ Graphs have a separate catalog, not an additional preset counted among the 111 p
 
 `GraphSpec` remains backward-compatible version 1: `{version:1,title,subtitle?,show_title?,nodes,edges?,groups?}`. Coordinates are absolute within 1152x512, with nodes/boundaries below the 88px title band by default. `show_title:false` omits title/subtitle objects and permits content from y=0; omission retains the band. Minimum size is 64x40; card nodes default to 176x80. There are 1-48 nodes, at most 64 edges and 16 boundaries, with boundary depth at most four. IDs are 1-24 ASCII letters/digits/hyphens/underscores, unique across all three collections. Root ID limit is 40 characters. Title/subtitle limits are 80/120; node labels 160, edge/boundary labels 64. The `schema` that `part_catalog` and `graph_catalog` return publishes these bounds as `minLength`/`maxLength`, `minItems`/`maxItems` and `minimum`/`maximum` on `GraphSpec`, `GraphNode`, `GraphEdge` and `GraphGroup`, so callers can read them without a failed call. Because a node or boundary has to fit the canvas, `x` is published up to 1088 and `y` up to 472 (the canvas minus the 64x40 minimum), `width` and `height` up to 1152 and 512; a position that satisfies each bound can still fail together with the size, and `y` below 88 needs `show_title:false`. Route points of a manual edge lie within 0-1152 and 0-512 (from y=88 while the title band is shown). The rendered scene still obeys 256 elements per slide and document size limits; not every combination of collection maxima fits.
 
-- Node: `{id,label,label_fit?,detail?,detail_font_size?,text_align?,heading_bold?,kind?,x,y,width?,height?,fill?,stroke?,color?,font_size?,group?,icon?,presentation?}`. Kinds: `rectangle`, `rounded_rectangle`, `ellipse`, `diamond`, `cylinder`, `cloud`. Font size 12-40, default 18; colors accept RGB/theme references. Default fill/outline/text: `@lt1`/`@accent1`/`@dk1`. `presentation` is `card` (default) or `icon`; icon mode requires an icon and retains the six kinds and four logical ports.
+- Node: `{id,label,label_fit?,detail?,detail_font_size?,detail_fit?,text_align?,heading_bold?,kind?,x,y,width?,height?,fill?,stroke?,color?,font_size?,group?,icon?,presentation?}`. Kinds: `rectangle`, `rounded_rectangle`, `ellipse`, `diamond`, `cylinder`, `cloud`. Font size 12-40, default 18; colors accept RGB/theme references. Default fill/outline/text: `@lt1`/`@accent1`/`@dk1`. `presentation` is `card` (default) or `icon`; icon mode requires an icon and retains the six kinds and four logical ports.
 - Edge: `{id,source,target,source_port?,target_port?,label?,route?,color?,arrow?,start_arrow?,dashed?}`. Ports: `auto`, `top`, `left`, `bottom`, `right`. Route: `straight` (default) or `elbow`. End arrow defaults true; start arrow/dashed false; color `@dk2`. Endpoints must reference distinct existing nodes.
 - Boundary: `{id,label,x,y,width,height,fill?,stroke?,parent?,icon?}`. Defaults `@lt2`/`@dk2`, with solid outlines. A member or child boundary must fit below its parent's 40px heading with 8px side/bottom padding. Missing parents, cycles, excess depth and containment violations reject. Core coordinates stay absolute; React Flow uses relative child positions only in the UI, with stable outer-first rendering.
 
@@ -1442,7 +1516,23 @@ color. `GraphNode.label_fit` is `wrap` (default, omitted from serialization)
 or `shrink`. Shrink prefers one line, testing the final text frame in 0.5px
 steps down to 12px without altering hard newlines. If one line still cannot
 fit, normal readable wrapping remains and diagnostics report the limit.
-These options preserve legacy rendering when omitted.
+These options preserve legacy rendering when omitted, except `detail_fit`.
+
+`GraphNode.detail_fit` is `wrap` (default, omitted from serialization) or
+`shrink`. A detail keeps the size it asks for: `detail_font_size`, or 80% of the
+heading size (at least 12px). Earlier versions silently reduced it by 0.5px steps,
+down to 12px, whenever a wrapped last line held only one CJK character, without a
+diagnostic. That reduction now happens only with `shrink`, and each detail it
+reduced is reported as `GRAPH_NODE_DETAIL_SHRUNK` (information, with the node ID,
+the starting and final sizes, and whether the node specified the size or uses the
+default). Existing documents keep the geometry they were saved with. A diagram
+that is rendered again, for example by `update_part`, draws such a detail at its
+full size and wraps with a short last line; widen the node, shorten the detail or
+add a line break where that matters, or choose `shrink`. Text that is smaller than
+the preflight floor in a node of a verified managed diagram is reported by
+`SMALL_TEXT` with the node ID, whether the detail or the heading is small, its
+drawn and requested sizes, and the repairs to make through `update_part` or
+`update_graph`.
 
 ### Graph Diagnostics
 
@@ -1456,7 +1546,17 @@ at 32 KiB, and contain `code`, `severity`, `graph_id`, `entity_id`, `element_ids
 Bounds are in the final graph group's local coordinate space.
 
 Codes include `GRAPH_LABEL_BORDER_OVERLAP`, `GRAPH_LABEL_OVERLAP`,
-`GRAPH_NODE_LABEL_WRAPPED` (info), and `GRAPH_NODE_LABEL_SHRINK_LIMIT` (warning).
+`GRAPH_NODE_LABEL_WRAPPED` (info), `GRAPH_NODE_LABEL_SHRINK_LIMIT` (warning),
+`GRAPH_NODE_DETAIL_SHRUNK` (info) and
+`GRAPH_NODE_PADDING` (warning). The engine raises the top and bottom padding of
+node text to the 8px floor of preflight's `CONTAINER_PADDING` whenever the
+measured text still fits with a pixel to spare: centered labels as before, and now
+also the top-aligned text of a node with a `detail`, whose padding used to stay at
+10% of the node height (7.6px for a 76px node). When the text does not fit, the
+layout is kept (explicit node sizes are never changed and text is never clipped).
+For `rectangle` and `rounded_rectangle` nodes of at least 100x60, the cards that
+preflight checks, `GRAPH_NODE_PADDING` then names the node, its text height and
+the node height that would keep the floor.
 Node-label findings name the node shape that holds the text and report its text
 frame as bounds; overlap findings and `on_overlap:error` messages likewise name
 the node or boundary shape rather than an internal label frame.
@@ -1478,10 +1578,21 @@ Diagnostics are not stored in documents, hashes, PPTX metadata or Undo receipts.
 Preflight omits a graph badge's overlap with its own connector only when
 current managed metadata, render fingerprints, actual badge attributes and
 the specified route agree. Hand-authored, stale, unverifiable and other-edge
-crossings remain reportable, as do badge/label collisions. Generic chart
+crossings remain reportable, as do badge/label collisions. The same verification
+decides how a connector is checked against a managed diagram's group frame: a
+verified frame is a drawn region that the diagram paints its connectors above, so
+only a connector over the heading's own text (with 4px of margin) is reported as
+`CONNECTOR_LABEL_INTERFERENCE`, and the cross-lane connectors every swimlane has
+are not. A changed or unverifiable diagram keeps the frame test. Findings about
+slide-owned objects inside a managed part carry `part_ids` (the part's element ID,
+for example `["lanes"]`), which tells you to repair them through `update_part` or
+`update_graph`; the field is omitted for other findings. Generic chart
 parity notices become one informational `CHART_PREVIEW` finding per selected
-page; specific `CHART_PRESENTATION` limits remain warnings. Raw renderer and
-preview warnings remain available, and `office_visual_parity` remains false.
+page; specific `CHART_PRESENTATION` limits remain warnings. `SHAPE_APPROXIMATION`
+follows the same rule, one `info` finding per page and owner with the shapes in
+`element_ids`; `options.include_preview_notices:false` omits both notices. Per-shape
+renderer warnings remain available from `export_static`, and `office_visual_parity`
+remains false.
 
 `GraphIcon` is `{base64,mime_type,alt?}` in direct core/SDK calls, with PNG/JPEG bytes rather than a path, URL or raw SVG. MCP accepts either that form or a prepared handle, `{asset_id,mime_type?,alt?}`, and resolves the handle to inline data before calling core. The `schema.$defs.GraphIcon` entry that MCP returns from `part_catalog`, `graph_catalog` and `best_practice_guide` documents both forms. The catalogs from core, the CLI and the SDK describe only the inline form, and core rejects `asset_id`. Set `icon` to null or omit it on a complete replacement to remove an icon; an icon-mode node must also return to `presentation: "card"`. Each payload uses the existing 1 MiB/4096px/64 MiB decoder bounds; total encoded node and boundary icons share a 3 MiB budget. Document/metadata/response budgets can reject a graph before these maxima. Use `create_graph_icon` for generic imported images: inert SVG becomes PNG at a 256px longest side, larger PNG/JPEG images are downsampled in their format, and smaller rasters retain their bytes. Prepared cloud PNGs bypass this helper to preserve originals up to 512px. Normal `create_asset` behavior is unchanged. Alt text is at most 500 characters.
 
@@ -1562,7 +1673,7 @@ The core's report schema is generated from Rust types in schema mode and further
 
 ## Graphics And Inspection
 
-Review operations `modern_comment`, `set_table_headers`, `check_accessibility`, `inspect_document` and `export_clean_copy` share the core/SDK/MCP contracts in [Phase 6 review](authoring/review-phase6.md). Modern threads are optional and separate from legacy comments; repeated rich-body edit/reopen preserves end-paragraph namespaces, while native thread/reply array reordering rejects rather than being silently ignored. PII candidates are masked, numeric-location manual findings and never cleanup categories. Inspection does not return content-derived paths. PDF consumes explicit table-header metadata; anchor, old-client omission and Office/assistive-technology limits remain explicit.
+Review operations `modern_comment`, `set_table_headers`, `check_accessibility`, `inspect_document` and `export_clean_copy` share the core/SDK/MCP contracts in [Phase 6 review](authoring/review-phase6.md). `check_accessibility` also returns `contrast_checked` and `contrast_unsupported` (text elements compared with a known solid background, and those that could not be) and a `reason` on each unsupported contrast issue. Modern threads are optional and separate from legacy comments; repeated rich-body edit/reopen preserves end-paragraph namespaces, while native thread/reply array reordering rejects rather than being silently ignored. PII candidates are masked, numeric-location manual findings and never cleanup categories. Inspection does not return content-derived paths. PDF consumes explicit table-header metadata; anchor, old-client omission and Office/assistive-technology limits remain explicit.
 
 - `object_catalog`: no fields; returns the allowlisted preset shapes, 24 chart kinds (18 classic and six chartEx) and table limits. See the [chartEx contract and histogram compatibility exception](authoring/chart-ex.md); the Office-compatible histogram encoding has two Open XML schema errors per histogram resource.
 - `create_object`: `id`, `kind` (`text`, `shape`, `table`, `chart`, `line`, `arrow`), optional `preset`, `rows`, `columns`; returns a validated element. Shape presets are OOXML names from the catalog; chart presets are chart kinds. Tables are 1-12 rows by 1-8 columns. Factory chart values are synthetic.
@@ -1571,7 +1682,7 @@ Review operations `modern_comment`, `set_table_headers`, `check_accessibility`, 
 - `design_tokens`: `deck`; returns the derived [design tokens](#design-tokens) without changing the deck.
 - `apply_design_preset`: `deck`, `preset_id`; accepts `public`, `minimal`, `stylish`, `pop`, `dynamic`, `trust` or `luxury`. Adds or replaces a verified dedicated preset master and seven layouts, retaining original masters and slide content. Foreign/edited templates, conflicting IDs and insufficient capacity fail before commit.
 - `update_design`: `deck`, `design`; validates the complete design and propagates inherited placeholder geometry/style while preserving text.
-- `apply_theme`: `deck`, `theme`; binds previous-palette RGB values to theme slots and retains unrelated custom colors. Does not install fonts or fetch resources.
+- `apply_theme`: `deck`, `theme`; binds previous-palette RGB values to theme slots and retains unrelated custom colors. A font you name is written even when it equals the one shown for a slot the template left empty; send `fonts.unset` back unchanged to keep a slot empty ([theme fonts](authoring/fonts.md#theme-fonts-a-template-leaves-empty)). Does not install fonts or fetch resources.
 - `set_master_theme` / `set_design_field`: owner-scoped theme overrides and dynamic-field/footer updates; see the [typed master-field contract](authoring/master-fields-themes.md#interfaces). `design_capabilities` reports the supported design subset and limitations.
 - `assign_layout`: `deck`, `slide_id`, `layout_id`; assigns/resets a layout, retains matching text, creates missing placeholders and detaches obsolete ones.
 - `create_picture`: `id`, `base64`, `mime_type`, `alt`; returns a decoded, fitted picture element.
@@ -1588,7 +1699,7 @@ Review operations `modern_comment`, `set_table_headers`, `check_accessibility`, 
 
 ## Authoring Model
 
-`deck.design` is optional and contains `{theme, masters, layouts}`. Each master is `{id, name, background, elements, theme?}`; each layout is `{id, name, master_id, source_id?, background?, elements}`. `source_id` records an imported package-part identity, not an alias accepted by layout assignment. A master's optional theme overrides the default design theme for its layouts and slides; omitting it restores inheritance. Background colors and element colors accept six-digit RGB or `@dk1`, `@lt1`, `@dk2`, `@lt2`, `@accent1` through `@accent6`, `@hlink`, `@folHlink`. Theme slots themselves must be RGB, not references. Theme fonts are `{major, minor, east_asian, complex_script}`.
+`deck.design` is optional and contains `{theme, masters, layouts}`. Each master is `{id, name, background, elements, theme?}`; each layout is `{id, name, master_id, source_id?, background?, elements}`. `source_id` records an imported package-part identity, not an alias accepted by layout assignment. A master's optional theme overrides the default design theme for its layouts and slides; omitting it restores inheritance. Background colors and element colors accept six-digit RGB or `@dk1`, `@lt1`, `@dk2`, `@lt2`, `@accent1` through `@accent6`, `@hlink`, `@folHlink`. Theme slots themselves must be RGB, not references. Theme fonts are `{major, minor, east_asian, complex_script, unset?}`; `unset` lists the typeface slots a template leaves empty (`empty`) or omits (`absent`), and the ones an edit has named since (`written`), where the four names are the fonts AISlide draws with rather than the file's setting ([theme fonts](authoring/fonts.md#theme-fonts-a-template-leaves-empty)).
 
 Native backgrounds, fills, text, explicit chart `schemeClr`, gradients and effects resolve through the 12-attribute color map (`p:clrMap`, layout/slide/notes `p:clrMapOvr` / `a:overrideClrMapping`, and `a:masterClrMapping` `sld -> sldLayout -> sldMaster` inheritance verified on PowerPoint 16.0 build 20430 in #32; chart `c:clrMapOvr`, `chartStyle`/`chartColorStyle` and auto palettes are not remapped), while `dk1`/`lt1`/`dk2`/`lt2` address theme slots directly. Masters without `<p:bg>` resolve `@bg1` via `p:clrMap`, and `import_masters` writes default `p:clrMap` while keeping `@slot` colors. Modern comment text belongs to no color map and resolves scheme colors through the default map.
 

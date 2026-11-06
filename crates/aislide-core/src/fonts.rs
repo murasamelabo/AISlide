@@ -104,13 +104,17 @@ mod rendering_tests {
     }
 }
 
+/// The theme slot (collection and script) that supplies the font of a run of text; `None` for text with its own font.
+pub(crate) fn theme_slot(text: &str, requested: Option<&str>) -> Option<(crate::theme_fonts::FontGroup, crate::theme_fonts::FontScript)> {
+    use crate::theme_fonts::FontGroup;
+    if requested.is_some_and(|family| !family.starts_with('@')) { return None; }
+    Some((if requested == Some("@major") { FontGroup::Major } else { FontGroup::Minor }, crate::theme_fonts::script_of(text)))
+}
+
 pub(crate) fn requested_family<'a>(text: &str, requested: Option<&'a str>, theme: &'a crate::design::Theme) -> &'a str {
-    match requested {
-        Some(family) if !family.starts_with('@') => family,
-        _ if text.chars().any(|character| matches!(character, '\u{3000}'..='\u{9fff}' | '\u{ac00}'..='\u{d7ff}' | '\u{f900}'..='\u{faff}' | '\u{ff00}'..='\u{ffef}' | '\u{20000}'..='\u{3134f}')) => &theme.fonts.east_asian,
-        _ if text.chars().any(|character| matches!(character, '\u{0590}'..='\u{08ff}' | '\u{0900}'..='\u{0dff}')) => &theme.fonts.complex_script,
-        Some("@major") => &theme.fonts.major,
-        _ => &theme.fonts.minor,
+    match theme_slot(text, requested) {
+        Some((group, script)) => theme.fonts.family(group, script),
+        None => requested.unwrap_or_default(),
     }
 }
 

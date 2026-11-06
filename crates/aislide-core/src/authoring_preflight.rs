@@ -9,10 +9,13 @@ pub struct PreflightOptions {
 	pub page_indices: Option<Vec<usize>>,
 	pub min_font_size: f64,
 	pub include_inherited: bool,
+	/// false omits the page-level info notices about preview approximation (SHAPE_APPROXIMATION and the generic chart parity notices);
+	/// specific chart limits and every other finding are unaffected.
+	pub include_preview_notices: bool,
 }
 
 impl Default for PreflightOptions {
-	fn default() -> Self { Self { page_indices: None, min_font_size: 16.0, include_inherited: true } }
+	fn default() -> Self { Self { page_indices: None, min_font_size: 16.0, include_inherited: true, include_preview_notices: true } }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -32,6 +35,10 @@ pub struct Finding {
 	pub affected_page_indices: Vec<usize>,
 	pub affected_slide_ids: Vec<String>,
 	pub element_ids: Vec<String>,
+	/// IDs of the managed parts (a diagram or a briefing part) that hold the slide-owned objects of this finding. Edit them through the part
+	/// (`update_part`, `update_graph`), not through their child elements. Empty for findings about other objects.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub part_ids: Vec<String>,
 	pub scopes: Vec<String>,
 	pub bounds: Bounds,
 	pub message: String,
@@ -48,7 +55,13 @@ pub struct PreflightReport {
 	pub limitations: Vec<String>,
 	pub office_visual_parity: bool,
 	pub semantic_truth_verified: bool,
+	/// The whole deck's mix of managed part presets: slides and instances per preset, the longest runs of one preset, slides with a relationship
+	/// diagram and slides without a part. Information for review, never a target; independent of the selected pages.
+	#[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+	pub deck_composition: serde_json::Value,
 	#[serde(skip)] include_inherited: bool,
+	// Element IDs of the managed parts on the page being checked.
+	#[serde(skip)] page_parts: BTreeSet<String>,
 }
 
 struct Object<'a> {
@@ -197,6 +210,34 @@ pub(crate) fn visible_reference_ids(deck: &Deck, page: usize) -> Result<BTreeSet
 		.map(|object| object.id.to_owned()).collect())
 }
 
+// The message and repair advice for text below the floor in a node of a verified managed diagram, from the sizes the diagram drew.
+// `effective` is the smallest size on the page, which fixes the scale between the diagram's own coordinates and the page.
+fn node_small_text(node: &crate::graphs::ManagedNodeText, effective: f64, floor: f64) -> Option<(String, Vec<String>)> {
+	let scale = effective / [node.heading, node.detail].into_iter().flatten().reduce(f64::min)?;
+	let (heading, detail) = (node.heading.map(|size| size * scale), node.detail.map(|size| size * scale));
+	let below = |size: Option<f64>| size.is_some_and(|size| size + 0.01 < floor);
+	let (detail_below, heading_below) = (below(detail), below(heading));
+	if !detail_below && !heading_below { return None; }
+	let mut drawn = Vec::new();
+	if detail_below { drawn.push(format!("its detail is drawn at {:.1}px", detail.unwrap_or_default())); }
+	if heading_below { drawn.push(format!("its heading is drawn at {:.1}px", heading.unwrap_or_default())); }
+	let requested = match node.detail_requested.map(|size| size * scale) {
+		Some(size) if detail_below && detail.is_some_and(|drawn| drawn + 0.01 < size) => format!(" (the node asks for {size:.1}px {}; its detail_fit is {})",
+			if node.detail_explicit { "through detail_font_size" } else { "by default" }, if node.detail_fit == crate::graphs::GraphDetailFit::Shrink { "shrink" } else { "wrap" }),
+		_ => String::new(),
+	};
+	let message = format!("Node '{}' of diagram '{}': {}, below the requested {floor}px floor{requested}", node.node_id, node.part_id, drawn.join(" and "));
+	let mut suggestions = Vec::new();
+	if detail_below {
+		suggestions.push(format!("Widen node '{}' or shorten its detail so that the text wraps without a short last line", node.node_id));
+		if node.detail_fit == crate::graphs::GraphDetailFit::Shrink { suggestions.push(format!("Set detail_fit to 'wrap' on node '{}' so that its detail keeps the size it asks for", node.node_id)); }
+		if node.detail_requested.is_some_and(|size| size * scale + 0.01 < floor) { suggestions.push(format!("Raise detail_font_size on node '{}' to at least {floor}; it cannot exceed the heading font_size", node.node_id)); }
+	}
+	if heading_below { suggestions.push(format!("Raise font_size on node '{}' to at least {floor} or widen the node; label_fit 'shrink' lowers the heading down to 12px", node.node_id)); }
+	suggestions.push(format!("Change it through update_part or update_graph on '{}', not by editing the node's text elements", node.part_id));
+	Some((message, suggestions))
+}
+
 fn crosses_frame(start: Point, end: Point, rect: Rect) -> bool {
 	let mut low = 0.0_f64;
 	let mut high = 1.0_f64;
@@ -231,7 +272,7 @@ fn route_crosses_badge_center(object: &Object<'_>, connector: &Object<'_>) -> bo
 fn push_finding(report: &mut PreflightReport, page: usize, slide: &str, objects: &[&Object<'_>], code: &str, severity: &str, evidence: &str, message: &str, suggestions: &[&str]) -> Result<()> {
 	let inherited = !objects.is_empty() && objects.iter().all(|object| object.scope != "slide");
 	if inherited && !report.include_inherited { return Ok(()); }
-	let aggregate = inherited && matches!(code, "SMALL_TEXT" | "FONT_FALLBACK");
+	let aggregate = inherited && matches!(code, "SMALL_TEXT" | "FONT_FALLBACK" | "SHAPE_APPROXIMATION");
 	if aggregate {
 		if let Some(finding) = report.findings.iter_mut().find(|finding| finding.code == code && finding.message == message && finding.evidence == evidence
 			&& finding.element_ids.iter().map(String::as_str).eq(objects.iter().map(|object| object.id))
@@ -243,9 +284,10 @@ fn push_finding(report: &mut PreflightReport, page: usize, slide: &str, objects:
 	}
 	if report.findings.len() >= 256 { return Err(Error::Limit("visual preflight exceeds 256 findings; select fewer pages or resolve reported density".into())); }
 	let bounds = objects.iter().map(|object| object.bounds).reduce(|first, next| first.union(next)).unwrap_or(Rect::ZERO);
+	let part_ids: BTreeSet<&str> = objects.iter().filter(|object| object.scope == "slide").map(|object| object.owner.unwrap_or(object.id)).filter(|owner| report.page_parts.contains(*owner)).collect();
 	report.findings.push(Finding { code: code.into(), severity: if aggregate { "info".into() } else { severity.into() }, evidence: evidence.into(), page_index: page, slide_id: slide.into(),
 		affected_page_indices: vec![page], affected_slide_ids: vec![slide.into()],
-		element_ids: objects.iter().map(|object| object.id.into()).collect(), scopes: objects.iter().map(|object| object.scope.clone()).collect(), bounds: bounds.into(),
+		element_ids: objects.iter().map(|object| object.id.into()).collect(), part_ids: part_ids.into_iter().map(String::from).collect(), scopes: objects.iter().map(|object| object.scope.clone()).collect(), bounds: bounds.into(),
 		message: message.into(), suggestions: suggestions.iter().map(|suggestion| (*suggestion).into()).collect() });
 	Ok(())
 }
@@ -349,6 +391,20 @@ fn part_aspect_findings(report: &mut PreflightReport, document: &Document, page:
 	Ok(())
 }
 
+fn source_label(source: &crate::native_projection::EffectSource) -> String {
+	if source.scope == "slide" { "on the slide itself".into() } else { format!("on {} '{}' ({})", source.scope, source.name, source.id) }
+}
+
+fn transition_message(transition: &crate::template_effects::Transition, source: &crate::native_projection::EffectSource) -> String {
+	let place = if source.scope == "slide" { "set on the slide itself".to_owned() } else { format!("inherited from {} '{}' ({})", source.scope, source.name, source.id) };
+	let mut message = if transition.kind == "none" { format!("This slide's slide-show transition has no visual effect ({place})") }
+		else { format!("This slide shows a {}{} transition in a slide show ({place})", transition.kind, if transition.extended { " (PowerPoint 2010+ effect)" } else { "" }) };
+	if let Some(milliseconds) = transition.advance_after_ms { message.push_str(&format!("; it advances by itself after {milliseconds} ms")); }
+	if transition.sound == Some("stop") { message.push_str("; it stops the sound that is playing"); } else if transition.sound.is_some() { message.push_str("; it starts a sound"); }
+	message.push_str("; AISlide does not play or edit transitions and the preview omits them");
+	message
+}
+
 pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -> Result<PreflightReport> {
 	crate::document::verify(document)?;
 	let deck = &document.deck;
@@ -359,17 +415,40 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 	if !options.min_font_size.is_finite() || !(8.0..=48.0).contains(&options.min_font_size) {
 		return Err(Error::Invalid("visual preflight minimum font size must be in 8..=48 pixels".into()));
 	}
+	let composition: Vec<crate::composition_mix::SlideParts> = deck.slides.iter().map(|slide| crate::composition_mix::SlideParts {
+		id: slide.id.clone(), presets: document.parts.iter().filter(|part| part.slide_id == slide.id).map(|part| part.spec.preset.clone()).collect(),
+	}).collect();
 	let mut report = PreflightReport { revision: document.revision, hash: document.hash.clone(), page_indices: selected.clone(), findings: Vec::new(),
+		deck_composition: crate::composition_mix::mix(&composition),
 		checks: ["renderer_warnings", "off_slide", "text_overlap", "connector_label_interference", "connector_badge_overlap", "container_clearance", "small_text", "density"].map(String::from).to_vec(),
-		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed shaped-glyph metric bounds with alignment, padding and clipping, not exact ink intersection; warped text conservatively uses its content frame", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices are summarized per page as info; specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
-		office_visual_parity: false, semantic_truth_verified: false, include_inherited: options.include_inherited };
+		limitations: ["Static renderer, not Office visual parity or semantic truth verification", "Text overlap uses transformed shaped-glyph metric bounds with alignment, padding and clipping, not exact ink intersection; warped text conservatively uses its content frame", "Connector checks exclude attached endpoint nodes and verified managed graph badge/own-edge pairs; other compact opaque numbered ellipses remain informational, not an automatic visual approval", "Generic chart parity notices and SHAPE_APPROXIMATION preview notices are summarized per page as info (include_preview_notices:false omits them); specific chart presentation limits remain individual warnings", "Container clearance infers the smallest earlier rounded rectangle in the same drawing scope; frame corners and an 8px text inset are heuristics, not clipping or ownership proof", "Density and font floors are heuristics; charts, orphan lines, contrast and full accessibility require separate review", "Unsupported renderer content fails closed; no partial all-clear report"].map(String::from).to_vec(),
+		office_visual_parity: false, semantic_truth_verified: false, include_inherited: options.include_inherited, page_parts: BTreeSet::new() };
 	report.limitations.push("Template-owned SMALL_TEXT and FONT_FALLBACK are informational and aggregated by owner and element before the finding limit; affected_page_indices and affected_slide_ids retain coverage. include_inherited:false omits inherited-only findings, not interactions with slide objects or unprojected native content.".into());
+	report.limitations.push("THEME_FONT_UNSET reports text that depends on a theme font slot the template leaves empty or omits; it does not predict which font PowerPoint chooses, and a script-specific font in the font scheme (a:font script) counts as covering text of that script. It stays a warning for template-owned text; include_inherited:false omits the template's finding.".into());
 	report.checks.extend(["note_reference_visibility".into(), "fixed_reference_collisions".into(), "numbered_sequence_spacing".into(), "part_aspect".into(), "part_title_band".into(), "interactive_lab_frame".into()]);
 	report.limitations.push("Over-budget shadow, glow, soft-edge and reflection are omitted only from the diagnostic view at scale 1, with an EFFECT_APPROXIMATION finding; native content is unchanged and other renderer failures still reject.".into());
 	report.limitations.push("Reference URL detection uses normalized HTTP(S) tokens terminated by CJK prose; percent-encode CJK URL paths. Warnings do not echo private note URLs. Fixed-reference collisions require explicit repair, not automatic reflow.".into());
 	let projection_warnings = crate::native_projection::warnings(document, &selected)?;
+	let page_effects = crate::native_projection::effects(document, &selected)?;
+	report.checks.push("slide_transitions".into());
+	report.limitations.push("SLIDE_TRANSITION and SLIDE_ANIMATIONS read p:transition and p:timing from the package the document was opened from: a slide's own transition, else its layout's, else its master's. AISlide neither plays nor edits them and the preview omits them; the effect PowerPoint shows depends on its version. A transition without a visual effect is reported only when it advances the slide by itself or has a sound action (starts or stops a sound). include_inherited:false omits the ones a layout or master sets. Documents without an imported package report nothing.".into());
 	for page in selected {
 		let slide = &deck.slides[page];
+		if let Some(effects) = page_effects.iter().find(|effects| effects.page_index == page) {
+			if let Some((transition, source)) = &effects.transition {
+				if (source.scope == "slide" || options.include_inherited) && (transition.kind != "none" || transition.advance_after_ms.is_some() || transition.sound.is_some()) {
+					push_finding(&mut report, page, &slide.id, &[], "SLIDE_TRANSITION", "info", "document", &transition_message(transition, source),
+						&["AISlide cannot edit transitions; set or remove them in PowerPoint", "Strip a template's transitions while importing it with import_template options.strip_transitions"])?;
+				}
+			}
+			let animated: Vec<&crate::native_projection::EffectSource> = effects.animations.iter().filter(|source| source.scope == "slide" || options.include_inherited).collect();
+			if !animated.is_empty() {
+				let places = animated.iter().map(|source| source_label(source)).collect::<Vec<_>>().join("; ");
+				push_finding(&mut report, page, &slide.id, &[], "SLIDE_ANIMATIONS", "info", "document",
+					&format!("Animations (p:timing) are defined {places}; AISlide does not play, preview or edit them, and PowerPoint plays them in a slide show"),
+					&["AISlide cannot edit animations; set or remove them in PowerPoint", "Strip a template's animations while importing it with import_template options.strip_animations"])?;
+			}
+		}
 		let notes_only = crate::references::notes_only_count(document, page)?;
 		if notes_only > 0 {
 			push_finding(&mut report, page, &slide.id, &[], "SOURCE_URL_NOT_VISIBLE", "warning", "heuristic",
@@ -377,10 +456,17 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				&["Approve distribution-safe URLs before adding visible citations or a linked reference appendix", "Keep a readable URL as well as a hyperlink; never automatically publish private notes or file paths"])?;
 		}
 		let known_badges = crate::graphs::managed_badge_pairs(document, &slide.id);
+		let managed_frames = crate::graphs::managed_group_frames(document, &slide.id);
+		let node_text = crate::graphs::managed_node_text(document, &slide.id);
+		report.page_parts = document.parts.iter().filter(|part| part.slide_id == slide.id).map(|part| part.element_id.clone()).collect();
 		let mut objects = page_objects(deck, page)?;
 		// Text a managed part draws at sizes its preset fixes (tags, captions, badges) cannot be raised from the spec, so it is information;
 		// a body_size the author lowered below the floor stays a warning (see parts::fixed_typography).
 		let fixed_part = |object: &Object<'_>| object.owner.and_then(|owner| document.parts.iter().find(|part| part.slide_id == slide.id && part.element_id == owner)).filter(|part| !part.stale && crate::parts::fixed_typography(&part.spec, options.min_font_size));
+		// The source line and page number of a guided slide keep the size guided creation fixed for them; the guided input cannot change it.
+		let guided_annotation = |object: &Object<'_>| if object.scope == "slide" && object.owner.is_none() {
+			slide.elements.iter().find(|element| element.bounds().0 == object.id).and_then(|element| crate::guided::fixed_annotation(deck, slide, element))
+		} else { None };
 		let rendered = crate::render::render_with_effect_policy(deck, page, false, 1.0, crate::render::EffectPolicy::Preflight)?;
 		let text_bounds: std::collections::BTreeMap<_, _> = rendered.text.iter()
 			.map(|span| ((span.scope.as_str(), span.element_id.as_str()), span.occupied_bounds())).collect();
@@ -390,6 +476,8 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			}
 		}
 		let mut chart_notices: Vec<&Object<'_>> = Vec::new();
+		let mut shape_notices: Vec<(&Object<'_>, String)> = Vec::new();
+		let mut font_notices: Vec<(&Object<'_>, String)> = Vec::new();
 		for warning in rendered.warnings.into_iter().chain(projection_warnings.iter().filter(|warning| warning.page_index == page).cloned()) {
 			let object = if warning.code == "NATIVE_OBJECT_NOT_PREVIEWED" { None } else {
 				objects.iter().rev().find(|object| warning.scope.as_deref().is_none_or(|scope| scope == object.scope)
@@ -400,6 +488,18 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			if generic_chart_notice {
 				if let Some(object) = object {
 					if !chart_notices.iter().any(|previous| std::ptr::eq(*previous, object)) { chart_notices.push(object); }
+					continue;
+				}
+			}
+			if warning.code == crate::render::SHAPE_APPROXIMATION {
+				if let Some(object) = object {
+					if !shape_notices.iter().any(|(previous, _)| std::ptr::eq(*previous, object)) { shape_notices.push((object, crate::render::approximated_preset(&warning.message).to_owned())); }
+					continue;
+				}
+			}
+			if warning.code == crate::render::THEME_FONT_UNSET {
+				if let Some(object) = object {
+					if !font_notices.iter().any(|(previous, _)| std::ptr::eq(*previous, object)) { font_notices.push((object, warning.message)); }
 					continue;
 				}
 			}
@@ -417,10 +517,30 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 				if let Some(finding) = report.findings.last_mut() { finding.element_ids.push(warning.element_id); }
 			}
 		}
-		if !chart_notices.is_empty() {
+		if !chart_notices.is_empty() && options.include_preview_notices {
 			push_finding(&mut report, page, &slide.id, &chart_notices, "CHART_PREVIEW", "info", "renderer",
 				&format!("{} chart preview(s) use bounded rendering; axis and legend placement are not Office visual parity (exported PPTX retains editable native OOXML charts; do not replace with hand-drawn shapes)", chart_notices.len()),
 				&["Keep native editable charts; do not replace them with hand-drawn shapes because of preview approximation", "Compare the listed charts in Office when visual parity matters", "Review specific chart warnings separately"])?;
+		}
+		// Slide-owned shapes and template-owned ones are separate findings, so that include_inherited:false omits only the template's.
+		for inherited in [false, true].into_iter().filter(|_| options.include_preview_notices) {
+			let group: Vec<&(&Object<'_>, String)> = shape_notices.iter().filter(|(object, _)| (object.scope != "slide") == inherited).collect();
+			if group.is_empty() { continue; }
+			let shapes: Vec<&Object<'_>> = group.iter().map(|(object, _)| *object).collect();
+			let presets: BTreeSet<&str> = group.iter().map(|(_, preset)| preset.as_str()).collect();
+			push_finding(&mut report, page, &slide.id, &shapes, crate::render::SHAPE_APPROXIMATION, "info", "renderer", &crate::render::shape_approximation_summary(shapes.len(), &presets),
+				&["Keep the preset shapes; the preview only approximates their geometry and the exported PPTX keeps the preset", "Compare the listed shapes in Office when exact geometry matters"])?;
+		}
+		// A theme font the template leaves empty is one finding per page and message. Template-owned text stays a warning (unlike FONT_FALLBACK),
+		// but is a separate finding, so that include_inherited:false omits only the template's.
+		for inherited in [false, true] {
+			let mut messages: Vec<&str> = Vec::new();
+			for (_, message) in font_notices.iter().filter(|(object, _)| (object.scope != "slide") == inherited) { if !messages.contains(&message.as_str()) { messages.push(message); } }
+			for message in messages {
+				let texts: Vec<&Object<'_>> = font_notices.iter().filter(|(object, text)| (object.scope != "slide") == inherited && text == message).map(|(object, _)| *object).collect();
+				push_finding(&mut report, page, &slide.id, &texts, crate::render::THEME_FONT_UNSET, "warning", "renderer", &format!("{message} ({} text element(s) on this page)", texts.len()),
+					&["Name the missing theme font with apply_theme or set_master_theme; an explicit value is always saved, even when it equals the font AISlide drew with", "Or give the text its own font_family", "Leave the slot empty only when PowerPoint's choice for the viewer's language is acceptable"])?;
+			}
 		}
 		container_findings(&mut report, page, &slide.id, &objects)?;
 		numbered_sequence_findings(&mut report, page, &slide.id, &objects)?;
@@ -450,7 +570,16 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 					Some(part) => push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "info", "heuristic",
 						&format!("Part {} ({}) draws this text at a fixed {:.0}px, below the requested {}px floor; its preset does not let you change the size", part.element_id, part.spec.preset, object.font_size.unwrap_or_default(), options.min_font_size),
 						&["Choose a preset whose typography meets the floor, or accept the preset's fixed sizes", "Split the content across slides"])?,
-					None => push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &format!("Effective font is below the requested {}px floor", options.min_font_size), &["Increase font size and enlarge or reflow the frame", "Split dense content into another slide"])?,
+					None => if let Some(role) = guided_annotation(object) {
+						push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "info", "heuristic",
+							&format!("Guided creation draws this {role} at a fixed {:.0}px, below the requested {}px floor; the guided input does not resize it and the body floor does not cover citations and page numbers", object.font_size.unwrap_or_default(), options.min_font_size),
+							&["Keep the fixed size, or raise this element's font size yourself; it is then checked against the floor like any other text", "Keep citations short instead of shrinking them"])?;
+					} else if let Some((message, suggestions)) = node_text.get(object.id).filter(|_| object.scope == "slide")
+						.and_then(|node| node_small_text(node, object.font_size.unwrap_or_default(), options.min_font_size)) {
+						push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &message, &suggestions.iter().map(String::as_str).collect::<Vec<_>>())?;
+					} else {
+						push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &format!("Effective font is below the requested {}px floor", options.min_font_size), &["Increase font size and enlarge or reflow the frame", "Split dense content into another slide"])?;
+					},
 				}
 			}
 			if !object.text { continue; }
@@ -462,8 +591,16 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 			}
 			for (connector_index, connector) in objects.iter().enumerate().filter(|(_, candidate)| !candidate.route.is_empty()) {
 				if connector.scope == object.scope && connector.connections.contains(&object.id) { continue; }
-				let inverse = object.transform.inverse();
-				if connector.route.windows(2).any(|segment| crosses_frame(inverse * segment[0], inverse * segment[1], object.text_frame)) {
+				// A managed group frame is a drawn region whose heading is its only text, and a diagram draws its connectors above it. Every cross-lane
+				// connector crosses the header band, so only a connector over the heading's own text counts.
+				let crosses = if object.scope == "slide" && managed_frames.contains(object.id) {
+					let heading = object.text_bounds.inflate(4.0, 4.0);
+					object.text_bounds.area() > 0.0 && connector.route.windows(2).any(|segment| crosses_frame(segment[0], segment[1], heading))
+				} else {
+					let inverse = object.transform.inverse();
+					connector.route.windows(2).any(|segment| crosses_frame(inverse * segment[0], inverse * segment[1], object.text_frame))
+				};
+				if crosses {
 					if object.numbered_badge && index > connector_index && object.scope == connector.scope && route_crosses_badge_center(object, connector) {
 						if object.scope == "slide" && known_badges.contains(&(object.id.into(), connector.id.into())) { continue; }
 						push_finding(&mut report, page, &slide.id, &[object, connector], "CONNECTOR_BADGE_OVERLAP", "info", "heuristic", "A compact opaque numbered badge covers a connector near its center; this may be intentional", &["Keep the connector behind the badge", "Confirm that the number and nearby labels remain readable in the preview"])?;

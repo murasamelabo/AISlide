@@ -108,6 +108,19 @@ test('issue36 preflight schema exposes the inherited-only finding switch', async
   });
 });
 
+test('issue83 preflight schema exposes the preview notice switch and rejects other keys', async () => {
+  await feedbackMcpFixture(async ({ registrations }) => {
+    const { config } = registrations.get('preflight_presentation');
+    const input = { deck_id: '00000000-0000-4000-8000-000000000083', options: { page_indices: [0], include_preview_notices: false } };
+    assert.deepEqual(config.inputSchema.parse(input), input);
+    assert.throws(() => config.inputSchema.parse({ ...input, options: { include_preview_notice: false } }));
+    assert.throws(() => config.inputSchema.parse({ ...input, options: { include_preview_notices: 'no' } }));
+    const jsonSchema = z.toJSONSchema(config.inputSchema, { io: 'input' });
+    assert.match(jsonSchema.properties.options.properties.include_preview_notices.description, /Default true.*SHAPE_APPROXIMATION/);
+    assert.match(config.description, /SHAPE_APPROXIMATION.*element_ids.*include_preview_notices:false/);
+  });
+});
+
 test('issue51 full tool-profile defaults detail to summary, omits filtered part_catalog schema and explains page_indices/detail on 9-page full requests', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-issue51-'));
   try {
@@ -1031,6 +1044,7 @@ test('issue18 MCP exposes bounded template inspection and selection', async () =
     }
     fixture.onRequest = async request => {
       if (request.op === 'inspect_template') return { source_sha256: 'c'.repeat(64), layouts: [{ id: selection.layout_ids[0], name: 'Blank', master_id: 'master' }], masters: [{ id: 'master', name: 'Master' }] };
+      if (request.op === 'design_tokens') return { theme_fonts: [] };
       assert.equal(request.op, 'import_template');
       return { version: 1, id: request.id, revision: 0, hash: 'a'.repeat(64), sources: [], bindings: [], parts: [], deck: { version: 1, title: 'Selected template', width: 1280, height: 720, slides: [{ id: 'slide-1', title: '', background: 'FFFFFF', elements: [], notes: '' }] } };
     };
@@ -1038,13 +1052,15 @@ test('issue18 MCP exposes bounded template inspection and selection', async () =
     assert.equal(inspected.source_sha256, selection.source_sha256);
     assert.equal(calls.at(-1).request.capacity_profile, 'standard');
     await call('import_template', { kind: 'potx', base64: 'UEs=', options: selection });
-    assert.deepEqual(calls.at(-1).request.options, selection);
+    assert.deepEqual(calls.filter(entry => entry.request.op === 'import_template').at(-1).request.options, selection);
   });
 });
 
 test('issue27 MCP returns template layout mappings without full-document payloads', async () => {
   await feedbackMcpFixture(async ({ call, calls, fixture }) => {
     fixture.onRequest = async request => {
+      if (request.op === 'design_tokens') return { theme_fonts: [] };
+      if (request.op === 'inspect_template') return {};
       assert.equal(request.op, 'import_template');
       return { version: 1, id: request.id, revision: 0, hash: 'a'.repeat(64), sources: [], bindings: [], parts: [],
         deck: { version: 1, title: 'Synthetic template', width: 1280, height: 720,
@@ -1061,6 +1077,56 @@ test('issue27 MCP returns template layout mappings without full-document payload
     assert.deepEqual(summary.masters, imported.masters);
     assert.equal(calls.length, count);
     assert.doesNotMatch(JSON.stringify({ imported, summary }), /PRIVATE_|base64/);
+  });
+});
+
+test('issue78 and issue79 import_template reports theme fonts and template effects without failing when the report is unavailable', async () => {
+  await feedbackMcpFixture(async ({ call, calls, registrations, fixture }) => {
+    const created = id => ({ version: 1, id, revision: 0, hash: 'a'.repeat(64), sources: [], bindings: [], parts: [], deck: { version: 1, title: 'Template', width: 1280, height: 720, slides: [{ id: 'slide-1', title: '', background: 'FFFFFF', elements: [], notes: '' }] } });
+    const fonts = [{ theme: 'Brand', slots: { minor: { east_asian: { state: 'empty', font: 'Yu Gothic', installed: true } } } }];
+    const effects = { masters: 1, layouts: 2, removed: { transitions: 1, animations: 0 } };
+    let reportable = true;
+    fixture.onRequest = async request => {
+      if (request.op === 'import_template') return created(request.id);
+      if (request.op === 'design_tokens') return { theme_fonts: fonts };
+      assert.equal(request.op, 'inspect_template');
+      if (!reportable) throw new Error('inspection failed');
+      return { import: effects };
+    };
+    const options = { strip_transitions: true, strip_animations: false };
+    const imported = await call('import_template', { kind: 'potx', base64: 'UEs=', options });
+    assert.deepEqual(imported.theme_fonts, fonts);
+    assert.deepEqual(imported.template_effects, effects);
+    // The same selection and stripping run again on the original bytes, so the report matches what was imported.
+    const inspection = calls.filter(entry => entry.request.op === 'inspect_template').at(-1).request;
+    assert.deepEqual({ kind: inspection.kind, options: inspection.options }, { kind: 'potx', options });
+    reportable = false;
+    const unavailable = await call('import_template', { kind: 'potx', base64: 'UEs=' });
+    assert.match(unavailable.template_effects.unavailable, /inspection failed/);
+    assert.deepEqual(unavailable.theme_fonts, fonts);
+    // A THMX theme has no slide master transitions to report.
+    const theme = await call('import_template', { kind: 'thmx', base64: 'UEs=' });
+    assert.equal('template_effects' in theme, false);
+    const schema = registrations.get('import_template').config.inputSchema;
+    assert.equal(schema.safeParse({ kind: 'potx', base64: 'UEs=', options: { strip_transitions: 'yes' } }).success, false);
+    assert.equal(registrations.get('inspect_template').config.inputSchema.safeParse({ kind: 'potx', base64: 'UEs=', options: { strip_animations: true } }).success, true);
+  });
+});
+
+test('issue78 MCP theme schema accepts the unset markers get_document returns and nothing else', async () => {
+  await feedbackMcpFixture(async ({ registrations }) => {
+    for (const name of ['apply_theme', 'set_master_theme']) {
+      const schema = registrations.get(name).config.inputSchema;
+      const base = { deck_id: '11111111-1111-4111-8111-111111111111', expected_revision: 0, ...(name === 'set_master_theme' ? { master_id: 'master-1' } : {}) };
+      const theme = unset => ({ name: 'Template', colors: {}, fonts: { major: 'A', minor: 'B', east_asian: 'Yu Gothic', complex_script: 'Arial', ...(unset ? { unset } : {}) } });
+      assert.equal(schema.safeParse({ ...base, theme: theme() }).success, true, name);
+      // An edit marks a slot it named as written, and get_document returns that marker.
+      for (const state of ['empty', 'absent', 'written']) assert.equal(schema.safeParse({ ...base, theme: theme({ minor: { east_asian: state } }) }).success, true, `${name} ${state}`);
+      assert.equal(schema.safeParse({ ...base, theme: theme({ minor: { script_fonts: { Jpan: 'Yu Gothic' } } }) }).success, true, name);
+      assert.equal(schema.safeParse({ ...base, theme: theme({ minor: { east_asian: 'specified' } }) }).success, false, name);
+      assert.equal(schema.safeParse({ ...base, theme: theme({ middle: {} }) }).success, false, name);
+      assert.equal(schema.safeParse({ ...base, theme: theme({ minor: { east_asian: 'empty', other: 'empty' } }) }).success, false, name);
+    }
   });
 });
 
@@ -2503,6 +2569,8 @@ test('graph feedback MCP schemas and committed diagnostics stay bounded and sing
     for (const value of [null, 'true', 1]) assert.equal(schema.safeParse({ id: 'graph', spec, include_diagnostics: value }).success, false);
     for (const label_fit of ['wrap', 'shrink']) assert.ok(schema.safeParse({ id: 'graph', spec: { ...spec, nodes: [{ ...node, label_fit }] } }).success);
     for (const label_fit of [null, 'truncate', true]) assert.equal(schema.safeParse({ id: 'graph', spec: { ...spec, nodes: [{ ...node, label_fit }] } }).success, false);
+    for (const detail_fit of ['wrap', 'shrink']) assert.ok(schema.safeParse({ id: 'graph', spec: { ...spec, nodes: [{ ...node, detail: 'Detail', detail_fit }] } }).success);
+    for (const detail_fit of [null, 'truncate', true]) assert.equal(schema.safeParse({ id: 'graph', spec: { ...spec, nodes: [{ ...node, detail: 'Detail', detail_fit }] } }).success, false);
     for (const header_color of ['123ABC', '@dk1', null]) assert.ok(schema.safeParse({ id: 'graph', spec: { ...spec, groups: [{ ...group, header_color }] } }).success);
     for (const header_color of ['red', '@bad', 123]) assert.equal(schema.safeParse({ id: 'graph', spec: { ...spec, groups: [{ ...group, header_color }] } }).success, false);
     assert.ok(registrations.get('transform_graph').config.inputSchema.safeParse({ spec, operations: [{ op: 'put_node', node }, { op: 'put_group', group }] }).success);
@@ -4742,4 +4810,67 @@ test('MCP validate_deck omits the validated deck unless detail is full', async (
     await client.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('issue78, issue79 and issue85 MCP reports theme fonts, template effects and deck composition through the real core', { timeout: 120000 }, async () => {
+  const { AislideClient } = await import('../packages/client/index.mjs');
+  const { requestCore } = await import('./core-client.mjs');
+  const sdk = new AislideClient(requestCore);
+  const source = await sdk.createPresentation('template-report-mcp', 'Synthetic source');
+  const exported = await source.exportTemplate('potx');
+  const client = new Client({ name: 'template-report-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const options = { strip_transitions: true, strip_animations: true };
+    const inspected = await call('inspect_template', { kind: 'potx', base64: exported.base64, options });
+    const [fonts] = inspected.theme_fonts;
+    assert.equal(fonts.master_id, inspected.masters[0].id);
+    for (const group of ['major', 'minor']) for (const script of ['latin', 'east_asian', 'complex_script']) assert.equal(fonts[group][script].state, 'specified', `${group}.${script}`);
+    assert.deepEqual(fonts.notes, []);
+    assert.deepEqual(inspected.import.removed, { transitions: 0, animations: 0 });
+    assert.equal(inspected.import.masters.length, inspected.masters.length);
+    assert.equal('import' in await call('inspect_template', { kind: 'potx', base64: exported.base64 }), false, 'the dry run is reported only when options ask for it');
+
+    const imported = await call('import_template', { kind: 'potx', base64: exported.base64, options });
+    assert.equal(imported.theme_fonts[0].scope, 'default');
+    assert.equal(imported.theme_fonts[0].minor.latin.state, 'specified');
+    assert.deepEqual(imported.template_effects.removed, { transitions: 0, animations: 0 });
+    assert.deepEqual((await call('design_tokens', { deck_id: imported.deck_id })).theme_fonts, imported.theme_fonts);
+
+    const preflight = await call('preflight_presentation', { deck_id: imported.deck_id });
+    assert.ok(preflight.checks.map(check => check.id ?? check).includes('slide_transitions'));
+    assert.equal(preflight.deck_composition.slides, 1);
+    assert.equal(preflight.deck_composition.without_parts, 1);
+    assert.equal(preflight.deck_composition.relationship_diagrams, 0);
+  } finally { await client.close(); }
+});
+
+test('issue85 MCP part_catalog finds the relationship diagram by architecture and concept terms while the listing stays paged', { timeout: 120000 }, async () => {
+  const client = new Client({ name: 'relationship-catalog-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const catalog = async (args = {}) => {
+    const result = await client.callTool({ name: 'part_catalog', arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    for (const query of ['architecture', 'concept map', '構成図', 'handoff']) {
+      assert.equal((await catalog({ query })).presets[0]?.id, 'diagram/custom', `a search for "${query}" lists the relationship diagram first`);
+    }
+    const direct = await catalog({ preset_id: 'diagram/custom' });
+    assert.equal(direct.total, 1);
+    assert.equal(direct.presets[0].example.preset, 'diagram/custom');
+    assert.match(direct.presets[0].avoid_when, /icons/);
+    const listing = await catalog();
+    assert.equal(listing.total, 143);
+    assert.equal(listing.presets.some(preset => preset.id === 'diagram/custom'), false, 'the paged listing stays the 143 presets of the catalog');
+    assert.equal(listing.next_offset, 12);
+  } finally { await client.close(); }
 });
