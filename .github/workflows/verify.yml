@@ -34,6 +34,10 @@ jobs:
       AISLIDE_AI_API_KEY: ''
       AISLIDE_AI_ALLOW_REMOTE: '0'
       CARGO_TERM_COLOR: always
+      # Workspace crates are rebuilt on every run, so incremental state is never reused, and tests need line tables rather than full debug information.
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -44,6 +48,12 @@ jobs:
         run: npm ci
       - name: Configure Rust
         run: rustup default stable
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            . -> target
+            apps/studio/src-tauri -> target
       - name: Check source encoding
         run: npm run encoding:check
       - name: Test Windows setup configuration
