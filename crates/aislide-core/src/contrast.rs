@@ -245,7 +245,7 @@ fn outline(preset: &str, style: &VisualStyle, width: f64, height: f64) -> Option
 // few pixels from a corner or an arrowhead can be reported although the paint does not reach it. A shape joins round, so its squares reach
 // half a line width, the radius of the join. A connector joins with a miter: the renderer keeps SVG's miter limit of 4, which caps the
 // miter's length at four line widths, so its tip lies at most two line widths (four half-widths) from the vertex and its squares reach
-// that far. The ends of an open route are flat.
+// that far. The ends of an open route are flat. `the_quads_of_a_line_hold_every_pixel_the_renderer_inks` keeps all of this in step with the renderer.
 fn quads(stroke: &Stroke, route: &[[f64; 2]], transform: Affine) -> Vec<[Point; 4]> {
     let half_width = stroke.width / 2.0;
     let closed = route.len() > 2 && route.first() == route.last();
@@ -419,6 +419,45 @@ fn is_convex(points: &[Point]) -> bool {
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    // The quads follow the renderer's stroke by hand: SVG's miter limit, which the renderer leaves at its default of 4, and the size of an
+    // arrowhead. Keep them in step: every pixel the renderer inks must lie in a quad, at corners sharp enough for the renderer to cut the
+    // miter off and at corners that are not, and in a group that scales unevenly and turns.
+    #[test]
+    fn the_quads_of_a_line_hold_every_pixel_the_renderer_inks() {
+        let connector = |id: &str, bounds: [f64; 4], width: f64, route: &[[f64; 2]]| json!({"type":"connector","id":id,"x":bounds[0],"y":bounds[1],"width":bounds[2],"height":bounds[3],
+            "color":"000000","stroke_width":width,"arrow":true,"routing":{"points":route,"start_arrow":true,"custom":true}});
+        // Two arms of 90 px meet at the apex (100, 20) of a box 200 px square, at the angle given, and each ends in an arrowhead.
+        let mut elements: Vec<Value> = [10.0_f64, 25.0, 30.0, 60.0, 90.0, 150.0].iter().enumerate().map(|(index, angle)| {
+            let (sin, cos) = angle.to_radians().sin_cos();
+            let route: Vec<[f64; 2]> = [[10.0, 20.0], [100.0, 20.0], [100.0 - 90.0 * cos, 20.0 + 90.0 * sin]].iter().map(|[x, y]| [x / 200.0, y / 200.0]).collect();
+            connector(&format!("angle-{angle}"), [40.0 + 420.0 * (index % 3) as f64, 30.0 + 240.0 * (index / 3) as f64, 200.0, 200.0], 10.0, &route)
+        }).collect();
+        // The group draws what it holds 2.5 times as wide and 1.5 times as high as authored, and turns it 20 degrees.
+        elements.push(json!({"type":"group","id":"uneven","x":60,"y":520,"width":250,"height":150,"view_width":100,"view_height":100,"visual":{"rotation":20},
+            "children":[connector("inner", [10.0, 10.0, 80.0, 80.0], 4.0, &[[0.0, 0.1], [1.0, 0.5], [0.0, 0.9]])]}));
+        let deck: Deck = serde_json::from_value(json!({"version":1,"title":"Synthetic","width":1280,"height":720,
+            "slides":[{"id":"s1","title":"Synthetic","background":"FFFFFF","notes":"","elements":elements}]})).unwrap();
+        crate::model::validate_deck(&deck).unwrap();
+        let mut painters = Vec::new();
+        walk(&deck.slides[0].elements, &Context { transform: Affine::IDENTITY, faded: false, hidden: false }, true, &mut painters, &mut Vec::new());
+        let quads: Vec<&[Point; 4]> = painters.iter().filter_map(|painter| match &painter.paint { Paint::Line(quads) => Some(quads), _ => None }).flatten().collect();
+        let svg = crate::render::render_validated(&deck, 0, false).unwrap().svg;
+        let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(deck.width, deck.height).unwrap();
+        pixmap.fill(resvg::tiny_skia::Color::WHITE);
+        resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+        // The lines are black on white, so a pixel darker than 192 has a quarter or more of its area under a line, and a quad that holds the line meets it.
+        let ink: Vec<(u32, u32)> = (0..deck.height).flat_map(|y| (0..deck.width).map(move |x| (x, y))).filter(|&(x, y)| pixmap.pixel(x, y).is_some_and(|pixel| pixel.red() < 192)).collect();
+        assert!(ink.len() > 5_000, "only {} pixels are inked", ink.len());
+        // The corner of 30 degrees at (980, 50) is mitered, its tip near (998.6, 45); a bevel would leave (994, 46) empty.
+        assert!(ink.contains(&(994, 46)), "the renderer no longer miters a corner of 30 degrees");
+        let outside: Vec<&(u32, u32)> = ink.iter().filter(|&&(x, y)| {
+            let pixel = Rect::new(f64::from(x), f64::from(y), f64::from(x) + 1.0, f64::from(y) + 1.0);
+            !quads.iter().any(|quad| meets(quad, pixel))
+        }).collect();
+        assert!(outside.is_empty(), "{} inked pixels lie outside every quad, the first at {:?}", outside.len(), outside.first());
+    }
 
     // The text block is worked out from the measured size and the alignment; the renderer alone decides where glyphs land. Keep the
     // two in step: every glyph the renderer draws must lie inside the block, give or take the em-box proxy `occupied_bounds` uses.
