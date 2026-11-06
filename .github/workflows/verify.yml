@@ -28,7 +28,8 @@ jobs:
         run: node --test tools/copilot-workflows.test.mjs
   windows:
     runs-on: windows-2025
-    timeout-minutes: 60
+    # The job runs 40-60 minutes and grows with the test suite; a 60-minute limit has already cancelled one run.
+    timeout-minutes: 90
     env:
       AISLIDE_AI_API_KEY: ''
       AISLIDE_AI_ALLOW_REMOTE: '0'
