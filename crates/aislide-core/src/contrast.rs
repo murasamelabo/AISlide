@@ -422,7 +422,7 @@ mod tests {
 
     // The quads follow the renderer's stroke by hand: SVG's miter limit, which the renderer leaves at its default of 4, and the size of an
     // arrowhead. Keep them in step: every pixel the renderer inks must lie in a quad, at corners sharp enough for the renderer to cut the
-    // miter off and at corners that are not, and in a group that scales unevenly and turns.
+    // miter off and at corners that are not, in a group that scales unevenly and turns, and on the outlines of shapes, which join round.
     #[test]
     fn the_quads_of_a_line_hold_every_pixel_the_renderer_inks() {
         let connector = |id: &str, bounds: [f64; 4], width: f64, route: &[[f64; 2]]| json!({"type":"connector","id":id,"x":bounds[0],"y":bounds[1],"width":bounds[2],"height":bounds[3],
@@ -436,6 +436,11 @@ mod tests {
         // The group draws what it holds 2.5 times as wide and 1.5 times as high as authored, and turns it 20 degrees.
         elements.push(json!({"type":"group","id":"uneven","x":60,"y":520,"width":250,"height":150,"view_width":100,"view_height":100,"visual":{"rotation":20},
             "children":[connector("inner", [10.0, 10.0, 80.0, 80.0], 4.0, &[[0.0, 0.1], [1.0, 0.5], [0.0, 0.9]])]}));
+        // Outlines with no fill join round. The apex (460, 500) of the triangle is sharp enough that a miter would reach well past the join.
+        elements.push(json!({"type":"polygon","id":"triangle","x":400,"y":500,"width":120,"height":190,"points":[[0.5,0.0],[1.0,1.0],[0.0,1.0]],"fill":"none","stroke":"000000","stroke_width":20}));
+        for (id, preset, bounds, width) in [("box", "rect", [700.0, 520.0, 200.0, 160.0], 12.0), ("oval", "ellipse", [960.0, 500.0, 280.0, 200.0], 3.0)] {
+            elements.push(json!({"type":"shape","id":id,"x":bounds[0],"y":bounds[1],"width":bounds[2],"height":bounds[3],"preset":preset,"fill":"none","stroke":"000000","stroke_width":width,"text":"","font_size":18,"color":"000000","bold":false}));
+        }
         let deck: Deck = serde_json::from_value(json!({"version":1,"title":"Synthetic","width":1280,"height":720,
             "slides":[{"id":"s1","title":"Synthetic","background":"FFFFFF","notes":"","elements":elements}]})).unwrap();
         crate::model::validate_deck(&deck).unwrap();
@@ -452,6 +457,8 @@ mod tests {
         assert!(ink.len() > 5_000, "only {} pixels are inked", ink.len());
         // The corner of 30 degrees at (980, 50) is mitered, its tip near (998.6, 45); a bevel would leave (994, 46) empty.
         assert!(ink.contains(&(994, 46)), "the renderer no longer miters a corner of 30 degrees");
+        // The join at the apex of the triangle is round: it reaches 10 px above the apex, so (460, 492) is inked.
+        assert!(ink.contains(&(460, 492)), "the renderer no longer joins the outline of a shape round");
         let outside: Vec<&(u32, u32)> = ink.iter().filter(|&&(x, y)| {
             let pixel = Rect::new(f64::from(x), f64::from(y), f64::from(x) + 1.0, f64::from(y) + 1.0);
             !quads.iter().any(|quad| meets(quad, pixel))
