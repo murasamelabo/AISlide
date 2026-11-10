@@ -58,7 +58,7 @@ pub struct Evidence {
     /// characters. The line shows `[ID] label` when this is given and `[ID] reference` when it is not. `reference` stays whole in the
     /// notes (unless `ledger_notes` is `none`) and in the creation record.
     #[serde(default, skip_serializing_if="Option::is_none")]
-    #[schemars(length(min=1, max=60))] pub label: Option<String>,
+    #[schemars(length(min=1, max=60), regex(pattern = r"^[^\r\n]*$"))] pub label: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]

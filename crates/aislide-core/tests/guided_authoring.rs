@@ -2024,6 +2024,9 @@ fn guided_authoring_schema_exposes_only_the_locked_settings() {
     assert_eq!(settings["properties"]["headline_font_size"]["maximum"],64);
     assert_eq!(settings["properties"]["font_family"]["maxLength"],100);
     assert_eq!(definitions["GuidedSlide"]["properties"]["speaker_notes"]["maxLength"],4000);
+    // The one-line rule of an evidence label is in the schema as well as in the checks, for clients that read only the schema.
+    let label=&definitions["Evidence"]["properties"]["label"];
+    assert_eq!((label["minLength"].as_u64(),label["maxLength"].as_u64(),label["pattern"].as_str()),(Some(1),Some(60),Some(r"^[^\r\n]*$")),"{label}");
 }
 
 #[test]
