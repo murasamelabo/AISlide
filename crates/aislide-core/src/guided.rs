@@ -162,6 +162,8 @@ pub struct Review {
     /// What the creation does not treat as a problem, so that `ready` does not depend on it, but that the author may want to change: a source
     /// line shortened to the evidence IDs, text that a fixed size leaves below the body floor. Absent when there is none.
     #[serde(skip_serializing_if="Vec::is_empty")] pub warnings: Vec<Diagnostic>,
+    /// How many warnings beyond the listed maximum were counted, not listed. Absent when none were left out.
+    #[serde(skip_serializing_if="is_zero")] pub warnings_omitted: usize,
     pub review_required: Vec<String>,
     /// The deck's mix of part presets (slides and instances per preset, the longest runs of one preset, slides with a relationship diagram and
     /// slides without a part). Information for review, never a target; absent when the input has no slides.
@@ -828,8 +830,11 @@ fn build(input:&GuidedInput,id:&str,diagnostics:&mut Vec<Diagnostic>,warnings:&m
     Ok(Some(document))
 }
 
-/// Problems beyond this many are counted, not listed, so a response stays bounded and says that it was cut.
+/// Problems beyond this many are counted, not listed, so a response stays bounded and says that it was cut: the problems by a sentence among
+/// `issues`, the warnings by `Review::warnings_omitted`.
 const MAX_DIAGNOSTICS:usize=200;
+
+fn is_zero(count:&usize)->bool {*count==0}
 
 fn evaluate(input:&GuidedInput,id:&str)->(Option<Document>,Review) {
     let mut issues=checks(input);
@@ -844,13 +849,14 @@ fn evaluate(input:&GuidedInput,id:&str)->(Option<Document>,Review) {
         diagnostics=part_diagnostics(input);
     }
     let omitted=diagnostics.len().saturating_sub(MAX_DIAGNOSTICS);
+    let warnings_omitted=warnings.len().saturating_sub(MAX_DIAGNOSTICS);
     diagnostics.truncate(MAX_DIAGNOSTICS);
     warnings.truncate(MAX_DIAGNOSTICS);
     issues.extend(diagnostics.iter().map(Diagnostic::issue));
     if omitted>0 {issues.push(format!("{omitted} more problems in the slides are not listed; fix the listed ones and validate again"));}
     issues.extend(failure);
     let expression=(!input.slides.is_empty()).then(||crate::composition_mix::mix(&input.slides.iter().map(|slide|crate::composition_mix::SlideParts{id:slide.id.clone(),presets:slide.part.iter().map(|part|part.preset.clone()).collect()}).collect::<Vec<_>>(),0));
-    let review=Review{ready:document.is_some(),issues,diagnostics,warnings,review_required:vec!["Verify source authenticity, assumptions and headline entailment; declared references are not proof.".into(),"Review material quantities embedded in prose, arithmetic, qualitative scores, and logical completeness.".into(),"Inspect actual Office rendering, chart scales, figure conventions, shape-label collisions and orphan lines.".into(),"Native parts are primitives, not implementations of every consulting compound pattern.".into(),"Review the part mix in expression: where the content relates, bounds or hands off named things, a relationship diagram (diagram/custom, flow/swimlane or correlation/c4-container) shows it and a list with icons does not. This is information, not a quota, and an explicit no-diagram request wins.".into()],expression,semantic_truth_verified:false,office_visual_parity:false};
+    let review=Review{ready:document.is_some(),issues,diagnostics,warnings,warnings_omitted,review_required:vec!["Verify source authenticity, assumptions and headline entailment; declared references are not proof.".into(),"Review material quantities embedded in prose, arithmetic, qualitative scores, and logical completeness.".into(),"Inspect actual Office rendering, chart scales, figure conventions, shape-label collisions and orphan lines.".into(),"Native parts are primitives, not implementations of every consulting compound pattern.".into(),"Review the part mix in expression: where the content relates, bounds or hands off named things, a relationship diagram (diagram/custom, flow/swimlane or correlation/c4-container) shows it and a list with icons does not. This is information, not a quota, and an explicit no-diagram request wins.".into()],expression,semantic_truth_verified:false,office_visual_parity:false};
     (document,review)
 }
 

@@ -1635,6 +1635,42 @@ fn issue92_the_advice_for_a_heading_or_a_badge_names_the_frame_that_its_size_nee
     assert!(both.get("warnings").is_none(), "the size and the badge size that the advice names leave nothing below the floor: {both}");
 }
 
+#[test]
+fn issue92_warnings_beyond_the_listed_maximum_are_counted_not_dropped() {
+    // Three labels and three badges below the floor on each of 34 slides: 204 warnings, of which 200 are listed.
+    let base = issue92_input(issue92_graph([16, 16, 16]));
+    let slides: Vec<Value> = (1..=34).map(|index| {
+        let mut slide = base["slides"][0].clone();
+        let mut numbers = Vec::new();
+        for edge in 0..3 {
+            slide["part"]["data"]["graph"]["edges"][edge]["badge"] = json!({"number":1,"position":0.25,"size":24});
+            for (field, value) in [("number", json!(1)), ("position", json!(0.25)), ("size", json!(24))] {
+                numbers.push(json!({"path":format!("/data/graph/edges/{edge}/badge/{field}"),"value":value,"evidence_id":"E1"}));
+            }
+        }
+        slide["numbers"] = json!(numbers);
+        slide["id"] = json!(format!("g{index}"));
+        slide["headline"] = json!(format!("処理の流れ {index}"));
+        slide["support"][0]["clause"] = slide["headline"].clone();
+        slide
+    }).collect();
+    let mut input = base;
+    input["slides"] = json!(slides);
+    input["authoring"]["slide_limit"] = json!(64);
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"], true, "{}", checked["issues"]);
+    let warnings = checked["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 200);
+    assert_eq!(checked["warnings_omitted"], 4, "34 slides of 6 warnings leave 4 past the 200 that are listed");
+    assert_eq!(warnings[199]["slide_id"], "g34", "the warnings are listed in slide order, so the last slide is the one that is cut");
+    assert!(warnings.iter().all(|warning| warning["code"] == "SMALL_TEXT"));
+
+    // Nothing is left out of a review that lists every warning.
+    let few = execute_request(json!({"op":"validate_guided_presentation","input":issue92_input(issue92_graph([16, 17, 18]))})).unwrap();
+    assert_eq!(few["warnings"].as_array().unwrap().len(), 2);
+    assert!(few.get("warnings_omitted").is_none(), "{few}");
+}
+
 fn issue90_slide(id: &str, from_label: &str, to_label: &str, transition: &str) -> Value {
     let mut slide = issue74_slide(id, transition, json!({"version":1,"preset":"before-after/shift","title":"対応","data":{"kind":"shift_rows","from_label":from_label,"to_label":to_label,
         "rows":[{"from":"旧 1","to":"新 1","detail":"説明"},{"from":"旧 2","to":"新 2","detail":"説明"}]}}));
