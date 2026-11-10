@@ -10,6 +10,40 @@ fn graph() -> Value {
 }
 
 #[test]
+fn issue91_graph_bounds_errors_name_the_element_every_condition_and_the_values() {
+    let create = |spec: &Value| execute_request(json!({"op":"create_graph","id":"bounds","spec":spec}));
+    let error_of = |change: &dyn Fn(&mut Value)| { let mut spec = graph(); change(&mut spec); create(&spec).unwrap_err().to_string() };
+
+    let above = error_of(&|spec| spec["nodes"][0]["y"] = json!(24));
+    for expected in ["graph node 'client' does not fit the 1152x512 canvas", "y 24 is above the content top 88", "title band", "show_title to false"] { assert!(above.contains(expected), "{above}"); }
+    assert!(!above.contains("exceeds") && !above.contains("minimum"), "only the violated condition is named: {above}");
+
+    let below = error_of(&|spec| { spec["nodes"][1]["y"] = json!(450); spec["nodes"][1]["height"] = json!(112); });
+    assert!(below.contains("graph node 'api'") && below.contains("y + height = 562 exceeds the canvas height 512"), "{below}");
+
+    let wide = error_of(&|spec| { spec["nodes"][0]["x"] = json!(1000); spec["nodes"][0]["width"] = json!(200); });
+    assert!(wide.contains("x + width = 1200 exceeds the canvas width 1152"), "{wide}");
+
+    let small = error_of(&|spec| { spec["nodes"][0]["width"] = json!(40); spec["nodes"][0]["height"] = json!(20); });
+    assert!(small.contains("width 40 is below the minimum 64") && small.contains("height 20 is below the minimum 40"), "{small}");
+
+    let several = error_of(&|spec| { spec["nodes"][0]["y"] = json!(10); spec["nodes"][0]["height"] = json!(510); });
+    assert!(several.contains("y 10 is above the content top 88") && several.contains("y + height = 520 exceeds the canvas height 512"), "every violated condition is named at once: {several}");
+
+    let group = error_of(&|spec| spec["groups"] = json!([{"id":"zone","label":"Zone","x":0,"y":10,"width":300,"height":200}]));
+    assert!(group.contains("graph group 'zone'") && group.contains("y 10 is above the content top 88"), "{group}");
+
+    // Without the title band the content starts at 0, and the message says so.
+    let mut untitled = graph();
+    untitled["show_title"] = json!(false);
+    untitled["nodes"][0]["y"] = json!(0);
+    create(&untitled).unwrap();
+    untitled["nodes"][0]["y"] = json!(-4);
+    let error = create(&untitled).unwrap_err().to_string();
+    assert!(error.contains("y -4 is above the content top 0") && !error.contains("title band"), "{error}");
+}
+
+#[test]
 fn layout_graph_matches_existing_grid_and_preserves_node_edge_properties() {
     let icon = execute_request(json!({"op":"create_graph_icon","base64":STANDARD.encode(r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#008080"/></svg>"##),"mime_type":"image/svg+xml","alt":"Synthetic icon"})).unwrap();
     let mut input = json!({"version":1,"title":"Synthetic grid","subtitle":"Existing grid, not hierarchical","nodes":[

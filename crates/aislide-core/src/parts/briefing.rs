@@ -351,22 +351,23 @@ pub(super) fn validate(data: &PartData) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn create(id: &str, spec: &PartSpec, theme: &Theme) -> std::result::Result<Element, PartFailure> {
+pub(super) fn create(id: &str, spec: &PartSpec, theme: &Theme) -> std::result::Result<(Element, super::TextLocations), PartFailure> {
     use sha2::{Digest, Sha256};
     let (x, y, width, height, show_title) = spec.layout.as_ref().map_or((64.0, 144.0, 1152.0, 512.0, true), |layout| (layout.x, layout.y, layout.width, layout.height, layout.show_title));
     let prefix = format!("{id}-{}", &format!("{:x}", Sha256::digest(crate::canonical::bytes(spec)?))[..10]);
     let top = if show_title { 88.0 } else { 0.0 };
     if width < 320.0 || height - top < 120.0 { return Err(Error::Invalid(format!("{} requires a body region of at least 320x120px", spec.preset)).into()); }
-    // The names of the drawn texts (for messages) and where each is in the spec (JSON Pointers), by element ID.
-    type Named = (std::collections::BTreeMap<String, String>, std::collections::BTreeMap<String, String>);
-    let build = |shrink: f64| -> Result<(Element, Vec<String>, Named)> {
+    // The drawn texts that the preset names (for messages, and where each is in the spec as a JSON Pointer), by element ID.
+    let build = |shrink: f64| -> Result<(Element, Vec<String>, super::TextLocations)> {
         let mut drawing = Drawing::new(&prefix);
         if show_title {
+            drawing.name_next_at("title".into(), "/title".into());
             drawing.text(&spec.title, [0.0, 0.0, width, 40.0], 28.0, "@dk1", true, TextAlign::Left);
+            drawing.name_next_at("subtitle".into(), "/subtitle".into());
             drawing.text(&spec.subtitle, [0.0, 44.0, width, 26.0], 16.0, "@dk2", false, TextAlign::Left);
         }
         let flexible = render(&mut drawing, &spec.data, [0.0, top, width, height - top], theme, shrink)?;
-        let named = (drawing.places.clone(), drawing.pointers.clone());
+        let named = drawing.locations();
         Ok((Element::Group { visual: None, id: id.into(), x, y, width, height, view_width: width, view_height: height, children: drawing.elements }, flexible, named))
     };
     let (mut result, flexible, mut named) = build(0.0)?;
@@ -383,7 +384,7 @@ pub(super) fn create(id: &str, spec: &PartSpec, theme: &Theme) -> std::result::R
     if !overflows.is_empty() {
         return Err(PartFailure::Overflow(overflows.into_iter().map(|overflow| {
             let text = &overflow.text;
-            let place = named.0.get(&overflow.element_id).map_or(overflow.element_id.as_str(), String::as_str);
+            let place = named.get(&overflow.element_id).map_or(overflow.element_id.as_str(), |location| location.place.as_str());
             let measured_px = overflow.measured_height;
             let available_px = overflow.available_height.floor().max(0.0) as u32;
             let detail = if measured_px > available_px {
@@ -392,7 +393,7 @@ pub(super) fn create(id: &str, spec: &PartSpec, theme: &Theme) -> std::result::R
                 format!("{place}: measured {measured_px}px in {available_px}px frame")
             };
             PartOverflow {
-                pointer: named.1.get(&overflow.element_id).cloned(),
+                pointer: named.get(&overflow.element_id).map(|location| location.pointer.clone()),
                 message: if overflow.missing_glyphs { format!("{} text \"{text}\" uses glyphs missing from the selected font; choose an installed font that covers it", spec.preset) }
                     else { format!("{} text \"{text}\" does not fit at its fixed font size ({detail}); shorten the text, enlarge the part frame or split the slide", spec.preset) },
                 missing_glyphs: overflow.missing_glyphs,
@@ -401,7 +402,7 @@ pub(super) fn create(id: &str, spec: &PartSpec, theme: &Theme) -> std::result::R
             }
         }).collect()));
     }
-    Ok(result)
+    Ok((result, named))
 }
 
 pub(super) struct Drawn { pub(super) bottom: f64, pub(super) flexible: Vec<String> }
@@ -443,6 +444,28 @@ pub(super) fn mix(color: &str, theme: &Theme, white: f64) -> String {
 
 fn pill_width(text: &str, size: f64) -> f64 {
     text.chars().map(|character| if character.is_ascii() { size * 0.64 } else { size * 1.1 }).sum::<f64>() + 32.0
+}
+
+/// The padding inside the pill of a column heading: left, top, right, bottom.
+const HEADING_PADDING: [f64; 4] = [10.0, 1.0, 10.0, 1.0];
+
+/// The width and height of the pill that holds a heading at `size` in a column `column` px wide. Its width is the estimate of `pill_width`,
+/// at most the column. Its height is 28px, unless the caller will raise and space the text (`finish`, from guided creation): then the pill is
+/// as tall as the text takes once the part is fitted to its frame, measured as the layout check will measure it.
+fn heading_pill(heading: &str, size: f64, column: f64, finish: Option<super::TextHint>, theme: &Theme) -> Result<(f64, f64)> {
+    let wide = pill_width(heading, size).min(column);
+    let Some(finish) = finish else { return Ok((wide, 28.0)); };
+    // The paragraphs are spaced as the caller will space them (`author_text`): the line height of each, and the gap after all but the last.
+    let mut paragraphs = label(heading, size, "@dk1", true);
+    let last = paragraphs.len().saturating_sub(1);
+    for (index, paragraph) in paragraphs.iter_mut().enumerate() {
+        paragraph.line_spacing = Some(Spacing::Percent((finish.line_spacing * 100_000.0).round() as u32));
+        paragraph.space_after = Some(Spacing::Percent(if index == last { 0 } else { (finish.paragraph_spacing * 100_000.0).round() as u32 }));
+    }
+    let measured = format(TextAlign::Center, VerticalAlign::Middle, Some(HEADING_PADDING), paragraphs.clone());
+    let needed = crate::layout::text_height(&crate::rich_text::plain_text(&paragraphs), (wide - HEADING_PADDING[0] - HEADING_PADDING[2]) * finish.horizontal, size, true, &measured, theme)?;
+    // The frame is scaled by `vertical` afterwards, its padding with it, and the text is not: a pixel of slack keeps the check's rounding off it.
+    Ok((wide, ((needed + 1.0) / finish.vertical + HEADING_PADDING[1] + HEADING_PADDING[3]).max(28.0)))
 }
 
 #[derive(Default)]
@@ -652,11 +675,22 @@ fn shift_rows(drawing: &mut Drawing, headings: [&String; 2], rows: &[ShiftRow], 
     let neutral = mix("@dk2", theme, 0.88);
     let mut y = top;
     if !headings[0].is_empty() || !headings[1].is_empty() {
-        for (heading, x, column, fill, color) in [(headings[0], left, from_width, mix("@dk2", theme, 0.80), "@dk1".to_string()), (headings[1], to_x, to_width, mix(accent, theme, 0.84), accent.to_string())] {
+        // A heading is drawn in a pill that fits its text. A caller that will raise and space the part's text afterwards (guided creation) says
+        // so through `super::text_hint`, and the pill is then sized for the text as it ends up, growing by a line where the text wraps.
+        let finish = super::text_hint();
+        let size = finish.map_or(SMALL, |finish| SMALL.max(finish.floor));
+        let mut pill_height = 0.0_f64;
+        for (heading, x, column, fill, color, place, pointer) in [
+            (headings[0], left, from_width, mix("@dk2", theme, 0.80), "@dk1".to_string(), "from_label", "/data/from_label"),
+            (headings[1], to_x, to_width, mix(accent, theme, 0.84), accent.to_string(), "to_label", "/data/to_label"),
+        ] {
             if heading.is_empty() { continue; }
-            shape(drawing, Fill::solid("roundRect", &fill).rounded(50000), [x, y, pill_width(heading, SMALL).min(column), 28.0], Some((label(heading, SMALL, &color, true), TextAlign::Center, [10.0, 1.0, 10.0, 1.0])));
+            let (wide, height) = heading_pill(heading, size, column, finish, theme)?;
+            pill_height = pill_height.max(height);
+            drawing.name_next_at(place.into(), pointer.into());
+            shape(drawing, Fill::solid("roundRect", &fill).rounded(50000), [x, y, wide, height], Some((label(heading, size, &color, true), TextAlign::Center, HEADING_PADDING)));
         }
-        y += 40.0;
+        y += pill_height + 12.0;
     }
     let gap = 10.0;
     let row_height = ((top + height - y - gap * (rows.len() - 1) as f64) / rows.len() as f64).min(ROW_PITCH);

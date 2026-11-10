@@ -339,11 +339,13 @@ const templateFilename = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}\.(?:p
 const graphId = z.string().min(1).max(24).regex(/^[A-Za-z0-9_-]+$/, 'Use 1-24 ASCII letters, digits, - or _');
 const graphPort = z.enum(['auto', 'top', 'left', 'bottom', 'right']);
 const graphIcon = withAssetReference(z.object({ base64: z.string().min(1).max(1398104), mime_type: z.enum(['image/png', 'image/jpeg']), alt: z.string().max(500).optional(), decorative: z.boolean().optional().describe('true marks the picture drawn from this icon decorative: it has no description, so alt must be empty. add_part, update_part, add_graph and update_graph record it on the picture each time the part is drawn, so it needs no set_accessibility after an update. An empty alt without decorative is still reported as image_alt_missing.') }).strict());
-const graphNode = z.object({ id: graphId, label: z.string().max(160), label_fit: z.enum(['wrap', 'shrink']).optional().describe('Default wrap is omitted. Shrink prefers a single line down to 12px, preserves hard newlines, and may still wrap at the floor.'), detail: optional(z.string().max(480).refine(value => value.trim().length > 0 && Array.from(value).length <= 240, 'Detail requires 1-240 Unicode scalars and must not be blank').meta({ maxLength: 240 })), detail_font_size: optional(z.number().min(12).max(40)), detail_fit: z.enum(['wrap', 'shrink']).optional().describe('Default wrap is omitted and keeps the detail size, accepting a short last line. Shrink reduces the detail by 0.5px steps, down to 12px, to avoid a short last line and reports GRAPH_NODE_DETAIL_SHRUNK.'), text_align: optional(z.enum(['left', 'center', 'right'])), heading_bold: z.boolean().optional(), kind: z.enum(['rectangle', 'rounded_rectangle', 'ellipse', 'diamond', 'cylinder', 'cloud']).optional(), presentation: z.enum(['card', 'icon']).optional(), x: z.number().min(0).max(1088), y: z.number().min(0).max(472), width: z.number().min(64).max(1152).optional(), height: z.number().min(40).max(512).optional(), fill: colorSchema.optional(), stroke: colorSchema.optional(), color: colorSchema.optional(), font_size: z.number().min(12).max(40).optional(), group: graphId.nullable().optional(), icon: graphIcon.nullable().optional() }).strict();
+const graphLeftEdge = 'Left edge; x + width may not exceed the canvas width of 1152.';
+const graphTopEdge = 'Top edge; at least 88 (the title band) unless show_title is false, and y + height may not exceed the canvas height of 512.';
+const graphNode = z.object({ id: graphId, label: z.string().max(160), label_fit: z.enum(['wrap', 'shrink']).optional().describe('Default wrap is omitted. Shrink prefers a single line down to 12px, preserves hard newlines, and may still wrap at the floor.'), detail: optional(z.string().max(480).refine(value => value.trim().length > 0 && Array.from(value).length <= 240, 'Detail requires 1-240 Unicode scalars and must not be blank').meta({ maxLength: 240 })), detail_font_size: optional(z.number().min(12).max(40)), detail_fit: z.enum(['wrap', 'shrink']).optional().describe('Default wrap is omitted and keeps the detail size, accepting a short last line. Shrink reduces the detail by 0.5px steps, down to 12px, to avoid a short last line and reports GRAPH_NODE_DETAIL_SHRUNK.'), text_align: optional(z.enum(['left', 'center', 'right'])), heading_bold: z.boolean().optional(), kind: z.enum(['rectangle', 'rounded_rectangle', 'ellipse', 'diamond', 'cylinder', 'cloud']).optional(), presentation: z.enum(['card', 'icon']).optional(), x: z.number().min(0).max(1088).describe(graphLeftEdge), y: z.number().min(0).max(472).describe(graphTopEdge), width: z.number().min(64).max(1152).optional(), height: z.number().min(40).max(512).optional(), fill: colorSchema.optional(), stroke: colorSchema.optional(), color: colorSchema.optional(), font_size: z.number().min(12).max(40).optional(), group: graphId.nullable().optional(), icon: graphIcon.nullable().optional() }).strict();
 const graphLabelPlacement = z.object({ position: alpha, side: z.enum(['above', 'below']).optional(), offset: z.number().min(0).max(128).optional(), on_overlap: z.enum(['warn', 'error']).optional() }).strict();
 const graphBadge = z.object({ number: z.number().int().min(1).max(99), position: alpha.optional(), size: z.number().min(16).max(64).optional(), font_size: z.number().min(8).max(32).optional(), fill: colorSchema.optional(), color: colorSchema.optional() }).strict();
 const graphEdge = z.object({ id: graphId, source: graphId, target: graphId, source_port: graphPort.optional(), target_port: graphPort.optional(), label: z.string().max(64).optional(), route: z.enum(['straight', 'elbow', 'manual']).optional(), waypoints: z.array(z.tuple([z.number().min(0).max(1152), z.number().min(0).max(512)])).max(16).optional(), color: colorSchema.optional(), arrow: z.boolean().optional(), start_arrow: z.boolean().optional(), dashed: z.boolean().optional(), stroke_width: optional(z.number().min(0.5).max(12)), label_color: optional(colorSchema), label_font_size: optional(z.number().min(8).max(40)), source_offset: optional(z.number().min(-0.5).max(0.5)), target_offset: optional(z.number().min(-0.5).max(0.5)), label_placement: optional(graphLabelPlacement), badge: optional(graphBadge) }).strict();
-const graphGroup = z.object({ id: graphId, label: z.string().max(64), x: z.number().min(0).max(1088), y: z.number().min(0).max(472), width: z.number().min(64).max(1152), height: z.number().min(40).max(512), fill: colorSchema.optional(), stroke: colorSchema.optional(), parent: graphId.nullable().optional(), icon: graphIcon.nullable().optional(), padding: optional(z.number().min(0).max(64)), header_height: optional(z.number().min(20).max(128)), header_font_size: optional(z.number().min(8).max(32)), header_color: optional(colorSchema).describe('Header text RGB or theme color; omitted or null defaults to @dk1.') }).strict();
+const graphGroup = z.object({ id: graphId, label: z.string().max(64), x: z.number().min(0).max(1088).describe(graphLeftEdge), y: z.number().min(0).max(472).describe(graphTopEdge), width: z.number().min(64).max(1152), height: z.number().min(40).max(512), fill: colorSchema.optional(), stroke: colorSchema.optional(), parent: graphId.nullable().optional(), icon: graphIcon.nullable().optional(), padding: optional(z.number().min(0).max(64)), header_height: optional(z.number().min(20).max(128)), header_font_size: optional(z.number().min(8).max(32)), header_color: optional(colorSchema).describe('Header text RGB or theme color; omitted or null defaults to @dk1.') }).strict();
 const graphSpec = z.object({ version: z.literal(1), title: z.string().max(80), subtitle: z.string().max(120).optional(), show_title: z.boolean().optional(), nodes: z.array(graphNode).min(1).max(48), edges: z.array(graphEdge).max(64).optional(), groups: z.array(graphGroup).max(16).optional() }).strict();
 const graphLayoutInput = graphSpec.omit({ nodes: true, groups: true }).extend({ nodes: z.array(graphNode.omit({ x: true, y: true, group: true })).min(1).max(48), columns: z.number().int().min(1).max(8).optional().describe('Grid columns, default 3; clamped to the node count. Node dimensions are never resized.') }).strict();
 const graphSelection = z.array(graphId).min(1).max(120);
@@ -365,7 +367,15 @@ const comparisonPanel = z.object({
 	items: z.array(z.object({ text: z.string().min(1).max(480).refine(value => value.trim().length > 0 && Array.from(value).length <= 240, 'Panel text requires 1-240 Unicode scalars').meta({ maxLength: 240 }), icon: optional(graphIcon) }).strict()).min(1).max(5),
 	fill: optional(colorSchema), heading_fill: optional(colorSchema), heading_color: optional(colorSchema), accent: optional(colorSchema), icon_fill: optional(colorSchema), body_size: optional(z.number().min(16).max(28)),
 }).strict();
-const briefingText = (maximum, name, required = false) => z.string().max(maximum * 2).refine(value => Array.from(value).length <= maximum && (!required || value.trim().length > 0), required ? `${name} requires 1-${maximum} Unicode scalars` : `${name} exceeds ${maximum} Unicode scalars`).refine(value => !value.includes('\r') && value.split('\n').length <= 3, `${name} allows at most three LF-separated lines`).meta(required ? { minLength: 1, maxLength: maximum } : { maxLength: maximum });
+// Rules on the shape of a text (its lines) or on how two arrays pair up. They are in the strict tree, which the tools that create or edit a
+// document use and tools/list publishes. validate_guided_presentation accepts a violation and reports it as a diagnostic with its path
+// (see lenientGuidedInput and ruleDiagnostics), so that tree is built without them.
+const oneLinePattern = '^[^\\r\\n]*$';
+const threeLinesPattern = '^[^\\r\\n]*(\\n[^\\r\\n]*){0,2}$';
+const documentRule = (strict) => (schema, check, message, path) => strict ? schema.refine(check, { message, ...(path ? { path } : {}), params: { documentRule: true } }) : schema;
+function buildPartSchemas(strict) {
+const rule = documentRule(strict);
+const briefingText = (maximum, name, required = false) => rule(z.string().max(maximum * 2).refine(value => Array.from(value).length <= maximum && (!required || value.trim().length > 0), required ? `${name} requires 1-${maximum} Unicode scalars` : `${name} exceeds ${maximum} Unicode scalars`), value => !value.includes('\r') && value.split('\n').length <= 3, `${name} allows at most three LF-separated lines`).meta({ ...(required ? { minLength: 1 } : {}), maxLength: maximum, pattern: threeLinesPattern });
 const briefingPoints = z.array(briefingText(80, 'Point', true)).max(4);
 const briefingBody = optional(z.number().min(14).max(22));
 const briefingMessage = optional(z.object({ text: briefingText(120, 'Message text', true), detail: briefingText(160, 'Message detail').optional(), fill: optional(colorSchema), color: optional(colorSchema) }).strict());
@@ -373,13 +383,14 @@ const iconCard = z.object({ label: briefingText(48, 'Card label', true), caption
 const iconRow = z.object({ label: briefingText(60, 'Row label', true), detail: briefingText(200, 'Row detail').optional(), detail_emphasis: z.array(briefingText(200, 'Emphasized phrase', true)).max(4).optional().describe('Phrases of detail shown bold in the emphasis color; each must occur verbatim in detail and phrases may not overlap. Use it to fold a qualifier into the row it limits.'), icon: optional(graphIcon), accent: optional(colorSchema) }).strict();
 const shiftRow = z.object({ from: briefingText(48, 'Shift from', true), to: briefingText(48, 'Shift to', true), caption: briefingText(64, 'Shift caption').optional(), detail: briefingText(200, 'Shift detail').optional() }).strict();
 const stepCard = z.object({ label: briefingText(48, 'Step label', true), detail: briefingText(240, 'Step detail').optional(), points: briefingPoints.optional(), outcome: briefingText(64, 'Step outcome').optional(), image: optional(graphIcon), icon: optional(graphIcon) }).strict();
-const agendaItem = z.object({ label: briefingText(60, 'Agenda label', true), detail: briefingText(120, 'Agenda detail').optional(), meta: z.string().max(32).refine(value => Array.from(value).length <= 16 && !/[\r\n]/.test(value), 'Agenda meta requires one line of at most 16 Unicode scalars').meta({ maxLength: 16 }).optional() }).strict();
+const agendaItem = z.object({ label: briefingText(60, 'Agenda label', true), detail: briefingText(120, 'Agenda detail').optional(), meta: rule(z.string().max(32).refine(value => Array.from(value).length <= 16, 'Agenda meta exceeds 16 Unicode scalars'), value => !/[\r\n]/.test(value), 'Agenda meta must be one line').meta({ maxLength: 16, pattern: oneLinePattern }).optional() }).strict();
 const callout = z.object({ x: z.number().min(0).max(1).describe('0-1 fraction of the source image width from its left edge'), y: z.number().min(0).max(1).describe('0-1 fraction of the source image height from its top edge'), target_region: calloutRegionSchema.nullable().optional().describe('Exact source-relative UI rectangle supplied from the original, not an inferred crop extent'), label: briefingText(48, 'Callout label', true), detail: briefingText(200, 'Callout detail').optional() }).strict().refine(calloutInsideRegion, { message: 'Callout position must lie inside its target region', path: ['target_region'] });
-const briefingLine = (maximum, name, required = false) => briefingText(maximum, name, required).refine(value => !value.includes('\n'), `${name} must be one line`);
+const briefingLine = (maximum, name, required = false) => rule(briefingText(maximum, name, required), value => !value.includes('\n'), `${name} must be one line`).meta({ pattern: oneLinePattern });
 const editorialStep = z.object({ label: briefingText(48, 'Open step label', true), detail: briefingText(160, 'Open step detail').optional() }).strict();
 const roadmapPhase = z.object({ period: briefingLine(24, 'Roadmap period', true), label: briefingText(48, 'Roadmap label', true), detail: briefingText(160, 'Roadmap detail').optional(), points: briefingPoints.optional(), outcome: briefingText(64, 'Roadmap outcome').optional() }).strict();
 const iconColumn = iconRow.omit({ detail_emphasis: true }).extend({
 	label: briefingText(48, 'Icon column label', true),
+	detail: briefingText(200, 'Icon column detail').optional(),
 	detail_emphasis: z.array(z.string()).max(0).optional().describe('Legacy compatibility only; only an empty array is accepted. Omit for new parts.').meta({ deprecated: true }),
 }).strict();
 const factColumn = z.object({ value: briefingLine(24, 'Fact value', true).describe('Supplied verbatim text, never normalized or compared by area'), label: briefingText(48, 'Fact label', true), unit: briefingLine(12, 'Fact unit').optional(), detail: briefingText(160, 'Fact detail').optional(), qualifier: briefingText(100, 'Fact qualifier').optional() }).strict();
@@ -427,7 +438,7 @@ const interactiveSpec = z.object({
 }).strict();
 const partData = z.discriminatedUnion('kind', [
 	z.object({ kind: z.literal('interactive'), spec: interactiveSpec }).strict(),
-	z.object({ kind: z.literal('comparison_panels'), panels: z.array(comparisonPanel).length(2), transition: z.boolean().optional() }).strict().refine(value => value.panels.length === 2 && value.panels[0].items.length === value.panels[1].items.length, { message: 'Comparison panels require paired row counts', path: ['panels', 1, 'items'] }),
+	rule(z.object({ kind: z.literal('comparison_panels'), panels: z.array(comparisonPanel).length(2).describe('Exactly two panels. Both panels must have the same number of items.'), transition: z.boolean().optional() }).strict(), value => value.panels.length === 2 && value.panels[0].items.length === value.panels[1].items.length, 'Comparison panels require paired row counts', ['panels', 1, 'items']),
 	z.object({ kind: z.literal('icon_cards'), cards: z.array(iconCard).min(2).max(6), columns: optional(z.number().int().min(2).max(4)), numbered: z.boolean().optional(), body_size: briefingBody, message: briefingMessage }).strict()
 		.refine(value => { const columns = value.columns ?? (value.cards.length <= 4 ? value.cards.length : 3); return columns <= value.cards.length && Math.ceil(value.cards.length / columns) <= 2; }, { message: 'Icon cards require at most the card count in columns and at most two rows', path: ['columns'] }),
 	z.object({ kind: z.literal('icon_rows'), rows: z.array(iconRow).min(2).max(6), boxed: z.boolean().optional(), body_size: briefingBody, message: briefingMessage }).strict(),
@@ -456,6 +467,10 @@ const partData = z.discriminatedUnion('kind', [
 ]);
 const partLayout = frameSchema.extend({ show_title: z.boolean().optional().describe('Default true. With true the part draws its title band, so spec.title must be nonempty: add_part, update_part, create_part, insert_part, and add_graph or update_graph while GraphSpec.show_title is true, reject a blank title, as compose_slide does. Set false to give the band to the body (spec.title is still kept). A part without layout keeps its legacy band and is not checked. Saved parts that already have an empty band stay readable and editable, and preflight_presentation reports them as PART_TITLE_BAND_EMPTY.'), fit: z.enum(['stretch', 'contain']).optional().describe('stretch (default) scales each axis to the frame; contain scales uniformly and centers, keeping circles round') }).strict();
 const partSpec = z.object({ version: z.literal(1), preset: z.string().min(1).max(100), title: z.string().max(80), subtitle: z.string().max(120).optional(), data: partData, layout: optional(partLayout) }).strict();
+return { partLayout, partSpec, interactiveState };
+}
+const { partLayout, partSpec, interactiveState } = buildPartSchemas(true);
+const { partSpec: lenientPartSpec } = buildPartSchemas(false);
 const compositionBlocks = [
 	z.object({ kind: z.literal('cards'), items: z.array(z.object({ label: z.string().max(80), detail: z.string().max(400).optional() }).strict()).min(1).max(6), columns: z.number().int().min(1).max(3).optional() }).strict(),
 	z.object({ kind: z.literal('callout'), text: z.string().max(400) }).strict(),
@@ -506,13 +521,72 @@ const revisionEdits = z.array(z.discriminatedUnion('op', [
 const guidedAuthoring = z.object({ context: optional(z.enum(['reading', 'projection'])), density: optional(z.enum(['comfortable', 'compact'])), spacing: optional(z.enum(['standard', 'relaxed'])), body_font_min: optional(z.number().min(12).max(40)), headline_font_size: optional(z.number().min(28).max(64)), font_family: optional(z.string().trim().min(1).max(100)), headline_style: optional(z.enum(['sentence', 'keyword'])), slide_limit: optional(z.number().int().min(32).max(128)), ledger_notes: optional(z.enum(['full', 'summary', 'none'])) }).strict();
 const authoringProfile = z.enum(['consulting-decision', 'technical-explainer', 'event-talk', 'status-report']);
 const evidenceId = z.string().min(1).max(40);
-const guidedInput = z.object({
+// The same input for both trees: with the rules (guidedInput) or without them (lenientGuidedInput, see buildPartSchemas).
+const guidedInputSchema = (part, strict) => z.object({
 	version: z.literal(1), profile_id: authoringProfile, title: z.string().min(1).max(120), audience: z.string().min(1).max(240), purpose: z.string().min(1).max(600), governing_message: z.string().min(1).max(600), language: z.enum(['en', 'ja']), brand_color: z.string().regex(/^[0-9a-fA-F]{6}$/).nullable().optional(),
 	authoring: optional(guidedAuthoring),
-	evidence: z.array(z.object({ id: evidenceId, kind: z.enum(['source', 'assumption', 'unknown']), reference: z.string().min(1).max(600), statement: z.string().min(1).max(1200) }).strict()).max(64),
+	evidence: z.array(z.object({ id: evidenceId, kind: z.enum(['source', 'assumption', 'unknown']), reference: z.string().min(1).max(600), statement: z.string().min(1).max(1200),
+		label: optional(documentRule(strict)(z.string().min(1).max(120).refine(value => value.trim().length > 0 && Array.from(value).length <= 60, 'Evidence label requires 1-60 Unicode scalars'), value => !/[\r\n]/.test(value), 'Evidence label must be one line').meta({ minLength: 1, maxLength: 60, pattern: oneLinePattern })).describe('Short text for the source line at the foot of each slide that cites this evidence, such as a document name. One line of at most 60 Unicode scalars. Without it the source line shows reference, and when that does not fit the line lists only the evidence IDs and points to the notes (a SOURCE_LINE_SHORTENED warning). The notes keep the full reference.') }).strict()).max(64),
 	issues: z.array(z.object({ id: z.string().min(1).max(32), question: z.string().min(1).max(100), requested_decision: z.string().min(1).max(120), criterion: z.string().min(1).max(120), owner: z.string().min(1).max(48), due: z.string().min(1).max(48), evidence_ids: z.array(evidenceId).min(1).max(8), analysis_slide_ids: z.array(slideId).min(1).max(12) }).strict()).max(6).optional(),
-	slides: z.array(z.object({ id: slideId, section: z.string().min(1).max(80), headline: z.string().min(1).max(240), sentence_form: z.enum(['causal', 'conditional', 'contrast', 'causal-focus', 'evaluation', 'proposal', 'explanation', 'comparison', 'outcome']), pattern_id: z.string().min(1).max(80), question: z.string().min(1).max(240), parent_message: z.string().min(1).max(80), transition: z.string().min(1).max(80), parallel_basis: z.string().min(1).max(80), part: partSpec.nullable().optional(), speaker_notes: optional(z.string().max(8000).refine(value => Array.from(value).length <= 4000, 'Speaker notes exceed 4000 Unicode scalars')), support: z.array(z.object({ clause: z.string().min(1).max(240), body_paths: z.array(z.string().min(1).max(512)).min(1).max(16), evidence_ids: z.array(evidenceId).min(1).max(16) }).strict()).max(8), numbers: z.array(z.object({ path: z.string().min(1).max(512), value: z.union([partValue, z.string().max(120), z.boolean(), z.null()]), evidence_id: evidenceId }).strict()).max(256).optional() }).strict()).min(1).max(128),
+	slides: z.array(z.object({ id: slideId, section: z.string().min(1).max(80), headline: z.string().min(1).max(240), sentence_form: z.enum(['causal', 'conditional', 'contrast', 'causal-focus', 'evaluation', 'proposal', 'explanation', 'comparison', 'outcome']), pattern_id: z.string().min(1).max(80), question: z.string().min(1).max(240), parent_message: z.string().min(1).max(80), transition: z.string().min(1).max(80), parallel_basis: z.string().min(1).max(80), part: part.nullable().optional(), speaker_notes: optional(z.string().max(8000).refine(value => Array.from(value).length <= 4000, 'Speaker notes exceed 4000 Unicode scalars')), support: z.array(z.object({ clause: z.string().min(1).max(240), body_paths: z.array(z.string().min(1).max(512)).min(1).max(16), evidence_ids: z.array(evidenceId).min(1).max(16) }).strict()).max(8), numbers: z.array(z.object({ path: z.string().min(1).max(512), value: z.union([partValue, z.string().max(120), z.boolean(), z.null()]), evidence_id: evidenceId }).strict()).max(256).optional() }).strict()).min(1).max(128),
 }).strict();
+const guidedInput = guidedInputSchema(partSpec, true);
+// What validate_guided_presentation accepts: every rule of the strict input that core checks as well is left out, and core or ruleDiagnostics reports it.
+const lenientGuidedInput = guidedInputSchema(lenientPartSpec, false);
+
+// What the strict schema rejects in a value that the lenient schema accepted: violations of document rules only. A tool registered with a
+// lenient shape receives them as options.documentRules.
+function documentRuleIssues(strictSchema, value) {
+	const parsed = strictSchema.safeParse(value);
+	if (parsed.success) return [];
+	if (!parsed.error.issues.every(issue => issue.params?.documentRule === true)) throw parsed.error;
+	return parsed.error.issues;
+}
+
+const MAX_RULE_DIAGNOSTICS = 200;
+const jsonPointer = segments => segments.map(segment => `/${String(segment).replaceAll('~', '~0').replaceAll('/', '~1')}`).join('');
+const diagnosticSentence = diagnostic => `${diagnostic.slide_id}${diagnostic.path ? ` / ${diagnostic.path}` : diagnostic.field ? ` / ${diagnostic.field}` : ''}: ${diagnostic.message}`;
+// How core words the same four rules when it meets them in a part (parts/briefing.rs, parts/business.rs, parts.rs).
+const coreRuleMessage = /must use LF line breaks|allows at most three lines|must be one line|require paired row counts/;
+
+// The violations of document rules in the slides of a guided input, as the diagnostics core gives such a problem: PART_INVALID with the
+// input's slide ID, plus the path into the slide's part (a JSON Pointer such as /data/panels/1/items). A violation outside a part, such as an
+// evidence label, is left to core, which checks it too.
+function ruleDiagnostics(input, issues) {
+	const found = [];
+	for (const issue of issues) {
+		const [, group, index, key, ...rest] = issue.path;
+		const slide = group === 'slides' && key === 'part' ? input.slides[index] : undefined;
+		if (slide?.part) found.push({ code: 'PART_INVALID', slide_id: slide.id, preset: slide.part.preset, path: jsonPointer(rest), message: issue.message });
+	}
+	return found;
+}
+
+const omittedProblems = /^(\d+) more problems in the slides are not listed/;
+
+// validate_guided_presentation: core checks these rules as well, but names neither the field nor all of them (it stops at the first problem of a
+// part), so the review lists every violation with its path. Core's own diagnostic for the same problem is dropped, the problems of the slides are
+// listed again in the order of the slides, as many as core lists at most, and a review that was ready cannot stay ready.
+function withRuleDiagnostics(review, input, documentRules) {
+	const found = ruleDiagnostics(input, documentRules);
+	if (found.length === 0) return review;
+	const slides = new Set(found.map(diagnostic => diagnostic.slide_id));
+	const repeated = diagnostic => diagnostic.code === 'PART_INVALID' && !diagnostic.path && slides.has(diagnostic.slide_id) && coreRuleMessage.test(diagnostic.message);
+	const own = review.diagnostics ?? [];
+	const order = new Map(input.slides.map((slide, index) => [slide.id, index]));
+	const diagnostics = [...own.filter(diagnostic => !repeated(diagnostic)), ...found]
+		.map((diagnostic, position) => ({ diagnostic, position }))
+		.sort((left, right) => (order.get(left.diagnostic.slide_id) ?? Infinity) - (order.get(right.diagnostic.slide_id) ?? Infinity) || left.position - right.position)
+		.map(({ diagnostic }) => diagnostic);
+	const listed = diagnostics.slice(0, MAX_RULE_DIAGNOSTICS);
+	// An issue is either a check of the input or the sentence of a diagnostic; core's note that it cut its own list is replaced by one that counts both.
+	const sentences = new Set(own.map(diagnosticSentence));
+	const coreOmitted = review.issues.reduce((total, sentence) => total + Number(omittedProblems.exec(sentence)?.[1] ?? 0), 0);
+	const issues = [...review.issues.filter(sentence => !sentences.has(sentence) && !omittedProblems.test(sentence)), ...listed.map(diagnosticSentence)];
+	const omitted = coreOmitted + diagnostics.length - listed.length;
+	if (omitted > 0) issues.push(`${omitted} more problems in the slides are not listed; fix the listed ones and validate again`);
+	return { ...review, ready: false, issues, diagnostics: listed };
+}
 
 async function requestCore(request, options) {
 	const timing = coreTimings.getStore();
@@ -711,11 +785,11 @@ function managedProgress(name, readOnly, extra) {
 	return stop;
 }
 
-function register(name, description, inputSchema, readOnly, action) {
+function register(name, description, inputSchema, readOnly, action, lenientShape) {
 	const selectsProfile = ['create_presentation', 'compile_report', 'open_pptx', 'import_pptx', 'open_project', 'import_template', 'inspect_template', 'inspect_master_source', 'create_guided_presentation', 'verify_recovery', 'recover_presentation'].includes(name);
 	const selectsPages = ['preview_presentation', 'preflight_presentation', 'finalize_presentation'].includes(name);
 	if (selectsPages) description += ' Select pages with options.page_indices, e.g. options:{page_indices:[0]}; page_indices is not a top-level argument.';
-	const originalSchema = z.object({ ...inputSchema, ...(selectsProfile ? { capacity_profile: capacityProfileSchema.optional() } : {}) }, {
+	const objectOf = shape => z.object({ ...shape, ...(selectsProfile ? { capacity_profile: capacityProfileSchema.optional() } : {}) }, {
 		error: issue => {
 			if (selectsPages && issue.code === 'unrecognized_keys' && issue.keys.includes('page_indices')) {
 				return 'page_indices belongs inside options.page_indices, not at the top level; use options:{page_indices:[0]} for the first page';
@@ -723,14 +797,18 @@ function register(name, description, inputSchema, readOnly, action) {
 			return undefined;
 		},
 	}).strict();
+	const originalSchema = objectOf(inputSchema);
 	const binary = Boolean(inputSchema.base64);
 	const schema = binary ? withAssetReference(originalSchema) : originalSchema;
 	if (binary) description += ' Accepts base64 or a registered asset_id; MIME type can be inferred from the asset.';
 	const annotations = { readOnlyHint: readOnly, destructiveHint: false, openWorldHint: name === 'generate_report' };
 	toolDefinitions.push({ name, description, schema, annotations });
+	// A tool whose lenientShape leaves out the document rules accepts what they reject and hands the violations to the action as options.documentRules
+	// (validate_guided_presentation reports them as diagnostics). What tools/list publishes, and every other tool, keeps the strict schema.
+	const lenientSchema = lenientShape ? objectOf(lenientShape) : undefined;
 	server.registerTool(name, {
 		description,
-		inputSchema: schema,
+		inputSchema: lenientSchema ?? schema,
 		annotations,
 	}, async (input, extra) => {
 		const timing = { started: performance.now(), core_calls: 0, core_roundtrip_ms: 0 };
@@ -744,9 +822,10 @@ function register(name, description, inputSchema, readOnly, action) {
 			if (Buffer.byteLength(JSON.stringify(input), 'utf8') > budget) throw new Error('JSON input exceeds selected capacity profile');
 			if (extra.signal.aborted) throw new Error('Operation cancelled');
 			const expanded = binary || nestedAssetTools.has(name) ? expandAssetReferences(input, name, Boolean(inputSchema.mime_type), budget) : input;
-			const { capacity_profile: _capacityProfile, ...parameters } = originalSchema.parse(expanded);
+			const { capacity_profile: _capacityProfile, ...parameters } = (lenientSchema ?? originalSchema).parse(expanded);
+			const documentRules = lenientSchema ? documentRuleIssues(originalSchema, expanded) : [];
 			stopProgress = managedProgress(name, readOnly, extra);
-			const result = await coreTimings.run(timing, () => action(parameters, extra.signal, { signal: extra.signal, capacityProfile: profile }));
+			const result = await coreTimings.run(timing, () => action(parameters, extra.signal, { signal: extra.signal, capacityProfile: profile, documentRules }));
 			if (readOnly && extra.signal.aborted) throw new Error('Operation cancelled');
 			const metadata = result?.[imageResult] ? result.metadata : result;
 			const deck_id = metadata?.deck_id ?? input.deck_id;
@@ -1291,7 +1370,7 @@ register('set_layout_patterns', 'Turn the layout_patterns guide on or off for th
 });
 register('best_practice_profiles', 'List four evidence-led authoring profiles: consulting decisions, technical explanations, event talks and reports. English guides are retrieved separately; no file or model access.', {}, true, async (_input, signal) => client.bestPracticeProfiles({ signal }));
 register('best_practice_guide', 'Retrieve the English five-stage workflow, profile-specific guidance and strict creation schema. The consulting catalog retains 48 patterns with honest native-template, composition-required or guidance-only status. Read this before planning; guidance does not verify truth.', { profile_id: authoringProfile }, true, async ({ profile_id }, signal) => withAssetHandleSchema(await client.bestPracticeGuide(profile_id, { signal })));
-register('validate_guided_presentation', 'Dry-run a structured outline, clause-to-body evidence, numeric source declarations and native layout. ready means compilable, not semantically proven or Office-qualified. Returns unmet checks and human-review requirements; no deck handle or file is created. Every slide is compiled: each text that does not fit at its fixed size is listed in issues and diagnostics with the input slide ID and the part field path (JSON Pointer, e.g. r2 / /data/rows/0/from) and its measured and available height, so one call shows all of them. Choose the part of each slide by its relation: relationships, boundaries and handoffs use diagram/custom, flow/swimlane or correlation/c4-container rather than a list, and more icons do not replace them; an explicit no-diagram request wins. The response also returns expression, the part mix of the deck (slides per preset, longest runs, relationship diagrams), as information for review, not a quota.', { input: guidedInput }, true, async ({ input }, signal) => client.validateGuidedPresentation(input, { signal }));
+register('validate_guided_presentation', 'Dry-run a structured outline, clause-to-body evidence, numeric source declarations and native layout. ready means compilable, not semantically proven or Office-qualified. Returns unmet checks and human-review requirements; no deck handle or file is created. Every slide is compiled and measured as finished: each text that does not fit is listed in issues and diagnostics, so one call shows all of them. A text of a part carries the input slide ID and the part field path (JSON Pointer, e.g. r2 / /data/rows/0/from); a text of the slide itself carries field (section, headline, source, page), and the source line also the evidence_ids it lists. diagnostics codes: PART_TEXT_OVERFLOW and PART_MISSING_GLYPHS (the part alone, at its fixed size), LAYOUT_TEXT_OVERFLOW and LAYOUT_MISSING_GLYPHS (the finished slide, with measured_px and available_px), PART_INVALID (the part cannot be drawn; a diagram frame outside the canvas, a line rule or unpaired comparison panels name the node, group or field by path). warnings list what does not stop creation: SOURCE_LINE_SHORTENED (a source line that does not fit lists only the evidence IDs; give the evidence a short label) and SMALL_TEXT (an edge label, edge badge or group heading below the body floor, with the font size to ask for). The one-line and three-line rules of part texts and the paired item counts of comparison panels are reported as PART_INVALID diagnostics here; create_guided_presentation rejects them. Choose the part of each slide by its relation: relationships, boundaries and handoffs use diagram/custom, flow/swimlane or correlation/c4-container rather than a list, and more icons do not replace them; an explicit no-diagram request wins. The response also returns expression, the part mix of the deck (slides per preset, longest runs, relationship diagrams), as information for review, not a quota.', { input: guidedInput }, true, async ({ input }, signal, { documentRules }) => withRuleDiagnostics(await client.validateGuidedPresentation(input, { signal }), input, documentRules), { input: lenientGuidedInput });
 register('create_guided_presentation', 'Create a NEW evidence-led presentation after strict validation. Defaults: sentence headlines, 32 slides. input.authoring.headline_style="keyword" permits keyword headings; slide_limit explicitly raises the limit within 32..128. Evidence and numeric checks still apply. input.authoring.ledger_notes selects full (default, legacy notes), summary (speaker text first, readable summary), or none (speaker text only). Summary/none keep the complete creation record outside notes in document.guided_record and PPTX Custom XML; they do not redact evidence. Only consulting-decision multi-page decks require 3-6 issues, C02 summary and C03 close. Unknown numbers remain xx in qualitative content. Choose the part of each slide by its relation: relationships, boundaries and handoffs use diagram/custom, flow/swimlane or correlation/c4-container rather than a list, and more icons do not replace them; the expression field of the validation lists the part mix of the deck for review. No model call or file save; review actual rendering and export separately.', { input: guidedInput }, false, async ({ input }, signal, options) => {
 	assertDeckCapacity();
 	const id = randomUUID(); const result = await client.createGuidedPresentation(id, input, options);

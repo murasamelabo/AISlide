@@ -83,7 +83,11 @@ impl PartLayout {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PartData {
     Interactive { spec: crate::interactive::Spec },
-    ComparisonPanels { #[schemars(length(min = 2, max = 2))] panels: Vec<ComparisonPanel>, #[serde(default)] transition: bool },
+    ComparisonPanels {
+        /// Exactly two panels. Both panels must have the same number of items.
+        #[schemars(length(min = 2, max = 2))] panels: Vec<ComparisonPanel>,
+        #[serde(default)] transition: bool,
+    },
     IconCards { #[schemars(length(min = 2, max = 6))] cards: Vec<IconCard>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = 2, max = 4))] columns: Option<usize>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] numbered: bool, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     IconRows { #[schemars(length(min = 2, max = 6))] rows: Vec<IconRow>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] boxed: bool, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
     ShiftRows { #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 24))] from_label: String, #[serde(default, skip_serializing_if = "String::is_empty")] #[schemars(length(max = 24))] to_label: String, #[schemars(length(min = 2, max = 5))] rows: Vec<ShiftRow>, #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] #[schemars(range(min = BODY_SIZE_MIN, max = BODY_SIZE_MAX))] body_size: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<PartMessage> },
@@ -383,6 +387,14 @@ pub(crate) fn fixed_annotation_ids(id: &str, spec: &PartSpec, element: &Element)
     }).collect())
 }
 
+/// The edge labels and badges of a diagram part that `fixed_annotation_ids` keeps at the size the diagram draws them, with where the spec sets
+/// each size. Empty for any other part.
+pub(crate) fn managed_annotations(id: &str, spec: &PartSpec) -> Result<Vec<crate::graphs::ManagedAnnotation>> {
+    let PartData::Diagram { graph } = &spec.data else { return Ok(Vec::new()); };
+    let (graph_id, graph, _) = graph_context(id, spec, graph)?;
+    crate::graphs::managed_annotations(&graph_id, &graph)
+}
+
 pub fn create(id: &str, spec: &PartSpec) -> Result<Element> { create_with_theme(id, spec, &crate::design::Theme::default()) }
 
 pub(crate) fn graph_render_context(id: &str, spec: &PartSpec) -> Result<(String, crate::graphs::GraphSpec, f64)> {
@@ -412,17 +424,22 @@ pub fn create_with_theme(id: &str, spec: &PartSpec, theme: &crate::design::Theme
 
 /// `create_with_theme`, except that every fixed-size text that does not fit is returned, not only the first.
 pub(crate) fn create_detailed(id: &str, spec: &PartSpec, theme: &crate::design::Theme) -> std::result::Result<Element, PartFailure> {
+    create_located(id, spec, theme).map(|(element, _)| element)
+}
+
+/// `create_detailed`, with where each text the preset names is in the spec, by element ID. A text the preset does not name has no entry.
+pub(crate) fn create_located(id: &str, spec: &PartSpec, theme: &crate::design::Theme) -> std::result::Result<(Element, TextLocations), PartFailure> {
     valid_text(id,40)?; if id.is_empty() {return Err(Error::Invalid("part identity".into()).into());}
     crate::design::validate_theme(theme)?;
     let (category,variant)=validate_spec(spec)?;
     if let PartData::Interactive { spec: interactive } = &spec.data {
-        return crate::interactive::create(id,spec,interactive,&interactive.initial_state,theme).map_err(PartFailure::from);
+        return crate::interactive::create(id,spec,interactive,&interactive.initial_state,theme).map(|element| (element, TextLocations::new())).map_err(PartFailure::from);
     }
-    if let Some(graph) = process::graph(spec, theme)? { return graph_part(id, spec, &graph, theme).map_err(PartFailure::from); }
+    if let Some(graph) = process::graph(spec, theme)? { return graph_part(id, spec, &graph, theme).map(|element| (element, TextLocations::new())).map_err(PartFailure::from); }
     if briefing::kind(&spec.data).is_some() { return briefing::create(id, spec, theme); }
     if let PartData::Diagram { graph } = &spec.data {
         if category != "diagram" { return Err(Error::Invalid("graph data requires diagram/custom".into()).into()); }
-        return graph_part(id, spec, graph, theme).map_err(PartFailure::from);
+        return graph_part(id, spec, graph, theme).map(|element| (element, TextLocations::new())).map_err(PartFailure::from);
     }
     let identity = crate::canonical::bytes(spec)?;
     use sha2::{Digest, Sha256};
@@ -435,6 +452,7 @@ pub(crate) fn create_detailed(id: &str, spec: &PartSpec, theme: &crate::design::
         Element::Text { id, text, font_size, .. } if category == "contrast" && variant == 3 && !text.is_empty() => Some((id.clone(), (*font_size, drawing.place_of(id).map(str::to_owned), drawing.pointer_of(id).map(str::to_owned)))),
         _ => None,
     }).collect();
+    let locations = drawing.locations();
     let fit_error = |error| match error {
         Error::Invalid(message) => {
             for (id, (_, place, _)) in &fixed_sizes {
@@ -473,7 +491,7 @@ pub(crate) fn create_detailed(id: &str, spec: &PartSpec, theme: &crate::design::
         }
     }
     if !shrunk.is_empty() { return Err(PartFailure::Overflow(shrunk)); }
-    Ok(result)
+    Ok((result, locations))
 }
 
 fn graph_part(id: &str, spec: &PartSpec, graph: &crate::graphs::GraphSpec, theme: &crate::design::Theme) -> Result<Element> {
@@ -634,6 +652,43 @@ pub(crate) struct PartOverflow {
     pub available: Option<u32>,
 }
 
+/// Where a text that a preset names is in the part spec: how messages call it (`rows[0].from`) and its JSON Pointer (`/data/rows/0/from`).
+#[derive(Clone, Debug)]
+pub(crate) struct TextLocation {
+    pub place: String,
+    pub pointer: String,
+}
+
+/// The texts of a part that its preset names, by element ID. A text the preset does not name has no entry.
+pub(crate) type TextLocations = std::collections::BTreeMap<String, TextLocation>;
+
+thread_local! { static TEXT_HINT: std::cell::Cell<Option<TextHint>> = const { std::cell::Cell::new(None) }; }
+
+/// How a caller finishes the text of a part whose frames are sized from their text: the size it raises text to, the line height it gives it
+/// and the gap after a paragraph (both multiples of the size), and the factors by which it then fits the part's width and height to its own
+/// frame.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TextHint {
+    pub floor: f64,
+    pub line_spacing: f64,
+    pub paragraph_spacing: f64,
+    pub horizontal: f64,
+    pub vertical: f64,
+}
+
+struct RestoreTextHint(Option<TextHint>);
+impl Drop for RestoreTextHint { fn drop(&mut self) { TEXT_HINT.with(|hint| hint.set(self.0)); } }
+
+/// Runs `render` for a part that the caller will finish as `hint` says, so that a frame that is sized from its text is sized for the text as it
+/// ends up. Without a hint such a frame follows the preset's own text sizes.
+pub(crate) fn with_text_hint<T>(hint: Option<TextHint>, render: impl FnOnce() -> T) -> T {
+    let _restore = RestoreTextHint(TEXT_HINT.with(|current| current.replace(hint)));
+    render()
+}
+
+/// The hint that `with_text_hint` announced, `None` outside it.
+pub(crate) fn text_hint() -> Option<TextHint> { TEXT_HINT.with(std::cell::Cell::get) }
+
 /// Why a part could not be created. Texts that do not fit at their fixed size are all collected, so a caller can report every one
 /// of them; `create_part` and the other single-error callers report the first.
 pub(crate) enum PartFailure { Error(Error), Overflow(Vec<PartOverflow>) }
@@ -698,6 +753,10 @@ impl Drawing {
     pub fn name_next_at(&mut self, place: String, pointer: String) { let id = self.id(); self.places.insert(id.clone(), place); self.pointers.insert(id, pointer); }
     pub fn place_of(&self, id: &str) -> Option<&str> { self.places.get(id).map(String::as_str) }
     pub fn pointer_of(&self, id: &str) -> Option<&str> { self.pointers.get(id).map(String::as_str) }
+    /// Every text named so far, by element ID.
+    pub fn locations(&self) -> TextLocations {
+        self.pointers.iter().map(|(id, pointer)| (id.clone(), TextLocation { place: self.places.get(id).cloned().unwrap_or_default(), pointer: pointer.clone() })).collect()
+    }
     pub fn id(&self) -> String { format!("{}-{}", self.prefix, self.elements.len()) }
     pub fn text(&mut self, text: &str, bounds: [f64; 4], size: f64, color: &str, bold: bool, alignment: TextAlign) {
         let [x, y, width, height] = bounds;

@@ -52,7 +52,14 @@ pub(crate) fn validate_record(record:&GuidedRecord)->Result<()> {
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Evidence { pub id: String, pub kind: EvidenceKind, pub reference: String, pub statement: String }
+pub struct Evidence {
+    pub id: String, pub kind: EvidenceKind, pub reference: String, pub statement: String,
+    /// A short form of `reference` for the source line at the foot of each slide that cites this evidence: one line of at most 60
+    /// characters. The line shows `[ID] label` when this is given and `[ID] reference` when it is not. `reference` stays whole in the
+    /// notes (unless `ledger_notes` is `none`) and in the creation record.
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    #[schemars(length(min=1, max=60), regex(pattern = r"^[^\r\n]*$"))] pub label: Option<String>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -152,6 +159,11 @@ pub struct Review {
     pub ready: bool, pub issues: Vec<String>,
     /// The slide problems among `issues`, structured; absent when there are none.
     #[serde(skip_serializing_if="Vec::is_empty")] pub diagnostics: Vec<Diagnostic>,
+    /// What the creation does not treat as a problem, so that `ready` does not depend on it, but that the author may want to change: a source
+    /// line shortened to the evidence IDs, text that a fixed size leaves below the body floor. Absent when there is none.
+    #[serde(skip_serializing_if="Vec::is_empty")] pub warnings: Vec<Diagnostic>,
+    /// How many warnings beyond the listed maximum were counted, not listed. Absent when none were left out.
+    #[serde(skip_serializing_if="is_zero")] pub warnings_omitted: usize,
     pub review_required: Vec<String>,
     /// The deck's mix of part presets (slides and instances per preset, the longest runs of one preset, slides with a relationship diagram and
     /// slides without a part). Information for review, never a target; absent when the input has no slides.
@@ -215,6 +227,10 @@ fn checks(input:&GuidedInput)->Vec<String> {
     let mut evidence=BTreeMap::new();
     for entry in &input.evidence {
         required(&entry.id,40,"evidence id",&mut issues);required(&entry.reference,600,"evidence reference",&mut issues);required(&entry.statement,1200,"evidence statement",&mut issues);
+        if let Some(label)=&entry.label {
+            required(label,60,"evidence label",&mut issues);
+            if label.contains(['\n','\r']) {issues.push("evidence label must be one line".into());}
+        }
         if evidence.insert(entry.id.as_str(),entry).is_some() {issues.push("Duplicate evidence id".into());}
     }
     let mut slide_ids=BTreeSet::new();
@@ -499,24 +515,40 @@ fn guided_design(input:&GuidedInput,authoring:Option<&ResolvedAuthoring<'_>>)->c
     design
 }
 
-/// One problem found while compiling a slide of the input: which slide, and for a part text that does not fit, where it is and what
-/// was measured. `Review::issues` carries the same problems as sentences.
+/// One problem found while compiling a slide of the input: which slide, and for a text that does not fit, where it is and what was
+/// measured. `Review::issues` carries the same problems as sentences.
 #[derive(Clone,Serialize)]
 pub struct Diagnostic {
-    /// `PART_TEXT_OVERFLOW`, `PART_MISSING_GLYPHS`, `PART_INVALID` (the part could not be created) or `SLIDE_INVALID`.
+    /// `PART_TEXT_OVERFLOW`, `PART_MISSING_GLYPHS`, `PART_INVALID` (the part could not be created) or `SLIDE_INVALID`; from the layout
+    /// check of the finished slide, `LAYOUT_TEXT_OVERFLOW` and `LAYOUT_MISSING_GLYPHS`. Among `warnings`, `SOURCE_LINE_SHORTENED`
+    /// and `SMALL_TEXT`.
     pub code: &'static str,
     /// The input's slide ID, never derived from an element ID.
     pub slide_id: String,
     #[serde(skip_serializing_if="Option::is_none")] pub preset: Option<String>,
     /// JSON Pointer into the slide's part (`/data/rows/0/from`), as in `support.body_paths`, when the preset names the text.
     #[serde(skip_serializing_if="Option::is_none")] pub path: Option<String>,
+    /// The text the slide draws itself, as `section`, `headline`, `source` (the source line) or `page` (the page number), when that is the text.
+    #[serde(skip_serializing_if="Option::is_none")] pub field: Option<&'static str>,
+    /// For the source line, the evidence it cites: the references to shorten, or to give a `label`.
+    #[serde(skip_serializing_if="Vec::is_empty")] pub evidence_ids: Vec<String>,
     pub message: String,
     #[serde(skip_serializing_if="Option::is_none")] pub measured_px: Option<u32>,
     #[serde(skip_serializing_if="Option::is_none")] pub available_px: Option<u32>,
 }
 
 impl Diagnostic {
-    fn issue(&self)->String {match &self.path {Some(path)=>format!("{} / {path}: {}",self.slide_id,self.message),None=>format!("{}: {}",self.slide_id,self.message)}}
+    fn new(code:&'static str,slide_id:&str,message:String)->Self {
+        Self{code,slide_id:slide_id.into(),preset:None,path:None,field:None,evidence_ids:Vec::new(),message,measured_px:None,available_px:None}
+    }
+
+    fn issue(&self)->String {
+        match (&self.path,self.field) {
+            (Some(path),_)=>format!("{} / {path}: {}",self.slide_id,self.message),
+            (None,Some(field))=>format!("{} / {field}: {}",self.slide_id,self.message),
+            (None,None)=>format!("{}: {}",self.slide_id,self.message),
+        }
+    }
 }
 
 enum SlideFailure {Part(crate::parts::PartFailure),Other(Error)}
@@ -525,15 +557,48 @@ impl From<serde_json::Error> for SlideFailure {fn from(error:serde_json::Error)-
 
 fn diagnostics_of(slide:&GuidedSlide,failure:SlideFailure)->Vec<Diagnostic> {
     let preset=slide.part.as_ref().map(|part|part.preset.clone());
-    let one=|code:&'static str,error:Error|vec![Diagnostic{code,slide_id:slide.id.clone(),preset:preset.clone(),path:None,message:match error {Error::Invalid(message)=>message,other=>other.to_string()},measured_px:None,available_px:None}];
+    let one=|code:&'static str,error:Error|vec![Diagnostic{preset:preset.clone(),..Diagnostic::new(code,&slide.id,match error {Error::Invalid(message)=>message,other=>other.to_string()})}];
     match failure {
         SlideFailure::Part(crate::parts::PartFailure::Overflow(overflows))=>overflows.into_iter().map(|overflow|Diagnostic{
-            code:if overflow.missing_glyphs {"PART_MISSING_GLYPHS"} else {"PART_TEXT_OVERFLOW"},slide_id:slide.id.clone(),preset:preset.clone(),
-            path:overflow.pointer,message:overflow.message,measured_px:overflow.measured,available_px:overflow.available,
+            preset:preset.clone(),path:overflow.pointer,measured_px:overflow.measured,available_px:overflow.available,
+            ..Diagnostic::new(if overflow.missing_glyphs {"PART_MISSING_GLYPHS"} else {"PART_TEXT_OVERFLOW"},&slide.id,overflow.message)
         }).collect(),
-        SlideFailure::Part(crate::parts::PartFailure::Error(error))=>one("PART_INVALID",error),
+        SlideFailure::Part(crate::parts::PartFailure::Error(error))=>{
+            // A diagram node or group outside the canvas is where the error says: find it by the message that the graph check gives for it.
+            let path=match (&slide.part,&error) {
+                (Some(part),Error::Invalid(message))=>match &part.data {
+                    crate::parts::PartData::Diagram{graph}=>crate::graphs::first_frame_violation(graph).filter(|(_,expected)|expected==message).map(|(pointer,_)|format!("/data/graph{pointer}")),
+                    _=>None,
+                },
+                _=>None,
+            };
+            let mut found=one("PART_INVALID",error);
+            for diagnostic in &mut found {diagnostic.path=path.clone();}
+            found
+        }
         SlideFailure::Other(error)=>one("SLIDE_INVALID",error),
     }
+}
+
+/// Where the part of a slide goes: the margin, and the top and height of its frame. The part is made 1152x512 and then fitted to this.
+fn body_frame(input:&GuidedInput,slide:&GuidedSlide,authoring:Option<&ResolvedAuthoring<'_>>)->(f64,f64,f64) {
+    let double=if input.language=="ja" {slide.headline.chars().count()>36} else {slide.headline.chars().count()>80};
+    let (mut top,mut height)=if double {(168.0,474.0)} else {(144.0,498.0)};
+    let mut margin=64.0;
+    if let Some(settings)=authoring {
+        let headline=settings.headline_size*(2.0*settings.line_spacing as f64+settings.paragraph_spacing as f64)/100000.0+8.0;
+        top=(64.0+headline+settings.gap).max(144.0);height=642.0-top;margin=settings.margin;
+    }
+    (margin,top,height)
+}
+
+/// How guided creation finishes the text of the part of a slide, so that a part which sizes a frame from its text can size it for the text as
+/// it ends up (see `parts::with_text_hint`); `None` for an input without typography settings, whose text keeps the preset's sizes.
+fn part_text_hint(input:&GuidedInput,slide:&GuidedSlide,authoring:Option<&ResolvedAuthoring<'_>>)->Option<crate::parts::TextHint> {
+    let settings=authoring?;
+    let (margin,_,height)=body_frame(input,slide,authoring);
+    let (view_width,view_height)=slide.part.as_ref().and_then(|part|part.layout.as_ref()).map_or((1152.0,512.0),|layout|(layout.width,layout.height));
+    Some(crate::parts::TextHint{floor:settings.body_floor,line_spacing:settings.line_spacing as f64/100000.0,paragraph_spacing:settings.paragraph_spacing as f64/100000.0,horizontal:(1280.0-2.0*margin)/view_width,vertical:height/view_height})
 }
 
 /// The parts of an input that failed its other checks, compiled on their own: a slide's text that does not fit does not depend on them.
@@ -544,40 +609,128 @@ fn part_diagnostics(input:&GuidedInput)->Vec<Diagnostic> {
     let mut diagnostics=Vec::new();
     for (index,slide) in input.slides.iter().enumerate() {
         let Some(spec)=&slide.part else {continue;};
-        if let Err(failure)=crate::parts::create_detailed(&format!("guided-part-{}",index+1),spec,&design.theme) {diagnostics.extend(diagnostics_of(slide,SlideFailure::Part(failure)));}
+        let created=crate::parts::with_text_hint(part_text_hint(input,slide,authoring.as_ref()),||crate::parts::create_detailed(&format!("guided-part-{}",index+1),spec,&design.theme));
+        if let Err(failure)=created {diagnostics.extend(diagnostics_of(slide,SlideFailure::Part(failure)));}
     }
     diagnostics
 }
 
-fn build(input:&GuidedInput,id:&str,diagnostics:&mut Vec<Diagnostic>)->Result<Option<Document>> {
+const SOURCE_FRAME:[f64;4]=[64.0,658.0,1052.0,48.0];
+
+/// What compiling one slide of the input yields: its page and part, where the part's texts are in the input, and what the author may want to
+/// change although the slide is compiled.
+struct Built {page:crate::model::Slide,part:Option<PartInstance>,locations:crate::parts::TextLocations,warnings:Vec<Diagnostic>}
+
+/// The text of a slide's source line. Each evidence the slide cites is `[ID] label`, or `[ID] reference` where it has no label. A line that does
+/// not fit its frame at the fixed size falls back to the IDs alone, with a pointer to the notes, when the notes keep the references; the
+/// slide is then compiled with a warning. Otherwise the line is kept as it is and the layout check reports it.
+fn source_line(input:&GuidedInput,slide:&GuidedSlide,citations:&[&Evidence],theme:&crate::design::Theme)->Result<(String,Option<Diagnostic>)> {
+    let full=citations.iter().map(|entry|format!("[{}] {}",entry.id,entry.label.as_deref().unwrap_or(&entry.reference))).collect::<Vec<_>>().join("; ");
+    let fits=|value:&str|->Result<bool> {Ok(crate::layout::first_overflow(&[text(SOURCE_ID,value,SOURCE_FRAME,ANNOTATION_SIZE,"@dk2",false)],theme)?.is_none())};
+    let notes_keep_references=input.authoring.as_ref().and_then(|settings|settings.ledger_notes).unwrap_or_default()!=LedgerNotes::None;
+    if !notes_keep_references || fits(&full)? {return Ok((full,None));}
+    let ids=citations.iter().map(|entry|format!("[{}]",entry.id)).collect::<Vec<_>>().join(" ");
+    let short=format!("{ids} {}",if input.language=="ja" {"（詳細はノート）"} else {"(details in the notes)"});
+    if !fits(&short)? {return Ok((full,None));}
+    let cited:Vec<String>=citations.iter().map(|entry|entry.id.clone()).collect();
+    let warning=Diagnostic{
+        field:Some("source"),evidence_ids:cited.clone(),
+        ..Diagnostic::new("SOURCE_LINE_SHORTENED",&slide.id,format!("the source line lists only the evidence IDs ({}) because their labels or references do not fit its {}x{}px frame at {}px; the notes keep the references. Give these evidence entries a short label to show them on the slide",cited.join(", "),SOURCE_FRAME[2],SOURCE_FRAME[3],ANNOTATION_SIZE))
+    };
+    Ok((short,Some(warning)))
+}
+
+/// What the text that the layout check measured under `element_id` says, in one line of at most 40 characters. A table that is measured whole
+/// reports its cells as `{table}[row,column]`, counted from 1.
+fn measured_text(deck:&Deck,slide_id:&str,element_id:&str)->String {
+    let cell=element_id.strip_suffix(']').and_then(|rest|rest.rsplit_once('[')).and_then(|(table,at)|{
+        let (row,column)=at.split_once(',')?;
+        Some((table,row.parse::<usize>().ok()?.checked_sub(1)?,column.parse::<usize>().ok()?.checked_sub(1)?))
+    });
+    let elements=deck.slides.iter().find(|slide|slide.id==slide_id).map(|slide|crate::model::element_list(&slide.elements)).unwrap_or_default();
+    let shown=elements.into_iter().find_map(|element|match element {
+        Element::Text{id,text,..}|Element::Shape{id,text,..} if id==element_id=>Some(text.clone()),
+        Element::Table{id,rows,..}=>cell.filter(|(table,..)|*table==id.as_str()).and_then(|(_,row,column)|rows.get(row)?.get(column).cloned()),
+        _=>None,
+    }).unwrap_or_default();
+    let shown=shown.split_whitespace().collect::<Vec<_>>().join(" ");
+    if shown.chars().count()>40 {format!("{}…",shown.chars().take(40).collect::<String>().trim_end())} else {shown}
+}
+
+/// The texts that the layout check of the finished slides found not to fit their frames, or without glyphs, as diagnostics of the slides they
+/// are on. `located` says where the texts of each slide's part are in the input, by slide ID.
+fn layout_diagnostics(input:&GuidedInput,deck:&Deck,report:&crate::layout::LayoutReport,located:&BTreeMap<String,crate::parts::TextLocations>)->Vec<Diagnostic> {
+    let mut found=Vec::new();
+    for measurement in report.measurements.iter().filter(|measurement|measurement.overflow || measurement.missing_glyphs>0) {
+        let Some(slide)=input.slides.iter().find(|slide|slide.id==measurement.slide_id) else {continue;};
+        let element_id=measurement.element_id.as_str();
+        let field=match element_id {"section"=>Some("section"),"headline"=>Some("headline"),SOURCE_ID=>Some("source"),PAGE_ID=>Some("page"),_=>None};
+        let location=located.get(&slide.id).and_then(|locations|locations.get(element_id));
+        let evidence_ids:Vec<String>=if field==Some("source") {input.evidence.iter().filter(|entry|slide.support.iter().any(|support|support.evidence_ids.contains(&entry.id))).map(|entry|entry.id.clone()).collect()} else {Vec::new()};
+        let (measured,available)=(measurement.measured_height.ceil() as u32,measurement.height.floor().max(0.0) as u32);
+        let figures=if measured>available {format!("measured {measured}px > available {available}px, over by {}px",measured-available)} else {format!("measured {measured}px in {available}px frame")};
+        let (subject,detail,advice)=match field {
+            Some("source")=>(format!("the source line (evidence {})",evidence_ids.join(", ")),figures,"give these evidence entries a short label, shorten their reference or cite fewer of them on this slide"),
+            Some("section")=>("the section".into(),figures,"shorten the section"),
+            Some("headline")=>("the headline".into(),figures,"shorten the headline"),
+            Some(_)=>("the page number".into(),figures,"reduce the number of slides"),
+            None=>{
+                let text=measured_text(deck,&slide.id,element_id);
+                let detail=match location {Some(location)=>format!("{}: {figures}",location.place),None=>figures};
+                match &slide.part {
+                    Some(part)=>(format!("{} text \"{text}\"",part.preset),detail,"shorten the text, split the slide or, where authoring raises the text size, lower authoring.body_font_min"),
+                    None=>(format!("decision slide text \"{text}\""),detail,"shorten the issue texts, split the issues across slides or, where authoring raises the text size, lower authoring.body_font_min"),
+                }
+            }
+        };
+        // A text that does not fit and also lacks glyphs is two problems, as the layout check counts them.
+        for glyphs in [false,true] {
+            if !(if glyphs {measurement.missing_glyphs>0} else {measurement.overflow}) {continue;}
+            let message=if glyphs {format!("{subject} uses glyphs missing from the selected font; choose an installed font that covers it")}
+                else {format!("{subject} does not fit on the finished slide ({detail}); {advice}")};
+            found.push(Diagnostic{
+                preset:if field.is_none() {slide.part.as_ref().map(|part|part.preset.clone())} else {None},path:location.map(|location|location.pointer.clone()),field,evidence_ids:evidence_ids.clone(),
+                measured_px:(!glyphs).then_some(measured),available_px:(!glyphs).then_some(available),
+                ..Diagnostic::new(if glyphs {"LAYOUT_MISSING_GLYPHS"} else {"LAYOUT_TEXT_OVERFLOW"},&slide.id,message)
+            });
+        }
+    }
+    found
+}
+
+fn build(input:&GuidedInput,id:&str,diagnostics:&mut Vec<Diagnostic>,warnings:&mut Vec<Diagnostic>)->Result<Option<Document>> {
     let authoring=input.authoring.as_ref().filter(|settings|settings.has_typography()).map(|settings|settings.resolve(&input.profile_id));
     let design=guided_design(input,authoring.as_ref());
     let design_value=json!({"theme":design.theme,"masters":[{"id":MASTER_ID,"name":"Evidence-led briefing","background":"@lt1","elements":[]}],"layouts":[{"id":LAYOUT_ID,"name":"Claim and evidence","master_id":MASTER_ID,"background":null,"elements":[]}]});
     let mut slides=Vec::new();let mut parts=Vec::new();
+    // Where the texts of each slide's part are in the input, by slide ID, for the layout check of the finished slides.
+    let mut located=BTreeMap::new();
     // One slide's page and part. A slide that cannot be built is reported with its own ID and the others are still compiled.
-    let build_slide=|index:usize,slide:&GuidedSlide|->std::result::Result<(crate::model::Slide,Option<PartInstance>),SlideFailure> {
+    let build_slide=|index:usize,slide:&GuidedSlide|->std::result::Result<Built,SlideFailure> {
         let mut part=None;
         let mut decorative=Vec::new();
+        let mut locations=crate::parts::TextLocations::new();
+        let mut notices=Vec::new();
         let double=if input.language=="ja" {slide.headline.chars().count()>36} else {slide.headline.chars().count()>80};
-        let mut body_top=if double {168.0} else {144.0};let mut body_height=if double {474.0} else {498.0};
+        let (_,body_top,body_height)=body_frame(input,slide,authoring.as_ref());
         let citations:Vec<_>=input.evidence.iter().filter(|entry|slide.support.iter().any(|support|support.evidence_ids.contains(&entry.id))).collect();
-        let citation=citations.iter().map(|entry|format!("[{}] {}",entry.id,entry.reference)).collect::<Vec<_>>().join("; ");
-        let mut elements=vec![text("section",&slide.section,[64.0,24.0,1152.0,28.0],18.0,"@accent1",true),text("headline",&slide.headline,[64.0,64.0,1152.0,if double {86.0} else {52.0}],if double {29.0} else {32.0},"@dk1",true),text(SOURCE_ID,&citation,[64.0,658.0,1052.0,48.0],ANNOTATION_SIZE,"@dk2",false),text(PAGE_ID,&format!("{} / {}",index+1,input.slides.len()),[1132.0,676.0,84.0,26.0],ANNOTATION_SIZE,"@dk2",false)];
+        let (citation,shortened)=source_line(input,slide,&citations,&design.theme)?;
+        notices.extend(shortened);
+        let mut elements=vec![text("section",&slide.section,[64.0,24.0,1152.0,28.0],18.0,"@accent1",true),text("headline",&slide.headline,[64.0,64.0,1152.0,if double {86.0} else {52.0}],if double {29.0} else {32.0},"@dk1",true),text(SOURCE_ID,&citation,SOURCE_FRAME,ANNOTATION_SIZE,"@dk2",false),text(PAGE_ID,&format!("{} / {}",index+1,input.slides.len()),[1132.0,676.0,84.0,26.0],ANNOTATION_SIZE,"@dk2",false)];
         crate::fields::pagination(&mut elements[3],&slide.id,index+1,input.slides.len());
         if let Some(settings)=&authoring {
             if let Element::Text {x,width,height,font_size,format,..}=&mut elements[1] {
                 *x=settings.margin;*width=1280.0-2.0*settings.margin;*font_size=settings.headline_size;
                 *height=settings.headline_size*(2.0*settings.line_spacing as f64+settings.paragraph_spacing as f64)/100000.0+8.0;
                 if let Some(family)=settings.font_family {format.font_family=Some(family.into());}
-                body_top=(64.0+*height+settings.gap).max(144.0);
-                body_height=642.0-body_top;
             }
         }
         if let Some(spec)=&slide.part {
             let element_id=format!("guided-part-{}",index+1);
-            let (created,declared)=crate::graphs::with_decorative_pictures(||crate::parts::create_detailed(&element_id,spec,&design.theme));
+            let (created,declared)=crate::graphs::with_decorative_pictures(||crate::parts::with_text_hint(part_text_hint(input,slide,authoring.as_ref()),||crate::parts::create_located(&element_id,spec,&design.theme)));
             decorative=declared;
-            let mut element=created.map_err(SlideFailure::Part)?;
+            let (mut element,named)=created.map_err(SlideFailure::Part)?;
+            locations=named;
             let fixed=crate::parts::fixed_annotation_ids(&element_id,spec,&element)?;
             let margin=authoring.as_ref().map_or(64.0,|settings|settings.margin);
             let body_width=1280.0-2.0*margin;
@@ -591,6 +744,13 @@ fn build(input:&GuidedInput,id:&str,diagnostics:&mut Vec<Diagnostic>)->Result<Op
                 element=serde_json::from_value(encoded)?;
             }
             if let Some(settings)=&authoring {author_body(&mut element,settings,1.0,body_height,&fixed);}
+            // Edge labels and badges keep the size the diagram draws them, so the body floor does not raise them: say which fall below it.
+            if let Some(settings)=&authoring {
+                for annotation in crate::parts::managed_annotations(&element_id,spec)? {
+                    let Some((message,advice))=crate::graphs::drawn_size(&element,&annotation.element_id).and_then(|size|annotation.small_text(&element_id,size,settings.body_floor)) else {continue;};
+                    notices.push(Diagnostic{preset:Some(spec.preset.clone()),path:Some(format!("/data/graph{}",annotation.pointer)),..Diagnostic::new("SMALL_TEXT",&slide.id,format!("{message}. {}",advice[0]))});
+                }
+            }
             part=Some(PartInstance{slide_id:slide.id.clone(),element_id,spec:spec.clone(),render_sha256:crate::parts::state::render_hash(&element)?,native_sha256:None,stale:false});
             elements.push(element);
         } else {
@@ -627,25 +787,27 @@ fn build(input:&GuidedInput,id:&str,diagnostics:&mut Vec<Diagnostic>)->Result<Op
         let mut page=serde_json::from_value(json!({"id":slide.id,"title":slide.headline,"background":"@lt1","layout_id":LAYOUT_ID,"inherit_background":true,"elements":elements,"notes":notes}))?;
         describe_visuals(&mut page,slide.part.as_ref())?;
         crate::parts::state::declare_decoration(&mut page.review,&decorative);
-        Ok((page,part))
+        Ok(Built{page,part,locations,warnings:notices})
     };
     for (index,slide) in input.slides.iter().enumerate() {
         match build_slide(index,slide) {
-            Ok((page,part))=>{slides.push(page);parts.extend(part);}
+            Ok(built)=>{slides.push(built.page);parts.extend(built.part);located.insert(slide.id.clone(),built.locations);warnings.extend(built.warnings);}
             Err(failure)=>diagnostics.extend(diagnostics_of(slide,failure)),
         }
     }
     if slides.is_empty() {return Ok(None);}
     let deck:Deck=serde_json::from_value(json!({"version":1,"title":input.title,"width":1280,"height":720,"design":design_value,"slides":slides}))?;
-    let measured=if authoring.is_some() {
+    // With typography settings, tables are measured as the text boxes of their cells, so the report names those boxes.
+    let measured_deck=if authoring.is_some() {
         crate::model::validate_deck(&deck)?;
         let mut measurement=deck.clone();
         for slide in &mut measurement.slides {for element in &mut slide.elements {measurement_cells(element)?;}}
-        crate::layout::measure_layout(&measurement)?
-    } else {crate::layout::measure_layout(&deck)?};
-    let measured=serde_json::to_value(measured)?;
-    let errors:Vec<_>=measured["issues"].as_array().unwrap().iter().filter(|issue|issue["severity"]=="error").collect();
-    if !errors.is_empty() {return Err(Error::Invalid(format!("guided layout does not fit: {}",serde_json::to_string(&errors)?)));}
+        std::borrow::Cow::Owned(measurement)
+    } else {std::borrow::Cow::Borrowed(&deck)};
+    let measured=crate::layout::measure_layout(&measured_deck)?;
+    diagnostics.extend(layout_diagnostics(input,&measured_deck,&measured,&located));
+    // One list in the order of the slides, whether a problem was found in a part or on a finished slide (a slide has only one kind).
+    diagnostics.sort_by_key(|diagnostic|input.slides.iter().position(|slide|slide.id==diagnostic.slide_id).unwrap_or(usize::MAX));
     if !diagnostics.is_empty() {return Ok(None);}
     let document=crate::document::create(id.into(),deck,Vec::new(),Vec::new(),None)?;
     let mut operations=Vec::new();
@@ -668,27 +830,33 @@ fn build(input:&GuidedInput,id:&str,diagnostics:&mut Vec<Diagnostic>)->Result<Op
     Ok(Some(document))
 }
 
-/// Problems beyond this many are counted, not listed, so a response stays bounded and says that it was cut.
+/// Problems beyond this many are counted, not listed, so a response stays bounded and says that it was cut: the problems by a sentence among
+/// `issues`, the warnings by `Review::warnings_omitted`.
 const MAX_DIAGNOSTICS:usize=200;
+
+fn is_zero(count:&usize)->bool {*count==0}
 
 fn evaluate(input:&GuidedInput,id:&str)->(Option<Document>,Review) {
     let mut issues=checks(input);
     let mut diagnostics=Vec::new();
+    let mut warnings=Vec::new();
     // What stopped the build after the slides were compiled, such as a layout that does not fit.
     let mut failure=None;
     let mut document=None;
     if issues.is_empty() {
-        match build(input,id,&mut diagnostics) {Ok(built)=>document=built,Err(error)=>failure=Some(error.to_string())}
+        match build(input,id,&mut diagnostics,&mut warnings) {Ok(built)=>document=built,Err(error)=>failure=Some(error.to_string())}
     } else {
         diagnostics=part_diagnostics(input);
     }
     let omitted=diagnostics.len().saturating_sub(MAX_DIAGNOSTICS);
+    let warnings_omitted=warnings.len().saturating_sub(MAX_DIAGNOSTICS);
     diagnostics.truncate(MAX_DIAGNOSTICS);
+    warnings.truncate(MAX_DIAGNOSTICS);
     issues.extend(diagnostics.iter().map(Diagnostic::issue));
     if omitted>0 {issues.push(format!("{omitted} more problems in the slides are not listed; fix the listed ones and validate again"));}
     issues.extend(failure);
     let expression=(!input.slides.is_empty()).then(||crate::composition_mix::mix(&input.slides.iter().map(|slide|crate::composition_mix::SlideParts{id:slide.id.clone(),presets:slide.part.iter().map(|part|part.preset.clone()).collect()}).collect::<Vec<_>>(),0));
-    let review=Review{ready:document.is_some(),issues,diagnostics,review_required:vec!["Verify source authenticity, assumptions and headline entailment; declared references are not proof.".into(),"Review material quantities embedded in prose, arithmetic, qualitative scores, and logical completeness.".into(),"Inspect actual Office rendering, chart scales, figure conventions, shape-label collisions and orphan lines.".into(),"Native parts are primitives, not implementations of every consulting compound pattern.".into(),"Review the part mix in expression: where the content relates, bounds or hands off named things, a relationship diagram (diagram/custom, flow/swimlane or correlation/c4-container) shows it and a list with icons does not. This is information, not a quota, and an explicit no-diagram request wins.".into()],expression,semantic_truth_verified:false,office_visual_parity:false};
+    let review=Review{ready:document.is_some(),issues,diagnostics,warnings,warnings_omitted,review_required:vec!["Verify source authenticity, assumptions and headline entailment; declared references are not proof.".into(),"Review material quantities embedded in prose, arithmetic, qualitative scores, and logical completeness.".into(),"Inspect actual Office rendering, chart scales, figure conventions, shape-label collisions and orphan lines.".into(),"Native parts are primitives, not implementations of every consulting compound pattern.".into(),"Review the part mix in expression: where the content relates, bounds or hands off named things, a relationship diagram (diagram/custom, flow/swimlane or correlation/c4-container) shows it and a list with icons does not. This is information, not a quota, and an explicit no-diagram request wins.".into()],expression,semantic_truth_verified:false,office_visual_parity:false};
     (document,review)
 }
 
@@ -731,5 +899,18 @@ mod tests {
         assert_eq!(style["text_format"]["paragraphs"][0]["runs"][0]["style"]["underline"],true);
         assert_eq!(style["fill"],"@accent1");
         assert_eq!(table["rows"],json!([["Cell"]]));
+    }
+
+    #[test]
+    fn measured_text_reads_a_cell_of_a_whole_table_by_its_row_and_column() {
+        let deck:Deck=serde_json::from_value(json!({"version":1,"title":"t","width":1152,"height":648,"slides":[{"id":"s1","title":"S","background":"@bg1","notes":"","elements":[
+            {"type":"table","id":"t1","x":0,"y":0,"width":400,"height":200,"rows":[["Head","Other"],["Body   with\nbreaks","Last"]],"font_size":14},
+            {"type":"text","id":"long","x":0,"y":300,"width":400,"height":40,"text":"abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij","font_size":14,"color":"@dk1","bold":false}
+        ]}]})).unwrap();
+        assert_eq!(measured_text(&deck,"s1","t1[2,1]"),"Body with breaks");
+        assert_eq!(measured_text(&deck,"s1","t1[1,2]"),"Other");
+        for unknown in ["t1[3,1]","t1[0,1]","t1[1,3]","t1[1,x]","t1[1]","t1","other[1,1]"] {assert_eq!(measured_text(&deck,"s1",unknown),"","{unknown}");}
+        assert_eq!(measured_text(&deck,"missing","t1[1,1]"),"");
+        assert_eq!(measured_text(&deck,"s1","long"),"abcdefghij abcdefghij abcdefghij abcdefg…");
     }
 }

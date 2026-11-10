@@ -458,6 +458,7 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 		let known_badges = crate::graphs::managed_badge_pairs(document, &slide.id);
 		let managed_frames = crate::graphs::managed_group_frames(document, &slide.id);
 		let node_text = crate::graphs::managed_node_text(document, &slide.id);
+		let annotation_text = crate::graphs::managed_annotation_text(document, &slide.id);
 		report.page_parts = document.parts.iter().filter(|part| part.slide_id == slide.id).map(|part| part.element_id.clone()).collect();
 		let mut objects = page_objects(deck, page)?;
 		// Text a managed part draws at sizes its preset fixes (tags, captions, badges) cannot be raised from the spec, so it is information;
@@ -577,8 +578,11 @@ pub fn preflight_presentation(document: &Document, options: &PreflightOptions) -
 					} else if let Some((message, suggestions)) = node_text.get(object.id).filter(|_| object.scope == "slide")
 						.and_then(|node| node_small_text(node, object.font_size.unwrap_or_default(), options.min_font_size)) {
 						push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &message, &suggestions.iter().map(String::as_str).collect::<Vec<_>>())?;
+					} else if let Some((message, suggestions)) = annotation_text.get(object.id).filter(|_| object.scope == "slide")
+						.and_then(|(part_id, annotation)| annotation.small_text(part_id, object.font_size.unwrap_or_default(), options.min_font_size)) {
+						push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &message, &suggestions.iter().map(String::as_str).collect::<Vec<_>>())?;
 					} else {
-						push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &format!("Effective font is below the requested {}px floor", options.min_font_size), &["Increase font size and enlarge or reflow the frame", "Split dense content into another slide"])?;
+						push_finding(&mut report, page, &slide.id, &[object], "SMALL_TEXT", "warning", "heuristic", &format!("Effective font is {:.1}px, below the requested {}px floor", object.font_size.unwrap_or_default(), options.min_font_size), &["Increase font size and enlarge or reflow the frame", "Split dense content into another slide"])?;
 					},
 				}
 			}

@@ -357,10 +357,12 @@ fn venn(drawing: &mut Drawing, items: &[PartItem], center: &str, variant: usize)
 fn groups(drawing: &mut Drawing, category: &str, variant: usize, data: &PartData) -> Result<()> {
     let PartData::Groups {groups}=data else {return Err(Error::Invalid("group data required".into()));}; count(groups.len(),2,if category=="set" {3} else {6})?;
     let columns=if variant==1 {1} else if variant==2 {groups.len()} else {groups.len().min(3)}; let rows=groups.len().div_ceil(columns); let width=1104.0/columns as f64; let height=400.0/rows as f64;
+    // One row pitch for every group, from the longest, so that the n-th item of each column is on one line and a shorter column ends early.
+    let tallest=groups.iter().map(|group|group.items.len()).max().unwrap_or(1).max(1);
     for (index,group) in groups.iter().enumerate() {let left=24.0+(index%columns) as f64*width; let top=90.0+(index/columns) as f64*height;
         drawing.rect([left,top,width-20.0,2.0],&accent(index));
         if variant==1 {drawing.text(&group.label,[left+8.0,top+12.0,210.0,height-18.0],20.0,"@dk1",true,TextAlign::Left); let slot=(width-250.0)/group.items.len() as f64; for (item_index,item) in group.items.iter().enumerate() {drawing.text(item,[left+240.0+item_index as f64*slot,top+12.0,slot-18.0,height-18.0],17.0,"@dk1",false,TextAlign::Left);} }
-        else {drawing.text(&group.label,[left+8.0,top+14.0,width-36.0,44.0],20.0,"@dk1",true,TextAlign::Left); let slot=(height-72.0)/group.items.len() as f64; for (item_index,item) in group.items.iter().enumerate() { if variant==2 && category=="set" {drawing.shape("ellipse",[left+8.0,top+72.0+item_index as f64*slot,24.0,24.0],"none",&accent(index));} drawing.text(item,[left+if variant==2 {42.0} else {12.0},top+70.0+item_index as f64*slot,width-62.0,slot-4.0],16.0,"@dk1",false,TextAlign::Left);} }
+        else {drawing.text(&group.label,[left+8.0,top+14.0,width-36.0,44.0],20.0,"@dk1",true,TextAlign::Left); let slot=(height-72.0)/tallest as f64; for (item_index,item) in group.items.iter().enumerate() { if variant==2 && category=="set" {drawing.shape("ellipse",[left+8.0,top+72.0+item_index as f64*slot,24.0,24.0],"none",&accent(index));} drawing.text(item,[left+if variant==2 {42.0} else {12.0},top+70.0+item_index as f64*slot,width-62.0,slot-4.0],16.0,"@dk1",false,TextAlign::Left);} }
     }
     Ok(())
 }
