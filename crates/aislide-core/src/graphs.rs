@@ -376,11 +376,34 @@ fn identity(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn bounds(x: f64, y: f64, width: f64, height: f64, content_top: f64) -> Result<()> {
-    if [x, y, width, height].iter().any(|value| !value.is_finite()) || x < 0.0 || y < content_top || width < MIN_WIDTH || height < MIN_HEIGHT || x + width > WIDTH || y + height > HEIGHT {
-        return Err(Error::Invalid(format!("graph bounds must fit 1152x512 at y >= {content_top}, with minimum size 64x40")));
-    }
-    Ok(())
+/// Why a frame does not fit the 1152x512 canvas, with the values it was given; `None` when it fits. Every violated condition is named.
+fn bounds_violation(x: f64, y: f64, width: f64, height: f64, content_top: f64) -> Option<String> {
+    if [x, y, width, height].iter().any(|value| !value.is_finite()) { return Some("x, y, width and height must be finite numbers".into()); }
+    let mut found = Vec::new();
+    if x < 0.0 { found.push(format!("x {x} is left of the canvas (x must be at least 0)")); }
+    if y < content_top { found.push(format!("y {y} is above the content top {content_top}{}", if content_top > 0.0 { " (the title band covers y 0-88; set show_title to false to start at 0)" } else { "" })); }
+    if width < MIN_WIDTH { found.push(format!("width {width} is below the minimum {MIN_WIDTH}")); }
+    if height < MIN_HEIGHT { found.push(format!("height {height} is below the minimum {MIN_HEIGHT}")); }
+    if x + width > WIDTH { found.push(format!("x + width = {} exceeds the canvas width {WIDTH}", x + width)); }
+    if y + height > HEIGHT { found.push(format!("y + height = {} exceeds the canvas height {HEIGHT}", y + height)); }
+    (!found.is_empty()).then(|| found.join("; "))
+}
+
+fn bounds_message(kind: &str, id: &str, frame: [f64; 4], content_top: f64) -> Option<String> {
+    bounds_violation(frame[0], frame[1], frame[2], frame[3], content_top).map(|reason| format!("graph {kind} '{id}' does not fit the 1152x512 canvas: {reason}"))
+}
+
+fn bounds(kind: &str, id: &str, frame: [f64; 4], content_top: f64) -> Result<()> {
+    bounds_message(kind, id, frame, content_top).map_or(Ok(()), |message| Err(Error::Invalid(message)))
+}
+
+/// The first group or node, in the order `validate` checks them, whose frame does not fit the canvas: where it is in the graph (a JSON
+/// Pointer such as `/nodes/0`) and the message that `validate` reports for it.
+pub(crate) fn first_frame_violation(spec: &GraphSpec) -> Option<(String, String)> {
+    let top = spec.content_top();
+    spec.groups.iter().enumerate().map(|(index, group)| (format!("/groups/{index}"), "group", &group.id, [group.x, group.y, group.width, group.height]))
+        .chain(spec.nodes.iter().enumerate().map(|(index, node)| (format!("/nodes/{index}"), "node", &node.id, [node.x, node.y, node.width, node.height])))
+        .find_map(|(pointer, kind, id, frame)| bounds_message(kind, id, frame, top).map(|message| (pointer, message)))
 }
 
 fn group_ancestors<'a>(spec: &'a GraphSpec, mut parent: Option<&'a str>) -> Result<Vec<usize>> {
@@ -438,7 +461,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
     for region in &spec.groups {
         identity(&region.id)?; valid_text(&region.label, GROUP_LABEL_MAX)?;
         if !ids.insert(&region.id) { return Err(Error::Invalid("duplicate graph ID".into())); }
-        bounds(region.x, region.y, region.width, region.height, spec.content_top())?;
+        bounds("group", &region.id, [region.x, region.y, region.width, region.height], spec.content_top())?;
         valid_color(&region.fill)?; valid_color(&region.stroke)?;
         if let Some(color) = &region.header_color { valid_color(color)?; }
         if !region.padding().is_finite() || !(0.0..=64.0).contains(&region.padding())
@@ -464,7 +487,7 @@ pub fn validate(spec: &GraphSpec) -> Result<()> {
     for node in &spec.nodes {
         identity(&node.id)?; valid_text(&node.label, NODE_LABEL_MAX)?;
         if !ids.insert(&node.id) { return Err(Error::Invalid("duplicate graph ID".into())); }
-        bounds(node.x, node.y, node.width, node.height, spec.content_top())?;
+        bounds("node", &node.id, [node.x, node.y, node.width, node.height], spec.content_top())?;
         valid_color(&node.fill)?; valid_color(&node.stroke)?; valid_color(&node.color)?;
         if !node.font_size.is_finite() || !(12.0..=40.0).contains(&node.font_size) { return Err(Error::Invalid("graph font size must be 12-40".into())); }
         if let Some(detail) = &node.detail {
@@ -1158,6 +1181,129 @@ pub(crate) fn managed_node_text(document: &crate::document::Document, slide_id: 
     nodes
 }
 
+/// Which text of a diagram a `ManagedAnnotation` is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AnnotationKind { EdgeLabel, EdgeBadge, GroupHeader }
+
+impl AnnotationKind {
+    fn owner(self) -> &'static str { if self == Self::GroupHeader { "group" } else { "edge" } }
+    fn text(self) -> &'static str { match self { Self::EdgeLabel => "its label", Self::EdgeBadge => "the number in its badge", Self::GroupHeader => "its heading" } }
+    fn field(self) -> &'static str { match self { Self::EdgeLabel => "label_font_size", Self::EdgeBadge => "badge.font_size", Self::GroupHeader => "header_font_size" } }
+    fn maximum(self) -> f64 { match self { Self::EdgeLabel => 40.0, Self::EdgeBadge | Self::GroupHeader => 32.0 } }
+    /// The field that the text has to fit, with the largest value `validate` accepts for it: the size of a badge, the height of a group's
+    /// header band. `validate` ties it to the font size. A label has no such frame.
+    fn extent_field(self) -> Option<(&'static str, f64)> { match self { Self::EdgeLabel => None, Self::EdgeBadge => Some(("badge.size", 64.0)), Self::GroupHeader => Some(("header_height", 128.0)) } }
+}
+
+/// A text of a diagram that guided creation keeps at the size the diagram draws it, so the body floor does not raise it: the label or the
+/// badge of an edge, or the heading of a group. It says which text it is and where the spec sets its size.
+#[derive(Clone, Debug)]
+pub(crate) struct ManagedAnnotation {
+    pub element_id: String,
+    pub kind: AnnotationKind,
+    /// The ID of the edge or group that the text belongs to.
+    pub owner_id: String,
+    /// The size the spec asks for in the diagram's own coordinates: `label_font_size` (16 when omitted), `badge.font_size` or
+    /// `header_font_size` (18 when omitted).
+    pub requested: f64,
+    pub explicit: bool,
+    /// Where the size is set, as a JSON Pointer into the graph (`/edges/0/label_font_size`).
+    pub pointer: String,
+    /// The value of `AnnotationKind::extent_field`: the `badge.size` or the `header_height` that the font has to fit; 0 for a label.
+    pub extent: f64,
+    /// The digits of the number in a badge, which the badge has to be wide enough for; 0 for the other texts.
+    pub digits: usize,
+}
+
+impl ManagedAnnotation {
+    /// The value of `extent_field` that a font of `font` px needs when the diagram is drawn at `scale`. A group's band needs what `validate`
+    /// requires. A badge needs that too, and what the layout check of the finished slide requires: the check takes the text insets of a shape
+    /// (12px across, 8px down, see `TextFormat::content_frame`) off the badge as drawn, and the insets do not scale with the diagram, so a badge
+    /// needs `inset / scale` beyond the text, which is more than `validate` asks.
+    fn extent_needed(&self, font: f64, scale: f64) -> f64 {
+        match self.kind {
+            AnnotationKind::EdgeLabel => 0.0,
+            AnnotationKind::EdgeBadge => {
+                let across = self.digits as f64 * font * 0.65;
+                (font * 1.25 + 4.0).max(across + 8.0).max(font * 1.25 + 8.0 / scale).max(across + 12.0 / scale)
+            }
+            AnnotationKind::GroupHeader => font * 1.25 + 12.0,
+        }
+    }
+
+    /// The message and repair advice for this text drawn at `effective` px on the page, below `floor`; `None` when it is not below.
+    /// The size to ask for is the floor divided by the scale that the diagram is drawn at, an estimate because the scale follows the frame.
+    /// Where `validate` ties the size to a frame that the text has to fit, the advice names the size that frame needs as well.
+    pub(crate) fn small_text(&self, part_id: &str, effective: f64, floor: f64) -> Option<(String, Vec<String>)> {
+        if !effective.is_finite() || effective <= 0.0 || effective + 0.01 >= floor { return None; }
+        let scale = effective / self.requested;
+        let (owner, field, maximum) = (self.kind.owner(), self.kind.field(), self.kind.maximum());
+        let asked = format!("{field} {}{}", self.requested, if self.explicit { "" } else { " by default" });
+        let message = format!("{} '{}' of diagram '{part_id}': {} is drawn at {effective:.1}px, below the requested {floor}px floor ({asked}, drawn at {scale:.2} of its size on this slide)",
+            if self.kind == AnnotationKind::GroupHeader { "Group" } else { "Edge" }, self.owner_id, self.kind.text());
+        let recommended = (floor / scale).ceil();
+        let frame = self.kind.extent_field().map(|(extent_field, largest)| (extent_field, largest, self.extent_needed(recommended, scale).ceil()));
+        let advice = match frame {
+            _ if recommended > maximum => format!("{field} on {owner} '{}' allows at most {maximum}, which does not reach {floor}px at the scale {scale:.2}; shorten the diagram's content so that the part is drawn larger, or accept this size", self.owner_id),
+            Some((extent_field, largest, needed)) if needed > largest => format!("{field} on {owner} '{}' would have to be about {recommended} to reach {floor}px at the scale {scale:.2}, which needs {extent_field} of at least {needed}, and {extent_field} allows at most {largest}; shorten the diagram's content so that the part is drawn larger, or accept this size", self.owner_id),
+            _ => {
+                let held = match frame {
+                    Some((extent_field, _, needed)) if needed > self.extent + 1e-9 => format!(" That size needs {extent_field} of at least {needed} (it is {}).", self.extent),
+                    _ => String::new(),
+                };
+                format!("Set {field} on {owner} '{}' to about {recommended}: {floor}px divided by the scale {scale:.2}.{held} The scale follows the part's frame, so check the preview", self.owner_id)
+            }
+        };
+        let suggestions = vec![advice, format!("Change it through update_part or update_graph on '{part_id}', not by editing the text element")];
+        Some((message, suggestions))
+    }
+}
+
+/// The group headings, edge labels and edge badges of a graph that carry text, drawn under `prefix` (see `render_prefix`): the texts that
+/// `fixed_annotation_ids` lists. A group's heading is the text of its frame.
+fn annotations_under(prefix: &str, spec: &GraphSpec) -> Vec<ManagedAnnotation> {
+    let mut found = Vec::new();
+    for (index, group) in spec.groups.iter().enumerate().filter(|(_, group)| !group.label.is_empty()) {
+        found.push(ManagedAnnotation { element_id: format!("{prefix}-g-{}", group.id), kind: AnnotationKind::GroupHeader, owner_id: group.id.clone(),
+            requested: group.header_font_size(), explicit: group.header_font_size.is_some(), pointer: format!("/groups/{index}/header_font_size"), extent: group.header_height(), digits: 0 });
+    }
+    for (index, edge) in spec.edges.iter().enumerate() {
+        if !edge.label.is_empty() {
+            found.push(ManagedAnnotation { element_id: format!("{prefix}-et-{}", edge.id), kind: AnnotationKind::EdgeLabel, owner_id: edge.id.clone(),
+                requested: edge.label_font_size.unwrap_or(16.0), explicit: edge.label_font_size.is_some(), pointer: format!("/edges/{index}/label_font_size"), extent: 0.0, digits: 0 });
+        }
+        if let Some(badge) = &edge.badge {
+            found.push(ManagedAnnotation { element_id: format!("{prefix}-eb-{}", edge.id), kind: AnnotationKind::EdgeBadge, owner_id: edge.id.clone(),
+                requested: badge.font_size, explicit: true, pointer: format!("/edges/{index}/badge/font_size"), extent: badge.size, digits: badge.number.to_string().len() });
+        }
+    }
+    found
+}
+
+/// The group headings, edge labels and edge badges of the graph drawn as part `id`.
+pub(crate) fn managed_annotations(id: &str, spec: &GraphSpec) -> Result<Vec<ManagedAnnotation>> { Ok(annotations_under(&render_prefix(id, spec)?, spec)) }
+
+/// The smallest size at which the text of the element `id` inside `element` is drawn, in the coordinates of `element`'s children.
+pub(crate) fn drawn_size(element: &Element, id: &str) -> Option<f64> {
+    crate::model::element_list(std::slice::from_ref(element)).into_iter().find_map(|candidate| match candidate {
+        Element::Text { id: candidate, font_size, format, .. } | Element::Shape { id: candidate, font_size, format, .. } if candidate == id => Some(
+            format.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).filter(|run| !run.text.trim().is_empty())
+                .map(|run| run.style.font_size.unwrap_or(*font_size)).reduce(f64::min).unwrap_or(*font_size)),
+        _ => None,
+    })
+}
+
+/// What `managed_annotations` says about the verified managed diagrams of a slide, by the ID of the text it names, with the diagram's ID.
+pub(crate) fn managed_annotation_text(document: &crate::document::Document, slide_id: &str) -> BTreeMap<String, (String, ManagedAnnotation)> {
+    let mut found = BTreeMap::new();
+    let Some(slide) = document.deck.slides.iter().find(|slide| slide.id == slide_id) else { return found; };
+    for (element, prefix, spec, _) in verified_diagrams(document, slide) {
+        let Element::Group { id: part_id, .. } = element else { continue; };
+        for annotation in annotations_under(&prefix, &spec) { found.insert(annotation.element_id.clone(), (part_id.clone(), annotation)); }
+    }
+    found
+}
+
 pub(crate) fn managed_badge_pairs(document: &crate::document::Document, slide_id: &str) -> BTreeSet<(String, String)> {
     let mut pairs = BTreeSet::new();
     let Some(slide) = document.deck.slides.iter().find(|slide| slide.id == slide_id) else { return pairs; };
@@ -1569,4 +1715,47 @@ pub fn apply(document: &crate::document::Document, expected_revision: u64, slide
         return Ok(annotate_transaction(result, &BTreeSet::from([(slide_id.into(), id.into())])));
     }
     change(document, expected_revision, slide_id, id, &next, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn annotation(kind: AnnotationKind, requested: f64, extent: f64, digits: usize) -> ManagedAnnotation {
+        ManagedAnnotation { element_id: "x".into(), kind, owner_id: "owner".into(), requested, explicit: true, pointer: "/p".into(), extent, digits }
+    }
+
+    /// The first suggestion for `annotation` drawn at `scale` of its size and below `floor`: the size to ask for and the frame it needs.
+    fn advice(annotation: &ManagedAnnotation, scale: f64, floor: f64) -> String {
+        annotation.small_text("part", annotation.requested * scale, floor).expect("the text is below the floor").1.remove(0)
+    }
+
+    #[test]
+    fn a_group_heading_is_advised_the_band_that_validate_requires_for_the_size() {
+        let heading = |band: f64| annotation(AnnotationKind::GroupHeader, 14.0, band, 0);
+        assert!(advice(&heading(30.0), 1.0, 16.0).contains("to about 16: 16px divided by the scale 1.00. That size needs header_height of at least 32 (it is 30)."), "16px needs 16 * 1.25 + 12");
+        assert!(!advice(&heading(40.0), 1.0, 16.0).contains("That size needs"), "a band that holds the size is not mentioned");
+        assert!(advice(&heading(40.0), 0.25, 16.0).contains("allows at most 32"), "a size beyond the largest font has no frame to name");
+    }
+
+    #[test]
+    fn a_badge_is_advised_the_size_that_the_finished_slide_needs_for_the_number() {
+        // At the scale 0.924 the 8px and 12px text insets of the shape are 8.66 and 12.99 in the diagram's own units, and they come on top of the text.
+        let badge = |extent: f64, digits: usize| annotation(AnnotationKind::EdgeBadge, 12.0, extent, digits);
+        let one = advice(&badge(24.0, 1), 0.924, 16.0);
+        assert!(one.contains("to about 18") && one.contains("That size needs badge.size of at least 32 (it is 24)."), "18 * 1.25 + 8 / 0.924 = 31.2 where validate asks 26.5: {one}");
+        let two = advice(&badge(30.0, 2), 0.924, 16.0);
+        assert!(two.contains("That size needs badge.size of at least 37 (it is 30)."), "two digits add 2 * 18 * 0.65 + 12 / 0.924 = 36.4: {two}");
+        assert!(!advice(&badge(40.0, 2), 0.924, 16.0).contains("That size needs"), "a badge that holds the number is not mentioned");
+        let unreachable = advice(&badge(30.0, 2), 0.5, 16.0);
+        assert!(unreachable.contains("to reach 16px") && unreachable.contains("badge.size of at least 66, and badge.size allows at most 64"), "{unreachable}");
+        assert!(advice(&badge(24.0, 1), 0.25, 16.0).contains("badge.font_size on edge 'owner' allows at most 32"));
+    }
+
+    #[test]
+    fn a_label_has_no_frame_to_name_and_text_at_the_floor_has_no_advice() {
+        let label = annotation(AnnotationKind::EdgeLabel, 16.0, 0.0, 0);
+        assert!(advice(&label, 0.924, 16.0).contains("to about 18") && !advice(&label, 0.924, 16.0).contains("That size needs"));
+        assert!(label.small_text("part", 16.0, 16.0).is_none() && label.small_text("part", 15.995, 16.0).is_none());
+    }
 }

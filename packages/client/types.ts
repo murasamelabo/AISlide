@@ -398,7 +398,7 @@ export type LayoutPatternResolution = { version: 1; pattern: LayoutPattern; canv
 export type PartInstance = { slide_id: string; element_id: string; spec: PartSpec; render_sha256: string; native_sha256?: string | null; stale: boolean }
 
 export type AuthoringProfile = 'consulting-decision' | 'technical-explainer' | 'event-talk' | 'status-report'
-export type GuidedEvidence = { id: string; kind: 'source' | 'assumption' | 'unknown'; reference: string; statement: string }
+export type GuidedEvidence = { id: string; kind: 'source' | 'assumption' | 'unknown'; reference: string; statement: string; /** What the source line at the foot of a slide that cites this evidence shows instead of `reference`: one line of 1-60 Unicode scalars. */ label?: string | null }
 export type ClauseSupport = { clause: string; body_paths: string[]; evidence_ids: string[] }
 export type NumberEvidence = { path: string; value: Scalar; evidence_id: string }
 export type DecisionIssue = { id: string; question: string; requested_decision: string; criterion: string; owner: string; due: string; evidence_ids: string[]; analysis_slide_ids: string[] }
@@ -406,9 +406,15 @@ export type GuidedAuthoring = { context?: 'reading' | 'projection' | null; densi
 export type GuidedSlide = { id: string; section: string; headline: string; sentence_form: 'causal' | 'conditional' | 'contrast' | 'causal-focus' | 'evaluation' | 'proposal' | 'explanation' | 'comparison' | 'outcome'; pattern_id: string; question: string; parent_message: string; transition: string; parallel_basis: string; part?: PartSpec | null; support: ClauseSupport[]; numbers?: NumberEvidence[]; speaker_notes?: string | null }
 export type GuidedInput = { version: 1; profile_id: AuthoringProfile; title: string; audience: string; purpose: string; governing_message: string; language: 'en' | 'ja'; brand_color?: string | null; authoring?: GuidedAuthoring | null; evidence: GuidedEvidence[]; issues?: DecisionIssue[]; slides: GuidedSlide[] }
 export type GuidedRecord = { version: 1; input: Omit<GuidedInput, 'slides'> & { slides: Omit<GuidedSlide, 'speaker_notes'>[] } }
-export type GuidedDiagnostic = { code: 'PART_TEXT_OVERFLOW' | 'PART_MISSING_GLYPHS' | 'PART_INVALID' | 'SLIDE_INVALID'; slide_id: string; preset?: string; /** JSON Pointer into the slide's part, as in support.body_paths. */ path?: string; message: string; measured_px?: number; available_px?: number }
-/** `diagnostics` is the structured form of the slide problems among `issues`; it is absent when there are none. `expression` is the mix of part presets across the input's slides, for review. */
-export type GuidedReview = { ready: boolean; issues: string[]; diagnostics?: GuidedDiagnostic[]; expression?: DeckComposition; review_required: string[]; semantic_truth_verified: false; office_visual_parity: false }
+/**
+ * One problem (or, among `warnings`, one notice) found while compiling a slide of the input. `PART_TEXT_OVERFLOW` and `PART_MISSING_GLYPHS` come from the part
+ * alone at its fixed size; `LAYOUT_TEXT_OVERFLOW` and `LAYOUT_MISSING_GLYPHS` from the layout check of the finished slide; `PART_INVALID` means the part could not be
+ * drawn (a diagram node or group outside the canvas, a line rule, comparison panels with unequal item counts); `SLIDE_INVALID` another problem of the slide.
+ * Warnings are `SOURCE_LINE_SHORTENED` and `SMALL_TEXT`.
+ */
+export type GuidedDiagnostic = { code: 'PART_TEXT_OVERFLOW' | 'PART_MISSING_GLYPHS' | 'LAYOUT_TEXT_OVERFLOW' | 'LAYOUT_MISSING_GLYPHS' | 'PART_INVALID' | 'SLIDE_INVALID' | 'SOURCE_LINE_SHORTENED' | 'SMALL_TEXT'; slide_id: string; preset?: string; /** JSON Pointer into the slide's part, as in support.body_paths. */ path?: string; /** The text the slide draws itself, when that is the text: `section`, `headline`, `source` (the source line) or `page` (the page number). */ field?: 'section' | 'headline' | 'source' | 'page'; /** For the source line, the evidence it lists: the references to shorten, or to give a `label`. */ evidence_ids?: string[]; message: string; measured_px?: number; available_px?: number }
+/** `diagnostics` is the structured form of the slide problems among `issues`; it is absent when there are none. `warnings` lists what does not stop creation; it is absent when there is nothing to say. `expression` is the mix of part presets across the input's slides, for review. */
+export type GuidedReview = { ready: boolean; issues: string[]; diagnostics?: GuidedDiagnostic[]; warnings?: GuidedDiagnostic[]; expression?: DeckComposition; review_required: string[]; semantic_truth_verified: false; office_visual_parity: false }
 export type BestPracticeGuide = { version: 1; profile_id: AuthoringProfile; title: string; language: 'en'; markdown: string; patterns: { id: string; name: string; purpose: string; capability: 'native-template' | 'composition-required' | 'guidance-only'; rule: string }[]; input_schema: unknown; automatic_patterns: string[]; semantic_truth_verified: false; limits: { slides: number; maximum_slides: number; evidence: number; issues: number; speaker_notes_scalars: number; slide_notes_scalars: number; guided_record_bytes: number }; creation: string }
 export type BestPracticeProfiles = { version: 1; profiles: { id: AuthoringProfile; title: string; language: 'en'; default_primary: string }[] }
 

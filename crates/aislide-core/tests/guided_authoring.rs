@@ -1219,18 +1219,473 @@ fn issue74_a_response_that_has_to_be_cut_says_how_much_was_left_out() {
 
 #[test]
 fn issue74_a_layout_that_does_not_fit_is_still_reported_next_to_the_slides_that_do_not_compile() {
-    let mut matrix = issue74_slide("m1", "終わり", json!({"version":1,"preset":"matrix/labeled","title":"Review","subtitle":"Decisions","data":{"kind":"matrix","rows":["Now","Next"],"columns":["A","B"],"cells":[["A\nB\nC","No"],["No","Yes"]]}}));
-    matrix["support"][0]["body_paths"] = json!(["/data/cells"]);
-    let mut input = issue74_input(vec![issue74_slide("r2", "次へ", issue74_part(&[(0, "from")])), matrix]);
-    input["authoring"] = json!({"body_font_min":28,"spacing":"relaxed","font_family":"Arial","headline_style":"keyword","ledger_notes":"summary"});
+    let matrix = |transition: &str| {
+        let mut slide = issue74_slide("m1", transition, json!({"version":1,"preset":"matrix/labeled","title":"Review","subtitle":"Decisions","data":{"kind":"matrix","rows":["Now","Next"],"columns":["A","B"],"cells":[["A\nB\nC","No"],["No","Yes"]]}}));
+        slide["support"][0]["body_paths"] = json!(["/data/cells"]);
+        slide
+    };
+    let authoring = json!({"body_font_min":28,"spacing":"relaxed","font_family":"Arial","headline_style":"keyword","ledger_notes":"summary"});
+    let mut input = issue74_input(vec![issue74_slide("r2", "次へ", issue74_part(&[(0, "from")])), matrix("終わり")]);
+    input["authoring"] = authoring.clone();
     let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
     assert_eq!(checked["ready"], false, "{checked}");
-    assert_eq!(issue74_diagnostics(&checked).iter().map(|(_, slide, path)| (slide.as_str(), path.as_deref())).collect::<Vec<_>>(), [("r2", Some("/data/rows/0/from"))], "{checked}");
+    let found = issue74_diagnostics(&checked);
+    assert_eq!(found[0], ("PART_TEXT_OVERFLOW".to_owned(), "r2".to_owned(), Some("/data/rows/0/from".to_owned())), "{checked}");
+    assert!(found.len() > 1 && found[1..].iter().all(|(code, slide, _)| code == "LAYOUT_TEXT_OVERFLOW" && slide == "m1"), "the compiled slide keeps its layout check, as diagnostics of its own: {found:?}");
     let issues: Vec<_> = checked["issues"].as_array().unwrap().iter().map(|issue| issue.as_str().unwrap()).collect();
-    assert_eq!(issues.len(), 2, "{checked}");
+    assert_eq!(issues.len(), found.len(), "{checked}");
     assert!(issues[0].starts_with("r2 / /data/rows/0/from: "), "{issues:?}");
-    assert!(issues[1].contains("guided layout does not fit") && issues[1].contains("TEXT_OVERFLOW") && issues[1].contains("m1"), "the compiled slide keeps its layout check: {issues:?}");
-    assert!(!issues[1].contains("r2"), "the slide that did not compile is not measured: {issues:?}");
+    assert!(issues[1..].iter().all(|issue| issue.starts_with("m1: matrix/labeled text ") && !issue.contains("guided layout does not fit")), "{issues:?}");
+    assert!(!issues.iter().any(|issue| issue.contains("r2") && issue.contains("does not fit on the finished slide")), "the slide that did not compile is not measured: {issues:?}");
+
+    // The problems follow the order of the slides, whether they were found in a part or on the finished slide.
+    let mut reversed = issue74_input(vec![matrix("次へ"), issue74_slide("r2", "終わり", issue74_part(&[(0, "from")]))]);
+    reversed["authoring"] = authoring;
+    let order: Vec<_> = issue74_diagnostics(&execute_request(json!({"op":"validate_guided_presentation","input":reversed})).unwrap()).into_iter().map(|(code, slide, _)| (code, slide)).collect();
+    assert!(order.len() > 1 && order[..order.len() - 1].iter().all(|(code, slide)| code == "LAYOUT_TEXT_OVERFLOW" && slide == "m1"), "{order:?}");
+    assert_eq!(order.last(), Some(&("PART_TEXT_OVERFLOW".to_owned(), "r2".to_owned())), "{order:?}");
+}
+
+const ISSUE89_REFERENCES: [(&str, &str); 5] = [
+    ("E2", "Synthetic design note A §3.1・§3.2（検証環境での実測、2026-11-06、読み取りのクエリで実行）https://example.com/docs/synthetic/design-note-a"),
+    ("E3", "Synthetic vendor documentation: Overview of the example normalization model https://example.com/docs/synthetic/overview-of-the-example-normalization-model（2026-11-06 確認）"),
+    ("E4", "Synthetic repository: Parsers/ExampleSchema/Parsers/ExampleParserVendorProduct.yaml（0.6.2）と CHANGELOG（2026-11-06 確認）"),
+    ("E5", "Synthetic known issues page https://example.com/docs/synthetic/normalization-known-issues（2026-11-07 確認）と検証環境での再確認（design note A §3.4）"),
+    ("E6", "Synthetic received document 080（データモデル概要、用語集、index のマクロと tag の一覧）"),
+];
+
+fn issue89_rows_slide(id: &str, rows: Value, evidence_ids: &[&str]) -> Value {
+    json!({"id":id,"section":"再現","headline":"判断の理由","question":"なぜか","parent_message":"governing","pattern_id":"native-part","sentence_form":"causal","parallel_basis":"理由","transition":"終わり",
+        "support":[{"clause":"判断の理由","body_paths":["/data/rows/0/label"],"evidence_ids":evidence_ids}],
+        "part":{"version":1,"preset":"list/icon-rows","title":"理由","data":{"kind":"icon_rows","rows":rows}}})
+}
+
+fn issue89_cited_input(notes: &str, labels: bool) -> Value {
+    let mut input = issue75_input();
+    for (id, reference) in ISSUE89_REFERENCES {
+        let mut entry = json!({"id":id,"kind":"source","reference":reference,"statement":"合成データ"});
+        if labels { entry["label"] = json!(format!("設計メモ {}", &id[1..])); }
+        input["evidence"].as_array_mut().unwrap().push(entry);
+    }
+    input["authoring"]["ledger_notes"] = json!(notes);
+    input["slides"] = json!([issue89_rows_slide("r2", json!([{"label":"理由 1","detail":"説明 1"},{"label":"理由 2","detail":"説明 2"}]), &["E2", "E3", "E4", "E5", "E6"])]);
+    input
+}
+
+fn source_text(created: &Value, slide: usize) -> String {
+    created["document"]["deck"]["slides"][slide]["elements"].as_array().unwrap().iter().find(|element| element["id"] == "source").unwrap()["text"].as_str().unwrap().to_owned()
+}
+
+fn find_text(value: &Value, text: &str) -> Option<Value> {
+    if value["text"] == text { return Some(value.clone()); }
+    ["elements", "children"].iter().filter_map(|key| value[key].as_array()).flatten().find_map(|child| find_text(child, text))
+}
+
+fn assert_nothing_overflows(created: &Value, context: &str) {
+    let report = execute_request(json!({"op":"measure_layout","deck":created["document"]["deck"]})).unwrap();
+    let overflowing: Vec<_> = report["measurements"].as_array().unwrap().iter().filter(|measurement| measurement["overflow"] == true).map(|measurement| measurement["element_id"].clone()).collect();
+    assert!(overflowing.is_empty(), "{context}: {overflowing:?}");
+}
+
+#[test]
+fn issue89_a_layout_that_does_not_fit_is_a_diagnostic_with_the_slide_and_the_field_to_change() {
+    let rows = json!([{"label":"理由 1","detail":"説明 1"},{"label":"理由 2","detail":"説明 2 ".repeat(20)},{"label":"理由 3","detail":"説明 3"}]);
+    let mut input = issue74_input(vec![issue89_rows_slide("r2", rows, &["E1"])]);
+    input["authoring"]["body_font_min"] = json!(30);
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"], false, "{checked}");
+    let diagnostics = checked["diagnostics"].as_array().expect("the layout check reports in diagnostics");
+    assert_eq!(diagnostics.len(), 1, "{checked}");
+    let entry = &diagnostics[0];
+    assert_eq!((entry["code"].as_str(), entry["slide_id"].as_str(), entry["path"].as_str(), entry["preset"].as_str()), (Some("LAYOUT_TEXT_OVERFLOW"), Some("r2"), Some("/data/rows/1"), Some("list/icon-rows")), "{entry}");
+    assert!(entry["measured_px"].as_u64().unwrap() > entry["available_px"].as_u64().unwrap(), "{entry}");
+    let issues: Vec<_> = checked["issues"].as_array().unwrap().iter().map(|issue| issue.as_str().unwrap()).collect();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert!(issues[0].starts_with("r2 / /data/rows/1: list/icon-rows text \"理由 2 説明 2"), "{issues:?}");
+    assert!(issues[0].contains("authoring.body_font_min"), "the way out for text that the authoring settings raised: {issues:?}");
+    assert!(!issues[0].contains("guided layout does not fit") && !issues[0].contains("guided-part") && !issues[0].contains("{\""), "no embedded JSON and no generated element ID: {issues:?}");
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue89","input":input})).unwrap_err().to_string();
+    assert!(created.contains("r2 / /data/rows/1: list/icon-rows text"), "{created}");
+
+    // The part's own title is named too, and a lower floor lets the same text fit.
+    let mut titled = input.clone();
+    titled["authoring"]["body_font_min"] = json!(40);
+    titled["slides"][0]["part"]["data"]["rows"][1]["detail"] = json!("説明");
+    let paths: Vec<_> = issue74_diagnostics(&execute_request(json!({"op":"validate_guided_presentation","input":titled})).unwrap()).into_iter().map(|(_, _, path)| path).collect();
+    assert!(paths.contains(&Some("/title".to_owned())), "{paths:?}");
+    input["authoring"]["body_font_min"] = json!(16);
+    let ready = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(ready["ready"], true, "{ready}");
+    assert!(ready.get("diagnostics").is_none(), "{ready}");
+}
+
+#[test]
+fn issue89_the_headline_overflow_is_named_by_its_field() {
+    let mut input = issue74_input(vec![issue74_slide("r1", "終わり", issue74_part(&[]))]);
+    let headline = "長い見出し".repeat(18);
+    input["slides"][0]["headline"] = json!(headline);
+    input["slides"][0]["support"][0]["clause"] = json!(headline);
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"], false, "{checked}");
+    let entry = &checked["diagnostics"][0];
+    assert_eq!((entry["code"].as_str(), entry["slide_id"].as_str(), entry["field"].as_str()), (Some("LAYOUT_TEXT_OVERFLOW"), Some("r1"), Some("headline")), "{entry}");
+    assert!(entry.get("path").is_none() && entry.get("preset").is_none(), "{entry}");
+    assert!(checked["issues"][0].as_str().unwrap().starts_with("r1 / headline: the headline does not fit on the finished slide"), "{checked}");
+}
+
+#[test]
+fn issue89_the_texts_of_a_decision_slide_are_reported_with_the_slide() {
+    let mut input = authoring_brief("consulting-decision");
+    input["issues"] = json!((1..=3).map(|index| json!({"id":format!("Q{index}"),"question":if index == 1 { "Scope approval ".repeat(6) } else { "Scope".into() },"requested_decision":"Approve pilot","criterion":"Review evidence","owner":"Owner","due":"After approval","evidence_ids":["source-a"],"analysis_slide_ids":["evidence-slide"]})).collect::<Vec<_>>());
+    let template = |id: &str, pattern: &str, headline: &str, form: &str| json!({"id":id,"section":"Decision","headline":headline,"sentence_form":form,"pattern_id":pattern,"question":"What should be approved?","parent_message":"governing","transition":"therefore","parallel_basis":"decision issue","support":[{"clause":headline,"body_paths":["/issues"],"evidence_ids":["source-a"]}],"numbers":[]});
+    input["slides"] = json!([template("summary", "C02", "Approve the pilot.", "proposal"), input["slides"][0].clone(), template("closing", "C03", "Confirm the conditions.", "conditional")]);
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"], false, "{checked}");
+    let found = issue74_diagnostics(&checked);
+    assert!(!found.is_empty() && found.iter().all(|(code, slide, path)| code == "LAYOUT_TEXT_OVERFLOW" && ["summary", "closing"].contains(&slide.as_str()) && path.is_none()), "{found:?}");
+    let issue = checked["issues"][0].as_str().unwrap();
+    assert!(issue.starts_with("summary: decision slide text \"Q1: Scope approval") && issue.contains("authoring.body_font_min"), "{issue}");
+}
+
+#[test]
+fn issue89_a_source_line_that_does_not_fit_names_the_evidence_it_lists() {
+    // With the notes off, the references are nowhere else, so the line is not shortened: the author is told which evidence is the long one.
+    let input = issue89_cited_input("none", false);
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"], false, "{checked}");
+    let entry = &checked["diagnostics"][0];
+    assert_eq!((entry["code"].as_str(), entry["slide_id"].as_str(), entry["field"].as_str()), (Some("LAYOUT_TEXT_OVERFLOW"), Some("r2"), Some("source")), "{entry}");
+    assert_eq!(entry["evidence_ids"], json!(["E2", "E3", "E4", "E5", "E6"]), "{entry}");
+    assert!(entry["measured_px"].as_u64().unwrap() > entry["available_px"].as_u64().unwrap(), "{entry}");
+    let issue = checked["issues"][0].as_str().unwrap();
+    assert!(issue.starts_with("r2 / source: the source line (evidence E2, E3, E4, E5, E6) does not fit on the finished slide") && issue.contains("short label"), "{issue}");
+    assert_eq!(checked["diagnostics"].as_array().unwrap().len(), 1, "{checked}");
+}
+
+#[test]
+fn issue93_a_long_source_line_falls_back_to_the_evidence_ids_and_the_notes_keep_the_references() {
+    for notes in ["summary", "full"] {
+        let input = issue89_cited_input(notes, false);
+        let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+        assert_eq!(checked["ready"], true, "{notes}: {checked}");
+        assert!(checked["issues"].as_array().unwrap().is_empty() && checked.get("diagnostics").is_none(), "{notes}: {checked}");
+        let warnings = checked["warnings"].as_array().expect("the shortened line is reported");
+        assert_eq!(warnings.len(), 1, "{checked}");
+        assert_eq!((warnings[0]["code"].as_str(), warnings[0]["slide_id"].as_str(), warnings[0]["field"].as_str()), (Some("SOURCE_LINE_SHORTENED"), Some("r2"), Some("source")), "{}", warnings[0]);
+        assert_eq!(warnings[0]["evidence_ids"], json!(["E2", "E3", "E4", "E5", "E6"]));
+        assert!(warnings[0]["message"].as_str().unwrap().contains("short label"), "{}", warnings[0]);
+
+        let created = execute_request(json!({"op":"create_guided_presentation","id":"issue93","input":input})).unwrap();
+        assert_eq!(source_text(&created, 0), "[E2] [E3] [E4] [E5] [E6] （詳細はノート）");
+        assert_eq!(created["validation"]["warnings"], checked["warnings"]);
+        let notes_text = created["document"]["deck"]["slides"][0]["notes"].as_str().unwrap();
+        for (id, reference) in ISSUE89_REFERENCES { assert!(notes_text.contains(reference), "{notes}: the notes keep {id} whole"); }
+        assert_nothing_overflows(&created, notes);
+        let exported = execute_request(json!({"op":"export_presentation","document":created["document"]})).unwrap();
+        execute_request(json!({"op":"open_presentation","id":"issue93-reopened","base64":exported["base64"]})).unwrap();
+    }
+    let mut english = issue89_cited_input("summary", false);
+    english["language"] = json!("en");
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue93-en","input":english})).unwrap();
+    assert_eq!(source_text(&created, 0), "[E2] [E3] [E4] [E5] [E6] (details in the notes)");
+}
+
+#[test]
+fn issue93_an_evidence_label_is_what_the_source_line_shows() {
+    let input = issue89_cited_input("summary", true);
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"], true, "{checked}");
+    assert!(checked.get("warnings").is_none() && checked.get("diagnostics").is_none(), "a label that fits is not a problem: {checked}");
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue93-label","input":input})).unwrap();
+    assert_eq!(source_text(&created, 0), "[E2] 設計メモ 2; [E3] 設計メモ 3; [E4] 設計メモ 4; [E5] 設計メモ 5; [E6] 設計メモ 6");
+    let notes_text = created["document"]["deck"]["slides"][0]["notes"].as_str().unwrap();
+    for (_, reference) in ISSUE89_REFERENCES { assert!(notes_text.contains(reference), "the notes keep the reference, not the label"); }
+    // The label also makes a line fit with the notes off, where the references have nowhere else to go and are not shortened.
+    assert_eq!(execute_request(json!({"op":"validate_guided_presentation","input":issue89_cited_input("none", true)})).unwrap()["ready"], true);
+    assert_eq!(execute_request(json!({"op":"validate_guided_presentation","input":issue89_cited_input("none", false)})).unwrap()["ready"], false);
+
+    for (label, expected) in [(json!(""), "evidence label"), (json!("a\nb"), "evidence label must be one line"), (json!("あ".repeat(61)), "evidence label"), (json!("あ".repeat(60)), "")] {
+        let mut changed = input.clone();
+        changed["evidence"][1]["label"] = label.clone();
+        let checked = execute_request(json!({"op":"validate_guided_presentation","input":changed})).unwrap();
+        if expected.is_empty() { assert_eq!(checked["ready"], true, "{checked}"); continue; }
+        assert_eq!(checked["ready"], false, "{label}: {checked}");
+        assert!(checked["issues"].as_array().unwrap().iter().any(|issue| issue.as_str().unwrap().starts_with(expected)), "{label}: {checked}");
+    }
+}
+
+fn issue92_graph(sizes: [u32; 3]) -> Value {
+    json!({"version":1,"title":"流れ",
+        "nodes":[
+            {"id":"n1","kind":"rounded_rectangle","label":"入力","detail":"合成の説明文。二行になるように少し長くする","font_size":20,"detail_font_size":15,"x":24,"y":96,"width":280,"height":150},
+            {"id":"n2","kind":"rounded_rectangle","label":"変換","detail":"合成の説明文。二行になるように少し長くする","font_size":20,"detail_font_size":16,"x":436,"y":96,"width":280,"height":150},
+            {"id":"n3","kind":"rounded_rectangle","label":"出力","detail":"合成の説明文。二行になるように少し長くする","font_size":20,"detail_font_size":16,"x":848,"y":96,"width":280,"height":150},
+            {"id":"n4","kind":"rounded_rectangle","label":"検査","detail":"合成の説明文","font_size":20,"detail_font_size":16,"x":848,"y":346,"width":280,"height":150}],
+        "edges":[
+            {"id":"e1","label":"渡す","label_font_size":sizes[0],"source":"n1","source_port":"right","target":"n2","target_port":"left"},
+            {"id":"e2","label":"渡す","label_font_size":sizes[1],"source":"n2","source_port":"right","target":"n3","target_port":"left"},
+            {"id":"e3","label":"確認","label_font_size":sizes[2],"source":"n4","source_port":"top","target":"n3","target_port":"bottom"}]})
+}
+
+fn issue92_input(graph: Value) -> Value {
+    let mut input = issue75_input();
+    input["slides"] = json!([{"id":"g1","section":"再現","headline":"処理の流れ","question":"どう流れるか","parent_message":"governing","pattern_id":"native-part","sentence_form":"explanation","parallel_basis":"処理の順","transition":"終わり",
+        "support":[{"clause":"処理の流れ","body_paths":["/data/graph/nodes/0/label"],"evidence_ids":["E1"]}],
+        "part":{"version":1,"preset":"diagram/custom","title":"流れ","data":{"kind":"diagram","graph":graph}}}]);
+    input
+}
+
+fn element_id_ending(value: &Value, suffix: &str) -> Option<String> {
+    if value["id"].as_str().is_some_and(|id| id.ends_with(suffix)) { return value["id"].as_str().map(str::to_owned); }
+    ["slides", "elements", "children"].iter().filter_map(|key| value[key].as_array()).flatten().find_map(|child| element_id_ending(child, suffix))
+}
+
+/// The font size that the advice of a SMALL_TEXT finding asks for: the number after "to about".
+fn advised_size(message: &str) -> u32 {
+    message.split("to about ").nth(1).unwrap().split(|character: char| !character.is_ascii_digit()).next().unwrap().parse().unwrap()
+}
+
+/// What the advice says about the frame that the asked-for size needs, from "That size needs {field} of at least N (it is M).": `(N, M)`.
+fn frame_needed(message: &str, field: &str) -> Option<(u32, u32)> {
+    let rest = message.split(&format!("That size needs {field} of at least ")).nth(1)?;
+    let (needed, rest) = rest.split_once(" (it is ")?;
+    Some((needed.parse().unwrap(), rest.split(')').next().unwrap().parse().unwrap()))
+}
+
+#[test]
+fn issue91_a_diagram_outside_the_canvas_is_reported_with_the_node_or_group_that_is_out() {
+    let validate = |input: &Value| execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    let mut graph = issue92_graph([18, 18, 18]);
+    assert_eq!(validate(&issue92_input(graph.clone()))["ready"], true);
+    graph["nodes"][2]["y"] = json!(24);
+    let checked = validate(&issue92_input(graph.clone()));
+    assert_eq!(checked["ready"], false, "{checked}");
+    let entry = &checked["diagnostics"][0];
+    assert_eq!((entry["code"].as_str(), entry["slide_id"].as_str(), entry["path"].as_str(), entry["preset"].as_str()), (Some("PART_INVALID"), Some("g1"), Some("/data/graph/nodes/2"), Some("diagram/custom")), "{entry}");
+    let message = entry["message"].as_str().unwrap();
+    assert!(message.contains("graph node 'n3' does not fit the 1152x512 canvas") && message.contains("y 24 is above the content top 88") && message.contains("title band"), "{message}");
+    assert!(checked["issues"][0].as_str().unwrap().starts_with("g1 / /data/graph/nodes/2: graph node 'n3'"), "{checked}");
+
+    graph["nodes"][2]["y"] = json!(96);
+    graph["groups"] = json!([{"id":"zone","label":"Zone","x":0,"y":10,"width":300,"height":200}]);
+    let group = validate(&issue92_input(graph.clone()));
+    assert_eq!(group["diagnostics"][0]["path"], "/data/graph/groups/0", "{group}");
+
+    // A diagram that is wrong in another way has no position to give.
+    graph["groups"] = json!([]);
+    graph["nodes"][0]["id"] = json!("n 1");
+    let other = validate(&issue92_input(graph));
+    assert_eq!(other["diagnostics"][0]["code"], "PART_INVALID", "{other}");
+    assert!(other["diagnostics"][0].get("path").is_none(), "{other}");
+}
+
+#[test]
+fn issue92_edge_labels_below_the_floor_are_reported_with_their_size_by_validate_create_and_preflight() {
+    let input = issue92_input(issue92_graph([16, 17, 18]));
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"], true, "a warning does not stop creation: {checked}");
+    assert!(checked["issues"].as_array().unwrap().is_empty() && checked.get("diagnostics").is_none(), "{checked}");
+    let warnings = checked["warnings"].as_array().expect("the labels below the floor are reported");
+    let shown: Vec<_> = warnings.iter().map(|warning| (warning["code"].as_str().unwrap(), warning["slide_id"].as_str().unwrap(), warning["path"].as_str().unwrap())).collect();
+    assert_eq!(shown, [("SMALL_TEXT", "g1", "/data/graph/edges/0/label_font_size"), ("SMALL_TEXT", "g1", "/data/graph/edges/1/label_font_size")], "label_font_size 18 meets the floor: {checked}");
+    let recommended = |message: &str| message.split("to about ").nth(1).unwrap().split(|character: char| !character.is_ascii_digit()).next().unwrap().parse::<u32>().unwrap();
+    for (warning, edge, size) in [(&warnings[0], "e1", 16), (&warnings[1], "e2", 17)] {
+        let message = warning["message"].as_str().unwrap();
+        assert!(message.starts_with(&format!("Edge '{edge}' of diagram 'guided-part-1': its label is drawn at ")) && message.contains("below the requested 16px floor") && message.contains(&format!("label_font_size {size}")), "{message}");
+        assert!(recommended(message) >= 17 && recommended(message) <= 20, "{message}");
+        assert_eq!(warning["preset"], "diagram/custom");
+    }
+
+    // Creation carries the same warnings, and preflight says the same about the finished slide, with the size to ask for.
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue92","input":input})).unwrap();
+    assert_eq!(created["validation"]["warnings"], checked["warnings"]);
+    let document = &created["document"];
+    let label = |edge: &str| element_id_ending(&document["deck"], &format!("-et-{edge}")).unwrap();
+    for (index, (edge, size)) in [("e1", 16), ("e2", 17)].into_iter().enumerate() {
+        let findings = small_text_findings(document, json!({"page_indices":[0]}), "g1", &label(edge));
+        assert_eq!(findings.len(), 1, "{edge}: {findings:?}");
+        assert_eq!(findings[0]["severity"], "warning");
+        let message = findings[0]["message"].as_str().unwrap();
+        assert!(message.starts_with(&format!("Edge '{edge}' of diagram 'guided-part-1': its label is drawn at ")) && message.contains(&format!("label_font_size {size}")), "{message}");
+        let advice = findings[0]["suggestions"][0].as_str().unwrap();
+        assert_eq!(recommended(advice), recommended(warnings[index]["message"].as_str().unwrap()), "validate and preflight ask for the same size");
+    }
+    assert!(small_text_findings(document, json!({"page_indices":[0]}), "g1", &label("e3")).is_empty(), "an 18px label meets the floor");
+
+    // Asking for the size that was named clears the warning.
+    let (first, second) = (recommended(warnings[0]["message"].as_str().unwrap()), recommended(warnings[1]["message"].as_str().unwrap()));
+    let fixed = issue92_input(issue92_graph([first, second, 18]));
+    let rechecked = execute_request(json!({"op":"validate_guided_presentation","input":fixed})).unwrap();
+    assert_eq!(rechecked["ready"], true, "{rechecked}");
+    assert!(rechecked.get("warnings").is_none(), "{rechecked}");
+    let recreated = execute_request(json!({"op":"create_guided_presentation","id":"issue92-fixed","input":fixed})).unwrap();
+    for edge in ["e1", "e2"] {
+        let id = element_id_ending(&recreated["document"]["deck"], &format!("-et-{edge}")).unwrap();
+        assert!(small_text_findings(&recreated["document"], json!({"page_indices":[0]}), "g1", &id).is_empty(), "{edge}");
+    }
+
+    // A floor that nothing but a bigger label can meet is also reported for labels left at their default, and the generic message has a value.
+    let mut defaulted = issue92_graph([16, 17, 18]);
+    for edge in defaulted["edges"].as_array_mut().unwrap() { edge.as_object_mut().unwrap().remove("label_font_size"); }
+    let by_default = execute_request(json!({"op":"validate_guided_presentation","input":issue92_input(defaulted)})).unwrap();
+    assert_eq!(by_default["warnings"].as_array().unwrap().len(), 3, "{by_default}");
+    assert!(by_default["warnings"][0]["message"].as_str().unwrap().contains("label_font_size 16 by default"), "{by_default}");
+}
+
+#[test]
+fn issue92_group_headings_are_reported_like_edge_labels() {
+    let graph = |header: Option<u32>| {
+        let mut group = json!({"id":"zone","label":"境界","x":24,"y":24,"width":1104,"height":440,"padding":16,"header_height":40});
+        if let Some(size) = header { group["header_font_size"] = json!(size); }
+        json!({"version":1,"title":"流れ","show_title":false,"groups":[group],
+            "nodes":[{"id":"a","label":"入力","x":64,"y":100,"width":240,"height":120,"group":"zone"},{"id":"b","label":"出力","x":760,"y":100,"width":240,"height":120,"group":"zone"}],
+            "edges":[{"id":"next","source":"a","target":"b"}]})
+    };
+    // A heading at 16px or at the default 18px meets the 16px floor; 14px does not.
+    for header in [None, Some(16)] {
+        let checked = execute_request(json!({"op":"validate_guided_presentation","input":issue92_input(graph(header))})).unwrap();
+        assert_eq!(checked["ready"], true, "{header:?}: {checked}");
+        assert!(checked.get("warnings").is_none(), "{header:?}: {checked}");
+    }
+    let input = issue92_input(graph(Some(14)));
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"], true, "a warning does not stop creation: {checked}");
+    let warnings = checked["warnings"].as_array().expect("the heading below the floor is reported");
+    assert_eq!(warnings.len(), 1, "{checked}");
+    assert_eq!((warnings[0]["code"].as_str(), warnings[0]["path"].as_str(), warnings[0]["slide_id"].as_str()), (Some("SMALL_TEXT"), Some("/data/graph/groups/0/header_font_size"), Some("g1")), "{}", warnings[0]);
+    let message = warnings[0]["message"].as_str().unwrap();
+    assert!(message.starts_with("Group 'zone' of diagram 'guided-part-1': its heading is drawn at 14.0px, below the requested 16px floor (header_font_size 14, "), "{message}");
+    assert!(message.contains("to about 16"), "the size to ask for: {message}");
+    assert!(frame_needed(message, "header_height").is_none(), "a band of 40px holds a 16px heading, so the advice leaves it out: {message}");
+
+    // Preflight says the same about the finished slide.
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue92-heading","input":input})).unwrap();
+    assert_eq!(created["validation"]["warnings"], checked["warnings"]);
+    let heading = element_id_ending(&created["document"]["deck"], "-g-zone").unwrap();
+    let findings = small_text_findings(&created["document"], json!({"page_indices":[0]}), "g1", &heading);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0]["message"].as_str().unwrap().starts_with("Group 'zone' of diagram 'guided-part-1': its heading is drawn at 14.0px"), "{}", findings[0]);
+    assert!(findings[0]["suggestions"][0].as_str().unwrap().contains("Set header_font_size on group 'zone' to about 16"), "{}", findings[0]);
+}
+
+#[test]
+fn issue92_the_advice_for_a_heading_or_a_badge_names_the_frame_that_its_size_needs() {
+    let validate = |input: &Value| execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+
+    // A heading sits in the header band of its group, and `validate` rejects a font that the band cannot hold.
+    let heading = |size: u32, band: u32| {
+        let graph = json!({"version":1,"title":"流れ","show_title":false,
+            "groups":[{"id":"zone","label":"境界","x":24,"y":24,"width":1104,"height":440,"padding":16,"header_height":band,"header_font_size":size}],
+            "nodes":[{"id":"a","label":"入力","x":64,"y":100,"width":240,"height":120,"group":"zone"},{"id":"b","label":"出力","x":760,"y":100,"width":240,"height":120,"group":"zone"}],
+            "edges":[{"id":"next","source":"a","target":"b"}]});
+        issue92_input(graph)
+    };
+    let checked = validate(&heading(14, 30));
+    assert_eq!(checked["ready"], true, "{checked}");
+    assert_eq!(checked["warnings"].as_array().unwrap().len(), 1, "{checked}");
+    let message = checked["warnings"][0]["message"].as_str().unwrap();
+    let size = advised_size(message);
+    let band = (f64::from(size) * 1.25 + 12.0).ceil() as u32;
+    assert!(band > 30, "the test needs a band that the asked-for size outgrows: {message}");
+    assert_eq!(frame_needed(message, "header_height"), Some((band, 30)), "{message}");
+
+    let alone = validate(&heading(size, 30));
+    assert_eq!(alone["ready"], false, "the size alone is rejected, which is why the advice names the band: {alone}");
+    assert_eq!(alone["diagnostics"][0]["code"], "PART_INVALID", "{alone}");
+    assert!(alone["diagnostics"][0]["message"].as_str().unwrap().contains("padding/header"), "{alone}");
+    let both = validate(&heading(size, band));
+    assert_eq!(both["ready"], true, "{both}");
+    assert!(both.get("warnings").is_none(), "the size and the band that the advice names leave nothing below the floor: {both}");
+
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue92-band","input":heading(14, 30)})).unwrap();
+    let id = element_id_ending(&created["document"]["deck"], "-g-zone").unwrap();
+    let findings = small_text_findings(&created["document"], json!({"page_indices":[0]}), "g1", &id);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0]["suggestions"][0].as_str().unwrap().contains(&format!("That size needs header_height of at least {band} (it is 30).")), "{}", findings[0]);
+
+    // A badge is a disc with the number in it. `validate` holds the font to the size of the badge, and the layout check of the finished slide asks
+    // for more, because the text insets of the shape do not scale with the diagram, so the advice names what both accept.
+    let badge = |size: u32, font: Option<u32>| {
+        let mut graph = issue92_graph([18, 18, 18]);
+        graph["edges"][0]["badge"] = json!({"number":12,"position":0.5,"size":size});
+        if let Some(font) = font { graph["edges"][0]["badge"]["font_size"] = json!(font); }
+        let mut input = issue92_input(graph);
+        input["slides"][0]["numbers"] = json!([
+            {"path":"/data/graph/edges/0/badge/number","value":12,"evidence_id":"E1"},
+            {"path":"/data/graph/edges/0/badge/position","value":0.5,"evidence_id":"E1"},
+            {"path":"/data/graph/edges/0/badge/size","value":size,"evidence_id":"E1"}]);
+        input
+    };
+    let checked = validate(&badge(30, None));
+    assert_eq!(checked["ready"], true, "{checked}");
+    assert_eq!(checked["warnings"].as_array().unwrap().len(), 1, "{checked}");
+    assert_eq!(checked["warnings"][0]["path"], "/data/graph/edges/0/badge/font_size", "{checked}");
+    let message = checked["warnings"][0]["message"].as_str().unwrap();
+    assert!(message.starts_with("Edge 'e1' of diagram 'guided-part-1': the number in its badge is drawn at "), "{message}");
+    let size = advised_size(message);
+    let (disc, held) = frame_needed(message, "badge.size").unwrap_or_else(|| panic!("{message}"));
+    assert_eq!(held, 30, "{message}");
+    assert!(f64::from(disc) >= (2.0 * f64::from(size) * 0.65 + 12.0).ceil() && disc <= 64, "two digits and the text insets of the shape: {message}");
+
+    let alone = validate(&badge(30, Some(size)));
+    assert_eq!(alone["ready"], false, "the size alone is rejected, which is why the advice names the badge size: {alone}");
+    assert!(alone["diagnostics"][0]["message"].as_str().unwrap().contains("badge"), "{alone}");
+    let both = validate(&badge(disc, Some(size)));
+    assert_eq!(both["ready"], true, "{both}");
+    assert!(both.get("warnings").is_none(), "the size and the badge size that the advice names leave nothing below the floor: {both}");
+}
+
+fn issue90_slide(id: &str, from_label: &str, to_label: &str, transition: &str) -> Value {
+    let mut slide = issue74_slide(id, transition, json!({"version":1,"preset":"before-after/shift","title":"対応","data":{"kind":"shift_rows","from_label":from_label,"to_label":to_label,
+        "rows":[{"from":"旧 1","to":"新 1","detail":"説明"},{"from":"旧 2","to":"新 2","detail":"説明"}]}}));
+    slide["support"][0]["body_paths"] = json!(["/data/rows/0/to"]);
+    slide
+}
+
+#[test]
+fn issue90_shift_column_headings_follow_the_text_size_that_authoring_sets() {
+    let slides = ["Vendor（ABC）", "Source（XYZ）", "旧方式（第一版）"].iter().enumerate()
+        .map(|(index, label)| issue90_slide(&format!("r{}", index + 1), label, "B", if index == 2 { "終わり" } else { "次へ" })).collect::<Vec<_>>();
+    for floor in [None, Some(20), Some(24), Some(30)] {
+        let mut input = issue74_input(slides.clone());
+        if let Some(floor) = floor { input["authoring"]["body_font_min"] = json!(floor); }
+        let created = execute_request(json!({"op":"create_guided_presentation","id":"issue90","input":input})).unwrap_or_else(|error| panic!("{floor:?}: {error}"));
+        assert_eq!(created["validation"]["ready"], true, "{floor:?}");
+        assert_nothing_overflows(&created, &format!("{floor:?}"));
+    }
+
+    // A column heading that wraps gets a taller pill, and a label as long as the schema allows still fits.
+    let long = "あ".repeat(24);
+    let input = issue74_input(vec![issue90_slide("r1", &long, &long, "終わり")]);
+    let height_at = |floor: u32| -> f64 {
+        let mut input = input.clone();
+        input["authoring"]["body_font_min"] = json!(floor);
+        let created = execute_request(json!({"op":"create_guided_presentation","id":"issue90-long","input":input})).unwrap_or_else(|error| panic!("{floor}: {error}"));
+        assert_nothing_overflows(&created, &format!("{floor}"));
+        find_text(&created["document"]["deck"]["slides"][0], &long).unwrap()["height"].as_f64().unwrap()
+    };
+    let (small, large) = (height_at(16), height_at(30));
+    assert!(large > small * 1.5, "the pill grows with the raised text: {small} -> {large}");
+
+    // A heading of two lines is two paragraphs: the pill holds both and the gap that authoring puts between them.
+    for floor in [16, 24, 30] {
+        let mut input = issue74_input(vec![issue90_slide("r1", "旧方式\n第一版", "新方式\n第二版", "終わり")]);
+        input["authoring"]["body_font_min"] = json!(floor);
+        let created = execute_request(json!({"op":"create_guided_presentation","id":"issue90-lines","input":input})).unwrap_or_else(|error| panic!("{floor}: {error}"));
+        assert_nothing_overflows(&created, &format!("two lines at {floor}"));
+    }
+}
+
+#[test]
+fn issue90_a_part_that_guided_creation_does_not_raise_keeps_its_heading_pill() {
+    let mut input = issue74_input(vec![issue90_slide("r1", "Vendor（ABC）", "B", "終わり")]);
+    input["authoring"] = json!({"headline_style":"keyword","ledger_notes":"summary"});
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue90-legacy","input":input})).unwrap();
+    assert_eq!(created["validation"]["ready"], true);
+    let heading = find_text(&created["document"]["deck"]["slides"][0], "Vendor（ABC）").unwrap();
+    assert!(heading["height"].as_f64().unwrap() < 28.0 + 0.001 && heading["height"].as_f64().unwrap() > 20.0, "the legacy pill is 28px in the part, scaled with it: {heading}");
+    let direct = execute_request(json!({"op":"create_part","id":"direct","spec":input["slides"][0]["part"]})).unwrap();
+    assert_eq!(find_text(&direct, "Vendor（ABC）").unwrap()["height"], 28.0, "{direct}");
 }
 
 #[test]
@@ -1540,7 +1995,8 @@ fn guided_authoring_rejects_rich_table_overflow_without_shrinking() {
     input["slides"][0]["support"][0]["body_paths"]=json!(["/data/cells"]);
     let checked=execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
     assert_eq!(checked["ready"],false,"relaxed cell typography must be measured: {checked}");
-    assert!(checked["issues"].to_string().contains("TEXT_OVERFLOW"),"{checked}");
+    assert!(checked["diagnostics"].to_string().contains("LAYOUT_TEXT_OVERFLOW"),"{checked}");
+    assert!(checked["issues"].as_array().unwrap().iter().any(|issue|issue.as_str().unwrap().contains("matrix/labeled text \"A B C\"")),"the cell is named by what it says: {checked}");
     assert!(execute_request(json!({"op":"create_guided_presentation","id":"overflow","input":input})).is_err());
 }
 

@@ -4481,6 +4481,216 @@ test('MCP guided ledger notes separate presenter text and preserve native creati
   } finally { await client.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+// The input of issue 94 (synthetic): comparison panels with two and three items, and an icon column whose detail has four lines.
+function issue94Input() {
+  return {
+    version: 1, title: 'Repro', language: 'ja', profile_id: 'technical-explainer', audience: '検証担当', purpose: '不具合の再現', governing_message: '合成データで不具合を再現する',
+    authoring: { context: 'reading', headline_style: 'keyword', ledger_notes: 'summary' },
+    evidence: [{ id: 'E1', kind: 'source', reference: 'synthetic', statement: '合成データ' }],
+    slides: [
+      { id: 'r1', section: '再現', headline: '左右の比較', question: '何が違うか', parent_message: 'governing', pattern_id: 'native-part', sentence_form: 'comparison', parallel_basis: '方式', transition: '次へ',
+        support: [{ clause: '左右の比較', body_paths: ['/data/panels/0/items/0/text'], evidence_ids: ['E1'] }],
+        part: { version: 1, preset: 'contrast/panels', title: '比較', data: { kind: 'comparison_panels', panels: [
+          { label: '方式 A', items: [{ text: '項目 1' }, { text: '項目 2' }] },
+          { label: '方式 B', items: [{ text: '項目 1' }, { text: '項目 2' }, { text: '項目 3' }] }] } } },
+      { id: 'r2', section: '再現', headline: '三つの区分', question: '何があるか', parent_message: 'governing', pattern_id: 'native-part', sentence_form: 'explanation', parallel_basis: '区分', transition: '終わり',
+        support: [{ clause: '三つの区分', body_paths: ['/data/items/0/label'], evidence_ids: ['E1'] }],
+        part: { version: 1, preset: 'list-horizontal/icon-columns', title: '区分', data: { kind: 'icon_columns', items: [
+          { label: '区分 1', detail: '製品 A\n製品 B\n製品 C\n製品 D' }, { label: '区分 2', detail: '製品 E' }] } } },
+    ],
+  };
+}
+
+test('issue 94 the line rules and the paired panel counts are published, and a changed shape is not accepted by the strict schema only', async () => {
+  await feedbackMcpFixture(async ({ registrations }) => {
+    const publish = name => z.toJSONSchema(registrations.get(name).config.inputSchema, { io: 'input' });
+    const open = (root, schema) => resolveSchemaRef(root, schema);
+    const variant = (root, schema, kind) => (open(root, schema).anyOf ?? open(root, schema).oneOf).map(branch => open(root, branch)).find(branch => branch.properties?.kind?.const === kind);
+    const part = publish('create_part');
+    const data = open(part, part.properties.spec.properties.data);
+    const items = (kind, key = 'items') => open(part, open(part, variant(part, data, kind).properties[key]).items);
+    const text = schema => { const value = open(part, schema); return value.anyOf ? open(part, value.anyOf.find(branch => branch.type !== 'null')) : value; };
+    const oneLine = '^[^\\r\\n]*$';
+    const threeLines = '^[^\\r\\n]*(\\n[^\\r\\n]*){0,2}$';
+    assert.equal(text(items('icon_rows', 'rows').properties.detail).pattern, threeLines);
+    assert.equal(text(items('icon_columns').properties.detail).pattern, threeLines);
+    assert.equal(text(items('icon_columns').properties.detail).maxLength, 200);
+    assert.equal(text(items('fact_columns').properties.value).pattern, oneLine);
+    assert.equal(text(items('agenda').properties.meta).pattern, oneLine);
+    assert.equal(text(items('agenda').properties.meta).maxLength, 16);
+    assert.match(open(part, variant(part, data, 'comparison_panels').properties.panels).description, /same number of items/);
+
+    // The patterns say what the rules say: no CR, at most three LF-separated lines, and none for a line.
+    const detail = new RegExp(threeLines);
+    const line = new RegExp(oneLine);
+    const strictRow = detail => registrations.get('create_part').config.inputSchema.safeParse({ id: 'part', spec: { version: 1, preset: 'list/icon-rows', title: 'T', data: { kind: 'icon_rows', rows: [{ label: 'A', detail }, { label: 'B' }] } } }).success;
+    const strictFact = value => registrations.get('create_part').config.inputSchema.safeParse({ id: 'part', spec: { version: 1, preset: 'list-horizontal/fact-columns', title: 'T', data: { kind: 'fact_columns', items: [{ value, label: 'A' }, { value: '2', label: 'B' }] } } }).success;
+    for (const value of ['', 'a', 'a\nb\nc', 'a\nb\nc\nd', 'a\r\nb', 'a\rb', 'a\n', 'a\nb\n', 'a\nb\nc\n', '\n\n', '\n\n\n']) {
+      assert.equal(detail.test(value), strictRow(value), `three lines: ${JSON.stringify(value)}`);
+      // A fact value is required, so its lines are compared on text that is not blank.
+      assert.equal(line.test(`x${value}`), strictFact(`x${value}`), `one line: ${JSON.stringify(`x${value}`)}`);
+    }
+
+    const guided = publish('validate_guided_presentation');
+    const label = open(guided, open(guided, open(guided, guided.properties.input).properties.evidence).items).properties.label;
+    assert.deepEqual([text(label).minLength, text(label).maxLength, text(label).pattern], [1, 60, oneLine]);
+    assert.match(label.description ?? text(label).description, /source line/);
+    // The tool that checks accepts a violation, the tools that create and edit do not, and what is published is the same.
+    assert.deepEqual(publish('create_guided_presentation').properties.input, guided.properties.input);
+    const violating = issue94Input();
+    assert.equal(registrations.get('validate_guided_presentation').config.inputSchema.safeParse({ input: violating }).success, true);
+    for (const name of ['create_guided_presentation']) assert.equal(registrations.get(name).config.inputSchema.safeParse({ input: violating }).success, false, name);
+    assert.equal(registrations.get('create_part').config.inputSchema.safeParse({ id: 'part', spec: violating.slides[0].part }).success, false);
+    // A rule is still not a way around what is structural.
+    const broken = issue94Input();
+    broken.slides[1].part.data.items[1].label = '';
+    assert.equal(registrations.get('validate_guided_presentation').config.inputSchema.safeParse({ input: broken }).success, false);
+
+    const graph = publish('create_graph');
+    const node = open(graph, open(graph, graph.properties.spec.properties.nodes).items);
+    assert.match(node.properties.y.description, /title band.*show_title is false.*512/);
+    assert.match(node.properties.x.description, /1152/);
+  });
+});
+
+test('issue 94 validate_guided_presentation reports a line rule or unpaired panels as diagnostics with their path, and create rejects them', async () => {
+  const client = new Client({ name: 'issue94-rules', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const validate = async input => {
+    const result = await client.callTool({ name: 'validate_guided_presentation', arguments: { input } });
+    assert.ok(!result.isError, JSON.stringify(result.content));
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const input = issue94Input();
+    // An independent problem of the same input is still found: r2 says less than its headline does.
+    input.slides[1].support[0].clause = '三つ';
+    const review = await validate(input);
+    assert.equal(review.ready, false);
+    const parts = review.diagnostics.filter(diagnostic => diagnostic.code === 'PART_INVALID');
+    assert.deepEqual(parts.map(({ slide_id, preset, path }) => ({ slide_id, preset, path })), [
+      { slide_id: 'r1', preset: 'contrast/panels', path: '/data/panels/1/items' },
+      { slide_id: 'r2', preset: 'list-horizontal/icon-columns', path: '/data/items/0/detail' },
+    ], JSON.stringify(review));
+    assert.equal(parts[0].message, 'Comparison panels require paired row counts');
+    assert.equal(parts[1].message, 'Icon column detail allows at most three LF-separated lines');
+    assert.ok(review.issues.includes('r1 / /data/panels/1/items: Comparison panels require paired row counts'), JSON.stringify(review.issues));
+    assert.ok(review.issues.includes('r2 / /data/items/0/detail: Icon column detail allows at most three LF-separated lines'), JSON.stringify(review.issues));
+    assert.ok(review.issues.some(issue => issue.startsWith('r2: ordered support clauses')), `the checks of the outline still run: ${JSON.stringify(review.issues)}`);
+    assert.equal(review.issues.filter(issue => /paired row counts|three LF-separated lines|three lines/.test(issue)).length, 2, `core says the same thing a second time: ${JSON.stringify(review.issues)}`);
+    assert.equal(review.diagnostics.length, parts.length, JSON.stringify(review.diagnostics));
+    // The premise of the above: core meets the same two problems, names only the slides, and words them as mcp.mjs expects, so that they are not listed twice.
+    const { requestCore } = await import('./core-client.mjs');
+    const raw = await requestCore({ op: 'validate_guided_presentation', input });
+    const named = raw.diagnostics.filter(diagnostic => diagnostic.code === 'PART_INVALID');
+    assert.deepEqual(named.map(diagnostic => [diagnostic.slide_id, diagnostic.path]), [['r1', undefined], ['r2', undefined]], JSON.stringify(raw.diagnostics));
+    for (const diagnostic of named) assert.match(diagnostic.message, /must use LF line breaks|allows at most three lines|must be one line|require paired row counts/);
+
+    // Every violation of a part is listed, not only the first one core meets, and a one-line field says which one.
+    const several = issue94Input();
+    several.slides[1].part = { version: 1, preset: 'list-horizontal/fact-columns', title: '値', data: { kind: 'fact_columns', items: [{ value: '1\n2', label: '区分 1', detail: 'a\nb\nc\nd' }, { value: '3', label: '区分 2' }] } };
+    several.slides[1].support[0].body_paths = ['/data/items/0/label'];
+    const listed = await validate(several);
+    assert.deepEqual(listed.diagnostics.filter(diagnostic => diagnostic.slide_id === 'r2').map(diagnostic => [diagnostic.path, diagnostic.message]), [
+      ['/data/items/0/value', 'Fact value must be one line'],
+      ['/data/items/0/detail', 'Fact detail allows at most three LF-separated lines'],
+    ], JSON.stringify(listed));
+
+    // Creation does not accept them: the strict input is what it was.
+    const created = await client.callTool({ name: 'create_guided_presentation', arguments: { input: issue94Input() } });
+    assert.equal(created.isError, true);
+    assert.match(created.content[0].text, /paired row counts|three LF-separated lines/);
+
+    // Once the input obeys the rules it is as ready as before, and nothing of the review changes.
+    const fixed = issue94Input();
+    fixed.slides[0].part.data.panels[1].items.pop();
+    fixed.slides[1].part.data.items[0].detail = '製品 A\n製品 B\n製品 C';
+    const ready = await validate(fixed);
+    assert.equal(ready.ready, true, JSON.stringify(ready));
+    assert.equal(ready.diagnostics, undefined);
+    assert.deepEqual(ready.issues, []);
+  } finally { await client.close(); }
+});
+
+test('issue 94 the diagnostics of the rules are listed in the order of the slides and counted with those that core left out', async () => {
+  await feedbackMcpFixture(async ({ call, fixture }) => {
+    const base = { review_required: [], semantic_truth_verified: false, office_visual_parity: false };
+    const sentence = ({ slide_id, path, message }) => `${slide_id}${path ? ` / ${path}` : ''}: ${message}`;
+    const own = [
+      { code: 'PART_INVALID', slide_id: 'r1', preset: 'contrast/panels', message: 'comparison panels require paired row counts' },
+      { code: 'PART_INVALID', slide_id: 'r2', preset: 'list-horizontal/icon-columns', message: 'a problem that the rules do not cover' },
+    ];
+    fixture.onRequest = request => request.op === 'validate_guided_presentation'
+      ? { ...base, ready: false, issues: ['r2: ordered support clauses must reconstruct the whole headline', ...own.map(sentence), '7 more problems in the slides are not listed; fix the listed ones and validate again'], diagnostics: own }
+      : { ready: true, op: request.op };
+    const review = await call('validate_guided_presentation', { input: issue94Input() });
+    assert.equal(review.ready, false);
+    // Core's sentence for a rule is replaced by the one with the path; a problem that is not a rule stays where its slide is.
+    assert.deepEqual(review.diagnostics.map(({ slide_id, path }) => [slide_id, path ?? null]), [['r1', '/data/panels/1/items'], ['r2', null], ['r2', '/data/items/0/detail']]);
+    assert.deepEqual(review.issues, [
+      'r2: ordered support clauses must reconstruct the whole headline',
+      'r1 / /data/panels/1/items: Comparison panels require paired row counts',
+      'r2: a problem that the rules do not cover',
+      'r2 / /data/items/0/detail: Icon column detail allows at most three LF-separated lines',
+      '7 more problems in the slides are not listed; fix the listed ones and validate again',
+    ]);
+
+    // At most 200 are listed, whoever found them, and what is cut is counted together with what core cut.
+    const many = Array.from({ length: 200 }, (_, index) => ({ code: 'PART_TEXT_OVERFLOW', slide_id: 'r2', preset: 'list-horizontal/icon-columns', path: `/data/items/${index % 2}/label`, message: `text ${index}`, measured_px: 90, available_px: 80 }));
+    fixture.onRequest = () => ({ ...base, ready: false, issues: [...many.map(sentence), '3 more problems in the slides are not listed; fix the listed ones and validate again'], diagnostics: many });
+    const cut = await call('validate_guided_presentation', { input: issue94Input() });
+    assert.equal(cut.diagnostics.length, 200);
+    assert.equal(cut.diagnostics[0].slide_id, 'r1', 'the slide that comes first comes first');
+    assert.deepEqual(cut.issues.slice(0, 200), cut.diagnostics.map(sentence), 'every sentence has its diagnostic');
+    assert.equal(cut.issues.length, 201);
+    assert.equal(cut.issues.at(-1), '5 more problems in the slides are not listed; fix the listed ones and validate again');
+  });
+});
+
+test('issue 93 an evidence label is published and shown on the source line, and a label that is not one line is reported', async () => {
+  const client = new Client({ name: 'issue93-label', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full'], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, input) => {
+    const result = await client.callTool({ name, arguments: { input } });
+    return { result, body: result.isError ? undefined : JSON.parse(result.content[0].text) };
+  };
+  try {
+    await client.connect(transport);
+    const input = issue94Input();
+    input.slides = [input.slides[1]];
+    input.slides[0].part.data.items[0].detail = '製品 A';
+    input.slides[0].transition = '終わり';
+    input.evidence = [{ id: 'E1', kind: 'source', reference: 'Synthetic design note A https://example.com/docs/synthetic/design-note-a '.repeat(8).trim(), label: '設計メモ A', statement: '合成データ' }];
+    const review = (await call('validate_guided_presentation', input)).body;
+    assert.equal(review.ready, true, JSON.stringify(review));
+    assert.equal(review.warnings, undefined, 'the label is short enough: the line does not need to fall back');
+    const created = await call('create_guided_presentation', input);
+    assert.ok(!created.result.isError, JSON.stringify(created.result.content));
+    const document = await (async () => {
+      const { deck_id } = created.body;
+      const fetched = await client.callTool({ name: 'get_document', arguments: { deck_id } });
+      return JSON.parse(fetched.content[0].text);
+    })();
+    assert.equal(document.deck.slides[0].elements.find(element => element.id === 'source').text, '[E1] 設計メモ A');
+
+    // Without the label the same reference does not fit, and the review says what happened.
+    delete input.evidence[0].label;
+    const shortened = (await call('validate_guided_presentation', input)).body;
+    assert.equal(shortened.ready, true, JSON.stringify(shortened));
+    assert.deepEqual(shortened.warnings.map(({ code, slide_id, field, evidence_ids }) => ({ code, slide_id, field, evidence_ids })), [{ code: 'SOURCE_LINE_SHORTENED', slide_id: 'r2', field: 'source', evidence_ids: ['E1'] }]);
+
+    // A label on two lines is the author's to correct: it is a problem of the input, reported as one, not a refusal of the call.
+    input.evidence[0].label = '設計\nメモ';
+    const multiline = (await call('validate_guided_presentation', input)).body;
+    assert.equal(multiline.ready, false);
+    assert.ok(multiline.issues.includes('evidence label must be one line'), JSON.stringify(multiline.issues));
+    assert.equal((await call('create_guided_presentation', input)).result.isError, true);
+    input.evidence[0].label = 'x'.repeat(61);
+    assert.equal((await call('validate_guided_presentation', input)).result.isError, true, 'the length is part of the structure');
+  } finally { await client.close(); }
+});
+
 test('P0 MCP previews return bounded images without changing documents or writing files', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-preview-mcp-'));
   const client = new Client({ name: 'preview-test', version: '1.0.0' });
