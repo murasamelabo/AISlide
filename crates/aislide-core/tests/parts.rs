@@ -16,6 +16,33 @@ fn open_list_spec(preset: &str) -> Value {
 }
 
 #[test]
+fn issue95_set_groups_keep_one_row_pitch_so_the_nth_item_of_every_column_is_on_one_line() {
+    let items = |count: usize, prefix: &str| (1..=count).map(|index| format!("{prefix}{index}")).collect::<Vec<_>>();
+    for preset in ["list-set/balanced", "list-set/labeled"] {
+        let spec = json!({"version":1,"preset":preset,"title":"Groups","data":{"kind":"groups","groups":[
+            {"label":"One","items":items(4, "a")},{"label":"Two","items":items(3, "b")},{"label":"Three","items":items(2, "c")}]}});
+        let element = execute_request(json!({"op":"create_part","id":"groups","spec":spec})).unwrap();
+        let children = element["children"].as_array().unwrap();
+        let top_of = |text: &str| children.iter().find(|child| child["text"] == text).unwrap()["y"].as_f64().unwrap();
+        for row in 1..=4 {
+            let tops: Vec<f64> = [("a", 4), ("b", 3), ("c", 2)].iter().filter(|(_, count)| row <= *count).map(|(prefix, _)| top_of(&format!("{prefix}{row}"))).collect();
+            assert!(tops.windows(2).all(|pair| (pair[0] - pair[1]).abs() < 1e-9), "{preset}: item {row} is on one line across the columns: {tops:?}");
+        }
+        // The pitch comes from the longest column, so a shorter column ends early instead of spreading its items out.
+        let pitch = top_of("a2") - top_of("a1");
+        assert!((top_of("c2") - top_of("c1") - pitch).abs() < 1e-9, "{preset}");
+        assert!(top_of("c2") < top_of("a4"), "{preset}");
+    }
+    // Columns with as many items as each other are drawn as before.
+    let even = json!({"version":1,"preset":"list-set/balanced","title":"Groups","data":{"kind":"groups","groups":[
+        {"label":"One","items":items(3, "a")},{"label":"Two","items":items(3, "b")}]}});
+    let element = execute_request(json!({"op":"create_part","id":"groups","spec":even})).unwrap();
+    let children = element["children"].as_array().unwrap();
+    let top = |text: &str| children.iter().find(|child| child["text"] == text).unwrap()["y"].as_f64().unwrap();
+    assert!((top("a2") - top("a1") - (400.0 - 72.0) / 3.0).abs() < 1e-9, "{}", top("a2") - top("a1"));
+}
+
+#[test]
 fn comparison_panels_are_deterministic_native_columns_with_meaningful_icons() {
     let icon = execute_request(json!({"op":"create_graph_icon","base64":STANDARD.encode(r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect x="4" y="4" width="16" height="16" fill="teal"/></svg>"#),"mime_type":"image/svg+xml","alt":"Synthetic indicator"})).unwrap();
     let spec = json!({"version":1,"preset":"contrast/panels","title":"Synthetic comparison","data":{"kind":"comparison_panels","transition":true,"panels":[
