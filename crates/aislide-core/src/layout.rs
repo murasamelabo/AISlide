@@ -273,12 +273,17 @@ pub(crate) fn fit_part_text(elements: &mut [Element], theme: &Theme) -> Result<(
 }
 
 pub(crate) fn fit_part_text_with_small_annotations(elements: &mut [Element], theme: &Theme, small_annotations: &BTreeSet<String>) -> Result<()> {
+    fit_part_text_except(elements, theme, small_annotations, &BTreeSet::new())
+}
+
+pub(crate) fn fit_part_text_except(elements: &mut [Element], theme: &Theme, small_annotations: &BTreeSet<String>, skip_ids: &BTreeSet<String>) -> Result<()> {
     let mut fonts=FONTS.get_or_init(||Mutex::new(crate::fonts::system())).lock().map_err(|_|Error::Invalid("font measurement state unavailable".into()))?;
     if fonts.db().faces().next().is_none() {return Err(Error::Unsupported("installed fonts are required for part fitting".into()));}
-    fn fit(fonts:&mut FontSystem,elements:&mut [Element],theme:&Theme,small_annotations:&BTreeSet<String>)->Result<()> {
+    fn fit(fonts:&mut FontSystem,elements:&mut [Element],theme:&Theme,small_annotations:&BTreeSet<String>,skip_ids:&BTreeSet<String>)->Result<()> {
         for element in elements {
             match element {
                 Element::Text {id,text,width,height,font_size,bold,format,..} | Element::Shape {id,text,width,height,font_size,bold,format,..} => {
+                    if skip_ids.contains(id) {continue;}
                     let mut size=*font_size;
                     let minimum=if small_annotations.contains(id) {8.0} else {12.0};
                     let bounds = if format.padding.is_some() { format.content_frame(*width, *height, false) } else { [0.0, 0.0, *width, *height] };
@@ -290,13 +295,13 @@ pub(crate) fn fit_part_text_with_small_annotations(elements: &mut [Element], the
                         if size<minimum {return Err(Error::Invalid(format!("part text {id} does not fit at {minimum}px; shorten the label or reduce item count")));}
                     }
                 }
-                Element::Group {children,..} => fit(fonts,children,theme,small_annotations)?,
+                Element::Group {children,..} => fit(fonts,children,theme,small_annotations,skip_ids)?,
                 _ => {}
             }
         }
         Ok(())
     }
-    fit(&mut fonts,elements,theme,small_annotations)
+    fit(&mut fonts,elements,theme,small_annotations,skip_ids)
 }
 
 #[cfg(test)]

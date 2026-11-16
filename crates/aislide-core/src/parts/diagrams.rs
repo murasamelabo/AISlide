@@ -369,7 +369,26 @@ fn groups(drawing: &mut Drawing, category: &str, variant: usize, data: &PartData
 
 fn matrix(drawing: &mut Drawing, variant: usize, data: &PartData) -> Result<()> {
     let PartData::Matrix { rows,columns,cells,corner_label }=data else {return Err(Error::Invalid("matrix data required".into()));};
-    if variant==2 {let mut table=vec![std::iter::once(corner_label.clone()).chain(columns.iter().cloned()).collect::<Vec<_>>()];for (label,cells) in rows.iter().zip(cells) {table.push(std::iter::once(label.clone()).chain(cells.iter().cloned()).collect());} drawing.elements.push(Element::Table { id:drawing.id(),x:32.0,y:110.0,width:1088.0,height:350.0,rows:table,font_size:20.0,format:Default::default() });return Ok(());}
+    if variant==2 {
+        let mut table=vec![std::iter::once(corner_label.clone()).chain(columns.iter().cloned()).collect::<Vec<_>>()];
+        for (label,cells) in rows.iter().zip(cells) {table.push(std::iter::once(label.clone()).chain(cells.iter().cloned()).collect());}
+        let id=drawing.id();
+        drawing.name_at(format!("{id}[1,1]"),"table[1,1] (corner_label)".into(),"/data/corner_label".into());
+        for index in 0..columns.len() {
+            let column=index+2;
+            drawing.name_at(format!("{id}[1,{column}]"),format!("table[1,{column}] (columns[{index}])"),format!("/data/columns/{index}"));
+        }
+        for (row_index,row_cells) in cells.iter().enumerate() {
+            let row=row_index+2;
+            drawing.name_at(format!("{id}[{row},1]"),format!("table[{row},1] (rows[{row_index}])"),format!("/data/rows/{row_index}"));
+            for col_index in 0..row_cells.len() {
+                let column=col_index+2;
+                drawing.name_at(format!("{id}[{row},{column}]"),format!("table[{row},{column}] (cells[{row_index}][{col_index}])"),format!("/data/cells/{row_index}/{col_index}"));
+            }
+        }
+        drawing.elements.push(Element::Table { id,x:32.0,y:110.0,width:1088.0,height:350.0,rows:table,font_size:20.0,format:Default::default() });
+        return Ok(());
+    }
     let width=880.0/columns.len() as f64; let height=320.0/rows.len() as f64;
     if !corner_label.is_empty() {drawing.text(corner_label,[24.0,90.0,180.0,48.0],22.0,"@dk1",true,TextAlign::Left);}
     for (index,column) in columns.iter().enumerate() {drawing.text_on(column,[228.0+index as f64*width,90.0,width-16.0,48.0],22.0,&accent(index),"@lt1",true,TextAlign::Center);}

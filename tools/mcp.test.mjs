@@ -4691,6 +4691,85 @@ test('issue 93 an evidence label is published and shown on the source line, and 
   } finally { await client.close(); }
 });
 
+test('issues 97-105 MCP preserves paragraph styles, rehomes or reports dropped table headers, rejects layoutless table overflow and cleans provenance', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aislide-issues-97-105-'));
+  const client = new Client({ name: 'issues-97-105', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('tools/mcp.mjs'), '--tool-profile', 'full', '--output-dir', directory], stderr: 'pipe', env: coreEnvironment });
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
+    return JSON.parse(result.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const { deck_id } = await call('create_presentation', { title: 'Issues 97-105' });
+
+    // #104: replace_text_content preserves paragraph 2's style even when neither prefix nor suffix matches.
+    let step = await call('add_elements', {
+      deck_id, expected_revision: 0, slide_id: 'slide-1',
+      elements: [{
+        type: 'text', id: 'cite', x: 64, y: 40, width: 800, height: 80, text: '見出しA\nhttps://example.com/a',
+        font_size: 20, color: '1F2933', bold: true,
+        format: { paragraphs: [
+          { runs: [{ text: '見出しA', style: { bold: true, color: '1F2933', font_size: 20 } }] },
+          { runs: [{ text: 'https://example.com/a', style: { bold: false, color: '6B7280', font_size: 14 } }] },
+        ] },
+      }],
+    });
+    step = await call('replace_text_content', { deck_id, expected_revision: step.revision, slide_id: 'slide-1', id: 'cite', text: '別の見出しB\nhttps://example.org/b' });
+    const afterReplace = await call('get_document', { deck_id });
+    const citeParagraphs = afterReplace.deck.slides[0].elements.find(el => el.id === 'cite').format.paragraphs;
+    assert.deepEqual(
+      citeParagraphs.map(p => ({ bold: p.runs[0].style.bold, color: p.runs[0].style.color, font_size: p.runs[0].style.font_size })),
+      [{ bold: true, color: '1F2933', font_size: 20 }, { bold: false, color: '6B7280', font_size: 14 }],
+    );
+
+    // #99 & #100: matrix/labeled sets table headers automatically, rejects layoutless cell overflow, and reports droppedReview when replaced by a non-table preset.
+    const overflowingMatrix = {
+      version: 1, preset: 'matrix/labeled', title: '比較',
+      data: {
+        kind: 'matrix', rows: ['行 1', '行 2', '行 3', '行 4'], columns: ['列 A', '列 B', '列 C'], corner_label: '観点',
+        cells: [['値 1A', '値 1B', '値 1C'], ['これは合成の文字列。セルに収まるかを確かめるための長い文です', '値 2B', '値 2C'], ['値 3A', '値 3B', '値 3C'], ['値 4A', '値 4B', '値 4C']],
+      },
+    };
+    const rejectedAdd = await client.callTool({ name: 'add_part', arguments: { deck_id, expected_revision: step.revision, slide_id: 'slide-1', id: 'mx', spec: overflowingMatrix } });
+    assert.equal(rejectedAdd.isError, true);
+    assert.match(rejectedAdd.content[0].text, /cells\[1\]\[0\]/);
+
+    const validMatrix = {
+      version: 1, preset: 'matrix/labeled', title: '比較',
+      data: { kind: 'matrix', rows: ['行 1', '行 2'], columns: ['列 A', '列 B'], corner_label: '観点', cells: [['短 A', '短 B'], ['短 C', '短 D']] },
+    };
+    step = await call('add_part', { deck_id, expected_revision: step.revision, slide_id: 'slide-1', id: 'mx', spec: validMatrix });
+    const a11y = await call('check_accessibility', { deck_id });
+    assert.ok(a11y.issues.every(issue => issue.code !== 'table_headers_unknown'), JSON.stringify(a11y.issues));
+
+    const rejectedUpdate = await client.callTool({ name: 'update_part', arguments: { deck_id, expected_revision: step.revision, slide_id: 'slide-1', id: 'mx', spec: overflowingMatrix } });
+    assert.equal(rejectedUpdate.isError, true);
+
+    step = await call('update_part', {
+      deck_id, expected_revision: step.revision, slide_id: 'slide-1', id: 'mx',
+      spec: { ...validMatrix, preset: 'matrix/balanced' },
+    });
+    assert.equal(step.droppedReview.dropped.length, 1);
+    assert.equal(step.droppedReview.dropped[0].kind, 'table_headers');
+    assert.equal(step.droppedReview.dropped[0].part_id, 'mx');
+
+    // #105: manually edit a part child so the part becomes stale, inspect_document discloses stale_parts, and export_clean_copy removes provenance with custom_xml.
+    const docBeforeEdit = await call('get_document', { deck_id });
+    const mxTitleId = docBeforeEdit.deck.slides[0].elements.find(el => el.id === 'mx').children[0].id;
+    step = await call('replace_text_content', { deck_id, expected_revision: step.revision, slide_id: 'slide-1', id: mxTitleId, text: '手で直した見出し（合成）' });
+    const inspected = await call('inspect_document', { deck_id });
+    const customFinding = inspected.findings.find(finding => finding.category === 'custom_xml');
+    assert.equal(customFinding.aislide_provenance, true);
+    assert.equal(customFinding.stale_parts, 1);
+
+    const cleaned = await call('export_clean_copy', { deck_id, expected_revision: step.revision, categories: ['sources', 'custom_xml'], confirmed: true, filename: 'clean.pptx' });
+    assert.ok(cleaned.warnings?.some(w => w.includes('AISlide provenance metadata was removed')), JSON.stringify(cleaned));
+    assert.equal(cleaned.inspection.findings.find(finding => finding.category === 'custom_xml').count, 0);
+  } finally { await client.close(); }
+});
+
 test('P0 MCP previews return bounded images without changing documents or writing files', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'aislide-preview-mcp-'));
   const client = new Client({ name: 'preview-test', version: '1.0.0' });

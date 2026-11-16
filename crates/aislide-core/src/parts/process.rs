@@ -1,4 +1,4 @@
-﻿use super::briefing::{colors, field, label, message, mix, shape, text, too_small, Drawn, Fill, Rich, SMALL};
+﻿use super::briefing::{colors, field, label, label_on, message, mix, shape, text, too_small, Drawn, Fill, Rich, SMALL};
 use super::business::{darken, figure, finite, items, path_polygon, single};
 use super::{accent, Drawing, PartData, PartSpec};
 use crate::{design::Theme, graphs::GraphSpec, model::{Element, TextAlign, VerticalAlign}, vector::PathCommand, Error, Result};
@@ -190,7 +190,8 @@ fn fishbone(drawing: &mut Drawing, effect: &str, categories: &[FishboneCategory]
             let color = if cause.focus { focus.as_str() } else { "@dk1" };
             // Upper bones lean left above their rib, so the label stops short of where the bone crosses its top edge.
             let clearance = if above { 8.0 + 22.0 * slant / reach } else { 6.0 };
-            text(drawing, [start, point[1] - 22.0, point[0] - clearance - start, 20.0], label(&cause.text, SMALL, color, cause.focus), TextAlign::Right, VerticalAlign::Bottom);
+            let cause_label = label_on(drawing, "@lt1", &cause.text, SMALL, color, cause.focus);
+            text(drawing, [start, point[1] - 22.0, point[0] - clearance - start, 20.0], cause_label, TextAlign::Right, VerticalAlign::Bottom);
         }
     }
     Ok(Drawn { bottom: top + height, flexible: Vec::new() })
@@ -296,7 +297,7 @@ fn sankey(drawing: &mut Drawing, nodes: &[SankeyNode], links: &[SankeyLink], uni
         let (bar_x, bar_y, bar_height) = (x(position), y[position], value[position] * scale);
         shape(drawing, Fill::solid("rect", &color[position]), [bar_x, bar_y, bar, bar_height.max(1.0)], None);
         let amount = format!(" {}{unit}", figure(value[position]));
-        let content = Rich::default().runs(&[(node.label.as_str(), 14.0, "@dk1", true), (amount.as_str(), SMALL, "@dk2", false)], 0).finish();
+        let content = Rich::default().runs_on(drawing, "@lt1", &[(node.label.as_str(), 14.0, "@dk1", true), (amount.as_str(), SMALL, "@dk2", false)], 0).finish();
         let middle = bar_y + bar_height / 2.0;
         if stage[position] == 0 { text(drawing, [bar_x - 8.0 - label_width, middle - 11.0, label_width, 22.0], content, TextAlign::Right, VerticalAlign::Middle); }
         else {
@@ -611,8 +612,10 @@ fn architecture(system: &str, elements: &[ArchitectureElement], relations: &[Arc
     let boundary_left = if people.is_empty() { 16.0 } else { 16.0 + side + gap };
     let boundary_right = if externals.is_empty() { 1136.0 } else { 1136.0 - side - gap };
     let boundary_width = boundary_right - boundary_left;
+    let boundary_fill = mix("@accent3", theme, 0.95);
+    let boundary_header_color = Drawing::new("architecture").with_theme(theme).readable_color(&darken("@accent3", theme, 0.2), &boundary_fill, 15.0, true);
     let groups = vec![json!({"id": "system", "label": system, "x": boundary_left, "y": CANVAS_TOP, "width": boundary_width, "height": CANVAS_HEIGHT,
-        "fill": mix("@accent3", theme, 0.95), "stroke": "@accent3", "header_height": header, "header_font_size": 15, "header_color": darken("@accent3", theme, 0.2), "padding": 12})];
+        "fill": boundary_fill, "stroke": "@accent3", "header_height": header, "header_font_size": 15, "header_color": boundary_header_color, "padding": 12})];
     let links: Vec<(usize, usize)> = relations.iter().map(|relation| (index[relation.from.as_str()], index[relation.to.as_str()])).collect();
     let mut best: Option<(f64, Vec<[f64; 4]>, Vec<usize>)> = None;
     // Try one to three inner columns; widest wins ties, so the default reads left to right.
@@ -661,7 +664,7 @@ fn architecture(system: &str, elements: &[ArchitectureElement], relations: &[Arc
         let (kind, fill, stroke, color) = style(element.kind);
         let mut value = json!({"id": element.id, "label": element.label, "kind": kind, "x": round(bounds[0]), "y": round(bounds[1]), "width": round(bounds[2]), "height": round(bounds[3]),
             "fill": fill, "stroke": stroke, "color": color, "font_size": 15});
-        if !element.detail.is_empty() { value["detail"] = json!(element.detail); value["detail_font_size"] = json!(12); }
+        if !element.detail.is_empty() { value["label_fit"] = json!("shrink"); value["detail"] = json!(element.detail); value["detail_font_size"] = json!(12); }
         if matches!(element.kind, ArchitectureKind::Container | ArchitectureKind::Database) { value["group"] = json!("system"); }
         value
     }).collect();

@@ -564,7 +564,7 @@ fn text(id: String, rect: [f64; 4], label: &str, size: f64, color: &str, alignme
     Element::Text { visual: None, id, x, y, width, height, text: label.into(), font_size: size, color: color.into(), bold, format: TextFormat { alignment, vertical: VerticalAlign::Middle, font_family: Some("@minor".into()), ..Default::default() } }
 }
 
-fn node_text(children: &mut Vec<Element>, prefix: &str, node: &GraphNode, content: [f64; 4]) -> Result<()> {
+fn node_text(children: &mut Vec<Element>, prefix: &str, node: &GraphNode, content: [f64; 4], theme: &Theme) -> Result<()> {
     let alignment = node.text_align.unwrap_or(if node.detail.is_some() { GraphTextAlign::Left } else { GraphTextAlign::Center });
     let heading_id = format!("{prefix}-nt-{}", node.id);
     let Some(detail) = &node.detail else {
@@ -572,9 +572,11 @@ fn node_text(children: &mut Vec<Element>, prefix: &str, node: &GraphNode, conten
         return Ok(());
     };
     let [left, top, width, height] = content;
-    let heading_height = (node.font_size * 1.25 * node.label.lines().count().max(1) as f64).min((height - 8.0) / 2.0);
-    let detail_height = height - heading_height - 8.0;
-    if heading_height < 15.0 || detail_height < 15.0 { return Err(Error::Invalid("graph detail requires room for a heading, 8px gap and body at 12px".into())); }
+    if (height - 8.0) / 2.0 < 15.0 { return Err(Error::Invalid("graph detail requires room for a heading, 8px gap and body at 12px".into())); }
+    let measured_heading = crate::layout::graph_text_metrics(&node.label, width, 4096.0, node.font_size, node.heading_bold, theme)
+        .map(|(metrics, _)| f64::from(metrics.measured_height)).unwrap_or(node.font_size * 1.25 * node.label.lines().count().max(1) as f64);
+    let heading_height = measured_heading.clamp(15.0, (height - 23.0).max(15.0));
+    let detail_height = (height - heading_height - 8.0).max(15.0);
     let mut heading = text(heading_id, [left, top, width, heading_height], &node.label, node.font_size, &node.color, alignment.alignment(), node.heading_bold);
     let mut body = text(format!("{prefix}-nd-{}", node.id), [left, top + heading_height + 8.0, width, detail_height], detail, detail_size(node), &node.color, alignment.alignment(), false);
     for element in [&mut heading, &mut body] {
@@ -629,7 +631,7 @@ fn paragraphs_of(element: &Element) -> Vec<crate::rich_text::RichParagraph> {
 // Moves label text boxes into their shape so the label follows the shape when it is moved or resized in PowerPoint.
 fn embed_labels(children: &mut Vec<Element>, shape_id: &str, labels: Vec<Element>, theme: &Theme) -> Result<()> {
     let labels: Vec<_> = labels.into_iter().filter(|label| matches!(label, Element::Text { text, .. } if !text.is_empty())).collect();
-    let Some(Element::Shape { x, y, width, height, preset, fill, stroke_width, text, font_size, color, bold, format, .. }) = children.iter_mut().find(|element| element.bounds().0 == shape_id) else {
+    let Some(Element::Shape { x, y, width, height, text, font_size, color, bold, format, .. }) = children.iter_mut().find(|element| element.bounds().0 == shape_id) else {
         return Err(Error::Invalid(format!("graph label target {shape_id} is missing")));
     };
     let Some(Element::Text { font_size: heading_size, color: heading_color, bold: heading_bold, format: heading_format, .. }) = labels.first() else { return Ok(()); };
@@ -645,27 +647,65 @@ fn embed_labels(children: &mut Vec<Element>, shape_id: &str, labels: Vec<Element
         }
         paragraphs.extend(block);
     }
-    let mut padding = crate::model::TextPadding { left: (left - *x).max(0.0), top: (top - *y).max(0.0), right: (*x + *width - right).max(0.0), bottom: (*y + *height - bottom).max(0.0) };
-    *format = TextFormat { alignment: heading_format.alignment, vertical: heading_format.vertical, font_family: heading_format.font_family.clone(), paragraphs, ..Default::default() };
+    let padding = crate::model::TextPadding { left: (left - *x).max(0.0), top: (top - *y).max(0.0), right: (*x + *width - right).max(0.0), bottom: (*y + *height - bottom).max(0.0) };
+    *format = TextFormat { alignment: heading_format.alignment, vertical: heading_format.vertical, font_family: heading_format.font_family.clone(), padding: Some(padding), paragraphs, ..Default::default() };
     *text = crate::rich_text::plain_text(&format.paragraphs);
     *font_size = *heading_size; *color = heading_color.clone(); *bold = *heading_bold;
+    if let Some(target) = children.iter_mut().find(|element| element.bounds().0 == shape_id) {
+        raise_shape_padding_floor(target, theme)?;
+    }
+    Ok(())
+}
+
+fn raise_shape_padding_floor(element: &mut Element, theme: &Theme) -> Result<()> {
+    let Element::Shape { width, height, preset, fill, stroke_width, text, font_size, bold, format, .. } = element else { return Ok(()); };
+    if text.trim().is_empty() { return Ok(()); }
     let card = matches!(preset.as_str(), "rect" | "roundRect") && *width >= 100.0 && *height >= 60.0 && (fill != "none" || *stroke_width > 0.0);
+    let Some(mut padding) = format.padding.clone() else { return Ok(()); };
+    if card && padding.left.min(padding.right) < MINIMUM_PADDING {
+        let next_left = padding.left.max(MINIMUM_PADDING);
+        let next_right = padding.right.max(MINIMUM_PADDING);
+        let next_width = *width - next_left - next_right;
+        let frame_height = *height - padding.top - padding.bottom;
+        if next_width >= 16.0 && frame_height > 0.0 {
+            let check = crate::layout::graph_rich_metrics(text, next_width, frame_height, *font_size, *bold, format, theme)?;
+            if !check.overflow { padding.left = next_left; padding.right = next_right; }
+        }
+    }
     let shortfall = MINIMUM_PADDING - padding.top.min(padding.bottom);
     if shortfall > 0.0 && (format.vertical == VerticalAlign::Middle || card && format.vertical == VerticalAlign::Top) {
-        let frame_width = *width - padding.left - padding.right; let frame_height = *height - padding.top - padding.bottom;
-        let needed = f64::from(crate::layout::graph_rich_metrics(text, frame_width, frame_height, *font_size, *bold, format, theme)?.measured_height);
-        if format.vertical == VerticalAlign::Middle {
-            // Equal growth on both sides keeps the centered text where the separate text box placed it.
-            let growth = shortfall.min(((frame_height - needed) / 2.0 - 1.0).max(0.0));
-            padding.top += growth; padding.bottom += growth;
-        } else if frame_height - needed - (MINIMUM_PADDING - padding.top).max(0.0) - (MINIMUM_PADDING - padding.bottom).max(0.0) >= 1.0 {
-            // Text with a detail hangs from the top of a painted card (the cards preflight checks). Each side rises only to the floor, and only
-            // while the measured text still fits; otherwise the padding stays as laid out and diagnostics reports the shortfall.
-            padding.top = padding.top.max(MINIMUM_PADDING); padding.bottom = padding.bottom.max(MINIMUM_PADDING);
+        let frame_width = *width - padding.left - padding.right;
+        let frame_height = *height - padding.top - padding.bottom;
+        if frame_width > 0.0 && frame_height > 0.0 {
+            let needed = f64::from(crate::layout::graph_rich_metrics(text, frame_width, frame_height, *font_size, *bold, format, theme)?.measured_height);
+            if format.vertical == VerticalAlign::Middle {
+                // Equal growth on both sides keeps the centered text where the separate text box placed it.
+                let growth = shortfall.min(((frame_height - needed) / 2.0 - 1.0).max(0.0));
+                padding.top += growth; padding.bottom += growth;
+                // A group header sits in a top band while `padding.bottom` spans the group body: shift the band down by any remaining scaling shortfall.
+                if card && padding.top < MINIMUM_PADDING && padding.bottom > padding.top + 32.0 {
+                    let shift = MINIMUM_PADDING - padding.top;
+                    if padding.bottom - shift >= MINIMUM_PADDING { padding.top = MINIMUM_PADDING; padding.bottom -= shift; }
+                }
+            } else if frame_height - needed - (MINIMUM_PADDING - padding.top).max(0.0) - (MINIMUM_PADDING - padding.bottom).max(0.0) >= 1.0 {
+                // Text with a detail hangs from the top of a painted card (the cards preflight checks). Each side rises only to the floor, and only
+                // while the measured text still fits; otherwise the padding stays as laid out and diagnostics reports the shortfall.
+                padding.top = padding.top.max(MINIMUM_PADDING); padding.bottom = padding.bottom.max(MINIMUM_PADDING);
+            }
         }
     }
     format.padding = Some(padding);
     Ok(())
+}
+
+/// Restores the `MINIMUM_PADDING` floor on diagram cards and group frames after `resize_canvas` scaled the group slightly below 1152x512
+/// (such as fitting a layoutless guided diagram into the 498px body region), whenever the final text still fits.
+pub(crate) fn restore_scaled_padding(element: &mut Element, theme: &Theme) -> Result<()> {
+    match element {
+        Element::Shape { .. } => raise_shape_padding_floor(element, theme),
+        Element::Group { children, .. } => children.iter_mut().try_for_each(|child| restore_scaled_padding(child, theme)),
+        _ => Ok(()),
+    }
 }
 
 pub(crate) fn embed_text(id: &str, spec: &GraphSpec, children: &mut Vec<Element>, theme: &Theme) -> Result<()> {
@@ -1054,9 +1094,12 @@ pub(crate) fn diagnostics(id: &str, spec: &GraphSpec, element: &Element, theme: 
                 match crate::layout::graph_rich_metrics(shape_text, shape_width - padding.left - padding.right, shape_height - padding.top - padding.bottom, *shape_font_size, *shape_bold, format, theme) {
                     Ok(metrics) => {
                         let needed = f64::from(metrics.measured_height);
+                        let scale_y = (*shape_height / node.height).max(0.01);
+                        let slack = if format.vertical == VerticalAlign::Middle { 2.0 } else { 1.0 };
+                        let min_height = (((needed + 2.0 * MINIMUM_PADDING + slack) / scale_y).ceil()).max(node.height.ceil() + 1.0);
                         report.push(GraphFinding {
                             code: "GRAPH_NODE_PADDING".into(), severity: "warning".into(), graph_id: id.into(), entity_id: node.id.clone(), element_ids: vec![shape_id.clone()], bounds,
-                            message: format!("Node text is {needed:.0}px tall, so this {shape_height:.0}px node cannot keep the {MINIMUM_PADDING:.0}px top and bottom padding; make the node at least {:.0}px tall, widen it so the text wraps less, or shorten the text.", (needed + 2.0 * MINIMUM_PADDING + 1.0).ceil()),
+                            message: format!("Node text is {needed:.0}px tall, so this {shape_height:.0}px node cannot keep the {MINIMUM_PADDING:.0}px top and bottom padding; make the node at least {min_height:.0}px tall, widen it so the text wraps less, or shorten the text."),
                             slide_id: None, lines: None, font_size: None,
                         });
                     }
@@ -1079,15 +1122,30 @@ pub(crate) fn diagnostics(id: &str, spec: &GraphSpec, element: &Element, theme: 
         let Some([x, y, width, height]) = text_frame(element, bounds) else { continue; };
         let text = crate::rich_text::plain_text(heading);
         let Ok((metrics, _)) = crate::layout::graph_text_metrics(&text, width, height, font_size, bold, theme) else { report.status = "partial".into(); continue; };
-        if metrics.lines <= node.label.lines().count().max(1) { continue; }
-        let shrink_limit = node.label_fit == GraphLabelFit::Shrink && !node.label.contains('\n') && !node.label.contains('\r');
-        report.push(GraphFinding {
-            code: if shrink_limit { "GRAPH_NODE_LABEL_SHRINK_LIMIT" } else { "GRAPH_NODE_LABEL_WRAPPED" }.into(),
-            severity: if shrink_limit { "warning" } else { "info" }.into(), graph_id: id.into(), entity_id: node.id.clone(),
-            element_ids: vec![shape_id], bounds: [x, y, width, height],
-            message: if shrink_limit { "A single line does not fit at the 12px floor; retained wrapping. Widen the node or shorten the label." } else { "Node label wraps into additional lines; widen the node or opt into label_fit:shrink." }.into(),
-            slide_id: None, lines: Some(metrics.lines), font_size: Some(font_size),
-        });
+        let single_line = !node.label.contains('\n') && !node.label.contains('\r');
+        let shrunk_heading = node.label_fit == GraphLabelFit::Shrink && single_line && font_size + 1e-9 < node.font_size;
+        let capped_detail = shrunk_heading && node.detail.is_some() && detail_size(node) > font_size + 1e-9;
+        let detail_note = if capped_detail {
+            let origin = if node.detail_font_size.is_some() { format!("detail_font_size {:.1}px", detail_size(node)) } else { format!("default detail size {:.1}px", detail_size(node)) };
+            format!(" Node detail ({origin}) was capped to {font_size:.1}px so it does not exceed the heading.")
+        } else { String::new() };
+        if metrics.lines > node.label.lines().count().max(1) {
+            let shrink_limit = node.label_fit == GraphLabelFit::Shrink && single_line;
+            report.push(GraphFinding {
+                code: if shrink_limit { "GRAPH_NODE_LABEL_SHRINK_LIMIT" } else { "GRAPH_NODE_LABEL_WRAPPED" }.into(),
+                severity: if shrink_limit { "warning" } else { "info" }.into(), graph_id: id.into(), entity_id: node.id.clone(),
+                element_ids: vec![shape_id], bounds: [x, y, width, height],
+                message: if shrink_limit { format!("A single line does not fit at the 12px floor; retained wrapping.{detail_note} Widen the node or shorten the label.") } else { "Node label wraps into additional lines; widen the node or opt into label_fit:shrink.".into() },
+                slide_id: None, lines: Some(metrics.lines), font_size: Some(font_size),
+            });
+        } else if shrunk_heading {
+            report.push(GraphFinding {
+                code: "GRAPH_NODE_LABEL_SHRUNK".into(), severity: "info".into(), graph_id: id.into(), entity_id: node.id.clone(),
+                element_ids: vec![shape_id], bounds: [x, y, width, height],
+                message: format!("Node label was reduced from {:.1}px to {font_size:.1}px to fit a single line, because label_fit is shrink.{detail_note} Set label_fit to wrap to keep the size, or widen the node or shorten the label.", node.font_size),
+                slide_id: None, lines: Some(metrics.lines), font_size: Some(font_size),
+            });
+        }
     }
     report
 }
@@ -1430,7 +1488,11 @@ pub(crate) fn fit_detail_widows(id: &str, spec: &GraphSpec, children: &mut [Elem
                 size = (size - 0.5).max(12.0);
                 let (metrics, orphan) = crate::layout::graph_text_metrics(text, *width, *height, size, *bold, theme)?;
                 if !metrics.overflow && metrics.missing_glyphs == 0 && !orphan {
-                    DETAIL_SHRINKS.with(|records| if let Some(records) = records.borrow_mut().as_mut() { records.push(DetailShrink { node_id: node.id.clone(), from: *font_size, to: size }); });
+                    let previous = *font_size;
+                    DETAIL_SHRINKS.with(|records| if let Some(records) = records.borrow_mut().as_mut() {
+                        if let Some(existing) = records.iter_mut().find(|entry| entry.node_id == node.id) { existing.to = size; }
+                        else { records.push(DetailShrink { node_id: node.id.clone(), from: previous, to: size }); }
+                    });
                     *font_size = size; break;
                 }
             }
@@ -1439,15 +1501,260 @@ pub(crate) fn fit_detail_widows(id: &str, spec: &GraphSpec, children: &mut [Elem
     Ok(())
 }
 
+pub(crate) fn detail_node_text_ids(id: &str, spec: &GraphSpec) -> Result<BTreeSet<String>> {
+    let prefix = render_prefix(id, spec)?;
+    Ok(spec.nodes.iter().filter(|node| node.detail.is_some())
+        .flat_map(|node| [format!("{prefix}-nt-{}", node.id), format!("{prefix}-nd-{}", node.id)]).collect())
+}
+
+pub(crate) fn node_locations(id: &str, spec: &GraphSpec) -> Result<crate::parts::TextLocations> {
+    let prefix = render_prefix(id, spec)?;
+    Ok(spec.nodes.iter().enumerate().map(|(index, node)| {
+        (format!("{prefix}-n-{}", node.id), crate::parts::TextLocation {
+            place: format!("node '{}' (nodes[{index}])", node.id),
+            pointer: format!("/data/graph/nodes/{index}"),
+        })
+    }).collect())
+}
+
+/// Sizes and partitions every node's heading (`-nt-`) and detail (`-nd-`) inside the node's current content box, and runs non-detail text
+/// fitting and label-overlap checks. With `label_fit: "wrap"` (default), a node's heading keeps `node.font_size`, wraps across lines, and
+/// leaves the remaining height after the gap to `detail`. Only `label_fit: "shrink"` reduces a single-line heading down to 12px.
+pub(crate) fn finish_fitted_graph(id: &str, spec: &GraphSpec, children: &mut [Element], theme: &Theme, diagram_pointers: bool) -> std::result::Result<(), crate::parts::PartFailure> {
+    let prefix = render_prefix(id, spec)?;
+    let small = small_annotation_ids(id, spec)?;
+    let skip = detail_node_text_ids(id, spec)?;
+    if let Err(error) = crate::layout::fit_part_text_except(children, theme, &small, &skip) {
+        if let Error::Invalid(message) = &error {
+            for (index, node) in spec.nodes.iter().enumerate().filter(|(_, node)| node.detail.is_none()) {
+                let heading_id = format!("{prefix}-nt-{}", node.id);
+                if let Some(reason) = message.strip_prefix(&format!("part text {heading_id} ")) {
+                    let frame = children.iter().find(|child| child.bounds().0 == heading_id);
+                    let (width, available) = frame.map_or((0.0, 0), |child| { let (_, _, _, w, h) = child.bounds(); (w, h.floor().max(0.0) as u32) });
+                    let missing_glyphs = reason.contains("unavailable glyphs");
+                    let measured = crate::layout::graph_text_metrics(&node.label, width, 4096.0, 12.0, node.heading_bold, theme).ok().map(|(m, _)| m.measured_height.ceil() as u32);
+                    let text_message = if missing_glyphs {
+                        format!("graph node '{}' ({prefix}-n-{}) label contains unavailable glyphs", node.id, node.id)
+                    } else {
+                        let detail = measured.map_or_else(|| format!("available {available}px"), |need| format!("measured {need}px > available {available}px"));
+                        format!("graph node '{}' ({prefix}-n-{}) label does not fit at 12px ({detail}); enlarge the node, widen it or shorten the label", node.id, node.id)
+                    };
+                    return Err(crate::parts::PartFailure::Overflow(vec![crate::parts::PartOverflow {
+                        pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/label")),
+                        message: text_message,
+                        missing_glyphs,
+                        measured,
+                        available: Some(available),
+                    }]));
+                }
+            }
+        }
+        return Err(public_label_error(id, spec, error).into());
+    }
+    fit_node_labels(id, spec, children, theme)?;
+    let mut overflows = Vec::new();
+    for (index, node) in spec.nodes.iter().enumerate() {
+        let Some(detail) = &node.detail else { continue; };
+        let heading_id = format!("{prefix}-nt-{}", node.id);
+        let detail_id = format!("{prefix}-nd-{}", node.id);
+        let Some(heading_index) = children.iter().position(|child| child.bounds().0 == heading_id) else {
+            return Err(Error::Invalid("graph detail heading is missing".into()).into());
+        };
+        let Some(detail_index) = children.iter().position(|child| child.bounds().0 == detail_id) else {
+            return Err(Error::Invalid("graph detail body is missing".into()).into());
+        };
+        let (_, _, top, width, old_heading_height) = children[heading_index].bounds();
+        let (_, _, old_detail_top, _, old_detail_height) = children[detail_index].bounds();
+        let total_height = (old_detail_top + old_detail_height - top).max(0.0);
+        let gap = (old_detail_top - (top + old_heading_height)).clamp(4.0, 8.0);
+        let mut heading_size = node.font_size;
+        if node.label_fit == GraphLabelFit::Shrink && !node.label.contains('\n') && !node.label.contains('\r') {
+            let mut candidate = heading_size;
+            loop {
+                let (metrics, _) = crate::layout::graph_text_metrics(&node.label, width, total_height, candidate, node.heading_bold, theme)?;
+                if metrics.lines <= 1 && !metrics.overflow && metrics.missing_glyphs == 0 { heading_size = candidate; break; }
+                if candidate <= 12.0 { heading_size = 12.0; break; }
+                candidate = (candidate - 0.5).max(12.0);
+            }
+        }
+        let (heading_metrics, _) = crate::layout::graph_text_metrics(&node.label, width, 4096.0, heading_size, node.heading_bold, theme)?;
+        if heading_metrics.missing_glyphs > 0 {
+            overflows.push(crate::parts::PartOverflow {
+                pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/label")),
+                message: format!("graph node '{}' ({prefix}-n-{}) label contains unavailable glyphs", node.id, node.id),
+                missing_glyphs: true, measured: None, available: None,
+            });
+            continue;
+        }
+        let effective_detail_size = detail_size(node).min(heading_size);
+        let (detail_metrics, _) = crate::layout::graph_text_metrics(detail, width, 4096.0, effective_detail_size, false, theme)?;
+        if detail_metrics.missing_glyphs > 0 {
+            overflows.push(crate::parts::PartOverflow {
+                pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/detail")),
+                message: format!("graph node '{}' ({prefix}-n-{}) detail contains unavailable glyphs", node.id, node.id),
+                missing_glyphs: true, measured: None, available: None,
+            });
+            continue;
+        }
+        let heading_needed = f64::from(heading_metrics.measured_height);
+        let detail_needed = f64::from(detail_metrics.measured_height);
+        let heading_box = heading_needed.max(15.0);
+        let heading_wide = f64::from(heading_metrics.measured_width) > width + 1.0;
+        let detail_wide = f64::from(detail_metrics.measured_width) > width + 1.0;
+        if !heading_wide && !detail_wide && heading_box + gap + detail_needed <= total_height + 1.0 {
+            if let Element::Text { y, height, font_size, .. } = &mut children[heading_index] {
+                *y = top; *height = heading_box; *font_size = heading_size;
+            }
+            if let Element::Text { y, height, font_size, .. } = &mut children[detail_index] {
+                *y = top + heading_box + gap;
+                *height = (total_height - heading_box - gap).max(detail_needed);
+                *font_size = effective_detail_size;
+            }
+            continue;
+        }
+        let detail_one_line = (effective_detail_size * 1.15).ceil().max(15.0);
+        if heading_wide || heading_box + gap + detail_one_line > total_height + 1.0 {
+            let (measured_px, available_px, axis) = if heading_wide && heading_box + gap + detail_one_line <= total_height + 1.0 {
+                (heading_metrics.measured_width.ceil() as u32, width.floor().max(0.0) as u32, "width ")
+            } else {
+                (heading_needed.ceil() as u32, (total_height - gap - detail_one_line).floor().max(0.0) as u32, "")
+            };
+            overflows.push(crate::parts::PartOverflow {
+                pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/label")),
+                message: format!("graph node '{}' ({prefix}-n-{}) label does not fit at {heading_size}px ({axis}measured {measured_px}px > available {available_px}px before {gap:.0}px gap and detail); enlarge the node, widen it, shorten the label or set label_fit to shrink", node.id, node.id),
+                missing_glyphs: false, measured: Some(measured_px), available: Some(available_px),
+            });
+        } else {
+            let available_px = (total_height - heading_box - gap).floor().max(0.0) as u32;
+            let (measured_px, available_px, axis) = if detail_wide && detail_needed <= total_height - heading_box - gap + 1.0 {
+                (detail_metrics.measured_width.ceil() as u32, width.floor().max(0.0) as u32, "width ")
+            } else {
+                (detail_needed.ceil() as u32, available_px, "")
+            };
+            overflows.push(crate::parts::PartOverflow {
+                pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/detail")),
+                message: format!("graph node '{}' ({prefix}-n-{}) detail does not fit at {effective_detail_size}px ({axis}measured {measured_px}px > available {available_px}px after {:.0}px label and {gap:.0}px gap); enlarge the node, widen it or shorten the detail", node.id, node.id, heading_box.ceil()),
+                missing_glyphs: false, measured: Some(measured_px), available: Some(available_px),
+            });
+        }
+    }
+    if !overflows.is_empty() { return Err(crate::parts::PartFailure::Overflow(overflows)); }
+    fit_detail_widows(id, spec, children, theme)?;
+    validate_label_overlaps(id, spec, children).map_err(|error| public_label_error(id, spec, error))?;
+    Ok(())
+}
+
 pub fn create(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
-    let mut result = create_with_label_boxes(id, spec, theme).map_err(|error| public_label_error(id, spec, error))?;
-    if let Element::Group { children, .. } = &mut result { embed_text(id, spec, children, theme)?; }
+    create_detailed(id, spec, theme, false).map(|(element, _)| element).map_err(crate::parts::PartFailure::into_error)
+}
+
+pub(crate) fn create_detailed(id: &str, spec: &GraphSpec, theme: &Theme, diagram_pointers: bool) -> std::result::Result<(Element, crate::parts::TextLocations), crate::parts::PartFailure> {
+    let mut result = create_with_label_boxes_fitted(id, spec, theme, diagram_pointers)?;
+    if let Element::Group { children, .. } = &mut result {
+        embed_text(id, spec, children, theme).map_err(|error| public_label_error(id, spec, error))?;
+    }
     validate_elements(std::slice::from_ref(&result), (1280.0, 720.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
+    let locations = if diagram_pointers { node_locations(id, spec)? } else { crate::parts::TextLocations::new() };
+    Ok((result, locations))
+}
+
+pub(crate) fn create_with_label_boxes_fitted(id: &str, spec: &GraphSpec, theme: &Theme, diagram_pointers: bool) -> std::result::Result<Element, crate::parts::PartFailure> {
+    let mut result = create_with_label_boxes_unfitted(id, spec, theme).map_err(|error| public_label_error(id, spec, error))?;
+    if let Element::Group { children, .. } = &mut result {
+        finish_fitted_graph(id, spec, children, theme, diagram_pointers)?;
+    }
     Ok(result)
 }
 
-// Labels stay separate text boxes here so fitting can size each one; `embed_text` moves them into their shapes afterwards.
-pub(crate) fn create_with_label_boxes(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
+/// Reflows `detail` nodes after `PartLayout` narrows a diagram (`horizontal_scale < 1.0`) while leaving nodes that still fit their scaled
+/// boxes untouched, preserving #97's `wrap` vs `shrink` semantics and structured overflow messages when vertical height was not compressed.
+pub(crate) fn reflow_post_layout_nodes(id: &str, spec: &GraphSpec, children: &mut [Element], theme: &Theme, diagram_pointers: bool, vertical_compressed: bool) -> std::result::Result<BTreeSet<String>, crate::parts::PartFailure> {
+    let prefix = render_prefix(id, spec)?;
+    let mut handled = BTreeSet::new();
+    let mut overflows = Vec::new();
+    for (index, node) in spec.nodes.iter().enumerate() {
+        let Some(detail) = &node.detail else { continue; };
+        let heading_id = format!("{prefix}-nt-{}", node.id);
+        let detail_id = format!("{prefix}-nd-{}", node.id);
+        let (Some(heading_index), Some(detail_index)) = (
+            children.iter().position(|child| child.bounds().0 == heading_id),
+            children.iter().position(|child| child.bounds().0 == detail_id),
+        ) else { continue; };
+        let (_, _, top, width, old_heading_height) = children[heading_index].bounds();
+        let (_, _, old_detail_top, _, old_detail_height) = children[detail_index].bounds();
+        let Element::Text { font_size: current_heading_size, .. } = &children[heading_index] else { continue; };
+        let Element::Text { font_size: current_detail_size, .. } = &children[detail_index] else { continue; };
+        let (cur_h, _) = crate::layout::graph_text_metrics(&node.label, width, old_heading_height, *current_heading_size, node.heading_bold, theme)?;
+        let (cur_d, _) = crate::layout::graph_text_metrics(detail, width, old_detail_height, *current_detail_size, false, theme)?;
+        let single_line_shrink = node.label_fit == GraphLabelFit::Shrink && !node.label.contains('\n') && !node.label.contains('\r') && cur_h.lines > 1;
+        if !cur_h.overflow && !cur_d.overflow && !single_line_shrink { continue; }
+        if vertical_compressed && !single_line_shrink { continue; }
+
+        handled.insert(heading_id);
+        handled.insert(detail_id);
+        let total_height = (old_detail_top + old_detail_height - top).max(0.0);
+        let gap = (old_detail_top - (top + old_heading_height)).clamp(4.0, 8.0);
+        let mut heading_size = node.font_size;
+        if node.label_fit == GraphLabelFit::Shrink && !node.label.contains('\n') && !node.label.contains('\r') {
+            let mut candidate = heading_size;
+            loop {
+                let (metrics, _) = crate::layout::graph_text_metrics(&node.label, width, total_height, candidate, node.heading_bold, theme)?;
+                if metrics.lines <= 1 && !metrics.overflow && metrics.missing_glyphs == 0 { heading_size = candidate; break; }
+                if candidate <= 12.0 { heading_size = 12.0; break; }
+                candidate = (candidate - 0.5).max(12.0);
+            }
+        }
+        let (heading_metrics, _) = crate::layout::graph_text_metrics(&node.label, width, 4096.0, heading_size, node.heading_bold, theme)?;
+        let effective_detail_size = current_detail_size.min(detail_size(node)).min(heading_size);
+        let (detail_metrics, _) = crate::layout::graph_text_metrics(detail, width, 4096.0, effective_detail_size, false, theme)?;
+        let heading_needed = f64::from(heading_metrics.measured_height);
+        let detail_needed = f64::from(detail_metrics.measured_height);
+        let heading_box = heading_needed.max(15.0);
+        let heading_wide = f64::from(heading_metrics.measured_width) > width + 1.0;
+        let detail_wide = f64::from(detail_metrics.measured_width) > width + 1.0;
+        if !heading_wide && !detail_wide && heading_box + gap + detail_needed <= total_height + 1.0 {
+            if let Element::Text { y, height, font_size, .. } = &mut children[heading_index] {
+                *y = top; *height = heading_box; *font_size = heading_size;
+            }
+            if let Element::Text { y, height, font_size, .. } = &mut children[detail_index] {
+                *y = top + heading_box + gap;
+                *height = (total_height - heading_box - gap).max(detail_needed);
+                *font_size = effective_detail_size;
+            }
+            continue;
+        }
+        let detail_one_line = (effective_detail_size * 1.15).ceil().max(15.0);
+        if heading_wide || heading_box + gap + detail_one_line > total_height + 1.0 {
+            let (measured_px, available_px, axis) = if heading_wide && heading_box + gap + detail_one_line <= total_height + 1.0 {
+                (heading_metrics.measured_width.ceil() as u32, width.floor().max(0.0) as u32, "width ")
+            } else {
+                (heading_needed.ceil() as u32, (total_height - gap - detail_one_line).floor().max(0.0) as u32, "")
+            };
+            overflows.push(crate::parts::PartOverflow {
+                pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/label")),
+                message: format!("graph node '{}' ({prefix}-n-{}) label does not fit at {heading_size}px ({axis}measured {measured_px}px > available {available_px}px before {gap:.0}px gap and detail); enlarge the node, widen it, shorten the label or set label_fit to shrink", node.id, node.id),
+                missing_glyphs: false, measured: Some(measured_px), available: Some(available_px),
+            });
+        } else {
+            let available_px = (total_height - heading_box - gap).floor().max(0.0) as u32;
+            let (measured_px, available_px, axis) = if detail_wide && detail_needed <= total_height - heading_box - gap + 1.0 {
+                (detail_metrics.measured_width.ceil() as u32, width.floor().max(0.0) as u32, "width ")
+            } else {
+                (detail_needed.ceil() as u32, available_px, "")
+            };
+            overflows.push(crate::parts::PartOverflow {
+                pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/detail")),
+                message: format!("graph node '{}' ({prefix}-n-{}) detail does not fit at {effective_detail_size}px ({axis}measured {measured_px}px > available {available_px}px after {:.0}px label and {gap:.0}px gap); enlarge the node, widen it or shorten the detail", node.id, node.id, heading_box.ceil()),
+                missing_glyphs: false, measured: Some(measured_px), available: Some(available_px),
+            });
+        }
+    }
+    if !overflows.is_empty() { return Err(crate::parts::PartFailure::Overflow(overflows)); }
+    Ok(handled)
+}
+
+// Labels stay separate text boxes here so layout scaling and fitting can size each one; `embed_text` moves them into their shapes afterwards.
+pub(crate) fn create_with_label_boxes_unfitted(id: &str, spec: &GraphSpec, theme: &Theme) -> Result<Element> {
     valid_text(id, 40)?;
     if id.is_empty() { return Err(Error::Invalid("graph root ID is required".into())); }
     validate(spec)?; crate::design::validate_theme(theme)?;
@@ -1502,7 +1809,7 @@ pub(crate) fn create_with_label_boxes(id: &str, spec: &GraphSpec, theme: &Theme)
             let width = (node.width - 8.0).min(96.0);
             let icon = node.icon.as_ref().ok_or_else(|| Error::Invalid("icon presentation requires an icon".into()))?;
             children.push(icon_picture(&format!("{prefix}-ni-{}", node.id), icon, [node.x + (node.width - width) / 2.0, node.y + 4.0, width, height])?);
-            node_text(&mut children, &prefix, node, [node.x + 4.0, node.y + 12.0 + height, node.width - 8.0, node.height - 16.0 - height])?;
+            node_text(&mut children, &prefix, node, [node.x + 4.0, node.y + 12.0 + height, node.width - 8.0, node.height - 16.0 - height], theme)?;
             continue;
         }
         children.push(shape(format!("{prefix}-n-{}", node.id), [node.x, node.y, node.width, node.height], node.kind.preset(), &node.fill, &node.stroke));
@@ -1525,7 +1832,7 @@ pub(crate) fn create_with_label_boxes(id: &str, spec: &GraphSpec, theme: &Theme)
             let offset = size + 8.0_f64.min(content[2] / 8.0);
             content[0] += offset; content[2] -= offset;
         }
-        node_text(&mut children, &prefix, node, content)?;
+        node_text(&mut children, &prefix, node, content, theme)?;
     }
     for (node_id, connection_sites) in sites_by_node {
         let node_id = format!("{prefix}-n-{node_id}");
@@ -1564,11 +1871,6 @@ pub(crate) fn create_with_label_boxes(id: &str, spec: &GraphSpec, theme: &Theme)
         } else { relationship_label_bounds(spec, edge, &points, width, size, &obstacles, theme)? };
         children.push(text(format!("{prefix}-et-{}", edge.id), bounds, &edge.label, size, edge.label_color.as_deref().unwrap_or("@dk1"), TextAlign::Center, false));
     }
-    crate::layout::fit_part_text_with_small_annotations(&mut children, theme, &small_annotation_ids(id, spec)?)?;
-    fit_node_labels(id, spec, &mut children, theme)?;
-    cap_detail_fonts(id, spec, &mut children)?;
-    fit_detail_widows(id, spec, &mut children, theme)?;
-    validate_label_overlaps(id, spec, &children)?;
     let result = Element::Group { visual: None, id: id.into(), x: 64.0, y: 144.0, width: WIDTH, height: HEIGHT, view_width: WIDTH, view_height: HEIGHT, children };
     validate_elements(std::slice::from_ref(&result), (1280.0, 720.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
     Ok(result)

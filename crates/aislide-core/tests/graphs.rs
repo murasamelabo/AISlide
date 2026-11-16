@@ -1202,6 +1202,10 @@ fn graph_node_detail_defaults_and_fitting_preserve_font_hierarchy() {
         spec["nodes"][0]["label"]=json!("A longer heading needs to fit");
         spec["nodes"][0]["width"]=json!(200);
         spec["nodes"][0]["detail"]=json!("Detail");
+        let wrapped=execute_request(json!({"op":"create_graph","id":"detail-wrapping","spec":spec})).unwrap();
+        assert_eq!(embedded_label(&wrapped,"-nt-client")["font_size"],24.0);
+        assert!((embedded_label(&wrapped,"-nd-client")["font_size"].as_f64().unwrap()-19.2).abs()<0.001);
+        spec["nodes"][0]["label_fit"]=json!("shrink");
         let fitted=execute_request(json!({"op":"create_graph","id":"detail-fitting","spec":spec})).unwrap();
         let heading=embedded_label(&fitted,"-nt-client");
         let detail=embedded_label(&fitted,"-nd-client");
@@ -2241,4 +2245,107 @@ fn issue81_small_text_in_a_managed_node_names_the_node_the_text_and_the_repair()
     for expected in ["Widen node 'n'", "Set detail_fit to 'wrap' on node 'n'", "update_part or update_graph on 'lanes'"] { assert!(suggestions.contains(expected), "{expected}: {suggestions}"); }
     let drawn = drawn_detail_size(&result["document"]["deck"]["slides"][0]["elements"][0]);
     assert!(message.contains(&format!("{drawn:.1}px")), "{message} / {drawn}");
+}
+
+#[test]
+fn issue97_detail_nodes_wrap_headings_by_default_report_shrink_diagnostics_and_name_overflowing_fields() {
+    let base_spec = |fit: Option<&str>| {
+        let mut with_detail = json!({"id":"with_detail","label":"追加の処理・必要なとき","detail":"余裕が足りなければ、次の経路に分けます","font_size":15,"detail_font_size":13,"x":40,"y":40,"width":170,"height":165});
+        if let Some(fit) = fit { with_detail["label_fit"] = json!(fit); }
+        let no_detail = json!({"id":"no_detail","label":"追加の処理・必要なとき","font_size":15,"x":260,"y":40,"width":170,"height":165});
+        json!({"version":1,"title":"Wrap vs shrink","show_title":false,"nodes":[with_detail, no_detail],"edges":[],"groups":[]})
+    };
+    let document = execute_request(json!({"op":"create_presentation","id":"issue97","title":"Issue 97"})).unwrap();
+    for fit in [None, Some("wrap")] {
+        let part = json!({"version":1,"preset":"diagram/custom","title":"Wrap vs shrink","data":{"kind":"diagram","graph":base_spec(fit)},"layout":{"x":64,"y":144,"width":1152,"height":512,"show_title":false}});
+        let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":"diag","spec":part})).unwrap();
+        let group = &inserted["document"]["deck"]["slides"][0]["elements"][0];
+        assert_eq!(embedded_label(group, "-nt-with_detail")["font_size"], 15.0, "{fit:?}");
+        assert_eq!(embedded_label(group, "-nd-with_detail")["font_size"], 13.0, "{fit:?}");
+        assert_eq!(embedded_label(group, "-nt-no_detail")["font_size"], 15.0, "{fit:?}");
+        let findings = inserted["diagnostics"]["findings"].as_array().unwrap();
+        for entity in ["with_detail", "no_detail"] {
+            assert!(findings.iter().any(|finding| finding["code"] == "GRAPH_NODE_LABEL_WRAPPED" && finding["entity_id"] == entity && finding["font_size"] == 15.0),
+                "{fit:?} missing wrapped info for {entity}: {findings:?}");
+        }
+    }
+
+    // Repro step 5: a 170x300 node with parentheses and detail succeeds at 15px heading and 13px detail.
+    let tall = json!({"version":1,"preset":"diagram/custom","title":"Tall","data":{"kind":"diagram","graph":{
+        "version":1,"title":"Tall","show_title":false,
+        "nodes":[{"id":"n1","label":"追加の処理（必要なとき）","detail":"余裕が足りなければ、次の経路に分けます","font_size":15,"detail_font_size":13,"x":40,"y":40,"width":170,"height":300}],
+        "edges":[],"groups":[]
+    }}});
+    let created_tall = execute_request(json!({"op":"create_part","id":"tall","spec":tall})).unwrap();
+    assert_eq!(embedded_label(&created_tall, "-nt-n1")["font_size"], 15.0);
+    assert_eq!(embedded_label(&created_tall, "-nd-n1")["font_size"], 13.0);
+
+    // Explicit `label_fit: "shrink"` shrinks the single-line heading, caps detail when needed, and reports GRAPH_NODE_LABEL_SHRUNK with detail cap info.
+    let shrink_spec = json!({"version":1,"title":"Shrink","show_title":false,
+        "nodes":[{"id":"shrunk","label":"追加の処理・必要なとき","label_fit":"shrink","detail":"余裕が足りなければ、次の経路に分けます","font_size":15,"detail_font_size":14,"x":40,"y":40,"width":170,"height":165}],
+        "edges":[],"groups":[]});
+    let shrunk = execute_request(json!({"op":"create_graph","id":"shrink-diag","spec":shrink_spec,"include_diagnostics":true})).unwrap();
+    let heading_drawn = embedded_label(&shrunk["element"], "-nt-shrunk")["font_size"].as_f64().unwrap();
+    let detail_drawn = embedded_label(&shrunk["element"], "-nd-shrunk")["font_size"].as_f64().unwrap();
+    assert!(heading_drawn < 15.0 && heading_drawn >= 12.0, "{heading_drawn}");
+    assert!(detail_drawn <= heading_drawn, "{detail_drawn} vs {heading_drawn}");
+    let findings = shrunk["diagnostics"]["findings"].as_array().unwrap();
+    let shrink_finding = findings.iter().find(|finding| ["GRAPH_NODE_LABEL_SHRUNK", "GRAPH_NODE_LABEL_SHRINK_LIMIT"].contains(&finding["code"].as_str().unwrap()) && finding["entity_id"] == "shrunk")
+        .unwrap_or_else(|| panic!("{findings:?}"));
+    if detail_drawn < 14.0 {
+        assert!(shrink_finding["message"].as_str().unwrap().contains("detail_font_size 14.0px"), "{shrink_finding}");
+    }
+
+    // Overflow messages distinguish `label` vs `detail` and report measured vs available px without leaking `-nt-` / `-nd-`.
+    let label_overflow = json!({"version":1,"title":"Overflow","show_title":false,
+        "nodes":[{"id":"n1","label":"見出しがとても長く狭い箱の高さに入りきらない合成テキストです","detail":"短い","font_size":20,"detail_font_size":12,"x":40,"y":40,"width":110,"height":80}],
+        "edges":[],"groups":[]});
+    let label_err = execute_request(json!({"op":"create_graph","id":"ov","spec":label_overflow})).unwrap_err().to_string();
+    assert!(label_err.contains("node 'n1'") && label_err.contains("-n-n1") && !label_err.contains("-nt-") && label_err.contains("label does not fit") && label_err.contains("measured ") && label_err.contains("available "), "{label_err}");
+
+    let detail_overflow = json!({"version":1,"title":"Overflow","show_title":false,
+        "nodes":[{"id":"n1","label":"短い","detail":"説明文がとても長く狭い箱の残りの高さに入りきらない合成テキストです。さらに行を増やします","font_size":15,"detail_font_size":14,"x":40,"y":40,"width":130,"height":90}],
+        "edges":[],"groups":[]});
+    let detail_err = execute_request(json!({"op":"create_graph","id":"ov","spec":detail_overflow})).unwrap_err().to_string();
+    assert!(detail_err.contains("node 'n1'") && detail_err.contains("-n-n1") && !detail_err.contains("-nd-") && detail_err.contains("detail does not fit") && detail_err.contains("measured ") && detail_err.contains("available "), "{detail_err}");
+
+    // Scaled PartLayouts (`height < 512` and `width < 1152`) also run the #97 pipeline directly: 1-line wrap headings keep their size,
+    // `label_fit: "shrink"` wraps at the 12px floor with GRAPH_NODE_LABEL_SHRINK_LIMIT, and overflowing wrap nodes report structured label/detail errors.
+    let shorter_part = json!({"version":1,"preset":"diagram/custom","title":"Shorter","data":{"kind":"diagram","graph":{
+        "version":1,"title":"Shorter","show_title":true,
+        "nodes":[{"id":"c1","label":"短い見出し","detail":"説明文","font_size":20,"detail_font_size":14,"x":40,"y":120,"width":260,"height":180}],
+        "edges":[],"groups":[]
+    }},"layout":{"x":64,"y":144,"width":1152,"height":424,"show_title":false}});
+    let shorter = execute_request(json!({"op":"create_part","id":"shorter","spec":shorter_part})).unwrap();
+    assert_eq!(embedded_label(&shorter, "-nt-c1")["font_size"], 20.0);
+    assert_eq!(embedded_label(&shorter, "-nd-c1")["font_size"], 14.0);
+
+    // An enlarged PartLayout (`1280x720`) succeeds when the enlarged node frame fits text that overflowed 1152x512.
+    let enlarged_graph = json!({
+        "version":1,"title":"Enlarged","show_title":false,
+        "nodes":[{"id":"e1","label":"拡大後の高さなら収まる二行の見出し","detail":"拡大後の高さなら収まる二行の説明文","font_size":18,"detail_font_size":14,"x":20,"y":20,"width":200,"height":84}],
+        "edges":[],"groups":[]
+    });
+    assert!(execute_request(json!({"op":"create_graph","id":"enlarged-raw","spec":enlarged_graph})).is_err());
+    let enlarged_part = json!({"version":1,"preset":"diagram/custom","title":"Enlarged","data":{"kind":"diagram","graph":enlarged_graph},"layout":{"x":0,"y":0,"width":1280,"height":720,"show_title":false}});
+    assert!(execute_request(json!({"op":"create_part","id":"enlarged","spec":enlarged_part})).is_ok());
+
+    let narrow_shrink = json!({"version":1,"preset":"diagram/custom","title":"Narrow shrink","data":{"kind":"diagram","graph":{
+        "version":1,"title":"Narrow shrink","show_title":false,
+        "nodes":[{"id":"s1","label":"半幅でも12pxの下限に達したら折り返す見出し","label_fit":"shrink","detail":"補足","font_size":18,"detail_font_size":14,"x":40,"y":40,"width":340,"height":240}],
+        "edges":[],"groups":[]
+    }},"layout":{"x":64,"y":144,"width":576,"height":512,"show_title":false}});
+    let narrow_inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide-1","id":"narrow","spec":narrow_shrink})).unwrap();
+    let narrow_group = &narrow_inserted["document"]["deck"]["slides"][0]["elements"][0];
+    assert_eq!(embedded_label(narrow_group, "-nt-s1")["font_size"], 12.0);
+    assert_eq!(embedded_label(narrow_group, "-nd-s1")["font_size"], 12.0);
+    assert!(narrow_inserted["diagnostics"]["findings"].as_array().unwrap().iter().any(|f| f["code"] == "GRAPH_NODE_LABEL_SHRINK_LIMIT" && f["entity_id"] == "s1"), "{narrow_inserted}");
+
+    let narrow_wrap_overflow = json!({"version":1,"preset":"diagram/custom","title":"Narrow wrap","data":{"kind":"diagram","graph":{
+        "version":1,"title":"Narrow wrap","show_title":false,
+        "nodes":[{"id":"w1","label":"半幅で折り返し行数が増えて収まらない長い見出しの合成テキスト","detail":"説明文も複数行になる合成テキスト","font_size":18,"detail_font_size":14,"x":40,"y":40,"width":300,"height":96}],
+        "edges":[],"groups":[]
+    }},"layout":{"x":64,"y":144,"width":576,"height":512,"show_title":false}});
+    let narrow_err = execute_request(json!({"op":"create_part","id":"narrow-ov","spec":narrow_wrap_overflow})).unwrap_err().to_string();
+    assert!(narrow_err.contains("node 'w1'") && narrow_err.contains("measured ") && narrow_err.contains("available "), "{narrow_err}");
 }

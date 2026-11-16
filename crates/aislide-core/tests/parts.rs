@@ -1520,3 +1520,102 @@ fn map_labels_stay_on_the_canvas_at_the_supported_latitude_limits() {
         }
     }
 }
+
+#[test]
+fn issue99_matrix_labeled_declares_table_headers_rehomes_on_update_and_reports_dropped_settings() {
+    let mut scene = deck(json!({})); scene["slides"][0]["elements"] = json!([]);
+    let document = execute_request(json!({"op":"new_document","id":"issue99","deck":scene})).unwrap();
+    for corner in ["", "観点"] {
+        let mut spec = matrix_spec("matrix", "labeled");
+        if !corner.is_empty() { spec["data"]["corner_label"] = json!(corner); }
+        let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"mx","spec":spec})).unwrap();
+        assert!(inserted.get("dropped_review").is_none(), "{inserted}");
+        let table_id = inserted["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap()
+            .iter().find(|child| child["type"] == "table").unwrap()["id"].as_str().unwrap().to_owned();
+        assert_eq!(inserted["document"]["deck"]["slides"][0]["review"]["table_headers"][&table_id], "both", "corner={corner:?}");
+        let report = execute_request(json!({"op":"check_accessibility","document":inserted["document"]})).unwrap();
+        let table_issues: Vec<_> = report["issues"].as_array().unwrap().iter()
+            .filter(|issue| issue["element_id"] == table_id).collect();
+        if corner.is_empty() {
+            assert_eq!(table_issues.len(), 1, "empty corner_label keeps Both and reports empty header rather than unknown: {table_issues:?}");
+            assert_eq!(table_issues[0]["code"], "table_declared_header_empty");
+        } else {
+            assert!(table_issues.is_empty(), "corner={corner:?}: {table_issues:?}");
+        }
+
+        // Updating a cell generates a new table element ID and preserves the header setting automatically.
+        spec["data"]["cells"][0][0] = json!("Updated");
+        let updated = execute_request(json!({"op":"update_part","document":inserted["document"],"expected_revision":1,"slide_id":"slide","id":"mx","spec":spec})).unwrap();
+        assert!(updated.get("dropped_review").is_none(), "{updated}");
+        let new_table_id = updated["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap()
+            .iter().find(|child| child["type"] == "table").unwrap()["id"].as_str().unwrap().to_owned();
+        assert_ne!(new_table_id, table_id);
+        assert_eq!(updated["document"]["deck"]["slides"][0]["review"]["table_headers"][&new_table_id], "both");
+        assert!(updated["document"]["deck"]["slides"][0]["review"]["table_headers"].get(&table_id).is_none());
+
+        // An explicit caller override (`first_row`) is preserved across updates rather than overwritten with the default `both`.
+        let overridden = execute_request(json!({"op":"set_table_headers","document":updated["document"],"expected_revision":2,"slide_id":"slide","element_id":new_table_id,"policy":"first_row"})).unwrap();
+        spec["data"]["cells"][1][1] = json!("Again");
+        let kept_override = execute_request(json!({"op":"update_part","document":overridden["document"],"expected_revision":3,"slide_id":"slide","id":"mx","spec":spec})).unwrap();
+        let third_table_id = kept_override["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap()
+            .iter().find(|child| child["type"] == "table").unwrap()["id"].as_str().unwrap().to_owned();
+        assert_eq!(kept_override["document"]["deck"]["slides"][0]["review"]["table_headers"][&third_table_id], "first_row");
+
+        // Replacing the table preset with a non-table preset drops the table header setting and discloses it in `dropped_review`.
+        let non_table = matrix_spec("matrix", "balanced");
+        let dropped = execute_request(json!({"op":"update_part","document":kept_override["document"],"expected_revision":4,"slide_id":"slide","id":"mx","spec":non_table})).unwrap();
+        let entries = dropped["dropped_review"].as_array().expect("dropped table header setting is disclosed");
+        assert_eq!(entries.len(), 1, "{dropped}");
+        assert_eq!((entries[0]["slide_id"].as_str(), entries[0]["part_id"].as_str(), entries[0]["element_id"].as_str(), entries[0]["kind"].as_str()),
+            (Some("slide"), Some("mx"), Some(third_table_id.as_str()), Some("table_headers")));
+
+        // `apply_slide_revision` with `UpdatePart` also forwards `dropped_review` rather than discarding it.
+        let edits = json!([{"op":"update_part","id":"mx","spec":non_table}]);
+        let preview = execute_request(json!({"op":"preview_slide_revision","document":kept_override["document"],"expected_revision":4,"expected_hash":kept_override["document"]["hash"],"slide_id":"slide","edits":edits})).unwrap();
+        let rev_applied = execute_request(json!({"op":"apply_slide_revision","document":kept_override["document"],"expected_revision":4,"expected_hash":kept_override["document"]["hash"],"slide_id":"slide","edits":edits,"candidate_hash":preview["candidate_hash"]})).unwrap();
+        assert_eq!(rev_applied["dropped_review"].as_array().map(Vec::len), Some(1), "{rev_applied}");
+    }
+
+    // A manual `both` table with an empty actual column header (`rows[0][1]`) or row header (`rows[1][0]`) still reports `table_declared_header_empty`.
+    for bad_rows in [json!([["", "", "Col B"], ["Row 1", "a", "b"]]), json!([["", "Col A", "Col B"], ["", "a", "b"]])] {
+        let mut manual = deck(json!({"type":"table","id":"t","x":40,"y":120,"width":600,"height":200,"rows":bad_rows,"font_size":18}));
+        manual["slides"][0]["review"] = json!({"table_headers":{"t":"both"}});
+        let manual_doc = execute_request(json!({"op":"new_document","id":"bad-both","deck":manual})).unwrap();
+        let report = execute_request(json!({"op":"check_accessibility","document":manual_doc})).unwrap();
+        assert!(report["issues"].as_array().unwrap().iter().any(|issue| issue["code"] == "table_declared_header_empty"), "{bad_rows}: {report}");
+    }
+}
+
+#[test]
+fn issue100_layoutless_and_updated_parts_reject_table_cell_overflow_with_cell_location_and_deficit() {
+    let overflowing_spec = || json!({"version":1,"preset":"matrix/labeled","title":"比較","data":{
+        "kind":"matrix",
+        "rows":["行 1","行 2","行 3","行 4"],
+        "columns":["列 A","列 B","列 C"],
+        "corner_label":"観点",
+        "cells":[
+            ["値 1A","値 1B","値 1C"],
+            ["これは合成の文字列。セルに収まるかを確かめるための長い文です","値 2B","値 2C"],
+            ["値 3A","値 3B","値 3C"],
+            ["値 4A","値 4B","値 4C"]
+        ]
+    }});
+    let direct_err = execute_request(json!({"op":"create_part","id":"mx","spec":overflowing_spec()})).unwrap_err().to_string();
+    assert!(direct_err.contains("table[3,2] (cells[1][0])") && direct_err.contains("over by "), "{direct_err}");
+
+    let mut with_layout = overflowing_spec();
+    with_layout["layout"] = json!({"x":64,"y":144,"width":1152,"height":498,"show_title":true});
+    let layout_err = execute_request(json!({"op":"create_part","id":"mx","spec":with_layout})).unwrap_err().to_string();
+    assert!(layout_err.contains("part content does not fit the requested frame without clipping") && layout_err.contains("table[3,2] (cells[1][0])"), "{layout_err}");
+
+    let mut scene = deck(json!({})); scene["slides"][0]["elements"] = json!([]);
+    let document = execute_request(json!({"op":"new_document","id":"issue100","deck":scene})).unwrap();
+    let add_err = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"mx","spec":overflowing_spec()})).unwrap_err().to_string();
+    assert!(add_err.contains("table[3,2] (cells[1][0])") && add_err.contains("over by "), "{add_err}");
+
+    // Updating a valid layoutless part (such as one created on a slide without `layout`) to overflowing cells rejects without mutating revision or content.
+    let valid_spec = matrix_spec("matrix", "labeled");
+    let inserted = execute_request(json!({"op":"insert_part","document":document,"expected_revision":0,"slide_id":"slide","id":"mx","spec":valid_spec})).unwrap();
+    let update_err = execute_request(json!({"op":"update_part","document":inserted["document"],"expected_revision":1,"slide_id":"slide","id":"mx","spec":overflowing_spec()})).unwrap_err().to_string();
+    assert!(update_err.contains("table[3,2] (cells[1][0])") && update_err.contains("over by "), "{update_err}");
+}

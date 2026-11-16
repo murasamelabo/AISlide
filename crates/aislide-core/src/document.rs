@@ -100,12 +100,24 @@ pub struct RemovedElements {
     pub cascaded: Vec<String>,
 }
 
+/// A review setting (`table_headers` or `accessibility`) attached to a part child that could not be carried over when the part was
+/// regenerated under new child IDs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DroppedReview {
+    pub slide_id: String,
+    pub part_id: String,
+    pub element_id: String,
+    pub kind: String,
+    pub reason: String,
+}
+
 #[derive(Serialize)]
 pub struct TransactionResult {
     pub document: Document, pub receipt: Option<UndoReceipt>, pub changes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub diagnostics: Option<crate::graphs::GraphDiagnostics>,
     #[serde(skip_serializing_if = "Vec::is_empty")] pub render_warnings: Vec<crate::export_static::RenderWarning>,
     #[serde(skip_serializing_if = "Vec::is_empty")] pub removed: Vec<RemovedElements>,
+    #[serde(skip_serializing_if = "Vec::is_empty")] pub dropped_review: Vec<DroppedReview>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -261,7 +273,7 @@ pub fn transact(document: &Document, transaction: Transaction) -> Result<Transac
     }
     crate::references::refresh(&mut updated)?;
     seal(&mut updated)?;
-    if updated.hash == document.hash { return Ok(TransactionResult { document: document.clone(), receipt: None, changes: Vec::new(), diagnostics: None, render_warnings: Vec::new(), removed: Vec::new() }); }
+    if updated.hash == document.hash { return Ok(TransactionResult { document: document.clone(), receipt: None, changes: Vec::new(), diagnostics: None, render_warnings: Vec::new(), removed: Vec::new(), dropped_review: Vec::new() }); }
     updated.revision = document.revision.checked_add(1).filter(|revision| *revision <= MAX_REVISION).ok_or_else(|| Error::Limit("document revision exhausted".into()))?;
     crate::preflight::serialized_bytes(&updated, document.capacity_profile.limits().document_bytes, "complete transaction document")?;
     let updated_content = serde_json::to_value(content_ref(&updated))?;
@@ -281,7 +293,7 @@ pub fn transact(document: &Document, transaction: Transaction) -> Result<Transac
     }
     let changes = serde_json::to_value(&transaction.operations)?.as_array().into_iter().flatten().filter_map(|operation| operation["path"].as_str().map(String::from)).collect();
     let receipt = UndoReceipt { document_id: updated.id.clone(), after_hash: updated.hash.clone(), inverse };
-    Ok(TransactionResult { document: updated, receipt: Some(receipt), changes, diagnostics: None, render_warnings: Vec::new(), removed: Vec::new() })
+    Ok(TransactionResult { document: updated, receipt: Some(receipt), changes, diagnostics: None, render_warnings: Vec::new(), removed: Vec::new(), dropped_review: Vec::new() })
 }
 
 pub fn undo(document: &Document, expected_revision: u64, receipt: UndoReceipt) -> Result<TransactionResult> {

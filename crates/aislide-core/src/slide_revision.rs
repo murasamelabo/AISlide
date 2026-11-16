@@ -81,6 +81,7 @@ fn candidate(document: &Document, expected_revision: u64, expected_hash: &str, s
     crate::preflight::serialized_bytes(&edits, 128 * 1024, "slide revision edits")?;
     let slide_index = document.deck.slides.iter().position(|slide| slide.id == slide_id).ok_or_else(|| Error::Invalid("revision slide not found".into()))?;
     let mut working = document.clone();
+    let mut dropped_review = Vec::new();
     for edit in edits {
         let ids: Vec<&String> = match edit {
             RevisionEdit::Translate { ids, .. } | RevisionEdit::Align { ids, .. } => ids.iter().collect(),
@@ -112,6 +113,7 @@ fn candidate(document: &Document, expected_revision: u64, expected_hash: &str, s
             RevisionEdit::UpdatePart { id, spec } => crate::parts::state::change(&working, working.revision, slide_id, id, spec, true)?,
             RevisionEdit::UpdateGraph { id, spec } => crate::graphs::change(&working, working.revision, slide_id, id, spec, true)?,
         };
+        dropped_review.extend(result.dropped_review);
         working = result.document;
         working.revision = document.revision;
     }
@@ -120,11 +122,13 @@ fn candidate(document: &Document, expected_revision: u64, expected_hash: &str, s
             return Err(Error::Unsupported("revision would modify another slide".into()));
         }
     }
-    crate::authoring_ops::review_transaction(document, Transaction { expected_revision, expected_hash: expected_hash.into(), operations: serde_json::from_value(json!([
+    let mut result = crate::authoring_ops::review_transaction(document, Transaction { expected_revision, expected_hash: expected_hash.into(), operations: serde_json::from_value(json!([
         {"op":"replace","path":format!("/deck/slides/{slide_index}"),"value":working.deck.slides[slide_index]},
         {"op":"add","path":"/parts","value":working.parts},
         {"op":"replace","path":"/bindings","value":working.bindings}
-    ]))? })
+    ]))? })?;
+    result.dropped_review = dropped_review;
+    Ok(result)
 }
 
 pub fn preview_slide_revision(document: &Document, expected_revision: u64, expected_hash: &str, slide_id: &str, edits: &[RevisionEdit], max_dimension: Option<u32>) -> Result<RevisionPreview> {

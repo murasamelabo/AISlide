@@ -228,6 +228,7 @@ fn apply(
     operation: &Operation,
     native_guard: &mut crate::parts::state::NativeRegenerationGuard<'_>,
     removals: &mut Vec<crate::document::RemovedElements>,
+    dropped_review: &mut Vec<crate::document::DroppedReview>,
 ) -> Result<usize> {
     let slide_id = match operation {
         Operation::ComposeSlide { slide_id, .. } | Operation::AddElements { slide_id, .. } | Operation::SetFrame { slide_id, .. } | Operation::SetTextStyle { slide_id, .. } | Operation::SetRichText { slide_id, .. } | Operation::SetTextPadding { slide_id, .. }
@@ -247,17 +248,17 @@ fn apply(
             slide.elements.extend(elements.iter().cloned());
         }
         Operation::AddPart { id, spec, .. } | Operation::UpdatePart { id, spec, .. } => {
-            crate::parts::state::change_in_deck(deck, parts, slide_id, id, spec, matches!(operation, Operation::UpdatePart { .. }), native_guard)?;
+            dropped_review.extend(crate::parts::state::change_in_deck(deck, parts, slide_id, id, spec, matches!(operation, Operation::UpdatePart { .. }), native_guard)?);
         }
         Operation::AddGraph { id, spec, layout, .. } => {
             let part = crate::parts::PartSpec { version: 1, preset: "diagram/custom".into(), title: spec.title.clone(), subtitle: spec.subtitle.clone(), data: crate::parts::PartData::Diagram { graph: spec.clone() }, layout: layout.clone() };
-            crate::parts::state::change_in_deck(deck, parts, slide_id, id, &part, false, native_guard)?;
+            dropped_review.extend(crate::parts::state::change_in_deck(deck, parts, slide_id, id, &part, false, native_guard)?);
         }
         Operation::UpdateGraph { id, spec, .. } => {
             let layout = parts.iter().find(|part| part.slide_id == *slide_id && part.element_id == *id && part.spec.preset == "diagram/custom")
                 .ok_or_else(|| Error::Invalid("managed graph metadata not found".into()))?.spec.layout.clone();
             let part = crate::parts::PartSpec { version: 1, preset: "diagram/custom".into(), title: spec.title.clone(), subtitle: spec.subtitle.clone(), data: crate::parts::PartData::Diagram { graph: spec.clone() }, layout };
-            crate::parts::state::change_in_deck(deck, parts, slide_id, id, &part, true, native_guard)?;
+            dropped_review.extend(crate::parts::state::change_in_deck(deck, parts, slide_id, id, &part, true, native_guard)?);
         }
         Operation::SetFrame { id, frame: destination, .. } => frame(target(&mut slide.elements, id)?, destination)?,
         Operation::SetTextStyle { ids, style, .. } => {
@@ -426,6 +427,7 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
     let mut metadata_changed = operations.iter().any(|operation| matches!(operation, Operation::ComposeSlide { .. } | Operation::AddPart { .. } | Operation::UpdatePart { .. } | Operation::AddGraph { .. } | Operation::UpdateGraph { .. }));
     let mut changed = BTreeSet::new();
     let mut removals = Vec::new();
+    let mut dropped_review = Vec::new();
     for (index, operation) in operations.iter().enumerate() {
         if matches!(operation, Operation::ComposeSlide { .. }) && document.origin.as_ref().is_some_and(|origin| origin.native) {
             return Err(Error::Unsupported("compose_slide requires a new empty slide in a generated document; use explicit edits for imported presentations".into()));
@@ -442,7 +444,7 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
                 if !unchanged { native_guard.check_rich_text(slide.native_source_id.as_deref().unwrap_or(slide_id), id).map_err(|error| Error::Invalid(format!("{context}: {error}")))?; }
             }
         }
-        changed.insert(apply(&mut deck, &mut parts, &mut bindings, operation, &mut native_guard, &mut removals).map_err(|error| Error::Invalid(format!("{context}: {error}")))?);
+        changed.insert(apply(&mut deck, &mut parts, &mut bindings, operation, &mut native_guard, &mut removals, &mut dropped_review).map_err(|error| Error::Invalid(format!("{context}: {error}")))?);
         crate::preflight::deck(&deck, document.capacity_profile.limits())?;
     }
     if crate::canonical::bytes(&parts)? != crate::canonical::bytes(&document.parts)? { metadata_changed = true; }
@@ -455,6 +457,7 @@ pub fn apply_operations(document: &Document, expected_revision: u64, expected_ha
     if bindings_changed { patches.push(json!({"op":"add","path":"/bindings","value":bindings})); }
     let mut result = document::transact(document, Transaction { expected_revision, expected_hash: expected_hash.into(), operations: serde_json::from_value(json!(patches))? })?;
     result.removed = removals;
+    result.dropped_review = dropped_review;
     result.render_warnings = crate::render::validated_authoring_effect_warnings(&result.document.deck, &page_indices)?;
     let mut targets: BTreeSet<_> = operations.iter().filter_map(|operation| match operation {
         Operation::AddGraph { slide_id, id, .. } | Operation::UpdateGraph { slide_id, id, .. } => Some((slide_id.clone(), id.clone())),

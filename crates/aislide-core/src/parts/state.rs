@@ -225,8 +225,9 @@ pub fn change(document:&Document,expected_revision:u64,slide_id:&str,id:&str,spe
     if document.revision!=expected_revision {return Err(Error::Conflict("stale document revision".into()));}
     let mut parts=document.parts.clone();let mut deck=document.deck.clone();
     let mut native_guard=NativeRegenerationGuard::new(document);
-    change_in_deck(&mut deck,&mut parts,slide_id,id,spec,update,&mut native_guard)?;
-    let result=crate::document::transact(document,Transaction {expected_revision,expected_hash:document.hash.clone(),operations:serde_json::from_value(json!([{"op":"replace","path":"/deck","value":deck},{"op":"add","path":"/parts","value":parts}]))?})?;
+    let dropped=change_in_deck(&mut deck,&mut parts,slide_id,id,spec,update,&mut native_guard)?;
+    let mut result=crate::document::transact(document,Transaction {expected_revision,expected_hash:document.hash.clone(),operations:serde_json::from_value(json!([{"op":"replace","path":"/deck","value":deck},{"op":"add","path":"/parts","value":parts}]))?})?;
+    result.dropped_review=dropped;
     let targets=if matches!(spec.data,super::PartData::Diagram {..}) {BTreeSet::from([(slide_id.into(),id.into())])} else {BTreeSet::new()};
     Ok(crate::graphs::annotate_transaction(result,&targets))
 }
@@ -250,13 +251,19 @@ fn picture_alt_mut<'a>(element: &'a mut Element, id: &str) -> Option<&'a mut Str
 /// What an update of a part does with the review state kept under the IDs of its children. A managed diagram names its children from
 /// its own spec, so a child whose role and entity (the node, edge or group it belongs to) are still drawn keeps its accessibility
 /// settings under its new ID, and a picture keeps a description set with `set_accessibility` unless the definition's own `alt` changed.
-/// Settings of children that are gone, and table headers of tables that are gone, are dropped. The part's root, every other element
-/// and their settings stay as they are. A part that does not name its children from its spec has nothing to match them by, so only
-/// the removal applies to it; its pictures can declare `decorative` in the definition instead.
-fn rehome_review(review: &mut Option<crate::review::SlideReview>, root: &str, old: &PartSpec, new: &PartSpec, previous: &Element, next: &mut Element) {
-    let Some(review) = review else { return; };
+/// Tables drawn in the same slot of a same-kind part carry over their `table_headers` policy under the new table ID. Settings of
+/// children or tables that are gone are dropped and returned so the caller can disclose them.
+fn rehome_review(review: &mut Option<crate::review::SlideReview>, slide_id: &str, root: &str, old: &PartSpec, new: &PartSpec, previous: &Element, next: &mut Element) -> Vec<crate::document::DroppedReview> {
+    let mut dropped = Vec::new();
+    let Some(review_ref) = review.as_mut() else { return dropped; };
     let kinds = |element: &Element| -> std::collections::BTreeMap<String, std::mem::Discriminant<Element>> {
         crate::model::element_list(std::slice::from_ref(element)).into_iter().map(|element| (element.bounds().0.to_owned(), std::mem::discriminant(element))).collect()
+    };
+    let table_ids = |element: &Element| -> Vec<String> {
+        crate::model::element_list(std::slice::from_ref(element)).into_iter().filter_map(|child| match child {
+            Element::Table { id, .. } => Some(id.clone()),
+            _ => None,
+        }).collect()
     };
     let (old_kinds, new_kinds) = (kinds(previous), kinds(next));
     let (old_names, new_names) = (crate::graphs::managed_names(root, old), crate::graphs::managed_names(root, new));
@@ -266,29 +273,56 @@ fn rehome_review(review: &mut Option<crate::review::SlideReview>, root: &str, ol
         let target = new_names.as_ref()?.id(role, &entity);
         (new_kinds.get(&target)? == old_kinds.get(id)?).then_some(target)
     };
-    let gone: Vec<(String, Option<String>)> = review.accessibility.keys().filter(|key| old_kinds.contains_key(*key) && !new_kinds.contains_key(*key)).map(|key| (key.clone(), target(key))).collect();
+    let gone: Vec<(String, Option<String>)> = review_ref.accessibility.keys().filter(|key| old_kinds.contains_key(*key) && !new_kinds.contains_key(*key)).map(|key| (key.clone(), target(key))).collect();
     for (from, to) in gone {
-        let Some(metadata) = review.accessibility.remove(&from) else { continue; };
-        if let Some(to) = to { review.accessibility.insert(to, metadata); }
-    }
-    review.table_headers.retain(|key, _| !old_kinds.contains_key(key) || new_kinds.contains_key(key));
-    let (Some(old_names), Some(new_names)) = (&old_names, &new_names) else { return; };
-    let (old_icons, new_icons) = (crate::graphs::diagram_icons(old), crate::graphs::diagram_icons(new));
-    for (role, entity, old_icon) in &old_icons {
-        let Some((_, _, new_icon)) = new_icons.iter().find(|(new_role, new_entity, _)| new_role == role && new_entity == entity) else { continue; };
-        let (old_id, new_id) = (old_names.id(role, entity), new_names.id(role, entity));
-        // A description set with set_accessibility lives in the picture's own alt, which drawing the part again would reset.
-        if let Some(Element::Picture { alt, .. }) = crate::model::element_list(std::slice::from_ref(previous)).into_iter().find(|element| element.bounds().0 == old_id) {
-            if *alt != old_icon.alt && new_icon.alt == old_icon.alt { if let Some(target) = picture_alt_mut(next, &new_id) { *target = alt.clone(); } }
+        let Some(metadata) = review_ref.accessibility.remove(&from) else { continue; };
+        if let Some(to) = to {
+            review_ref.accessibility.insert(to, metadata);
+        } else {
+            dropped.push(crate::document::DroppedReview {
+                slide_id: slide_id.into(), part_id: root.into(), element_id: from, kind: "accessibility".into(),
+                reason: "target child element is not drawn in the updated part".into(),
+            });
         }
-        // The definition no longer declares the picture decorative, so the decoration it recorded goes.
-        if old_icon.decorative && !new_icon.decorative {
-            if let Some(entry) = review.accessibility.get_mut(&new_id) {
-                entry.decorative = None;
-                if *entry == crate::review::ElementAccessibility::default() { review.accessibility.remove(&new_id); }
+    }
+    let (old_tables, new_tables) = (table_ids(previous), table_ids(next));
+    if std::mem::discriminant(&old.data) == std::mem::discriminant(&new.data) && old_tables.len() == new_tables.len() {
+        for (old_id, new_id) in old_tables.iter().zip(&new_tables) {
+            if old_id != new_id {
+                if let Some(policy) = review_ref.table_headers.remove(old_id) {
+                    review_ref.table_headers.insert(new_id.clone(), policy);
+                }
             }
         }
     }
+    let gone_tables: Vec<String> = review_ref.table_headers.keys().filter(|key| old_kinds.contains_key(*key) && !new_kinds.contains_key(*key)).cloned().collect();
+    for table_id in gone_tables {
+        review_ref.table_headers.remove(&table_id);
+        dropped.push(crate::document::DroppedReview {
+            slide_id: slide_id.into(), part_id: root.into(), element_id: table_id, kind: "table_headers".into(),
+            reason: "table is not drawn in the updated part".into(),
+        });
+    }
+    if let (Some(old_names), Some(new_names)) = (&old_names, &new_names) {
+        let (old_icons, new_icons) = (crate::graphs::diagram_icons(old), crate::graphs::diagram_icons(new));
+        for (role, entity, old_icon) in &old_icons {
+            let Some((_, _, new_icon)) = new_icons.iter().find(|(new_role, new_entity, _)| new_role == role && new_entity == entity) else { continue; };
+            let (old_id, new_id) = (old_names.id(role, entity), new_names.id(role, entity));
+            // A description set with set_accessibility lives in the picture's own alt, which drawing the part again would reset.
+            if let Some(Element::Picture { alt, .. }) = crate::model::element_list(std::slice::from_ref(previous)).into_iter().find(|element| element.bounds().0 == old_id) {
+                if *alt != old_icon.alt && new_icon.alt == old_icon.alt { if let Some(target) = picture_alt_mut(next, &new_id) { *target = alt.clone(); } }
+            }
+            // The definition no longer declares the picture decorative, so the decoration it recorded goes.
+            if old_icon.decorative && !new_icon.decorative {
+                if let Some(entry) = review_ref.accessibility.get_mut(&new_id) {
+                    entry.decorative = None;
+                    if *entry == crate::review::ElementAccessibility::default() { review_ref.accessibility.remove(&new_id); }
+                }
+            }
+        }
+    }
+    if *review_ref == crate::review::SlideReview::default() { *review = None; }
+    dropped
 }
 
 /// Records that the definition declares these pictures decorative. The definition is authoritative for what it declares: it replaces a
@@ -301,7 +335,22 @@ pub(crate) fn declare_decoration(review: &mut Option<crate::review::SlideReview>
     }
 }
 
-pub(crate) fn change_in_deck(deck:&mut Deck,parts:&mut Vec<PartInstance>,slide_id:&str,id:&str,spec:&PartSpec,update:bool,native_guard:&mut NativeRegenerationGuard<'_>)->Result<()> {
+/// Records semantic table headers for tables drawn by a part whose structure fixes header rows and columns (`matrix/labeled` and
+/// `contrast/labeled` draw column headings across the first row and row headings down the first column). Preserves any explicit policy
+/// already recorded on the table (for example, carried over across `update_part`).
+pub(crate) fn declare_table_headers(review: &mut Option<crate::review::SlideReview>, spec: &PartSpec, element: &Element) {
+    let Some(default_policy) = (match &spec.data {
+        super::PartData::Matrix { .. } => Some(crate::review::TableHeaders::Both),
+        _ => None,
+    }) else { return; };
+    for child in crate::model::element_list(std::slice::from_ref(element)) {
+        if let Element::Table { id, .. } = child {
+            review.get_or_insert_with(Default::default).table_headers.entry(id.clone()).or_insert(default_policy);
+        }
+    }
+}
+
+pub(crate) fn change_in_deck(deck:&mut Deck,parts:&mut Vec<PartInstance>,slide_id:&str,id:&str,spec:&PartSpec,update:bool,native_guard:&mut NativeRegenerationGuard<'_>)->Result<Vec<crate::document::DroppedReview>> {
     if !update && parts.len()>=128 {return Err(Error::Limit("more than 128 metadata parts".into()));}
     let slide=deck.slides.iter_mut().find(|slide|slide.id==slide_id).ok_or_else(||Error::Invalid("unknown part slide".into()))?;
     let fallback=crate::design::Theme::default();
@@ -323,8 +372,10 @@ pub(crate) fn change_in_deck(deck:&mut Deck,parts:&mut Vec<PartInstance>,slide_i
     }
     // An update may keep a band that is already empty, but must not introduce one.
     if !(update && existing.is_some_and(|index| super::title_band_empty(&parts[index].spec))) { super::validate_title_band(spec)?; }
-    let (created,declared)=crate::graphs::with_decorative_pictures(||super::create_with_theme(id,&effective_spec,crate::design::slide_theme(slide,deck.design.as_ref()).unwrap_or(&fallback)));
-    let mut element=created?;
+    let slide_theme = crate::design::slide_theme(slide,deck.design.as_ref()).unwrap_or(&fallback).clone();
+    let (created,declared)=crate::graphs::with_decorative_pictures(||super::create_located(id,&effective_spec,&slide_theme));
+    let (mut element,locations)=created.map_err(super::PartFailure::into_error)?;
+    let is_diagram = matches!(effective_spec.data, super::PartData::Diagram { .. } | super::PartData::Swimlane { .. } | super::PartData::Architecture { .. });
     if !update && effective_spec.layout.is_none() {
         let region = deck.design.as_ref().and_then(|design| design.layouts.iter().find(|layout| Some(&layout.id) == slide.layout_id.as_ref() && layout.id == "preset-visual-content"))
             .and_then(|layout| layout.elements.iter().find(|element| element.bounds().0 == "preset-visual-region"));
@@ -335,24 +386,40 @@ pub(crate) fn change_in_deck(deck:&mut Deck,parts:&mut Vec<PartInstance>,slide_i
             *x = left + (region_width - *width) / 2.0; *y = top + (region_height - *height) / 2.0;
             let target = (*width, *height);
             resize_canvas(&mut element, target.0, target.1)?;
+            if is_diagram { crate::graphs::restore_scaled_padding(&mut element, &slide_theme)?; }
+            let overflows = super::layout_overflows(&element, &slide_theme)?;
+            if !overflows.is_empty() { return Err(super::PartFailure::Overflow(super::part_overflow_details(&effective_spec.preset, overflows, &locations)).into_error()); }
         }
     }
     let native_sha256=existing.and_then(|index|parts[index].native_sha256.clone());
     if native_sha256.is_some() { explicit_native_padding(&mut element); }
+    let mut dropped = Vec::new();
     if update {
         let index=existing.ok_or_else(||Error::Invalid("part metadata missing".into()))?;
         if parts[index].stale {return Err(Error::Conflict("part metadata is stale; retain manual edits or insert a new part".into()));}
-        let current=slide.elements.iter_mut().find(|element|element.bounds().0==id).ok_or_else(||Error::Conflict("part element missing".into()))?;
+        let target_frame = slide.elements.iter().find(|element| element.bounds().0 == id)
+            .ok_or_else(|| Error::Conflict("part element missing".into()))?
+            .clone();
         if effective_spec.layout.is_none() {
-            if let Element::Group { view_width, view_height, .. } = current { resize_canvas(&mut element, *view_width, *view_height)?; }
-            if let Element::Group{x,y,width,height,..}=&mut element {let bounds=current.bounds();*x=bounds.1;*y=bounds.2;*width=bounds.3;*height=bounds.4;}
+            if let Element::Group { view_width, view_height, .. } = &target_frame { resize_canvas(&mut element, *view_width, *view_height)?; }
+            if let Element::Group{x,y,width,height,..}=&mut element {let bounds=target_frame.bounds();*x=bounds.1;*y=bounds.2;*width=bounds.3;*height=bounds.4;}
+            if is_diagram { crate::graphs::restore_scaled_padding(&mut element, &slide_theme)?; }
+            let overflows = super::layout_overflows(&element, &slide_theme)?;
+            if !overflows.is_empty() { return Err(super::PartFailure::Overflow(super::part_overflow_details(&effective_spec.preset, overflows, &locations)).into_error()); }
         }
+        let current=slide.elements.iter_mut().find(|element|element.bounds().0==id).ok_or_else(||Error::Conflict("part element missing".into()))?;
         // The children are drawn again under new IDs: settings made for them follow, or go with the children that are gone.
-        rehome_review(&mut slide.review,id,&parts[index].spec,&effective_spec,current,&mut element);
+        dropped = rehome_review(&mut slide.review,slide_id,id,&parts[index].spec,&effective_spec,current,&mut element);
         declare_decoration(&mut slide.review,&declared);
+        declare_table_headers(&mut slide.review,&effective_spec,&element);
         *current=element.clone();
-    } else {if existing.is_some() || slide.elements.iter().any(|element|element.bounds().0==id) {return Err(Error::Conflict("part identity already exists".into()));}slide.elements.push(element.clone());declare_decoration(&mut slide.review,&declared);}
+    } else {
+        if existing.is_some() || slide.elements.iter().any(|element|element.bounds().0==id) {return Err(Error::Conflict("part identity already exists".into()));}
+        slide.elements.push(element.clone());
+        declare_decoration(&mut slide.review,&declared);
+        declare_table_headers(&mut slide.review,&effective_spec,&element);
+    }
     let instance=PartInstance {slide_id:slide_id.into(),element_id:id.into(),spec:effective_spec,render_sha256:render_hash(&element)?,native_sha256,stale:false};
     if let Some(index)=existing {parts[index]=instance;} else {parts.push(instance);}
-    Ok(())
+    Ok(dropped)
 }

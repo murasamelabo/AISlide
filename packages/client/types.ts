@@ -212,10 +212,11 @@ export type AccessibilityIssue = { code: string; slide_id: string; element_id: s
 /** `contrast_checked` / `contrast_unsupported` count text elements (not runs); low contrast counts as checked. `checked_features` lists what the checker can evaluate, not what it did in this deck. */
 export type AccessibilityReport = { issues: AccessibilityIssue[]; checked_features: string[]; contrast_checked: number; contrast_unsupported: number; limitations: string[]; wcag_certified: false }
 export type InspectionCategory = 'sources' | 'custom_xml' | 'comments' | 'notes' | 'unused_media' | 'off_slide' | 'invisible'
+export type InspectionFinding = { category: InspectionCategory; count: number; paths: string[]; aislide_provenance?: boolean; managed_parts?: number; stale_parts?: number }
 export type PersonalDataCandidate = { rule: 'email_candidate' | 'phone_candidate' | 'personal_property_candidate'; scope: 'current_deck' | 'embedded_origin'; surface: string; count: number; locations: number[][]; masked_value: '[REDACTED]' }
-export type DocumentInspection = { findings: { category: InspectionCategory; count: number; paths: string[] }[]; candidates: PersonalDataCandidate[]; candidate_scan_truncated: boolean; limitations: string[]; complete_personal_data_detection: false }
+export type DocumentInspection = { findings: InspectionFinding[]; candidates: PersonalDataCandidate[]; candidate_scan_truncated: boolean; limitations: string[]; complete_personal_data_detection: false }
 export type CleanCopyOptions = { new_document_id: string; categories: InspectionCategory[]; confirmed: boolean }
-export type CleanCopyExport = Exported & { document: AislideDocument; inspection: DocumentInspection }
+export type CleanCopyExport = Exported & { document: AislideDocument; inspection: DocumentInspection; warnings?: string[] }
 export type ReadingOrderResult = { document: AislideDocument; warnings: string[] }
 export type Slide = { id: string; title: string; background: string; elements: Element[]; notes: string; notes_paragraphs?: RichParagraph[]; layout_id?: string | null; inherit_background?: boolean; hide_master_graphics?: boolean; native_source_id?: string | null; review?: SlideReview | null }
 export type SlideOperation =
@@ -441,6 +442,8 @@ export type RenderWarningsSnapshot = { revision: number; hash: string; status: '
 /** One remove_elements operation: the IDs it named, plus the group children and attached connectors removed with them (document order). */
 export type RemovedElements = { slide_id: string; requested: string[]; cascaded: string[] }
 export type RemovedElementsSnapshot = { revision: number; hash: string; status: 'complete' | 'unavailable'; removed: RemovedElements[] }
+export type DroppedReview = { slide_id: string; part_id: string; element_id: string; kind: 'table_headers' | 'accessibility'; reason: string }
+export type DroppedReviewSnapshot = { revision: number; hash: string; status: 'complete' | 'unavailable'; dropped: DroppedReview[] }
 export type GraphCreation = { element: Element; diagnostics: GraphDiagnostics }
 export type GraphAlignment = 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom'
 export type GraphOperation =

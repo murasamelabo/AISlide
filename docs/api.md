@@ -581,6 +581,18 @@ responses expose it as `removedElements:{revision,hash,status,removed}`. Status
 is `complete` or `unavailable`; later accepted edits and Undo/Redo clear the
 snapshot. Undo restores the whole batch, including the cascaded elements.
 
+Table parts (`matrix/labeled`, `contrast/labeled`) record `TableHeaders::Both`
+automatically on creation and carry any existing `table_headers` setting (including
+explicit `set_table_headers` overrides) to the regenerated table slot on
+`update_part`. When `update_part`, `update_graph` or `apply_slide_revision`
+cannot rehome a child `table_headers` or `accessibility` setting (for example,
+replacing a table preset with a non-table preset or removing a diagram node),
+the transaction result carries
+`dropped_review:[{slide_id,part_id,element_id,kind,reason}]` (omitted when
+empty), surfaced as `session.droppedReview` in the SDK and
+`droppedReview:{revision,hash,status,dropped}` on MCP part/graph/revision
+mutations. Later accepted edits and Undo/Redo clear the snapshot.
+
 `Frame` is `{x,y,width,height}`: finite nonnegative coordinates, positive
 dimensions, each bounded by 4096 scene pixels, with final page/group bounds
 also enforced. Nested target coordinates are parent-local. Resizing a group
@@ -1203,8 +1215,7 @@ exceed it. Stored records are validated structurally (XML 1.0 characters in
 strings and keys, at most 30 nesting levels below the provenance root, exact
 reread of the generated XML including CR); guided content checks run
 only at creation. Removing `/guided_record` also removes it from project and
-presentation PPTX output. `inspect_document` scans the record and `export_clean_copy`
-removes it when `sources` or `notes` is selected. `none` does not redact evidence
+presentation PPTX output. `inspect_document` scans the record and managed part metadata, discloses `aislide_provenance`, `managed_parts` and `stale_parts` counts on `custom_xml` findings, and `export_clean_copy` removes the record when `sources` or `notes` is selected, always detaches `stale` part definitions so pre-edit spec text is not retained, and removes AISlide part/provenance metadata when `custom_xml` is selected (leaving visible slide elements editable while detaching `update_part`/`update_graph` regeneration). `none` does not redact evidence
 from the file. The record is captured at creation, not automatically updated
 after edits or authenticated as truth.
 
@@ -1549,8 +1560,8 @@ at 32 KiB, and contain `code`, `severity`, `graph_id`, `entity_id`, `element_ids
 Bounds are in the final graph group's local coordinate space.
 
 Codes include `GRAPH_LABEL_BORDER_OVERLAP`, `GRAPH_LABEL_OVERLAP`,
-`GRAPH_NODE_LABEL_WRAPPED` (info), `GRAPH_NODE_LABEL_SHRINK_LIMIT` (warning),
-`GRAPH_NODE_DETAIL_SHRUNK` (info) and
+`GRAPH_NODE_LABEL_WRAPPED` (info), `GRAPH_NODE_LABEL_SHRUNK` (info),
+`GRAPH_NODE_LABEL_SHRINK_LIMIT` (warning), `GRAPH_NODE_DETAIL_SHRUNK` (info) and
 `GRAPH_NODE_PADDING` (warning). The engine raises the top and bottom padding of
 node text to the 8px floor of preflight's `CONTAINER_PADDING` whenever the
 measured text still fits with a pixel to spare: centered labels as before, and now

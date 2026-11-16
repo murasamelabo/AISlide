@@ -349,8 +349,23 @@ pub fn check_accessibility(deck: &crate::model::Deck) -> AccessibilityReport {
 #[serde(rename_all = "snake_case")]
 pub enum InspectionCategory { Sources, CustomXml, Comments, Notes, UnusedMedia, OffSlide, Invisible }
 
+fn is_zero_usize(count: &usize) -> bool { *count == 0 }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct InspectionFinding { pub category: InspectionCategory, pub count: usize, pub paths: Vec<String> }
+pub struct InspectionFinding {
+    pub category: InspectionCategory,
+    pub count: usize,
+    pub paths: Vec<String>,
+    /// For `custom_xml`: whether AISlide's own provenance part (`urn:aislide:provenance:1`) is present among the inspected Custom XML or carries managed part definitions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub aislide_provenance: bool,
+    /// For `custom_xml`: managed part definitions currently stored in AISlide provenance.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub managed_parts: usize,
+    /// For `custom_xml`: managed part definitions marked `stale`, whose stored `spec` predates manual slide edits.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub stale_parts: usize,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersonalDataCandidate { pub rule: String, pub scope: String, pub surface: String, pub count: usize, pub locations: Vec<Vec<usize>>, pub masked_value: String }
@@ -434,7 +449,22 @@ impl CandidateScan {
             }
         }
         self.sources(&document.sources, scope);
+        self.parts(&document.parts, scope);
         if let Some(record) = &document.guided_record { self.guided_record(record, scope); }
+    }
+
+    fn parts(&mut self, parts: &[crate::parts::state::PartInstance], scope: &str) {
+        fn strings(scan: &mut CandidateScan, value: &serde_json::Value, scope: &str, part_index: usize, index: &mut usize) {
+            match value {
+                serde_json::Value::String(text) => { scan.text(text, scope, "part_metadata", &[part_index, *index]); *index += 1; }
+                serde_json::Value::Array(values) => for value in values { strings(scan, value, scope, part_index, index); },
+                serde_json::Value::Object(values) => for value in values.values() { strings(scan, value, scope, part_index, index); },
+                _ => {},
+            }
+        }
+        for (part_index, part) in parts.iter().enumerate() {
+            if let Ok(value) = serde_json::to_value(&part.spec) { strings(self, &value, scope, part_index, &mut 0); }
+        }
     }
 
     fn guided_record(&mut self, record: &crate::guided::GuidedRecord, scope: &str) {
@@ -491,6 +521,7 @@ impl CandidateScan {
         }
         if !properties_only { if let Some((_, provenance)) = crate::provenance::read(package)? {
             self.sources(&provenance.sources, scope);
+            self.parts(&provenance.parts, scope);
             if let Some(record) = &provenance.guided_record { self.guided_record(record, scope); }
         } }
         Ok(())
@@ -502,7 +533,13 @@ impl CandidateScan {
 pub struct CleanCopyOptions { pub new_document_id: String, pub categories: BTreeSet<InspectionCategory>, pub confirmed: bool }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CleanCopy { pub bytes: Vec<u8>, pub document: crate::document::Document, pub inspection: InspectionReport }
+pub struct CleanCopy {
+    pub bytes: Vec<u8>,
+    pub document: crate::document::Document,
+    pub inspection: InspectionReport,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
 
 #[derive(Clone)]
 struct Relationship { source: String, part: String, id: String, kind: String, target: Option<String>, external: bool }
@@ -741,15 +778,30 @@ fn inspect_document_inner(document: &crate::document::Document) -> Result<Inspec
         if !slide.notes.is_empty() { found.entry(Notes).or_default().insert(format!("document/deck/slides/{index}/notes")); }
         for position in 0..slide.review.as_ref().map_or(0, |review| review.comments.len()) { found.entry(Comments).or_default().insert(format!("document/deck/slides/{index}/review/comments/{position}")); }
     }
+    let mut aislide_provenance = false;
+    let managed_parts = document.parts.len();
+    let stale_parts = document.parts.iter().filter(|part| part.stale).count();
     let mut packages = vec![("current", current_package(document)?)];
     if let Some(origin) = &document.origin { packages.push(("original", crate::package::Package::open(base64::engine::general_purpose::STANDARD.decode(&origin.base64).map_err(|_| Error::Invalid("origin encoding".into()))?)?)); }
     for (scope, package) in packages {
         candidates.package(&package, if scope == "current" { "current_deck" } else { "embedded_origin" }, scope == "current")?;
         let relations = relationships(&package, true)?; let reached = reachable(&relations, &BTreeSet::new());
-        let source = crate::provenance::read(&package)?.map(|(path, metadata)| (path, !metadata.sources.is_empty() || !metadata.bindings.is_empty() || metadata.guided_record.is_some()));
+        let provenance = crate::provenance::read(&package)?;
+        let provenance_info = provenance.map(|(path, metadata)| {
+            let has_source = !metadata.sources.is_empty() || !metadata.bindings.is_empty() || metadata.guided_record.is_some();
+            let has_custom = !has_source || !metadata.parts.is_empty() || metadata.references.is_some();
+            (path, has_source, has_custom)
+        });
         for (path, kind) in content_types(&package)? {
-            let category = if source.as_ref().is_some_and(|(source, evidence)| source == &path && *evidence) { Some(Sources) }
-                else if comment_type(&kind) { Some(Comments) }
+            if let Some((_, has_source, has_custom)) = provenance_info.as_ref().filter(|(source, _, _)| source == &path) {
+                if *has_source { found.entry(Sources).or_default().insert(format!("{scope}/{path}")); }
+                if *has_custom {
+                    aislide_provenance = true;
+                    found.entry(CustomXml).or_default().insert(format!("{scope}/{path}"));
+                }
+                continue;
+            }
+            let category = if comment_type(&kind) { Some(Comments) }
                 else if kind == "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml" { Some(Notes) }
                 else if relations.iter().any(|relation| relation.kind == format!("{}/customXml", crate::native::R) && relation.target.as_deref() == Some(&path)) || path.starts_with("customXml/") { Some(CustomXml) }
                 else if (kind.starts_with("image/") || path.starts_with("ppt/media/")) && !reached.contains(&path) { Some(UnusedMedia) }
@@ -758,7 +810,16 @@ fn inspect_document_inner(document: &crate::document::Document) -> Result<Inspec
         }
         for (category, parts) in hidden_or_offslide(&package)? { for (path, ids) in parts { for id in ids { found.entry(category).or_default().insert(format!("{scope}/{path}#shape-{id}")); } } }
     }
-    Ok(InspectionReport { findings: found.into_iter().map(|(category, paths)| InspectionFinding { category, count: paths.len(), paths: Vec::new() }).collect(), candidates: candidates.entries.into_values().collect(), candidate_scan_truncated: candidates.truncated, limitations: ["Candidates require manual review; email, formatted phone and personal-property rules are not proof of personal data or completeness", "Numeric locations and Unicode-scalar offsets are scope-local; matched values and paths are never returned", "Current deck and embedded origin are scanned separately; history and recovery snapshots retain previous content", "The scan is bounded to 8 MiB of text and 4096 candidate locations; no OCR or embedded binary inspection", "Off-slide covers wholly outside, unrotated top-level objects; invisible covers native hidden top-level objects", "External relationships are inspected as metadata only; no targets are fetched or executed"].map(str::to_owned).to_vec(), complete_personal_data_detection: false })
+    let findings = found.into_iter().map(|(category, paths)| {
+        let custom = category == CustomXml;
+        InspectionFinding {
+            category, count: paths.len(), paths: Vec::new(),
+            aislide_provenance: custom && aislide_provenance,
+            managed_parts: if custom { managed_parts } else { 0 },
+            stale_parts: if custom { stale_parts } else { 0 },
+        }
+    }).collect();
+    Ok(InspectionReport { findings, candidates: candidates.entries.into_values().collect(), candidate_scan_truncated: candidates.truncated, limitations: ["Candidates require manual review; email, formatted phone and personal-property rules are not proof of personal data or completeness", "Numeric locations and Unicode-scalar offsets are scope-local; matched values and paths are never returned", "Current deck and embedded origin are scanned separately; history and recovery snapshots retain previous content", "The scan is bounded to 8 MiB of text and 4096 candidate locations; no OCR or embedded binary inspection", "Off-slide covers wholly outside, unrotated top-level objects; invisible covers native hidden top-level objects", "External relationships are inspected as metadata only; no targets are fetched or executed"].map(str::to_owned).to_vec(), complete_personal_data_detection: false })
 }
 
 fn remove_parts(package: &mut crate::package::Package, removed: &BTreeSet<String>) -> Result<()> {
@@ -827,13 +888,45 @@ pub fn export_clean_copy(document: &crate::document::Document, options: &CleanCo
     if options.categories.contains(&Sources) || options.categories.contains(&Notes) { sanitized.guided_record = None; }
     let removed_elements = remove_shapes(&mut package, &options.categories, document)?;
     sanitized.parts.retain(|part| !removed_elements.contains(&(part.slide_id.clone(), part.element_id.clone())));
+    let stale_slides: BTreeSet<String> = sanitized.parts.iter().filter(|part| part.stale).map(|part| part.slide_id.clone()).collect();
+    let stale_detached = sanitized.parts.iter().filter(|part| part.stale).count();
+    sanitized.parts.retain(|part| !part.stale);
+    if !stale_slides.is_empty() {
+        if let Some(record) = sanitized.guided_record.as_mut() {
+            for slide in &mut record.input.slides {
+                if stale_slides.contains(&slide.id) { slide.part = None; }
+            }
+        }
+    }
+    let had_managed_metadata = !document.parts.is_empty() || document.references.is_some()
+        || document.guided_record.as_ref().is_some_and(|record| record.input.slides.iter().any(|slide| slide.part.is_some()));
+    if options.categories.contains(&CustomXml) {
+        sanitized.parts.clear();
+        sanitized.references = None;
+        if let Some(record) = sanitized.guided_record.as_mut() {
+            for slide in &mut record.input.slides { slide.part = None; }
+        }
+    }
+    let keep_source_provenance = !sanitized.sources.is_empty() || !sanitized.bindings.is_empty() || sanitized.guided_record.is_some();
     let types = content_types(&package)?; let relations = relationships(&package, true)?;
     let provenance = crate::provenance::read(&package)?.map(|(path, _)| path);
     let mut removed = BTreeSet::new();
     for (path, kind) in &types {
+        let is_provenance = Some(path) == provenance.as_ref();
         if (options.categories.contains(&Comments) && comment_type(kind))
             || (options.categories.contains(&Notes) && ["application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml", "application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"].contains(&kind.as_str()))
-            || (options.categories.contains(&CustomXml) && Some(path) != provenance.as_ref() && (path.starts_with("customXml/") || relations.iter().any(|relation| relation.kind == format!("{}/customXml", crate::native::R) && relation.target.as_ref() == Some(path)))) { removed.insert(path.clone()); }
+            || (options.categories.contains(&CustomXml) && (!is_provenance || !keep_source_provenance) && (path.starts_with("customXml/") || relations.iter().any(|relation| relation.kind == format!("{}/customXml", crate::native::R) && relation.target.as_ref() == Some(path)))) { removed.insert(path.clone()); }
+    }
+    let mut warnings = Vec::new();
+    if options.categories.contains(&CustomXml) && (had_managed_metadata || (provenance.is_some() && !keep_source_provenance)) {
+        let detail = if keep_source_provenance {
+            "AISlide managed part and reference definitions were removed (unselected source/evidence provenance was retained); slides remain editable as native elements, but managed parts cannot be regenerated with update_part or update_graph."
+        } else {
+            "AISlide provenance metadata was removed; slides remain editable as native elements, but managed parts cannot be regenerated with update_part or update_graph."
+        };
+        warnings.push(detail.into());
+    } else if stale_detached > 0 {
+        warnings.push(format!("{stale_detached} stale managed part definition(s) were detached so pre-edit spec text is not retained in the clean copy; visible slide elements are unchanged."));
     }
     if options.categories.contains(&Notes) {
         let main = crate::pptx::relationship_targets(&package, "", "officeDocument")?.into_values().next().ok_or_else(|| Error::Invalid("presentation missing".into()))?;
@@ -854,7 +947,7 @@ pub fn export_clean_copy(document: &crate::document::Document, options: &CleanCo
     for relation in relationships(&verified, true)? { if let Some(target) = relation.target { if !verified.part_names().contains(target.as_str()) { return Err(Error::Invalid("clean copy would contain a dangling OPC relationship".into())); } } }
     let clean: crate::document::Document = serde_json::from_value(crate::document::open_presentation(options.new_document_id.clone(), bytes.clone())?["document"].clone())?;
     let inspection = inspect_document(&clean)?;
-    Ok(CleanCopy { bytes, document: clean, inspection })
+    Ok(CleanCopy { bytes, document: clean, inspection, warnings })
 }
 
 #[cfg(test)]

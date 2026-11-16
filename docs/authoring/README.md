@@ -345,11 +345,14 @@ at its full size, so widen the node or shorten the detail where a short last lin
 matters.
 
 Node `label_fit:"shrink"` prefers a single-line heading by reducing its font
-only as far as 12px; default `wrap` retains the original behavior. Hard
-newlines are never removed. A node too narrow at that floor retains wrapping
-and reports `GRAPH_NODE_LABEL_SHRINK_LIMIT`; ordinary additional wrapping is
-reported as informational `GRAPH_NODE_LABEL_WRAPPED`. Widen the node instead
-of assuming every label can become one line.
+only as far as 12px and reports `GRAPH_NODE_LABEL_SHRUNK` (including when
+`detail` is capped so it does not exceed the shrunk heading); default `wrap`
+retains the original size and wraps across lines, allocating the remaining
+height after the gap to `detail`. Hard newlines are never removed. A node too
+narrow at the 12px floor retains wrapping and reports
+`GRAPH_NODE_LABEL_SHRINK_LIMIT`; ordinary additional wrapping is reported as
+informational `GRAPH_NODE_LABEL_WRAPPED`. Widen the node instead of assuming
+every label can become one line.
 
 Node text keeps at least 8px of top and bottom padding wherever the measured text
 fits, including the top-aligned text of a node with `detail`, so preflight does not
@@ -1007,9 +1010,11 @@ Each slide contains `id`, `section`, `headline`, `sentence_form`, `pattern_id`, 
 | `none` | Only the supplied speaker text; empty if absent | `document.guided_record` and PPTX Custom XML |
 
 For example, use `authoring:{ledger_notes:"summary"}` with your own per-slide
-`speaker_notes`. Summary headings follow `language`; references preserve the
-declared `source`, `assumption` or `unknown` classification. Raw ledger/evidence
-JSON is not placed in summary/none notes.
+`speaker_notes`. Generated summary headings and the human-review caution follow
+`language` (supplied speaker text, questions, claims and references are not
+translated); references preserve the declared `source`, `assumption` or
+`unknown` classification. Raw ledger/evidence JSON is not placed in
+summary/none notes.
 
 The per-slide speaker-text budget is **4000 valid Unicode scalars**, not UTF-16
 code units or UTF-8 bytes. The completed note budget is **8000 scalars**, including
@@ -1061,10 +1066,17 @@ hiding notes or choosing `none` is not redaction. The minimal delivery
 For documents with a record, the delivery manifest explicitly sets
 `privacy.pptx_includes_guided_record:true`; the minimal source report also
 identifies that retention without duplicating the complete input.
-`inspect_document` scans record text for masked candidates (`surface:
-"guided_record"`, current deck and embedded origin) and counts the record under
-`sources`. An explicitly confirmed `export_clean_copy` removes the record when
-`sources` or `notes` is selected, because `full` notes carry the same evidence.
+`inspect_document` scans record text (`surface: "guided_record"`) and part
+definitions (`surface: "part_metadata"`, current deck and embedded origin) for
+masked candidates, counts the record under `sources`, and discloses
+`aislide_provenance`, `managed_parts` and `stale_parts` counts on `custom_xml`
+without returning content or paths. An explicitly confirmed `export_clean_copy`
+removes the record when `sources` or `notes` is selected (because `full` notes
+carry the same evidence), always detaches `stale` managed part definitions so
+replaced pre-edit text is not retained in the clean archive, and removes AISlide
+part/provenance metadata when `custom_xml` is selected (slides remain editable
+as native elements, while managed `update_part`/`update_graph` regeneration is
+detached and reported in `warnings`).
 
 Support entries contain `clause`, `body_paths` and `evidence_ids`. Ordered clauses must reconstruct the whole headline after whitespace normalization. Native-part paths refer to populated `/data` within `PartSpec`, not its title. C02/C03 paths refer to populated `/issues`. Pointers select the actual content offered as support; their existence does not prove the claim.
 
@@ -1084,7 +1096,7 @@ Number declarations have `{path,value,evidence_id}`. For example:
 }
 ```
 
-These are synthetic test values, not factual business data. Numeric quantities in part data need exact path/value declarations with source or assumption evidence. Geometry and structural/index fields are excluded: x/y/width/height, font/stroke size (including `detail_font_size`), version, edge from/to indices, timeline start/end indices, longitude/latitude. Their factual meaning, along with dates, amounts and counts embedded in prose, remains a review responsibility. Unknown evidence cannot justify a numeric chart value. Use `xx` in qualitative content instead of fabricating a chart bar.
+These are synthetic test values, not factual business data. Numeric quantities in part data need exact path/value declarations with source or assumption evidence. Geometry and structural/index fields are excluded across all parts (`x`, `y`, `width`, `height`, `font_size`, `detail_font_size`, `stroke_width`, `version`, `from`, `to`, `start`, `end`, `longitude`, `latitude`), along with part-scoped layout, placement and step-badge fields below `/data`: `icon_cards|fact_columns|kpi_cards` `/data/columns`; `icon_cards|icon_rows|shift_rows|step_cards|rail_steps|fact_columns|agenda|screenshot_callouts` `/data/body_size`; `comparison_panels` `/data/panels/*/body_size`; `interactive` `/data/spec/initial_state/dimension`; `swimlane` `/data/steps/*/lane` and `/data/steps/*/column`; `journey` `/data/highlight`; and `diagram` `/data/graph/groups/*/padding`, `/data/graph/groups/*/header_height`, `/data/graph/groups/*/header_font_size`, `/data/graph/edges/*/label_font_size`, `/data/graph/edges/*/waypoints`, `/data/graph/edges/*/source_offset`, `/data/graph/edges/*/target_offset`, `/data/graph/edges/*/label_placement/position`, `/data/graph/edges/*/label_placement/offset`, `/data/graph/edges/*/badge/position`, `/data/graph/edges/*/badge/size`, and `/data/graph/edges/*/badge/number` (a display step number on an edge badge, not an exemption for quantitative numbers elsewhere). Their factual meaning, along with dates, amounts and counts embedded in prose, remains a review responsibility. Unknown evidence cannot justify a numeric chart value. Use `xx` in qualitative content instead of fabricating a chart bar.
 
 Limits: guided authoring defaults to 1-32 slides; explicit `authoring.slide_limit` accepts 32-128. At most 64 evidence entries, 6 decision issues, 8 support clauses per page, 16 body paths and evidence references per clause, and 256 numeric declarations per page are allowed. Existing core part limits and the selected fixed capacity profile also apply; default large is 96 MiB wire / 32 MiB complete document. Standard and legacy remain smaller, so legacy cannot accommodate 39 slides even with the grammar opt-in. The capacity profile alone does not expand the guided input grammar. Long citations or text that cannot fit are rejected rather than clipped or silently omitted. Source/reference strings are inert, not fetched.
 
