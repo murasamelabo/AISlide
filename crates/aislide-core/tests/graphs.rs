@@ -2348,4 +2348,23 @@ fn issue97_detail_nodes_wrap_headings_by_default_report_shrink_diagnostics_and_n
     }},"layout":{"x":64,"y":144,"width":576,"height":512,"show_title":false}});
     let narrow_err = execute_request(json!({"op":"create_part","id":"narrow-ov","spec":narrow_wrap_overflow})).unwrap_err().to_string();
     assert!(narrow_err.contains("node 'w1'") && narrow_err.contains("measured ") && narrow_err.contains("available "), "{narrow_err}");
+
+    // Mixed layout (`width > 1152` + `height < content_height`): vertical compression still applies consistently for both `wrap` and `shrink`
+    // rather than failing when a height-compressed diagram is also widened.
+    for fit in ["wrap", "shrink"] {
+        let mixed_graph = json!({
+            "version":1,"title":"Mixed","show_title":false,
+            "nodes":[{"id":"m1","label":"見出しの収容確認","label_fit":fit,"detail":"説明文\n補足行","font_size":24,"detail_font_size":16,"x":40,"y":20,"width":220,"height":176}],
+            "edges":[],"groups":[]
+        });
+        let height_only = json!({"version":1,"preset":"diagram/custom","title":"Mixed","data":{"kind":"diagram","graph":mixed_graph},"layout":{"x":0,"y":0,"width":1152,"height":256,"show_title":false}});
+        let wider_and_shorter = json!({"version":1,"preset":"diagram/custom","title":"Mixed","data":{"kind":"diagram","graph":mixed_graph},"layout":{"x":0,"y":0,"width":1248,"height":256,"show_title":false}});
+        let h_only = execute_request(json!({"op":"create_part","id":"h-only","spec":height_only})).unwrap_or_else(|e| panic!("{fit} height-only failed: {e}"));
+        let widened = execute_request(json!({"op":"create_part","id":"widened","spec":wider_and_shorter})).unwrap_or_else(|e| panic!("{fit} widened+shortened failed: {e}"));
+        let h_head = embedded_label(&h_only, "-nt-m1")["font_size"].as_f64().unwrap();
+        let w_head = embedded_label(&widened, "-nt-m1")["font_size"].as_f64().unwrap();
+        let w_detail = embedded_label(&widened, "-nd-m1")["font_size"].as_f64().unwrap();
+        assert!(w_head >= 12.0 && w_head >= h_head, "{fit}: widened heading {w_head} regressed below height-only {h_head}");
+        assert!(w_detail >= 12.0 && w_detail <= w_head, "{fit}: detail {w_detail} exceeds heading {w_head}");
+    }
 }

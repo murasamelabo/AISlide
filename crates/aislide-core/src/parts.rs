@@ -502,25 +502,27 @@ fn graph_part(id: &str, spec: &PartSpec, graph: &crate::graphs::GraphSpec, theme
     let (graph_id, rendered_graph, content_height) = graph_context(id, spec, graph)?;
     let small_annotations = crate::graphs::small_annotation_ids(&graph_id, &rendered_graph)?;
     let locations = if diagram_pointers { crate::graphs::node_locations(&graph_id, &rendered_graph)? } else { TextLocations::new() };
-    let enlarged = layout.width > 1152.0 || layout.height > content_height;
+    let (raw_h, raw_v) = (layout.width / 1152.0, layout.height / content_height);
+    let (scale_x, scale_y) = if layout.fit == PartFit::Contain { let scale = raw_h.min(raw_v); (scale, scale) } else { (raw_h, raw_v) };
+    let enlarged = scale_x > 1.0 + 1e-6 || scale_y > 1.0 + 1e-6;
+    let vertical_compressed = scale_y + 1e-6 < 1.0;
     let mut result = if enlarged {
         crate::graphs::create_with_label_boxes_unfitted(&graph_id, &rendered_graph, theme)
             .map_err(|error| PartFailure::Error(crate::graphs::public_label_error(&graph_id, &rendered_graph, error)))?
     } else {
-        match crate::graphs::create_with_label_boxes_fitted(&graph_id, &rendered_graph, theme, diagram_pointers) {
-            Ok(element) => element,
-            Err(failure) => return Err(failure),
-        }
+        crate::graphs::create_with_label_boxes_fitted(&graph_id, &rendered_graph, theme, diagram_pointers)?
     };
     if let Element::Group { id: root_id, .. } = &mut result { *root_id = id.into(); }
     adopt_layout_geometry(&mut result, layout, 0.0, content_height)
         .map_err(|error| PartFailure::Error(crate::graphs::public_label_error(&graph_id, &rendered_graph, error)))?;
     if let Element::Group { children, .. } = &mut result {
-        if enlarged {
+        if enlarged && !vertical_compressed {
             crate::graphs::finish_fitted_graph(&graph_id, &rendered_graph, children, theme, diagram_pointers)?;
         } else {
-            let vertical_compressed = layout.height + 1e-6 < content_height;
-            let skip = crate::graphs::reflow_post_layout_nodes(&graph_id, &rendered_graph, children, theme, diagram_pointers, vertical_compressed)?;
+            if enlarged {
+                crate::graphs::prepare_widened_compressed_nodes(&graph_id, &rendered_graph, children, theme, diagram_pointers, scale_y)?;
+            }
+            let skip = crate::graphs::reflow_post_layout_nodes(&graph_id, &rendered_graph, children, theme, diagram_pointers, scale_y)?;
             crate::layout::fit_part_text_except(children, theme, &small_annotations, &skip)
                 .map_err(|error| PartFailure::Error(crate::graphs::public_label_error(&graph_id, &rendered_graph, error)))?;
             crate::graphs::fit_node_labels(&graph_id, &rendered_graph, children, theme)

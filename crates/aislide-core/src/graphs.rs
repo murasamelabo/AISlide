@@ -1517,6 +1517,95 @@ pub(crate) fn node_locations(id: &str, spec: &GraphSpec) -> Result<crate::parts:
     }).collect())
 }
 
+struct DetailNodePartition {
+    heading_size: f64,
+    heading_box: f64,
+    detail_size: f64,
+    detail_box: f64,
+    gap: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_detail_node(
+    prefix: &str,
+    index: usize,
+    node: &GraphNode,
+    detail: &str,
+    width: f64,
+    total_height: f64,
+    gap: f64,
+    detail_cap: f64,
+    theme: &Theme,
+    diagram_pointers: bool,
+) -> Result<std::result::Result<DetailNodePartition, crate::parts::PartOverflow>> {
+    let mut heading_size = node.font_size;
+    if node.label_fit == GraphLabelFit::Shrink && !node.label.contains('\n') && !node.label.contains('\r') {
+        let mut candidate = heading_size;
+        loop {
+            let (metrics, _) = crate::layout::graph_text_metrics(&node.label, width, total_height, candidate, node.heading_bold, theme)?;
+            if metrics.lines <= 1 && !metrics.overflow && metrics.missing_glyphs == 0 { heading_size = candidate; break; }
+            if candidate <= 12.0 { heading_size = 12.0; break; }
+            candidate = (candidate - 0.5).max(12.0);
+        }
+    }
+    let (heading_metrics, _) = crate::layout::graph_text_metrics(&node.label, width, 4096.0, heading_size, node.heading_bold, theme)?;
+    if heading_metrics.missing_glyphs > 0 {
+        return Ok(Err(crate::parts::PartOverflow {
+            pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/label")),
+            message: format!("graph node '{}' ({prefix}-n-{}) label contains unavailable glyphs", node.id, node.id),
+            missing_glyphs: true, measured: None, available: None,
+        }));
+    }
+    let effective_detail_size = detail_cap.min(detail_size(node)).min(heading_size);
+    let (detail_metrics, _) = crate::layout::graph_text_metrics(detail, width, 4096.0, effective_detail_size, false, theme)?;
+    if detail_metrics.missing_glyphs > 0 {
+        return Ok(Err(crate::parts::PartOverflow {
+            pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/detail")),
+            message: format!("graph node '{}' ({prefix}-n-{}) detail contains unavailable glyphs", node.id, node.id),
+            missing_glyphs: true, measured: None, available: None,
+        }));
+    }
+    let heading_needed = f64::from(heading_metrics.measured_height);
+    let detail_needed = f64::from(detail_metrics.measured_height);
+    let heading_box = heading_needed.max(15.0);
+    let heading_wide = f64::from(heading_metrics.measured_width) > width + 1.0;
+    let detail_wide = f64::from(detail_metrics.measured_width) > width + 1.0;
+    if !heading_wide && !detail_wide && heading_box + gap + detail_needed <= total_height + 1.0 {
+        return Ok(Ok(DetailNodePartition {
+            heading_size,
+            heading_box,
+            detail_size: effective_detail_size,
+            detail_box: (total_height - heading_box - gap).max(detail_needed),
+            gap,
+        }));
+    }
+    let detail_one_line = (effective_detail_size * 1.15).ceil().max(15.0);
+    if heading_wide || heading_box + gap + detail_one_line > total_height + 1.0 {
+        let (measured_px, available_px, axis) = if heading_wide && heading_box + gap + detail_one_line <= total_height + 1.0 {
+            (heading_metrics.measured_width.ceil() as u32, width.floor().max(0.0) as u32, "width ")
+        } else {
+            (heading_needed.ceil() as u32, (total_height - gap - detail_one_line).floor().max(0.0) as u32, "")
+        };
+        Ok(Err(crate::parts::PartOverflow {
+            pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/label")),
+            message: format!("graph node '{}' ({prefix}-n-{}) label does not fit at {heading_size}px ({axis}measured {measured_px}px > available {available_px}px before {gap:.0}px gap and detail); enlarge the node, widen it, shorten the label or set label_fit to shrink", node.id, node.id),
+            missing_glyphs: false, measured: Some(measured_px), available: Some(available_px),
+        }))
+    } else {
+        let available_px = (total_height - heading_box - gap).floor().max(0.0) as u32;
+        let (measured_px, available_px, axis) = if detail_wide && detail_needed <= total_height - heading_box - gap + 1.0 {
+            (detail_metrics.measured_width.ceil() as u32, width.floor().max(0.0) as u32, "width ")
+        } else {
+            (detail_needed.ceil() as u32, available_px, "")
+        };
+        Ok(Err(crate::parts::PartOverflow {
+            pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/detail")),
+            message: format!("graph node '{}' ({prefix}-n-{}) detail does not fit at {effective_detail_size}px ({axis}measured {measured_px}px > available {available_px}px after {:.0}px label and {gap:.0}px gap); enlarge the node, widen it or shorten the detail", node.id, node.id, heading_box.ceil()),
+            missing_glyphs: false, measured: Some(measured_px), available: Some(available_px),
+        }))
+    }
+}
+
 /// Sizes and partitions every node's heading (`-nt-`) and detail (`-nd-`) inside the node's current content box, and runs non-detail text
 /// fitting and label-overlap checks. With `label_fit: "wrap"` (default), a node's heading keeps `node.font_size`, wraps across lines, and
 /// leaves the remaining height after the gap to `detail`. Only `label_fit: "shrink"` reduces a single-line heading down to 12px.
@@ -1567,75 +1656,16 @@ pub(crate) fn finish_fitted_graph(id: &str, spec: &GraphSpec, children: &mut [El
         let (_, _, old_detail_top, _, old_detail_height) = children[detail_index].bounds();
         let total_height = (old_detail_top + old_detail_height - top).max(0.0);
         let gap = (old_detail_top - (top + old_heading_height)).clamp(4.0, 8.0);
-        let mut heading_size = node.font_size;
-        if node.label_fit == GraphLabelFit::Shrink && !node.label.contains('\n') && !node.label.contains('\r') {
-            let mut candidate = heading_size;
-            loop {
-                let (metrics, _) = crate::layout::graph_text_metrics(&node.label, width, total_height, candidate, node.heading_bold, theme)?;
-                if metrics.lines <= 1 && !metrics.overflow && metrics.missing_glyphs == 0 { heading_size = candidate; break; }
-                if candidate <= 12.0 { heading_size = 12.0; break; }
-                candidate = (candidate - 0.5).max(12.0);
+        match measure_detail_node(&prefix, index, node, detail, width, total_height, gap, f64::INFINITY, theme, diagram_pointers)? {
+            Ok(part) => {
+                if let Element::Text { y, height, font_size, .. } = &mut children[heading_index] {
+                    *y = top; *height = part.heading_box; *font_size = part.heading_size;
+                }
+                if let Element::Text { y, height, font_size, .. } = &mut children[detail_index] {
+                    *y = top + part.heading_box + part.gap; *height = part.detail_box; *font_size = part.detail_size;
+                }
             }
-        }
-        let (heading_metrics, _) = crate::layout::graph_text_metrics(&node.label, width, 4096.0, heading_size, node.heading_bold, theme)?;
-        if heading_metrics.missing_glyphs > 0 {
-            overflows.push(crate::parts::PartOverflow {
-                pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/label")),
-                message: format!("graph node '{}' ({prefix}-n-{}) label contains unavailable glyphs", node.id, node.id),
-                missing_glyphs: true, measured: None, available: None,
-            });
-            continue;
-        }
-        let effective_detail_size = detail_size(node).min(heading_size);
-        let (detail_metrics, _) = crate::layout::graph_text_metrics(detail, width, 4096.0, effective_detail_size, false, theme)?;
-        if detail_metrics.missing_glyphs > 0 {
-            overflows.push(crate::parts::PartOverflow {
-                pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/detail")),
-                message: format!("graph node '{}' ({prefix}-n-{}) detail contains unavailable glyphs", node.id, node.id),
-                missing_glyphs: true, measured: None, available: None,
-            });
-            continue;
-        }
-        let heading_needed = f64::from(heading_metrics.measured_height);
-        let detail_needed = f64::from(detail_metrics.measured_height);
-        let heading_box = heading_needed.max(15.0);
-        let heading_wide = f64::from(heading_metrics.measured_width) > width + 1.0;
-        let detail_wide = f64::from(detail_metrics.measured_width) > width + 1.0;
-        if !heading_wide && !detail_wide && heading_box + gap + detail_needed <= total_height + 1.0 {
-            if let Element::Text { y, height, font_size, .. } = &mut children[heading_index] {
-                *y = top; *height = heading_box; *font_size = heading_size;
-            }
-            if let Element::Text { y, height, font_size, .. } = &mut children[detail_index] {
-                *y = top + heading_box + gap;
-                *height = (total_height - heading_box - gap).max(detail_needed);
-                *font_size = effective_detail_size;
-            }
-            continue;
-        }
-        let detail_one_line = (effective_detail_size * 1.15).ceil().max(15.0);
-        if heading_wide || heading_box + gap + detail_one_line > total_height + 1.0 {
-            let (measured_px, available_px, axis) = if heading_wide && heading_box + gap + detail_one_line <= total_height + 1.0 {
-                (heading_metrics.measured_width.ceil() as u32, width.floor().max(0.0) as u32, "width ")
-            } else {
-                (heading_needed.ceil() as u32, (total_height - gap - detail_one_line).floor().max(0.0) as u32, "")
-            };
-            overflows.push(crate::parts::PartOverflow {
-                pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/label")),
-                message: format!("graph node '{}' ({prefix}-n-{}) label does not fit at {heading_size}px ({axis}measured {measured_px}px > available {available_px}px before {gap:.0}px gap and detail); enlarge the node, widen it, shorten the label or set label_fit to shrink", node.id, node.id),
-                missing_glyphs: false, measured: Some(measured_px), available: Some(available_px),
-            });
-        } else {
-            let available_px = (total_height - heading_box - gap).floor().max(0.0) as u32;
-            let (measured_px, available_px, axis) = if detail_wide && detail_needed <= total_height - heading_box - gap + 1.0 {
-                (detail_metrics.measured_width.ceil() as u32, width.floor().max(0.0) as u32, "width ")
-            } else {
-                (detail_needed.ceil() as u32, available_px, "")
-            };
-            overflows.push(crate::parts::PartOverflow {
-                pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/detail")),
-                message: format!("graph node '{}' ({prefix}-n-{}) detail does not fit at {effective_detail_size}px ({axis}measured {measured_px}px > available {available_px}px after {:.0}px label and {gap:.0}px gap); enlarge the node, widen it or shorten the detail", node.id, node.id, heading_box.ceil()),
-                missing_glyphs: false, measured: Some(measured_px), available: Some(available_px),
-            });
+            Err(overflow) => overflows.push(overflow),
         }
     }
     if !overflows.is_empty() { return Err(crate::parts::PartFailure::Overflow(overflows)); }
@@ -1666,11 +1696,11 @@ pub(crate) fn create_with_label_boxes_fitted(id: &str, spec: &GraphSpec, theme: 
     Ok(result)
 }
 
-/// Reflows `detail` nodes after `PartLayout` narrows a diagram (`horizontal_scale < 1.0`) while leaving nodes that still fit their scaled
-/// boxes untouched, preserving #97's `wrap` vs `shrink` semantics and structured overflow messages when vertical height was not compressed.
-pub(crate) fn reflow_post_layout_nodes(id: &str, spec: &GraphSpec, children: &mut [Element], theme: &Theme, diagram_pointers: bool, vertical_compressed: bool) -> std::result::Result<BTreeSet<String>, crate::parts::PartFailure> {
+/// Prepares `detail` nodes on a `PartLayout` that widens horizontally (`scale_x > 1.0`) while compressing vertically (`scale_y < 1.0`):
+/// partitions each `detail` node at its widened width and uncompressed height (`total_height / scale_y`) and scales the resulting heading/gap/detail
+/// bands by `scale_y`, so widening a vertically compressed diagram applies the exact same vertical-compression fitting rules without regressing.
+pub(crate) fn prepare_widened_compressed_nodes(id: &str, spec: &GraphSpec, children: &mut [Element], theme: &Theme, diagram_pointers: bool, scale_y: f64) -> std::result::Result<(), crate::parts::PartFailure> {
     let prefix = render_prefix(id, spec)?;
-    let mut handled = BTreeSet::new();
     let mut overflows = Vec::new();
     for (index, node) in spec.nodes.iter().enumerate() {
         let Some(detail) = &node.detail else { continue; };
@@ -1682,10 +1712,63 @@ pub(crate) fn reflow_post_layout_nodes(id: &str, spec: &GraphSpec, children: &mu
         ) else { continue; };
         let (_, _, top, width, old_heading_height) = children[heading_index].bounds();
         let (_, _, old_detail_top, _, old_detail_height) = children[detail_index].bounds();
+        let total_height = (old_detail_top + old_detail_height - top).max(0.0);
+        let scaled_gap = (old_detail_top - (top + old_heading_height)).max(0.0);
+        let unscaled_gap = (scaled_gap / scale_y).clamp(4.0, 8.0);
+        match measure_detail_node(&prefix, index, node, detail, width, total_height / scale_y, unscaled_gap, f64::INFINITY, theme, diagram_pointers)? {
+            Ok(part) => {
+                let final_gap = part.gap * scale_y;
+                let min_band = ((node.font_size * 1.25).ceil() * scale_y).min((total_height - final_gap - 15.0).max(0.0));
+                let scaled_heading = (part.heading_box * scale_y).max(min_band);
+                let scaled_detail = (total_height - scaled_heading - final_gap).max(0.01);
+                if let Element::Text { y, height, font_size, .. } = &mut children[heading_index] {
+                    *y = top; *height = scaled_heading; *font_size = part.heading_size;
+                }
+                if let Element::Text { y, height, font_size, .. } = &mut children[detail_index] {
+                    *y = top + scaled_heading + final_gap; *height = scaled_detail; *font_size = part.detail_size;
+                }
+            }
+            Err(overflow) => overflows.push(overflow),
+        }
+    }
+    if !overflows.is_empty() { return Err(crate::parts::PartFailure::Overflow(overflows)); }
+    Ok(())
+}
+
+/// Reflows `detail` nodes after `PartLayout` narrows or vertically compresses a diagram while leaving nodes that still fit their scaled
+/// boxes untouched, preserving #97's `wrap` vs `shrink` semantics and structured overflow messages when vertical height was not compressed.
+pub(crate) fn reflow_post_layout_nodes(id: &str, spec: &GraphSpec, children: &mut [Element], theme: &Theme, diagram_pointers: bool, scale_y: f64) -> std::result::Result<BTreeSet<String>, crate::parts::PartFailure> {
+    let vertical_compressed = scale_y + 1e-6 < 1.0;
+    let prefix = render_prefix(id, spec)?;
+    let mut handled = BTreeSet::new();
+    let mut overflows = Vec::new();
+    for (index, node) in spec.nodes.iter().enumerate() {
+        let Some(detail) = &node.detail else { continue; };
+        let heading_id = format!("{prefix}-nt-{}", node.id);
+        let detail_id = format!("{prefix}-nd-{}", node.id);
+        let (Some(heading_index), Some(detail_index)) = (
+            children.iter().position(|child| child.bounds().0 == heading_id),
+            children.iter().position(|child| child.bounds().0 == detail_id),
+        ) else { continue; };
+        let (_, _, top, width, mut old_heading_height) = children[heading_index].bounds();
+        let (_, _, mut old_detail_top, _, mut old_detail_height) = children[detail_index].bounds();
+        if vertical_compressed {
+            let total_height = (old_detail_top + old_detail_height - top).max(0.0);
+            let raw_gap = (old_detail_top - (top + old_heading_height)).max(0.0);
+            let min_band = ((node.font_size * 1.25).ceil() * scale_y).min((total_height - raw_gap - 15.0).max(0.0));
+            if old_heading_height + 1e-6 < min_band {
+                old_heading_height = min_band;
+                old_detail_top = top + old_heading_height + raw_gap;
+                old_detail_height = (total_height - old_heading_height - raw_gap).max(0.01);
+                if let Element::Text { height, .. } = &mut children[heading_index] { *height = old_heading_height; }
+                if let Element::Text { y, height, .. } = &mut children[detail_index] { *y = old_detail_top; *height = old_detail_height; }
+            }
+        }
         let Element::Text { font_size: current_heading_size, .. } = &children[heading_index] else { continue; };
         let Element::Text { font_size: current_detail_size, .. } = &children[detail_index] else { continue; };
+        let current_detail_cap = *current_detail_size;
         let (cur_h, _) = crate::layout::graph_text_metrics(&node.label, width, old_heading_height, *current_heading_size, node.heading_bold, theme)?;
-        let (cur_d, _) = crate::layout::graph_text_metrics(detail, width, old_detail_height, *current_detail_size, false, theme)?;
+        let (cur_d, _) = crate::layout::graph_text_metrics(detail, width, old_detail_height, current_detail_cap, false, theme)?;
         let single_line_shrink = node.label_fit == GraphLabelFit::Shrink && !node.label.contains('\n') && !node.label.contains('\r') && cur_h.lines > 1;
         if !cur_h.overflow && !cur_d.overflow && !single_line_shrink { continue; }
         if vertical_compressed && !single_line_shrink { continue; }
@@ -1694,59 +1777,16 @@ pub(crate) fn reflow_post_layout_nodes(id: &str, spec: &GraphSpec, children: &mu
         handled.insert(detail_id);
         let total_height = (old_detail_top + old_detail_height - top).max(0.0);
         let gap = (old_detail_top - (top + old_heading_height)).clamp(4.0, 8.0);
-        let mut heading_size = node.font_size;
-        if node.label_fit == GraphLabelFit::Shrink && !node.label.contains('\n') && !node.label.contains('\r') {
-            let mut candidate = heading_size;
-            loop {
-                let (metrics, _) = crate::layout::graph_text_metrics(&node.label, width, total_height, candidate, node.heading_bold, theme)?;
-                if metrics.lines <= 1 && !metrics.overflow && metrics.missing_glyphs == 0 { heading_size = candidate; break; }
-                if candidate <= 12.0 { heading_size = 12.0; break; }
-                candidate = (candidate - 0.5).max(12.0);
+        match measure_detail_node(&prefix, index, node, detail, width, total_height, gap, current_detail_cap, theme, diagram_pointers)? {
+            Ok(part) => {
+                if let Element::Text { y, height, font_size, .. } = &mut children[heading_index] {
+                    *y = top; *height = part.heading_box; *font_size = part.heading_size;
+                }
+                if let Element::Text { y, height, font_size, .. } = &mut children[detail_index] {
+                    *y = top + part.heading_box + part.gap; *height = part.detail_box; *font_size = part.detail_size;
+                }
             }
-        }
-        let (heading_metrics, _) = crate::layout::graph_text_metrics(&node.label, width, 4096.0, heading_size, node.heading_bold, theme)?;
-        let effective_detail_size = current_detail_size.min(detail_size(node)).min(heading_size);
-        let (detail_metrics, _) = crate::layout::graph_text_metrics(detail, width, 4096.0, effective_detail_size, false, theme)?;
-        let heading_needed = f64::from(heading_metrics.measured_height);
-        let detail_needed = f64::from(detail_metrics.measured_height);
-        let heading_box = heading_needed.max(15.0);
-        let heading_wide = f64::from(heading_metrics.measured_width) > width + 1.0;
-        let detail_wide = f64::from(detail_metrics.measured_width) > width + 1.0;
-        if !heading_wide && !detail_wide && heading_box + gap + detail_needed <= total_height + 1.0 {
-            if let Element::Text { y, height, font_size, .. } = &mut children[heading_index] {
-                *y = top; *height = heading_box; *font_size = heading_size;
-            }
-            if let Element::Text { y, height, font_size, .. } = &mut children[detail_index] {
-                *y = top + heading_box + gap;
-                *height = (total_height - heading_box - gap).max(detail_needed);
-                *font_size = effective_detail_size;
-            }
-            continue;
-        }
-        let detail_one_line = (effective_detail_size * 1.15).ceil().max(15.0);
-        if heading_wide || heading_box + gap + detail_one_line > total_height + 1.0 {
-            let (measured_px, available_px, axis) = if heading_wide && heading_box + gap + detail_one_line <= total_height + 1.0 {
-                (heading_metrics.measured_width.ceil() as u32, width.floor().max(0.0) as u32, "width ")
-            } else {
-                (heading_needed.ceil() as u32, (total_height - gap - detail_one_line).floor().max(0.0) as u32, "")
-            };
-            overflows.push(crate::parts::PartOverflow {
-                pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/label")),
-                message: format!("graph node '{}' ({prefix}-n-{}) label does not fit at {heading_size}px ({axis}measured {measured_px}px > available {available_px}px before {gap:.0}px gap and detail); enlarge the node, widen it, shorten the label or set label_fit to shrink", node.id, node.id),
-                missing_glyphs: false, measured: Some(measured_px), available: Some(available_px),
-            });
-        } else {
-            let available_px = (total_height - heading_box - gap).floor().max(0.0) as u32;
-            let (measured_px, available_px, axis) = if detail_wide && detail_needed <= total_height - heading_box - gap + 1.0 {
-                (detail_metrics.measured_width.ceil() as u32, width.floor().max(0.0) as u32, "width ")
-            } else {
-                (detail_needed.ceil() as u32, available_px, "")
-            };
-            overflows.push(crate::parts::PartOverflow {
-                pointer: diagram_pointers.then(|| format!("/data/graph/nodes/{index}/detail")),
-                message: format!("graph node '{}' ({prefix}-n-{}) detail does not fit at {effective_detail_size}px ({axis}measured {measured_px}px > available {available_px}px after {:.0}px label and {gap:.0}px gap); enlarge the node, widen it or shorten the detail", node.id, node.id, heading_box.ceil()),
-                missing_glyphs: false, measured: Some(measured_px), available: Some(available_px),
-            });
+            Err(overflow) => overflows.push(overflow),
         }
     }
     if !overflows.is_empty() { return Err(crate::parts::PartFailure::Overflow(overflows)); }
