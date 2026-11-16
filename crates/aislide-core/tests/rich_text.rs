@@ -906,3 +906,103 @@ fn rich_run_size_bounds_do_not_escape_legacy_frame_bounds() {
         assert_eq!(open(&export_document(&changed["document"]))["deck"]["slides"][0]["elements"][0]["text"], "A");
     }
 }
+
+#[test]
+fn issue104_replace_text_content_preserves_paragraph_styles_and_attributes_without_matching_edges() {
+    let fixture = || {
+        let mut input = text_element();
+        input["text"] = json!("見出しA\nhttps://example.com/a");
+        input["format"] = json!({"paragraphs":[
+            {"alignment":"left","space_after":{"kind":"points","value":400},"runs":[{"text":"見出しA","style":{"bold":true,"color":"1F2933","font_size":20}}]},
+            {"alignment":"right","runs":[{"text":"https://example.com/a","style":{"bold":false,"color":"6B7280","font_size":14}}]}
+        ]});
+        input
+    };
+    let assert_two_styles = |result: &Value, expected_heading: &str, expected_url: &str| {
+        assert_eq!(result["text"], format!("{expected_heading}\n{expected_url}"));
+        let paragraphs = result["format"]["paragraphs"].as_array().unwrap();
+        assert_eq!(paragraphs.len(), 2, "{result}");
+        assert_eq!(paragraphs[0]["alignment"], "left");
+        assert_eq!(paragraphs[0]["space_after"]["value"], 400);
+        let first = &paragraphs[0]["runs"][0]["style"];
+        assert_eq!((first["bold"].as_bool(), first["color"].as_str(), first["font_size"].as_f64()), (Some(true), Some("1F2933"), Some(20.0)), "{paragraphs:?}");
+        assert_eq!(paragraphs[1]["alignment"], "right");
+        for run in paragraphs[1]["runs"].as_array().unwrap() {
+            let style = &run["style"];
+            assert_eq!((style["bold"].as_bool(), style["color"].as_str(), style["font_size"].as_f64()), (Some(false), Some("6B7280"), Some(14.0)), "{paragraphs:?}");
+        }
+    };
+
+    // Exact issue reproduction: neither prefix nor suffix matches (`t1`), and zero-character overlap anywhere (`ftp://...`), match `t2`.
+    let t1 = value(replace_text_content(element(fixture()), "別の見出しB\nhttps://example.org/b".into()).unwrap());
+    assert_two_styles(&t1, "別の見出しB", "https://example.org/b");
+    let disjoint = value(replace_text_content(element(fixture()), "完全な別タイトル\nftp://other.invalid/z".into()).unwrap());
+    assert_two_styles(&disjoint, "完全な別タイトル", "ftp://other.invalid/z");
+    let t2 = value(replace_text_content(element(fixture()), "見出しA\nhttps://example.org/b".into()).unwrap());
+    assert_two_styles(&t2, "見出しA", "https://example.org/b");
+
+    // Native PPTX roundtrip and preview_slide_revision keep the second paragraph's style too.
+    let document = open(&export_deck(deck(fixture())));
+    let slide_id = document["deck"]["slides"][0]["id"].as_str().unwrap().to_owned();
+    let target_id = document["deck"]["slides"][0]["elements"][0]["id"].as_str().unwrap().to_owned();
+    let edits = json!([{"op":"replace_text","id":target_id,"text":"別の見出しB\nhttps://example.org/b"}]);
+    let preview = execute_request(json!({"op":"preview_slide_revision","document":document,"expected_revision":0,"expected_hash":document["hash"],"slide_id":slide_id,"edits":edits})).unwrap();
+    let applied = execute_request(json!({"op":"apply_slide_revision","document":document,"expected_revision":0,"expected_hash":document["hash"],"slide_id":slide_id,"edits":edits,"candidate_hash":preview["candidate_hash"]})).unwrap();
+    let reopened = open(&export_document(&applied["document"]));
+    assert_two_styles(&reopened["deck"]["slides"][0]["elements"][0], "別の見出しB", "https://example.org/b");
+
+    // Multi-run paragraph keeps unchanged inner runs while paragraph 2 keeps its own style.
+    let mut multi = text_element();
+    multi["text"] = json!("前置き 強調 結び\n次段落");
+    multi["format"] = json!({"paragraphs":[
+        {"runs":[
+            {"text":"前置き ","style":{"color":"111111","font_size":18}},
+            {"text":"強調","style":{"bold":true,"color":"AA0000","font_size":18}},
+            {"text":" 結び","style":{"color":"111111","font_size":18}}
+        ]},
+        {"runs":[{"text":"次段落","style":{"italic":true,"color":"445566","font_size":13}}]}
+    ]});
+    let replaced_multi = value(replace_text_content(element(multi), "差し替え 強調 結び\n別の次段落".into()).unwrap());
+    assert_eq!(replaced_multi["format"]["paragraphs"][0]["runs"][1]["text"], "強調");
+    assert_eq!(replaced_multi["format"]["paragraphs"][0]["runs"][1]["style"]["color"], "AA0000");
+    assert_eq!(replaced_multi["format"]["paragraphs"][1]["runs"][0]["style"]["color"], "445566");
+    assert_eq!(replaced_multi["format"]["paragraphs"][1]["runs"][0]["style"]["italic"], true);
+
+    // Different paragraph counts: splitting paragraph 0 keeps paragraph 1's style on the last line; growing 2 -> 3 with no matching edges
+    // maps line 0 to paragraph 0 and lines 1..=2 to paragraph 1 rather than bleeding paragraph 0's heading style onto later lines.
+    let split = value(replace_text_content(element(fixture()), "見出し\n後半\nhttps://example.com/a".into()).unwrap());
+    assert_eq!(split["format"]["paragraphs"][0]["runs"][0]["style"]["font_size"], 20.0);
+    assert_eq!(split["format"]["paragraphs"][1]["runs"][0]["style"]["font_size"], 20.0);
+    assert_eq!(split["format"]["paragraphs"][2]["runs"][0]["style"]["font_size"], 14.0);
+    let grown = value(replace_text_content(element(fixture()), "新見出し\n補足行\nftp://other.invalid/path".into()).unwrap());
+    assert_eq!(grown["format"]["paragraphs"][0]["runs"][0]["style"]["font_size"], 20.0);
+    assert_eq!(grown["format"]["paragraphs"][1]["runs"][0]["style"]["font_size"], 14.0);
+    assert_eq!(grown["format"]["paragraphs"][1]["runs"][0]["style"]["bold"], false);
+    assert_eq!(grown["format"]["paragraphs"][2]["runs"][0]["style"]["font_size"], 14.0);
+    assert_eq!(grown["format"]["paragraphs"][2]["runs"][0]["style"]["color"], "6B7280");
+
+    // Leading empty paragraphs keep their own paragraph attributes and run styles when paragraph count changes.
+    let mut leading_empty = text_element();
+    leading_empty["text"] = json!("\n本文1\n本文2");
+    leading_empty["format"] = json!({"paragraphs":[
+        {"alignment":"center","runs":[{"text":"","style":{"font_size":24,"color":"AA1122","bold":true}}]},
+        {"alignment":"left","runs":[{"text":"本文1","style":{"font_size":14,"color":"333333","bold":false}}]},
+        {"alignment":"right","runs":[{"text":"本文2","style":{"font_size":12,"color":"666666","bold":false}}]}
+    ]});
+    let trimmed_tail = value(replace_text_content(element(leading_empty), "\n本文1".into()).unwrap());
+    assert_eq!(trimmed_tail["format"]["paragraphs"][0]["alignment"], "center");
+    assert_eq!(trimmed_tail["format"]["paragraphs"][0]["runs"][0]["style"]["color"], "AA1122");
+    assert_eq!(trimmed_tail["format"]["paragraphs"][1]["alignment"], "left");
+
+    let mut middle_empty = text_element();
+    middle_empty["text"] = json!("見出し\n\n本文");
+    middle_empty["format"] = json!({"paragraphs":[
+        {"alignment":"left","runs":[{"text":"見出し","style":{"font_size":28,"color":"111111","bold":true}}]},
+        {"alignment":"center","runs":[{"text":"","style":{"font_size":13,"color":"778899","bold":false}}]},
+        {"alignment":"right","runs":[{"text":"本文","style":{"font_size":15,"color":"223344","bold":false}}]}
+    ]});
+    let dropped_first = value(replace_text_content(element(middle_empty), "\n本文".into()).unwrap());
+    assert_eq!(dropped_first["format"]["paragraphs"][0]["alignment"], "center");
+    assert_eq!(dropped_first["format"]["paragraphs"][0]["runs"][0]["style"]["color"], "778899");
+    assert_eq!(dropped_first["format"]["paragraphs"][1]["alignment"], "right");
+}
