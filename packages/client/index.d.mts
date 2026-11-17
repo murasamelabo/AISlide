@@ -126,6 +126,8 @@ export class DocumentSession {
   readonly renderWarnings: import('./types').RenderWarningsSnapshot | null
   /** Set by the latest accepted operation only: null unless remove_elements removed something. Lists group children and attached connectors removed in addition to the requested IDs. */
   readonly removedElements: import('./types').RemovedElementsSnapshot | null
+  /** Set by the latest accepted operation only: null unless regenerating a part dropped child review settings (table_headers or accessibility) whose targets are no longer drawn. */
+  readonly droppedReview: import('./types').DroppedReviewSnapshot | null
   getSummary(options?: { offset?: number; limit?: number; slideId?: string }): SessionSummary
   transact(operations: PatchOperation[], options?: TransactionOptions): Promise<AislideDocument>
   /** 1..128 typed operations, one core transaction and Undo per changed batch. Prefer add_part/add_graph for regenerable metadata; add_elements is unmanaged. add_graph accepts layout here only; update_graph retains its existing PartLayout. Core capacity and 128 total metadata entries still apply. */

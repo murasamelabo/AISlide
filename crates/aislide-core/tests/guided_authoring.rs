@@ -1062,10 +1062,23 @@ fn issue75_no_guided_part_draws_text_in_a_pale_accent_tint() {
         let mut texts = Vec::new();
         collect_text(&deck["slides"][0]["elements"], &mut texts);
         for text in texts {
-            let color = text["color"].as_str().unwrap();
-            if !color.starts_with("@accent") { continue; }
-            // The darker of the two light backgrounds a part draws on.
-            if wcag_contrast(&theme_color(deck, color), &theme_color(deck, "@lt2")) < 3.0 { pale.push(format!("{preset}: {} {color}", text["text"])); }
+            let mut colors = vec![text["color"].as_str().unwrap()];
+            if let Some(paragraphs) = text["format"]["paragraphs"].as_array() {
+                for paragraph in paragraphs {
+                    for run in paragraph["runs"].as_array().unwrap() {
+                        if !run["text"].as_str().unwrap_or("").trim().is_empty() {
+                            if let Some(run_color) = run["style"]["color"].as_str() { colors.push(run_color); }
+                        }
+                    }
+                }
+            }
+            for color in colors {
+                if !color.starts_with("@accent") { continue; }
+                // The darker of the two light backgrounds a part draws on.
+                if wcag_contrast(&theme_color(deck, color), &theme_color(deck, "@lt2")) < 3.0 {
+                    pale.push(format!("{preset}: {} {color}", text["text"]));
+                }
+            }
         }
     }
     assert!(checked >= 40, "only {checked} presets could be checked");
@@ -2200,4 +2213,272 @@ fn guided_headline_numbers_are_bounded_and_small_labels_keep_the_font_floor() {
     input["slides"][0]["headline"]=json!("We should address 12 delays across 4 teams within 30 days.");
     input["slides"][0]["support"][0]["clause"]=input["slides"][0]["headline"].clone();
     assert_eq!(execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap()["ready"],false);
+}
+
+#[test]
+fn issue97_guided_diagram_overflow_points_to_node_label_or_detail_with_measured_and_available_heights() {
+    let label_graph = json!({"version":1,"title":"流れ","show_title":false,
+        "nodes":[{"id":"n1","label":"見出しがとても長く狭い箱の高さに入りきらない合成テキストです","detail":"短い","font_size":20,"detail_font_size":12,"x":40,"y":40,"width":110,"height":80}],
+        "edges":[]});
+    let checked_label = execute_request(json!({"op":"validate_guided_presentation","input":issue92_input(label_graph)})).unwrap();
+    assert_eq!(checked_label["ready"], false, "{checked_label}");
+    let diag = &checked_label["diagnostics"][0];
+    assert_eq!((diag["code"].as_str(), diag["slide_id"].as_str(), diag["path"].as_str()), (Some("PART_TEXT_OVERFLOW"), Some("g1"), Some("/data/graph/nodes/0/label")), "{diag}");
+    assert!(diag["measured_px"].as_u64().unwrap() > diag["available_px"].as_u64().unwrap(), "{diag}");
+
+    let detail_graph = json!({"version":1,"title":"流れ","show_title":false,
+        "nodes":[{"id":"n1","label":"短い","detail":"説明文がとても長く狭い箱の残りの高さに入りきらない合成テキストです。さらに行を増やします","font_size":15,"detail_font_size":14,"x":40,"y":40,"width":130,"height":90}],
+        "edges":[]});
+    let checked_detail = execute_request(json!({"op":"validate_guided_presentation","input":issue92_input(detail_graph)})).unwrap();
+    assert_eq!(checked_detail["ready"], false, "{checked_detail}");
+    let diag = &checked_detail["diagnostics"][0];
+    assert_eq!((diag["code"].as_str(), diag["slide_id"].as_str(), diag["path"].as_str()), (Some("PART_TEXT_OVERFLOW"), Some("g1"), Some("/data/graph/nodes/0/detail")), "{diag}");
+    assert!(diag["measured_px"].as_u64().unwrap() > diag["available_px"].as_u64().unwrap(), "{diag}");
+}
+
+#[test]
+fn issue98_guided_diagram_restores_padding_floor_and_never_recommends_smaller_node_height() {
+    let graph = json!({"version":1,"title":"流れ","show_title":false,
+        "groups":[{"id":"g1","label":"グループ","header_font_size":15,"x":10,"y":10,"width":370,"height":490}],
+        "nodes":[
+            {"id":"a","label":"製品 A","detail":"フォワーダー（型 B）","font_size":16,"detail_font_size":13,"kind":"rounded_rectangle","group":"g1","x":18,"y":55,"width":354,"height":80},
+            {"id":"b","label":"製品 B","detail":"標準のコネクタ","font_size":16,"detail_font_size":13,"kind":"rounded_rectangle","group":"g1","x":18,"y":150,"width":354,"height":80}
+        ],
+        "edges":[{"id":"e1","source":"a","target":"b"}]});
+    let mut input = issue92_input(graph);
+    input["authoring"] = json!({"headline_style":"keyword","ledger_notes":"none"});
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue98","input":input})).unwrap();
+    let document = &created["document"];
+    let preflight = execute_request(json!({"op":"preflight_presentation","document":document,"options":{"page_indices":[0]}})).unwrap();
+    let padding_findings: Vec<_> = preflight["findings"].as_array().unwrap().iter().filter(|finding| finding["code"] == "CONTAINER_PADDING").collect();
+    assert!(padding_findings.is_empty(), "{padding_findings:?}");
+
+    // Both a no-op put_node and a content update keep padding >= 8px and emit no GRAPH_NODE_PADDING or CONTAINER_PADDING.
+    let node_a = document["parts"][0]["spec"]["data"]["graph"]["nodes"][0].clone();
+    let noop = execute_request(json!({"op":"apply_graph","document":document,"expected_revision":document["revision"],"slide_id":"g1","id":"guided-part-1","operations":[{"op":"put_node","node":node_a}]})).unwrap();
+    assert!(noop["diagnostics"]["findings"].as_array().unwrap().iter().all(|finding| finding["code"] != "GRAPH_NODE_PADDING"), "{noop}");
+    let mut edited_node = document["parts"][0]["spec"]["data"]["graph"]["nodes"][0].clone();
+    edited_node["detail"] = json!("フォワーダー（改訂版）");
+    let edited = execute_request(json!({"op":"apply_graph","document":document,"expected_revision":document["revision"],"slide_id":"g1","id":"guided-part-1","operations":[{"op":"put_node","node":edited_node}]})).unwrap();
+    assert!(edited["diagnostics"]["findings"].as_array().unwrap().iter().all(|finding| finding["code"] != "GRAPH_NODE_PADDING"), "{edited}");
+    let post_preflight = execute_request(json!({"op":"preflight_presentation","document":edited["document"],"options":{"page_indices":[0]}})).unwrap();
+    assert!(post_preflight["findings"].as_array().unwrap().iter().all(|finding| finding["code"] != "CONTAINER_PADDING"), "{post_preflight}");
+
+    // When a node genuinely cannot hold 8px top/bottom padding on the scaled slide, the advised height exceeds the current node height and fixes both warnings.
+    let mut cramped_node = edited["document"]["parts"][0]["spec"]["data"]["graph"]["nodes"][0].clone();
+    cramped_node["height"] = json!(62);
+    cramped_node["font_size"] = json!(17);
+    cramped_node["detail_font_size"] = json!(17);
+    let cramped = execute_request(json!({"op":"apply_graph","document":edited["document"],"expected_revision":edited["document"]["revision"],"slide_id":"g1","id":"guided-part-1","operations":[{"op":"put_node","node":cramped_node.clone()}]})).unwrap();
+    let warning = cramped["diagnostics"]["findings"].as_array().unwrap().iter().find(|finding| finding["code"] == "GRAPH_NODE_PADDING").expect("cramped 62px node warns");
+    let advised: f64 = warning["message"].as_str().unwrap().split("at least ").nth(1).unwrap().split("px").next().unwrap().parse().unwrap();
+    assert!(advised > 62.0, "{warning}");
+    cramped_node["height"] = json!(advised);
+    let fixed = execute_request(json!({"op":"apply_graph","document":cramped["document"],"expected_revision":cramped["document"]["revision"],"slide_id":"g1","id":"guided-part-1","operations":[{"op":"put_node","node":cramped_node}]})).unwrap();
+    assert!(fixed["diagnostics"]["findings"].as_array().unwrap().iter().all(|finding| finding["code"] != "GRAPH_NODE_PADDING"), "{fixed}");
+    let fixed_preflight = execute_request(json!({"op":"preflight_presentation","document":fixed["document"],"options":{"page_indices":[0]}})).unwrap();
+    assert!(fixed_preflight["findings"].as_array().unwrap().iter().all(|finding| finding["code"] != "CONTAINER_PADDING"), "{fixed_preflight}");
+
+    // Centered (`VerticalAlign::Middle`, no `detail`) card nodes also advise a height that fully clears both GRAPH_NODE_PADDING and CONTAINER_PADDING.
+    let middle_card = json!({"id":"mid","label":"二行に折り返して中央に入る見出しの合成文字列","font_size":18,"kind":"rounded_rectangle","x":420,"y":55,"width":220,"height":60});
+    let mid_cramped = execute_request(json!({"op":"apply_graph","document":fixed["document"],"expected_revision":fixed["document"]["revision"],"slide_id":"g1","id":"guided-part-1","operations":[{"op":"put_node","node":middle_card.clone()}]})).unwrap();
+    if let Some(mid_warn) = mid_cramped["diagnostics"]["findings"].as_array().unwrap().iter().find(|f| f["code"] == "GRAPH_NODE_PADDING" && f["entity_id"] == "mid") {
+        let mid_advised: f64 = mid_warn["message"].as_str().unwrap().split("at least ").nth(1).unwrap().split("px").next().unwrap().parse().unwrap();
+        assert!(mid_advised > 60.0, "{mid_warn}");
+        let mut mid_fixed_node = middle_card;
+        mid_fixed_node["height"] = json!(mid_advised);
+        let mid_fixed = execute_request(json!({"op":"apply_graph","document":mid_cramped["document"],"expected_revision":mid_cramped["document"]["revision"],"slide_id":"g1","id":"guided-part-1","operations":[{"op":"put_node","node":mid_fixed_node}]})).unwrap();
+        assert!(mid_fixed["diagnostics"]["findings"].as_array().unwrap().iter().all(|f| f["code"] != "GRAPH_NODE_PADDING"), "{mid_fixed}");
+        let mid_preflight = execute_request(json!({"op":"preflight_presentation","document":mid_fixed["document"],"options":{"page_indices":[0]}})).unwrap();
+        assert!(mid_preflight["findings"].as_array().unwrap().iter().all(|f| f["code"] != "CONTAINER_PADDING"), "{mid_preflight}");
+    }
+}
+
+#[test]
+fn issue99_and_100_guided_matrix_sets_table_headers_and_rejects_overflowing_part_updates() {
+    let mut input = issue75_input();
+    input["slides"] = json!([{"id":"m1","section":"比較","headline":"方式の比較","question":"何が違うか","parent_message":"governing","pattern_id":"native-part","sentence_form":"comparison","parallel_basis":"方式","transition":"終わり",
+        "support":[{"clause":"方式の比較","body_paths":["/data/cells"],"evidence_ids":["E1"]}],
+        "part":{"version":1,"preset":"matrix/labeled","title":"比較","data":{"kind":"matrix","rows":["行 1","行 2"],"columns":["列 A","列 B"],"corner_label":"観点","cells":[["短 A","短 B"],["短 C","短 D"]]}}}]);
+    let created = execute_request(json!({"op":"create_guided_presentation","id":"issue99-100","input":input})).unwrap();
+    let document = &created["document"];
+    let report = execute_request(json!({"op":"check_accessibility","document":document})).unwrap();
+    assert!(report["issues"].as_array().unwrap().iter().all(|issue| issue["code"] != "table_headers_unknown"), "{report}");
+
+    // Updating a cell preserves table_headers without needing set_table_headers again.
+    let mut updated_spec = document["parts"][0]["spec"].clone();
+    updated_spec["data"]["cells"][0][0] = json!("更新 A");
+    let updated = execute_request(json!({"op":"update_part","document":document,"expected_revision":document["revision"],"slide_id":"m1","id":"guided-part-1","spec":updated_spec})).unwrap();
+    let post_report = execute_request(json!({"op":"check_accessibility","document":updated["document"]})).unwrap();
+    assert!(post_report["issues"].as_array().unwrap().iter().all(|issue| issue["code"] != "table_headers_unknown"), "{post_report}");
+
+    // Updating the guided layoutless table to overflowing 4x3 content is rejected instead of clipping silently.
+    let mut overflowing = updated["document"]["parts"][0]["spec"].clone();
+    overflowing["data"] = json!({
+        "kind":"matrix","rows":["行 1","行 2","行 3","行 4"],"columns":["列 A","列 B","列 C"],"corner_label":"観点",
+        "cells":[["値 1A","値 1B","値 1C"],["これは合成の文字列。セルに収まるかを確かめるための長い文です","値 2B","値 2C"],["値 3A","値 3B","値 3C"],["値 4A","値 4B","値 4C"]]
+    });
+    let err = execute_request(json!({"op":"update_part","document":updated["document"],"expected_revision":updated["document"]["revision"],"slide_id":"m1","id":"guided-part-1","spec":overflowing})).unwrap_err().to_string();
+    assert!(err.contains("table[3,2] (cells[1][0])") && err.contains("over by "), "{err}");
+}
+
+#[test]
+fn issue101_structural_and_placement_numbers_do_not_require_evidence_and_stay_synced_with_docs() {
+    let mut input = issue75_input();
+    input["slides"] = json!([
+        {"id":"s1","section":"再現","headline":"担当ごとの流れ","question":"どう進むか","parent_message":"governing","pattern_id":"native-part","sentence_form":"explanation","parallel_basis":"手順","transition":"次へ",
+            "support":[{"clause":"担当ごとの流れ","body_paths":["/data/steps/0/label"],"evidence_ids":["E1"]}],
+            "part":{"version":1,"preset":"flow/swimlane","title":"手順","data":{"kind":"swimlane","lanes":["担当 A","担当 B"],
+                "steps":[{"id":"a","label":"受付","lane":0},{"id":"b","label":"確認","lane":1,"column":1},{"id":"c","label":"完了","lane":0}],
+                "flows":[{"from":"a","to":"b"},{"from":"b","to":"c"}]}}},
+        {"id":"s2","section":"再現","headline":"接続の位置","question":"どう結ぶか","parent_message":"governing","pattern_id":"native-part","sentence_form":"explanation","parallel_basis":"接続","transition":"次へ",
+            "support":[{"clause":"接続の位置","body_paths":["/data/graph/nodes/0/label"],"evidence_ids":["E1"]}],
+            "part":{"version":1,"preset":"diagram/custom","title":"接続","data":{"kind":"diagram","graph":{"version":1,"title":"接続","show_title":false,
+                "nodes":[{"id":"n1","label":"送信元","x":60,"y":120,"width":220,"height":100},{"id":"n2","label":"宛先","x":640,"y":120,"width":220,"height":100}],
+                "edges":[{"id":"e1","source":"n1","target":"n2","source_offset":0.25,"target_offset":-0.25,"label":"送信",
+                    "label_placement":{"position":0.3,"side":"above","offset":8},"badge":{"number":1,"position":0.5,"size":28}}]}}}},
+        {"id":"s3","section":"再現","headline":"段階ごとの体験","question":"どこに注目するか","parent_message":"governing","pattern_id":"native-part","sentence_form":"outcome","parallel_basis":"段階","transition":"終わり",
+            "support":[{"clause":"段階ごとの体験","body_paths":["/data/rows/0/cells"],"evidence_ids":["E1"]}],
+            "part":{"version":1,"preset":"flow/journey","title":"体験","data":{"kind":"journey","stages":["認知","導入","定着"],
+                "rows":[{"label":"行動","cells":["知る","試す","続ける"]}],"highlight":1}}}
+    ]);
+    let checked = execute_request(json!({"op":"validate_guided_presentation","input":input})).unwrap();
+    assert_eq!(checked["ready"], true, "{}", checked["issues"]);
+    assert!(execute_request(json!({"op":"create_guided_presentation","id":"issue101","input":input})).is_ok());
+
+    // Quantitative values in journey (`emotions`) still require `numbers` declarations, and out-of-range structural indices still fail validation.
+    let mut with_emotions = input.clone();
+    with_emotions["slides"][2]["part"]["data"]["emotions"] = json!([1, -1, 2]);
+    let missing_emotion = execute_request(json!({"op":"validate_guided_presentation","input":with_emotions})).unwrap();
+    assert_eq!(missing_emotion["ready"], false, "{missing_emotion}");
+    assert!(missing_emotion["issues"].as_array().unwrap().iter().any(|issue| issue.as_str().unwrap().contains("/data/emotions/0 has no source or assumption")), "{missing_emotion}");
+
+    let mut invalid_lane = input.clone();
+    invalid_lane["slides"][0]["part"]["data"]["steps"][0]["lane"] = json!(5);
+    assert_eq!(execute_request(json!({"op":"validate_guided_presentation","input":invalid_lane})).unwrap()["ready"], false);
+
+    // Every excluded key and part path in core appears in both `best_practice_guide` and `docs/authoring/README.md`.
+    let guide = execute_request(json!({"op":"best_practice_guide","profile_id":"technical-explainer"})).unwrap();
+    let guide_md = guide["markdown"].as_str().unwrap();
+    let readme_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/authoring/README.md");
+    let readme = std::fs::read_to_string(&readme_path).unwrap();
+    for key in aislide_core::guided::EXCLUDED_NUMERIC_KEYS {
+        assert!(guide_md.contains(key), "guide missing excluded key {key}");
+        assert!(readme.contains(&format!("`{key}`")), "README missing excluded key {key}");
+    }
+    for (kinds, segments) in aislide_core::guided::EXCLUDED_NUMERIC_PATHS {
+        let path = format!("/data/{}", segments.join("/"));
+        let kinds_joined = kinds.join("|");
+        assert!(guide_md.contains(&format!("{kinds_joined} {path}")), "guide missing {kinds_joined} {path}");
+        assert!(readme.contains(&format!("`{path}`")), "README missing {path}");
+        assert!(readme.contains(&format!("`{kinds_joined}`")), "README missing kinds {kinds_joined}");
+    }
+}
+
+#[test]
+fn issue102_icon_rows_detail_emphasis_uses_readable_color_on_plain_and_boxed_rows() {
+    for boxed in [false, true] {
+        for brand in [None, Some("0F6CBD"), Some("FFEB3B"), Some("0B1F3A")] {
+            let mut input = issue75_input();
+            input["authoring"] = json!({"headline_style":"keyword","ledger_notes":"none"});
+            if let Some(brand) = brand { input["brand_color"] = json!(brand); }
+            input["slides"] = json!([{"id":"r1","section":"再現","headline":"強調の確認","question":"読めるか","parent_message":"governing","pattern_id":"native-part","sentence_form":"explanation","parallel_basis":"項目","transition":"終わり",
+                "support":[{"clause":"強調の確認","body_paths":["/data/rows/0/detail"],"evidence_ids":["E1"]}],
+                "part":{"version":1,"preset":"list/icon-rows","title":"項目","data":{"kind":"icon_rows","boxed":boxed,"rows":[
+                    {"label":"項目 1","detail":"通常の説明と強調する語句を含む文","detail_emphasis":["強調する語句"]},
+                    {"label":"項目 2","detail":"強調のない説明"}
+                ]}}}]);
+            let created = execute_request(json!({"op":"create_guided_presentation","id":"issue102","input":input})).unwrap();
+            let report = execute_request(json!({"op":"check_accessibility","document":created["document"]})).unwrap();
+            let low: Vec<_> = report["issues"].as_array().unwrap().iter()
+                .filter(|issue| issue["code"] == "text_contrast_low" && (brand != Some("FFEB3B") || issue["element_id"] != "section"))
+                .collect();
+            assert!(low.is_empty(), "boxed={boxed} brand={brand:?}: {low:?}");
+            let mut texts = Vec::new();
+            collect_text(&created["document"]["deck"]["slides"][0]["elements"], &mut texts);
+            let row_text = texts.iter().find(|t| t["text"].as_str().is_some_and(|s| s.contains("強調する語句"))).unwrap();
+            let runs = row_text["format"]["paragraphs"][1]["runs"].as_array().unwrap();
+            assert_eq!(runs.len(), 3, "{runs:?}");
+            assert_eq!(runs[1]["text"], "強調する語句");
+            assert_eq!(runs[1]["style"]["bold"], true);
+            if brand == Some("0B1F3A") {
+                assert_eq!(runs[1]["style"]["color"], "@accent2", "a dark accent2 that meets WCAG keeps @accent2");
+            } else {
+                assert_eq!(runs[1]["style"]["color"], "@dk1", "pale @accent2 falls back to @dk1");
+            }
+        }
+    }
+
+    // Sibling part text call sites (`icon_cards` numbered, `shift_rows` headings, `variance`, `fishbone` focus, `c4-container` boundary header)
+    // also pass `check_accessibility` with zero `text_contrast_low` on the default guided palette.
+    let sibling_parts = [
+        ("cards", "/data/cards/0/label", json!({"version":1,"preset":"list-horizontal/icon-cards","title":"カード","data":{"kind":"icon_cards","numbered":true,"body_size":14,"cards":[
+            {"label":"項目 A","detail":"説明 A","tag":"分類 A"},{"label":"項目 B","detail":"説明 B","tag":"分類 B"}]}})),
+        ("shift", "/data/rows/0/to", json!({"version":1,"preset":"before-after/shift","title":"前後","data":{"kind":"shift_rows","from_label":"従来","to_label":"変更後","accent":"@accent4","rows":[
+            {"from":"手作業","to":"自動検査","caption":"補足","detail":"説明 1"},{"from":"個別確認","to":"共通基盤","caption":"補足","detail":"説明 2"}]}})),
+        ("fish", "/data/effect", json!({"version":1,"preset":"tree/fishbone","title":"要因","data":{"kind":"fishbone","effect":"遅延の発生","categories":[
+            {"label":"体制","causes":[{"text":"担当の重複","focus":true},{"text":"手順の分散"}]},
+            {"label":"環境","causes":[{"text":"設定の差異","focus":true}]}]}})),
+        ("arch", "/data/system", json!({"version":1,"preset":"correlation/c4-container","title":"構成","data":{"kind":"architecture","system":"対象システム",
+            "elements":[{"id":"u","label":"利用者","detail":"ブラウザ","kind":"person"},{"id":"api","label":"API","detail":"検証と応答","kind":"container"},{"id":"db","label":"DB","detail":"記録","kind":"database"}],
+            "relations":[{"from":"u","to":"api","label":"HTTPS"},{"from":"api","to":"db","label":"SQL"}]}})),
+    ];
+    for (id, body_path, part) in sibling_parts {
+        let mut input = issue75_input();
+        input["authoring"] = json!({"headline_style":"keyword","ledger_notes":"none"});
+        input["slides"] = json!([{"id":id,"section":"検証","headline":"配色の確認","question":"読めるか","parent_message":"governing","pattern_id":"native-part","sentence_form":"explanation","parallel_basis":"要素","transition":"終わり",
+            "support":[{"clause":"配色の確認","body_paths":[body_path],"evidence_ids":["E1"]}],"part":part}]);
+        let created = execute_request(json!({"op":"create_guided_presentation","id":format!("issue102-{id}"),"input":input})).unwrap();
+        let report = execute_request(json!({"op":"check_accessibility","document":created["document"]})).unwrap();
+        let low: Vec<_> = report["issues"].as_array().unwrap().iter().filter(|issue| issue["code"] == "text_contrast_low").collect();
+        assert!(low.is_empty(), "{id}: {low:?}");
+    }
+    let mut var_input = issue75_input();
+    var_input["authoring"] = json!({"headline_style":"keyword","ledger_notes":"none"});
+    var_input["slides"] = json!([{"id":"var","section":"検証","headline":"差異の確認","question":"読めるか","parent_message":"governing","pattern_id":"native-part","sentence_form":"explanation","parallel_basis":"項目","transition":"終わり",
+        "support":[{"clause":"差異の確認","body_paths":["/data/rows"],"evidence_ids":["E1"]}],
+        "numbers":[
+            {"path":"/data/rows/0/plan","value":10,"evidence_id":"E1"},{"path":"/data/rows/0/actual","value":8,"evidence_id":"E1"},
+            {"path":"/data/rows/1/plan","value":10,"evidence_id":"E1"},{"path":"/data/rows/1/actual","value":13,"evidence_id":"E1"}
+        ],
+        "part":{"version":1,"preset":"water-fall/variance","title":"差異","data":{"kind":"variance","unit":"件","rows":[
+            {"label":"項目 1","plan":10.0,"actual":8.0},{"label":"項目 2","plan":10.0,"actual":13.0}]}}}]);
+    let var_created = execute_request(json!({"op":"create_guided_presentation","id":"issue102-var","input":var_input})).unwrap();
+    let var_report = execute_request(json!({"op":"check_accessibility","document":var_created["document"]})).unwrap();
+    let var_low: Vec<_> = var_report["issues"].as_array().unwrap().iter().filter(|issue| issue["code"] == "text_contrast_low").collect();
+    assert!(var_low.is_empty(), "variance: {var_low:?}");
+}
+
+#[test]
+fn issue103_summary_ledger_notes_follow_deck_language_including_caution_and_keep_kind_tokens() {
+    let mut input = issue75_input();
+    input["language"] = json!("ja");
+    input["authoring"] = json!({"headline_style":"keyword","ledger_notes":"summary"});
+    input["evidence"] = json!([
+        {"id":"S1","kind":"source","reference":"合成の参照情報","statement":"合成データ"},
+        {"id":"A1","kind":"assumption","reference":"合成の仮定条件","statement":"合成の仮定"},
+        {"id":"U1","kind":"unknown","reference":"未確認の範囲","statement":"未確認"}
+    ]);
+    input["slides"][0]["speaker_notes"] = json!("合成のスピーカーノート");
+    input["slides"][0]["support"][0]["evidence_ids"] = json!(["S1","A1","U1"]);
+    let ja_created = execute_request(json!({"op":"create_guided_presentation","id":"issue103-ja","input":input})).unwrap();
+    let ja_notes = ja_created["document"]["deck"]["slides"][0]["notes"].as_str().unwrap();
+    assert!(ja_notes.starts_with("合成のスピーカーノート\n\n---\n作成根拠の要約\n問い: "), "{ja_notes}");
+    assert!(ja_notes.ends_with("\n内容の正しさと PowerPoint での表示は、人が確認してください。"), "{ja_notes}");
+    assert!(!ja_notes.contains("Semantic truth and Office parity"), "{ja_notes}");
+    for expected in ["[S1] 合成の参照情報 (source)", "[A1] 合成の仮定条件 (assumption)", "[U1] 未確認の範囲 (unknown)"] {
+        assert!(ja_notes.contains(expected), "{expected} missing in {ja_notes}");
+    }
+
+    // Without speaker_notes, Japanese summary starts directly at the localized heading and ends with the localized caution.
+    input["slides"][0].as_object_mut().unwrap().remove("speaker_notes");
+    let ja_no_speaker = execute_request(json!({"op":"create_guided_presentation","id":"issue103-ja-nospeaker","input":input})).unwrap();
+    let notes_no_speaker = ja_no_speaker["document"]["deck"]["slides"][0]["notes"].as_str().unwrap();
+    assert!(notes_no_speaker.starts_with("作成根拠の要約\n") && notes_no_speaker.ends_with("内容の正しさと PowerPoint での表示は、人が確認してください。"), "{notes_no_speaker}");
+
+    // English summary and `full` mode keep the English caution unchanged.
+    let mut en_input = authoring_brief("status-report");
+    en_input["authoring"] = json!({"ledger_notes":"summary"});
+    let en_created = execute_request(json!({"op":"create_guided_presentation","id":"issue103-en","input":en_input})).unwrap();
+    assert!(en_created["document"]["deck"]["slides"][0]["notes"].as_str().unwrap().ends_with("Semantic truth and Office parity require human review."));
 }

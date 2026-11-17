@@ -1123,3 +1123,116 @@ fn pr14_strict_operations_still_inspect_xml_without_protection_element_names() {
         assert_eq!(save(&original), bytes);
     }
 }
+
+#[test]
+fn issue105_clean_copy_detaches_stale_part_specs_and_custom_xml_removes_provenance() {
+    use review::InspectionCategory::*;
+    let created = aislide_core::execute_request(json!({"op":"create_presentation","id":"issue105","title":"Clean provenance"})).unwrap();
+    let part_one = json!({"version":1,"preset":"list/icon-rows","title":"旧い見出し（合成）","data":{"kind":"icon_rows","rows":[
+        {"label":"旧ラベル1","detail":"連絡先 legacy-owner@example.com（合成）"},
+        {"label":"旧ラベル2","detail":"補足"}
+    ]},"layout":{"x":64,"y":120,"width":1152,"height":240,"show_title":true}});
+    let part_two = json!({"version":1,"preset":"list/icon-rows","title":"健全な見出し（合成）","data":{"kind":"icon_rows","rows":[
+        {"label":"健全ラベル1","detail":"残す説明"},
+        {"label":"健全ラベル2","detail":"残す補足"}
+    ]},"layout":{"x":64,"y":380,"width":1152,"height":240,"show_title":true}});
+    let with_one = aislide_core::execute_request(json!({"op":"insert_part","document":created,"expected_revision":0,"slide_id":"slide-1","id":"stale-part","spec":part_one})).unwrap();
+    let with_two = aislide_core::execute_request(json!({"op":"insert_part","document":with_one["document"],"expected_revision":1,"slide_id":"slide-1","id":"healthy-part","spec":part_two})).unwrap();
+    let group_children = with_two["document"]["deck"]["slides"][0]["elements"][0]["children"].as_array().unwrap();
+    let heading_id = group_children[0]["id"].as_str().unwrap().to_owned();
+    let row_id = group_children.iter().find(|child| child["text"].as_str().is_some_and(|t| t.contains("legacy-owner@example.com"))).unwrap()["id"].as_str().unwrap().to_owned();
+    let edited_heading = aislide_core::execute_request(json!({"op":"replace_text_content","document":with_two["document"],"expected_revision":2,"slide_id":"slide-1","id":heading_id,"text":"新しい見出し（合成）"})).unwrap();
+    let edited_row = aislide_core::execute_request(json!({"op":"replace_text_content","document":edited_heading["document"],"expected_revision":3,"slide_id":"slide-1","id":row_id,"text":"新ラベル1\n差し替えた説明"})).unwrap();
+    let with_notes = aislide_core::execute_request(json!({"op":"transaction","document":edited_row["document"],"transaction":{
+        "expected_revision":4,"expected_hash":edited_row["document"]["hash"],
+        "operations":[{"op":"replace","path":"/deck/slides/0/notes","value":"合成ノート"}]
+    }})).unwrap();
+    let working: Document = serde_json::from_value(with_notes["document"].clone()).unwrap();
+
+    let before = review::inspect_document(&working).unwrap();
+    let before_json = serde_json::to_string(&before).unwrap();
+    assert!(!before_json.contains("旧い見出し") && !before_json.contains("legacy-owner@example.com"), "inspection never leaks content");
+    let custom_finding = before.findings.iter().find(|finding| finding.category == CustomXml).unwrap();
+    assert!(custom_finding.aislide_provenance);
+    assert_eq!((custom_finding.managed_parts, custom_finding.stale_parts), (2, 1));
+    assert!(before.candidates.iter().any(|candidate| candidate.rule == "email_candidate" && candidate.surface == "part_metadata"), "{before:?}");
+
+    // Selecting custom_xml (+ sources) removes AISlide provenance completely; neither stale nor healthy part specs remain in the archive.
+    let no_custom = review::export_clean_copy(&working, &review::CleanCopyOptions {
+        new_document_id: "issue105-no-custom".into(), categories: [Sources, CustomXml].into_iter().collect(), confirmed: true,
+    }).unwrap();
+    assert!(no_custom.warnings.iter().any(|warning| warning.contains("AISlide provenance metadata was removed") && warning.contains("update_part")), "{:?}", no_custom.warnings);
+    let archive = Package::open(no_custom.bytes.clone()).unwrap();
+    assert!(!archive.parts().keys().any(|name| name.starts_with("customXml/")), "{:?}", archive.parts().keys());
+    for (_, bytes) in archive.parts() {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(!text.contains("旧い見出し") && !text.contains("legacy-owner@example.com"));
+    }
+    assert!(archive.text("ppt/slides/slide1.xml").unwrap().contains("新しい見出し（合成）"));
+    assert!(no_custom.document.parts.is_empty());
+    let clean_custom = no_custom.inspection.findings.iter().find(|finding| finding.category == CustomXml).unwrap();
+    assert_eq!((clean_custom.count, clean_custom.aislide_provenance, clean_custom.managed_parts, clean_custom.stale_parts), (0, false, 0, 0));
+    assert!(no_custom.inspection.candidates.is_empty(), "{:?}", no_custom.inspection.candidates);
+    // Visible slide elements remain editable as native elements even after provenance removal.
+    let reopened = serde_json::to_value(&no_custom.document).unwrap();
+    let native_text_id = reopened["deck"]["slides"][0]["elements"][0]["children"][0]["id"].as_str().unwrap().to_owned();
+    assert!(aislide_core::execute_request(json!({"op":"replace_text_content","document":reopened,"expected_revision":0,"slide_id":reopened["deck"]["slides"][0]["id"],"id":native_text_id,"text":"さらに編集した見出し"})).is_ok());
+
+    // Even when custom_xml is NOT selected, stale part specs are detached while healthy managed parts remain regenerable.
+    let notes_only = review::export_clean_copy(&working, &review::CleanCopyOptions {
+        new_document_id: "issue105-notes-only".into(), categories: [Notes].into_iter().collect(), confirmed: true,
+    }).unwrap();
+    assert!(notes_only.warnings.iter().any(|warning| warning.contains("1 stale managed part")), "{:?}", notes_only.warnings);
+    assert_eq!(notes_only.document.parts.len(), 1);
+    assert_eq!(notes_only.document.parts[0].element_id, "healthy-part");
+    assert!(!notes_only.document.parts[0].stale);
+    let kept_archive = Package::open(notes_only.bytes.clone()).unwrap();
+    for (_, bytes) in kept_archive.parts() {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(!text.contains("旧い見出し") && !text.contains("legacy-owner@example.com"), "stale spec text must not survive in clean copy");
+    }
+    let kept_custom = notes_only.inspection.findings.iter().find(|finding| finding.category == CustomXml).unwrap();
+    assert_eq!((kept_custom.aislide_provenance, kept_custom.managed_parts, kept_custom.stale_parts), (true, 1, 0));
+    let mut updated_healthy = part_two;
+    updated_healthy["title"] = json!("更新した健全な見出し");
+    assert!(aislide_core::execute_request(json!({"op":"update_part","document":notes_only.document,"expected_revision":0,"slide_id":"slide-1","id":"healthy-part","spec":updated_healthy})).is_ok());
+
+    // Reopening a saved PPTX with a stale part and detaching it immediately drops `stale_parts` and `managed_parts` to 0 for that part.
+    let reopened_working: Document = serde_json::from_value(
+        aislide_core::execute_request(json!({"op":"open_presentation","id":"issue105-reopened","base64":STANDARD.encode(save(&working))})).unwrap()["document"].clone()
+    ).unwrap();
+    let detached = aislide_core::execute_request(json!({"op":"detach_part","document":reopened_working,"expected_revision":0,"slide_id":"slide-1","id":"stale-part"})).unwrap();
+    let after_detach = review::inspect_document(&serde_json::from_value(detached["document"].clone()).unwrap()).unwrap();
+    let after_detach_custom = after_detach.findings.iter().find(|finding| finding.category == CustomXml).unwrap();
+    assert_eq!((after_detach_custom.managed_parts, after_detach_custom.stale_parts), (1, 0), "{after_detach_custom:?}");
+
+    // Guided `summary` deck with a manually edited (stale) part: `custom_xml.count >= 1` matches `aislide_provenance: true`,
+    // and cleaning either `comments` or `custom_xml` strips the pre-edit `PartSpec` from `guided_record` as well.
+    let guided_input = json!({
+        "version":1,"profile_id":"technical-explainer","language":"ja","title":"要約デッキ","audience":"開発者","purpose":"点検の確認","governing_message":"合成データで確認する",
+        "authoring":{"headline_style":"keyword","ledger_notes":"summary"},
+        "evidence":[{"id":"E1","kind":"source","reference":"合成資料","statement":"合成の確認文"}],
+        "slides":[{"id":"gs1","section":"構成","headline":"見出し","question":"残るか","parent_message":"governing","pattern_id":"native-part","sentence_form":"explanation","parallel_basis":"項目","transition":"終わり",
+            "support":[{"clause":"見出し","body_paths":["/data/rows/0/detail"],"evidence_ids":["E1"]}],
+            "part":{"version":1,"preset":"list/icon-rows","title":"誘導の見出し","subtitle":"旧サブタイトル","data":{"kind":"icon_rows","rows":[
+                {"label":"行A","detail":"説明A"},{"label":"行B","detail":"説明B"}]}}}]
+    });
+    let guided_created = aislide_core::execute_request(json!({"op":"create_guided_presentation","id":"issue105-guided","input":guided_input})).unwrap();
+    let guided_text_id = guided_created["document"]["deck"]["slides"][0]["elements"].as_array().unwrap()
+        .iter().find(|el| el["id"] == "guided-part-1").unwrap()["children"].as_array().unwrap()
+        .iter().find(|el| el["text"] == "旧サブタイトル").unwrap()["id"].as_str().unwrap().to_owned();
+    let guided_edited = aislide_core::execute_request(json!({"op":"replace_text_content","document":guided_created["document"],"expected_revision":guided_created["document"]["revision"],"slide_id":"gs1","id":guided_text_id,"text":"新サブタイトル"})).unwrap();
+    let guided_doc: Document = serde_json::from_value(guided_edited["document"].clone()).unwrap();
+    let guided_inspected = review::inspect_document(&guided_doc).unwrap();
+    let guided_custom = guided_inspected.findings.iter().find(|f| f.category == CustomXml).unwrap();
+    assert!(guided_custom.count >= 1 && guided_custom.aislide_provenance && guided_custom.stale_parts == 1, "{guided_custom:?}");
+    for categories in [vec![Comments], vec![CustomXml]] {
+        let cleaned_guided = review::export_clean_copy(&guided_doc, &review::CleanCopyOptions {
+            new_document_id: "issue105-guided-clean".into(), categories: categories.into_iter().collect(), confirmed: true,
+        }).unwrap();
+        let zip = Package::open(cleaned_guided.bytes).unwrap();
+        for (name, bytes) in zip.parts().iter().filter(|(name, _)| name.starts_with("customXml/")) {
+            assert!(!String::from_utf8_lossy(bytes).contains("旧サブタイトル"), "pre-edit spec text leaked in {name}");
+        }
+    }
+}

@@ -1,4 +1,4 @@
-﻿use super::briefing::{field, label, message, mix, shape, text, too_small, Drawn, Fill, Rich, GAP, SMALL};
+﻿use super::briefing::{field, label, label_on, message, mix, shape, text, too_small, Drawn, Fill, Rich, GAP, SMALL};
 use super::{display, Drawing, PartData, PartMessage};
 use crate::{design::Theme, model::{chart_format::{AxisOptions, ChartAxis, ChartOptions, LegendPosition}, ChartKind, ChartSeries, Element, TextAlign, VerticalAlign}, vector::{PathCommand, VectorPath}, visual::VisualStyle, Error, Result};
 use serde::{Deserialize, Serialize};
@@ -300,10 +300,10 @@ fn kpi_cards(drawing: &mut Drawing, cards: &[KpiCard], columns: Option<usize>, f
         let value_size = ((card_width - 52.0 - estimate(&unit, 18.0)) / estimate(&card.value, 1.0).max(0.6)).clamp(24.0, 44.0).floor();
         let emphasis = if card.status == KpiStatus::Neutral && card.accent.is_none() { "@dk2".to_string() } else { darken(accent, theme, 0.2) };
         let mut content = Rich::default();
-        content.add(&card.label, 15.0, "@dk2", true, 300)
-            .runs(&[(card.value.as_str(), value_size, "@dk1", true), (unit.as_str(), 18.0, "@dk2", false)], 200)
-            .add(&card.delta, 16.0, &emphasis, true, 100)
-            .add(&card.comparison, SMALL, "@dk2", false, 0);
+        content.add_on(drawing, &panel, &card.label, 15.0, "@dk2", true, 300)
+            .runs_on(drawing, &panel, &[(card.value.as_str(), value_size, "@dk1", true), (unit.as_str(), 18.0, "@dk2", false)], 200)
+            .add_on(drawing, &panel, &card.delta, 16.0, &emphasis, true, 100)
+            .add_on(drawing, &panel, &card.comparison, SMALL, "@dk2", false, 0);
         drawing.name_next_at(format!("item {} (cards[{index}])", index + 1), format!("/data/cards/{index}"));
         text(drawing, [x + 26.0, y + 12.0, card_width - 44.0, card_height - 24.0], content.finish(), TextAlign::Left, VerticalAlign::Middle);
     }
@@ -352,7 +352,7 @@ fn bullet_graphs(drawing: &mut Drawing, rows: &[BulletRow], frame: [f64; 4], the
         text(drawing, [left, y + 2.0, label_width, pitch - 10.0], name.finish(), TextAlign::Left, VerticalAlign::Top);
         let unit = row.unit.as_str();
         let (actual, target, color) = (format!("{}{unit}", figure(row.actual)), format!(" / {}{unit}", figure(row.target)), darken(accent, theme, 0.2));
-        let value = Rich::default().runs(&[(actual.as_str(), 18.0, color.as_str(), true), (target.as_str(), SMALL, "@dk2", false)], 0).finish();
+        let value = Rich::default().runs_on(drawing, "@lt1", &[(actual.as_str(), 18.0, color.as_str(), true), (target.as_str(), SMALL, "@dk2", false)], 0).finish();
         text(drawing, [left + width - value_width, band_top - 4.0, value_width, band + 8.0], value, TextAlign::Right, VerticalAlign::Middle);
     }
     Ok(Drawn { bottom: top + pitch * rows.len() as f64, flexible: Vec::new() })
@@ -396,7 +396,8 @@ fn variance(drawing: &mut Drawing, rows: &[VarianceRow], headings: [&str; 3], un
         if length >= 0.5 { shape(drawing, Fill::solid("rect", color), [if difference > 0.0 { center } else { center - length }, y + (pitch - thickness) / 2.0, length, thickness], None); }
         let figure_width = 88.0;
         let (x, alignment) = if difference >= 0.0 { (center + length + 6.0, TextAlign::Left) } else { (center - length - 6.0 - figure_width, TextAlign::Right) };
-        text(drawing, [x, y, figure_width, pitch], label(&format!("{}{unit}", signed(difference)), 14.0, &darken(color, theme, 0.2), true), alignment, VerticalAlign::Middle);
+        let delta_label = label_on(drawing, "@lt1", &format!("{}{unit}", signed(difference)), 14.0, &darken(color, theme, 0.2), true);
+        text(drawing, [x, y, figure_width, pitch], delta_label, alignment, VerticalAlign::Middle);
         if !emphasized && index + 1 < rows.len() { shape(drawing, Fill::solid("rect", &mix("@dk2", theme, 0.92)), [left, y + pitch - 0.5, label_width, 0.75], None); }
     }
     Ok(Drawn { bottom: body + pitch * (rows.len() + usize::from(!total.is_empty())) as f64, flexible: Vec::new() })

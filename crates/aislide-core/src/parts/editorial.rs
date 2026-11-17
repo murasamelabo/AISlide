@@ -1,4 +1,4 @@
-﻿use super::briefing::{badge, body_size, colors, field, label, mix, shape, text, too_small, Drawn, Fill, Rich, BODY};
+﻿use super::briefing::{badge, body_size, colors, field, label, label_on, mix, shape, text, too_small, Drawn, Fill, Rich, BODY};
 use super::business::single;
 use super::{Drawing, PartData};
 use crate::{design::Theme, graphs::GraphIcon, model::{Element, TextAlign, VerticalAlign}, Error, Result};
@@ -190,7 +190,8 @@ fn roadmap(drawing: &mut Drawing, phases: &[RoadmapPhase], accent: &str, frame: 
     let reserved = if outcomes { 66.0 } else { 0.0 };
     for (index, phase) in phases.iter().enumerate() {
         let x = left + index as f64 * (column + gap);
-        text(drawing, [x, top, column, 22.0], label(&phase.period, 16.0, accent, true), TextAlign::Center, VerticalAlign::Top);
+        let period = label_on(drawing, "@lt1", &phase.period, 16.0, accent, true);
+        text(drawing, [x, top, column, 22.0], period, TextAlign::Center, VerticalAlign::Top);
         marker(drawing, [center(index), axis], index + 1, accent);
         let mut content = Rich::default();
         content.add(&phase.label, 18.0, "@dk1", true, 400).add(&phase.detail, 16.0, "@dk2", false, 400);
@@ -199,7 +200,8 @@ fn roadmap(drawing: &mut Drawing, phases: &[RoadmapPhase], accent: &str, frame: 
         text(drawing, [x, top + 78.0, column, height - 78.0 - reserved], content.finish(), TextAlign::Left, VerticalAlign::Top);
         if !phase.outcome.is_empty() {
             line(drawing, [x, top + height - 58.0], [x + column, top + height - 58.0], accent, false);
-            text(drawing, [x, top + height - 44.0, column, 40.0], label(&phase.outcome, 16.0, accent, true), TextAlign::Left, VerticalAlign::Top);
+            let outcome = label_on(drawing, "@lt1", &phase.outcome, 16.0, accent, true);
+            text(drawing, [x, top + height - 44.0, column, 40.0], outcome, TextAlign::Left, VerticalAlign::Top);
         }
     }
     Ok(Drawn { bottom: top + height, flexible: Vec::new() })
@@ -238,7 +240,7 @@ fn fact_columns(drawing: &mut Drawing, items: &[FactColumn], columns: Option<usi
         let y = top + (index / columns) as f64 * (row + gap);
         shape(drawing, Fill::solid("rect", accent), [x, y, 44.0, 3.0], None);
         let unit = if item.unit.is_empty() { String::new() } else { format!(" {}", item.unit) };
-        let content = Rich::default().runs(&[(&item.value, 44.0, accent, true), (&unit, 22.0, accent, true)], 500)
+        let content = Rich::default().runs_on(drawing, "@lt1", &[(&item.value, 44.0, accent, true), (&unit, 22.0, accent, true)], 500)
             .add(&item.label, 18.0, "@dk1", true, 300).add(&item.detail, size, "@dk1", false, 400).add(&item.qualifier, 14.0, "@dk2", false, 0).finish();
         drawing.name_next_at(format!("item {} (items[{index}])", index + 1), format!("/data/items/{index}"));
         text(drawing, [x, y + 14.0, column, row - 14.0], content, TextAlign::Left, VerticalAlign::Top);

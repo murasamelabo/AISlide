@@ -288,6 +288,27 @@ pub(crate) fn preserve_alternative_languages(previous: &[RichParagraph], paragra
     Ok(())
 }
 
+fn replace_paragraph_line(paragraph: &RichParagraph, replacement: &str) -> RichParagraph {
+    let mut out = paragraph.clone();
+    let old_line: String = paragraph.runs.iter().map(|run| run.text.as_str()).collect();
+    if old_line == replacement && !out.runs.is_empty() { return out; }
+    let fallback = paragraph.runs.first().map(|run| run.style.clone()).unwrap_or_default();
+    let after: Vec<_> = replacement.chars().collect();
+    if after.is_empty() {
+        out.runs = vec![RichRun { text: String::new(), style: fallback, field: None }];
+        return out;
+    }
+    let before: Vec<_> = paragraph.runs.iter().flat_map(|run| run.text.chars().map(|character| (character, run.style.clone()))).collect();
+    let prefix = before.iter().zip(&after).take_while(|((left, _), right)| left == *right).count();
+    let suffix = before[prefix..].iter().rev().zip(after[prefix..].iter().rev()).take_while(|((left, _), right)| left == *right).count();
+    let inserted_style = prefix.checked_sub(1).and_then(|index| before.get(index)).or_else(|| before.get(prefix)).map(|(_, style)| style.clone()).unwrap_or(fallback);
+    out.runs.clear();
+    for (character, style) in &before[..prefix] { append(&mut out.runs, character.to_string(), style.clone()); }
+    if after.len() > prefix + suffix { append(&mut out.runs, after[prefix..after.len() - suffix].iter().collect(), inserted_style); }
+    for (character, style) in &before[before.len() - suffix..] { append(&mut out.runs, character.to_string(), style.clone()); }
+    out
+}
+
 pub fn replace_text_content(mut element: Element, replacement: String) -> Result<Element> {
     validate_element(&element)?; valid_text(&replacement, 4000)?;
     if crate::fields::has_fields(&element) { return crate::fields::replace_body(element, replacement); }
@@ -295,28 +316,61 @@ pub fn replace_text_content(mut element: Element, replacement: String) -> Result
     if *text == replacement { return Ok(element); }
     if format.paragraphs.is_empty() { *text = replacement; return Ok(element); }
     if replacement.contains('\r') { return Err(Error::Invalid("rich text uses LF paragraph separators".into())); }
+    let lines: Vec<_> = replacement.split('\n').collect();
+    if lines.len() == format.paragraphs.len() {
+        format.paragraphs = format.paragraphs.iter().zip(&lines).map(|(paragraph, line)| replace_paragraph_line(paragraph, line)).collect();
+        *text = replacement;
+        validate_element(&element)?;
+        return Ok(element);
+    }
     let before: Vec<_> = text.chars().collect(); let after: Vec<_> = replacement.chars().collect();
     let prefix = before.iter().zip(&after).take_while(|(left, right)| left == right).count();
     let suffix = before[prefix..].iter().rev().zip(after[prefix..].iter().rev()).take_while(|(left, right)| left == right).count();
     let mut tokens = Vec::new();
     for (index, paragraph) in format.paragraphs.iter().enumerate() {
-        if index > 0 { tokens.push(('\n', RunStyle::default(), index - 1)); }
+        let empty = paragraph.runs.first().map(|run| run.style.clone()).unwrap_or_default();
+        if index > 0 { tokens.push(('\n', empty, index)); }
         for run in &paragraph.runs { for character in run.text.chars() { tokens.push((character, run.style.clone(), index)); } }
     }
-    let insertion_paragraph = before[..prefix].iter().filter(|character| **character == '\n').count();
-    let inherited = prefix.checked_sub(1).and_then(|index| tokens.get(index)).filter(|token| token.0 != '\n').or_else(|| tokens.get(prefix).filter(|token| token.0 != '\n'));
-    let (style, paragraph_index) = inherited.map(|token| (token.1.clone(), token.2)).unwrap_or_else(|| (format.paragraphs[insertion_paragraph].runs.first().map(|run| run.style.clone()).unwrap_or_default(), insertion_paragraph));
-    let inserted = after[prefix..after.len() - suffix].iter().map(|character| (*character, style.clone(), paragraph_index));
+    let start_paragraph = before[..prefix].iter().filter(|character| **character == '\n').count();
+    let end_paragraph = before[..before.len() - suffix].iter().filter(|character| **character == '\n').count();
+    let first_inherited = prefix.checked_sub(1).and_then(|index| tokens.get(index)).filter(|token| token.0 != '\n')
+        .or_else(|| tokens.get(prefix).filter(|token| token.0 != '\n' && token.2 == start_paragraph));
+    let first_style = first_inherited.map(|token| token.1.clone())
+        .unwrap_or_else(|| format.paragraphs[start_paragraph].runs.first().map(|run| run.style.clone()).unwrap_or_default());
+    let middle = &after[prefix..after.len() - suffix];
+    let segments: Vec<&[char]> = middle.split(|character| *character == '\n').collect();
+    let suffix_head = (suffix > 0).then(|| tokens.get(tokens.len() - suffix)).flatten().filter(|token| token.0 != '\n');
+    let mut inserted = Vec::with_capacity(middle.len());
+    for (offset, segment) in segments.iter().enumerate() {
+        let (source, style) = if offset == 0 {
+            (start_paragraph, first_style.clone())
+        } else if offset + 1 == segments.len() && suffix_head.is_some() {
+            let head = suffix_head.unwrap();
+            (head.2, head.1.clone())
+        } else {
+            let source = (start_paragraph + offset).min(end_paragraph);
+            let style = if source == start_paragraph { first_style.clone() } else { format.paragraphs[source].runs.first().map(|run| run.style.clone()).unwrap_or_default() };
+            (source, style)
+        };
+        if offset > 0 { inserted.push(('\n', style.clone(), source)); }
+        for character in *segment { inserted.push((*character, style.clone(), source)); }
+    }
     let combined: Vec<_> = tokens[..prefix].iter().cloned().chain(inserted).chain(tokens[tokens.len() - suffix..].iter().cloned()).collect();
-    let first_index = combined.first().map(|token| token.2).unwrap_or(paragraph_index);
+    let first_index = match combined.first() {
+        Some((ch, _, source)) if *ch != '\n' => *source,
+        Some(_) if prefix > 0 || !middle.is_empty() => 0,
+        Some((_, _, next_source)) => next_source.saturating_sub(1),
+        None => start_paragraph,
+    };
     let mut paragraph = format.paragraphs[first_index].clone();
-    let mut empty_style = paragraph.runs.first().map(|run| run.style.clone()).unwrap_or_else(|| style.clone()); paragraph.runs.clear();
+    let mut empty_style = paragraph.runs.first().map(|run| run.style.clone()).unwrap_or_else(|| first_style.clone()); paragraph.runs.clear();
     let mut result = Vec::new();
     for (index, (character, style, source)) in combined.iter().enumerate() {
         if *character == '\n' {
             if paragraph.runs.is_empty() { paragraph.runs.push(RichRun { text: String::new(), style: empty_style.clone(), field: None }); }
             result.push(paragraph);
-            let next_source = combined.get(index + 1).map(|token| token.2).unwrap_or((*source + 1).min(format.paragraphs.len() - 1));
+            let next_source = combined.get(index + 1).filter(|token| token.0 != '\n').map(|token| token.2).unwrap_or(*source);
             paragraph = format.paragraphs[next_source].clone(); empty_style = paragraph.runs.first().map(|run| run.style.clone()).unwrap_or_else(|| style.clone()); paragraph.runs.clear();
         } else { append(&mut paragraph.runs, character.to_string(), style.clone()); }
     }

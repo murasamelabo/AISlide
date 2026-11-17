@@ -359,7 +359,7 @@ pub(super) fn create(id: &str, spec: &PartSpec, theme: &Theme) -> std::result::R
     if width < 320.0 || height - top < 120.0 { return Err(Error::Invalid(format!("{} requires a body region of at least 320x120px", spec.preset)).into()); }
     // The drawn texts that the preset names (for messages, and where each is in the spec as a JSON Pointer), by element ID.
     let build = |shrink: f64| -> Result<(Element, Vec<String>, super::TextLocations)> {
-        let mut drawing = Drawing::new(&prefix);
+        let mut drawing = Drawing::new(&prefix).with_theme(theme);
         if show_title {
             drawing.name_next_at("title".into(), "/title".into());
             drawing.text(&spec.title, [0.0, 0.0, width, 40.0], 28.0, "@dk1", true, TextAlign::Left);
@@ -385,13 +385,8 @@ pub(super) fn create(id: &str, spec: &PartSpec, theme: &Theme) -> std::result::R
         return Err(PartFailure::Overflow(overflows.into_iter().map(|overflow| {
             let text = &overflow.text;
             let place = named.get(&overflow.element_id).map_or(overflow.element_id.as_str(), |location| location.place.as_str());
-            let measured_px = overflow.measured_height;
-            let available_px = overflow.available_height.floor().max(0.0) as u32;
-            let detail = if measured_px > available_px {
-                format!("{place}: measured {measured_px}px > available {available_px}px, over by {}px", measured_px - available_px)
-            } else {
-                format!("{place}: measured {measured_px}px in {available_px}px frame")
-            };
+            let (measured_px, available_px, _) = overflow.primary_bounds();
+            let detail = overflow.deficit_detail(place);
             PartOverflow {
                 pointer: named.get(&overflow.element_id).map(|location| location.pointer.clone()),
                 message: if overflow.missing_glyphs { format!("{} text \"{text}\" uses glyphs missing from the selected font; choose an installed font that covers it", spec.preset) }
@@ -473,12 +468,24 @@ pub(super) struct Rich(Vec<RichParagraph>);
 
 impl Rich {
     pub(super) fn add(&mut self, value: &str, size: f64, color: &str, bold: bool, after: u32) -> &mut Self { self.lines(value, size, color, bold, after, false) }
+    /// `add` with `color` checked against `background` through `Drawing::readable_color` so pale theme accents fall back to `@dk1`.
+    pub(super) fn add_on(&mut self, drawing: &Drawing, background: &str, value: &str, size: f64, color: &str, bold: bool, after: u32) -> &mut Self {
+        let color = drawing.readable_color(color, background, size, bold);
+        self.add(value, size, &color, bold, after)
+    }
     pub(super) fn bullet(&mut self, value: &str, size: f64, color: &str, after: u32) -> &mut Self { self.lines(value, size, color, false, after, true) }
     /// One paragraph of differently styled runs, such as a KPI value followed by its unit; empty runs are skipped.
     pub(super) fn runs(&mut self, runs: &[(&str, f64, &str, bool)], after: u32) -> &mut Self {
         let runs: Vec<RichRun> = runs.iter().filter(|run| !run.0.is_empty()).map(|&(value, size, color, bold)| RichRun { text: value.into(), style: RunStyle { bold: Some(bold), font_size: Some(size), color: Some(color.into()), font_family: Some("@minor".into()), ..Default::default() }, field: None }).collect();
         if !runs.is_empty() { self.0.push(RichParagraph { runs, space_after: (after > 0).then_some(Spacing::Points(after)), ..Default::default() }); }
         self
+    }
+    /// `runs` with each run's color checked against `background` through `Drawing::readable_color`.
+    pub(super) fn runs_on(&mut self, drawing: &Drawing, background: &str, runs: &[(&str, f64, &str, bool)], after: u32) -> &mut Self {
+        let resolved: Vec<(&str, f64, String, bool)> = runs.iter().filter(|run| !run.0.is_empty())
+            .map(|&(value, size, color, bold)| (value, size, drawing.readable_color(color, background, size, bold), bold)).collect();
+        let borrowed: Vec<(&str, f64, &str, bool)> = resolved.iter().map(|(value, size, color, bold)| (*value, *size, color.as_str(), *bold)).collect();
+        self.runs(&borrowed, after)
     }
     fn lines(&mut self, value: &str, size: f64, color: &str, bold: bool, after: u32, bullet: bool) -> &mut Self {
         if value.is_empty() { return self; }
@@ -540,6 +547,10 @@ pub(super) fn shape(drawing: &mut Drawing, style: Fill<'_>, bounds: [f64; 4], co
 }
 
 pub(super) fn label(value: &str, size: f64, color: &str, bold: bool) -> Vec<RichParagraph> { Rich::default().add(value, size, color, bold, 0).finish() }
+
+pub(super) fn label_on(drawing: &Drawing, background: &str, value: &str, size: f64, color: &str, bold: bool) -> Vec<RichParagraph> {
+    Rich::default().add_on(drawing, background, value, size, color, bold, 0).finish()
+}
 
 fn icon(drawing: &mut Drawing, icon: &GraphIcon, center: [f64; 2], size: f64) -> Result<()> {
     let mut picture = crate::graphs::icon_element(&drawing.id(), icon)?;
@@ -609,12 +620,16 @@ fn icon_cards(drawing: &mut Drawing, cards: &[IconCard], columns: Option<usize>,
         shape(drawing, Fill::solid("rect", accent), [x, y, card_width, 4.0], None);
         let mut cursor = y + 22.0;
         if let Some(value) = &card.icon { badge(drawing, value, [x + PAD, cursor], 44.0, &tint)?; }
-        if numbered { text(drawing, [x + card_width - PAD - 64.0, cursor + 6.0, 64.0, 30.0], label(&format!("{:02}", index + 1), LABEL, &number_color, true), TextAlign::Right, VerticalAlign::Top); }
+        if numbered {
+            let num = label_on(drawing, "@lt1", &format!("{:02}", index + 1), LABEL, &number_color, true);
+            text(drawing, [x + card_width - PAD - 64.0, cursor + 6.0, 64.0, 30.0], num, TextAlign::Right, VerticalAlign::Top);
+        }
         if has_icon { cursor += 58.0; } else if numbered { cursor += 40.0; }
         let mut bottom = y + card_height - PAD;
         if !card.tag.is_empty() {
             bottom -= 30.0;
-            shape(drawing, Fill::solid("roundRect", &tint).rounded(50000), [x + PAD, bottom, card_width - PAD * 2.0, 30.0], Some((label(&card.tag, SMALL, accent, true), TextAlign::Center, [10.0, 2.0, 10.0, 2.0])));
+            let tag = label_on(drawing, &tint, &card.tag, SMALL, accent, true);
+            shape(drawing, Fill::solid("roundRect", &tint).rounded(50000), [x + PAD, bottom, card_width - PAD * 2.0, 30.0], Some((tag, TextAlign::Center, [10.0, 2.0, 10.0, 2.0])));
             bottom -= 12.0;
         }
         if bottom - cursor < 40.0 { return Err(too_small("icon card texts")); }
@@ -646,15 +661,16 @@ fn icon_rows(drawing: &mut Drawing, rows: &[IconRow], boxed: bool, size: f64, fr
             if let Some(value) = &row.icon { badge(drawing, value, [x, y + (row_height - diameter) / 2.0], diameter, &mix(accent, theme, 0.88))?; }
             x += diameter + 16.0;
         }
+        let ground = if boxed { pale.as_str() } else { "@lt1" };
         let mut content = Rich::default();
-        content.add(&row.label, LABEL, "@dk1", true, 300);
+        content.add_on(drawing, ground, &row.label, LABEL, "@dk1", true, 300);
         let pieces = detail_pieces(&row.detail, &row.detail_emphasis)?;
         if pieces.iter().any(|piece| piece.1) {
-            // One paragraph of runs: the supplied phrase is bold in the emphasis color, the rest keeps the detail color.
+            // One paragraph of runs: the supplied phrase is bold in the emphasis color (or @dk1 when the accent is too pale for the row background), the rest keeps the detail color.
             let runs: Vec<(&str, f64, &str, bool)> = pieces.iter().map(|(value, emphasized)| (value.as_str(), size, if *emphasized { "@accent2" } else { "@dk2" }, *emphasized)).collect();
-            content.runs(&runs, 0);
+            content.runs_on(drawing, ground, &runs, 0);
         } else {
-            content.add(&row.detail, size, "@dk2", false, 0);
+            content.add_on(drawing, ground, &row.detail, size, "@dk2", false, 0);
         }
         drawing.name_next_at(format!("item {} (rows[{index}])", index + 1), format!("/data/rows/{index}"));
         text(drawing, [x, y + 6.0, left + width - inset - x, row_height - 12.0], content.finish(), TextAlign::Left, VerticalAlign::Middle);
@@ -688,7 +704,8 @@ fn shift_rows(drawing: &mut Drawing, headings: [&String; 2], rows: &[ShiftRow], 
             let (wide, height) = heading_pill(heading, size, column, finish, theme)?;
             pill_height = pill_height.max(height);
             drawing.name_next_at(place.into(), pointer.into());
-            shape(drawing, Fill::solid("roundRect", &fill).rounded(50000), [x, y, wide, height], Some((label(heading, size, &color, true), TextAlign::Center, HEADING_PADDING)));
+            let pill_text = label_on(drawing, &fill, heading, size, &color, true);
+            shape(drawing, Fill::solid("roundRect", &fill).rounded(50000), [x, y, wide, height], Some((pill_text, TextAlign::Center, HEADING_PADDING)));
         }
         y += pill_height + 12.0;
     }
@@ -700,7 +717,7 @@ fn shift_rows(drawing: &mut Drawing, headings: [&String; 2], rows: &[ShiftRow], 
         drawing.name_next_at(format!("rows[{index}].from"), format!("/data/rows/{index}/from"));
         shape(drawing, Fill::solid("rect", &neutral), [left, row_top, from_width, row_height], Some((label(&row.from, BODY, "@dk1", false), TextAlign::Center, [12.0, 8.0, 12.0, 8.0])));
         shape(drawing, Fill::solid("chevron", accent), [chevron_x, row_top + row_height / 2.0 - 16.0, 26.0, 32.0], None);
-        let destination = Rich::default().add(&row.to, 17.0, "@lt1", true, 200).add(&row.caption, 12.0, "@lt1", false, 0).finish();
+        let destination = Rich::default().add_on(drawing, accent, &row.to, 17.0, "@lt1", true, 200).add_on(drawing, accent, &row.caption, 12.0, "@lt1", false, 0).finish();
         drawing.name_next_at(format!("rows[{index}].to"), format!("/data/rows/{index}/to"));
         shape(drawing, Fill::solid("rect", accent), [to_x, row_top, to_width, row_height], Some((destination, TextAlign::Left, [16.0, 8.0, 12.0, 8.0])));
         if !row.detail.is_empty() {
@@ -746,7 +763,10 @@ fn step_cards(drawing: &mut Drawing, steps: &[StepCard], step_label: &str, accen
         let mut bottom = top + height;
         if has_outcome {
             bottom -= 52.0;
-            if !step.outcome.is_empty() { shape(drawing, Fill::solid("rect", &tint), [x, bottom, column, 52.0], Some((label(&step.outcome, 14.0, accent, true), TextAlign::Center, [10.0, 8.0, 10.0, 8.0]))); }
+            if !step.outcome.is_empty() {
+                let outcome = label_on(drawing, &tint, &step.outcome, 14.0, accent, true);
+                shape(drawing, Fill::solid("rect", &tint), [x, bottom, column, 52.0], Some((outcome, TextAlign::Center, [10.0, 8.0, 10.0, 8.0])));
+            }
             bottom -= 12.0;
         }
         if bottom - y < 48.0 { return Err(too_small("step card texts")); }
@@ -805,7 +825,7 @@ fn screenshot_details(drawing: &mut Drawing, image: &GraphIcon, callouts: &[Call
     if detail_width < 280.0 || pitch < 112.0 { return Err(too_small("readable screenshot details; split overview and detail pages")); }
     for (index, callout) in callouts.iter().enumerate() {
         let row_top = top + index as f64 * (pitch + GAP);
-        let content = Rich::default().add(&callout.label, LABEL, accent, true, 200).add(&callout.detail, size, "@dk1", false, 0).finish();
+        let content = Rich::default().add_on(drawing, "@lt1", &callout.label, LABEL, accent, true, 200).add_on(drawing, "@lt1", &callout.detail, size, "@dk1", false, 0).finish();
         let content_text = crate::rich_text::plain_text(&content);
         let content_format = format(TextAlign::Left, VerticalAlign::Top, None, content.clone());
         let content_height = (crate::layout::text_height(&content_text, detail_width, LABEL, true, &content_format, theme)? + 4.0).ceil();

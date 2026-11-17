@@ -347,6 +347,9 @@ fn execute(request: Request, profile: crate::limits::CapacityProfile) -> Result<
             let mut result = encoded(clean.bytes)?;
             result["document"] = serde_json::to_value(clean.document)?;
             result["inspection"] = serde_json::to_value(clean.inspection)?;
+            if !clean.warnings.is_empty() {
+                result["warnings"] = serde_json::to_value(clean.warnings)?;
+            }
             Ok(result)
         }
         Request::ReplaceElementText { element, text } => {

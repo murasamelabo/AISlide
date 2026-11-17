@@ -179,11 +179,55 @@ pub fn guide(id: &str) -> Result<Value> {
     let (_,title,content)=PROFILES.iter().find(|entry|entry.0==id).ok_or_else(||Error::Unsupported("unknown authoring profile".into()))?;
     let patterns:Value=if id=="consulting-decision" {serde_json::from_str(PATTERNS)?} else {json!([])};
     let automatic_patterns=if id=="consulting-decision" {vec!["native-part","C02","C03"]} else {vec!["native-part"]};
-    Ok(json!({"version":1,"profile_id":id,"title":title,"language":"en","markdown":format!("{}\n\n{}\n\nAuthoring overrides: authoring.slide_limit explicitly selects {DEFAULT_SLIDE_LIMIT}..{MAX_SLIDE_LIMIT} slides (default {DEFAULT_SLIDE_LIMIT}); resource capacity limits still apply. authoring.headline_style defaults to sentence. keyword waives Japanese decision headline length and adjacent sentence-form variation only; supported sentence_form names, logical support, evidence and numeric declarations remain required. These validation-only options do not activate typography overrides. authoring.ledger_notes selects full (default, unchanged legacy notes), summary (speaker text first, readable question/claim/evidence references), or none (speaker text only). A notes-mode-only override does not activate typography. Summary/none preserve the complete creation input except duplicated speaker_notes in document.guided_record and PPTX Custom XML; retrieve the record with MCP get_document or the SDK session.document. It is a creation snapshot, not proof of current content, and these modes are not privacy redaction. speaker_notes allows 4000 Unicode scalars; complete slide notes allow 8000 including separators and summaries. No text is truncated. The independent creation-record JSON budget is {MAX_RECORD_BYTES} bytes; total provenance XML remains limited to 2 MiB and summary/none creation rejects input that would exceed it after XML escaping. Stored records are validated structurally (XML 1.0 characters in strings and keys, at most {} nesting levels below the provenance root, exact XML reread); content checks run only at creation. inspect_document scans the record and export_clean_copy removes it when sources or notes is selected.",COMMON.trim_start_matches('\u{feff}'),content.trim_start_matches('\u{feff}'),crate::provenance::MAX_VALUE_DEPTH),"patterns":patterns,"input_schema":schemars::schema_for!(GuidedInput),"automatic_patterns":automatic_patterns,"semantic_truth_verified":false,"limits":{"slides":DEFAULT_SLIDE_LIMIT,"maximum_slides":MAX_SLIDE_LIMIT,"evidence":64,"issues":6,"speaker_notes_scalars":4000,"slide_notes_scalars":8000,"guided_record_bytes":MAX_RECORD_BYTES},"creation":"Supply a structured, evidence-linked input; validate_guided_presentation before create_guided_presentation. No model call or file write."}))
+    let numeric_exclusions=excluded_numeric_guidance();
+    Ok(json!({"version":1,"profile_id":id,"title":title,"language":"en","markdown":format!("{}\n\n{}\n\nAuthoring overrides: authoring.slide_limit explicitly selects {DEFAULT_SLIDE_LIMIT}..{MAX_SLIDE_LIMIT} slides (default {DEFAULT_SLIDE_LIMIT}); resource capacity limits still apply. authoring.headline_style defaults to sentence. keyword waives Japanese decision headline length and adjacent sentence-form variation only; supported sentence_form names, logical support, evidence and numeric declarations remain required. These validation-only options do not activate typography overrides. authoring.ledger_notes selects full (default, unchanged legacy notes), summary (speaker text first, readable question/claim/evidence references), or none (speaker text only). A notes-mode-only override does not activate typography. Summary/none preserve the complete creation input except duplicated speaker_notes in document.guided_record and PPTX Custom XML; retrieve the record with MCP get_document or the SDK session.document. It is a creation snapshot, not proof of current content, and these modes are not privacy redaction. speaker_notes allows 4000 Unicode scalars; complete slide notes allow 8000 including separators and summaries. No text is truncated. The independent creation-record JSON budget is {MAX_RECORD_BYTES} bytes; total provenance XML remains limited to 2 MiB and summary/none creation rejects input that would exceed it after XML escaping. Stored records are validated structurally (XML 1.0 characters in strings and keys, at most {} nesting levels below the provenance root, exact XML reread); content checks run only at creation. inspect_document scans the record and export_clean_copy removes it when sources or notes is selected.\n\n{numeric_exclusions}",COMMON.trim_start_matches('\u{feff}'),content.trim_start_matches('\u{feff}'),crate::provenance::MAX_VALUE_DEPTH),"patterns":patterns,"input_schema":schemars::schema_for!(GuidedInput),"automatic_patterns":automatic_patterns,"semantic_truth_verified":false,"limits":{"slides":DEFAULT_SLIDE_LIMIT,"maximum_slides":MAX_SLIDE_LIMIT,"evidence":64,"issues":6,"speaker_notes_scalars":4000,"slide_notes_scalars":8000,"guided_record_bytes":MAX_RECORD_BYTES},"creation":"Supply a structured, evidence-linked input; validate_guided_presentation before create_guided_presentation. No model call or file write."}))
 }
 
 fn required(value:&str, maximum:usize, field:&str, issues:&mut Vec<String>) {
     if value.trim().is_empty() || valid_text(value,maximum).is_err() {issues.push(format!("{field}: nonempty text within {maximum} characters is required"));}
+}
+
+/// Geometry, version and structural index keys that never require a `numbers` source/assumption declaration on any part.
+pub const EXCLUDED_NUMERIC_KEYS:&[&str]=&["x","y","width","height","font_size","detail_font_size","stroke_width","version","from","to","start","end","longitude","latitude"];
+
+/// Part-scoped layout, placement, index and diagram step-badge paths below `/data` (`*` matches an array index) excluded from `numbers`
+/// declarations. Only these exact `(data.kind, path)` pairs are excluded; quantitative fields (including any other `number`) still require
+/// an exact `numbers` entry.
+pub const EXCLUDED_NUMERIC_PATHS:&[(&[&str],&[&str])]=&[
+    (&["icon_cards","fact_columns","kpi_cards"],&["columns"]),
+    (&["icon_cards","icon_rows","shift_rows","step_cards","rail_steps","fact_columns","agenda","screenshot_callouts"],&["body_size"]),
+    (&["comparison_panels"],&["panels","*","body_size"]),
+    (&["interactive"],&["spec","initial_state","dimension"]),
+    (&["swimlane"],&["steps","*","lane"]),
+    (&["swimlane"],&["steps","*","column"]),
+    (&["journey"],&["highlight"]),
+    (&["diagram"],&["graph","groups","*","padding"]),
+    (&["diagram"],&["graph","groups","*","header_height"]),
+    (&["diagram"],&["graph","groups","*","header_font_size"]),
+    (&["diagram"],&["graph","edges","*","label_font_size"]),
+    (&["diagram"],&["graph","edges","*","waypoints"]),
+    (&["diagram"],&["graph","edges","*","source_offset"]),
+    (&["diagram"],&["graph","edges","*","target_offset"]),
+    (&["diagram"],&["graph","edges","*","label_placement","position"]),
+    (&["diagram"],&["graph","edges","*","label_placement","offset"]),
+    (&["diagram"],&["graph","edges","*","badge","position"]),
+    (&["diagram"],&["graph","edges","*","badge","size"]),
+    (&["diagram"],&["graph","edges","*","badge","number"]),
+];
+
+fn excluded_numeric_guidance()->String {
+    let keys=EXCLUDED_NUMERIC_KEYS.join(", ");
+    let paths=EXCLUDED_NUMERIC_PATHS.iter().map(|(kinds,segments)|format!("{} /data/{}",kinds.join("|"),segments.join("/"))).collect::<Vec<_>>().join("; ");
+    format!("Numeric declaration exclusions: geometry and index keys ({keys}) and part layout/placement paths ({paths}; diagram badge/number is a display step number on an edge badge, not a general exemption for quantitative numbers).")
+}
+
+fn is_excluded_numeric_path(kind:&str,path:&str,key:&str)->bool {
+    if EXCLUDED_NUMERIC_KEYS.contains(&key) {return true;}
+    let candidate=format!("{path}/{}",key.replace('~',"~0").replace('/',"~1"));
+    let Some(rest)=candidate.strip_prefix("/data/") else {return false;};
+    let segments:Vec<&str>=rest.split('/').collect();
+    EXCLUDED_NUMERIC_PATHS.iter().any(|(kinds,pattern)|kinds.contains(&kind) && segments.len()==pattern.len()
+        && segments.iter().zip(*pattern).all(|(actual,expected)|if *expected=="*" {actual.parse::<usize>().is_ok()} else {actual==expected}))
 }
 
 fn numeric_paths(value:&Value, path:&str, kind:&str, output:&mut Vec<(String,Value)>) {
@@ -191,12 +235,7 @@ fn numeric_paths(value:&Value, path:&str, kind:&str, output:&mut Vec<(String,Val
         Value::Number(_) => output.push((path.into(),value.clone())),
         Value::Array(values) => for (index,item) in values.iter().enumerate() {numeric_paths(item,&format!("{path}/{index}"),kind,output);},
         Value::Object(values) => for (key,item) in values {
-            let root_style=path=="/data" && (key=="columns" && ["icon_cards","fact_columns","kpi_cards"].contains(&kind)
-                || key=="body_size" && ["icon_cards","icon_rows","shift_rows","step_cards","screenshot_callouts"].contains(&kind));
-            let panel_style=kind=="comparison_panels" && key=="body_size" && path.starts_with("/data/panels/");
-            let graph_style=kind=="diagram" && ((path.starts_with("/data/graph/groups/") && ["padding","header_height","header_font_size"].contains(&key.as_str()))
-                || (path.starts_with("/data/graph/edges/") && ["label_font_size","waypoints"].contains(&key.as_str())));
-            if !root_style && !panel_style && !graph_style && !["x","y","width","height","font_size","detail_font_size","stroke_width","version","from","to","start","end","longitude","latitude"].contains(&key.as_str()) {
+            if !is_excluded_numeric_path(kind,path,key) {
                 numeric_paths(item,&format!("{path}/{}",key.replace('~',"~0").replace('/',"~1")),kind,output);
             }
         },
@@ -432,9 +471,9 @@ fn slide_notes(input:&GuidedInput,slide:&GuidedSlide,citations:&[&Evidence])->Re
             notes
         }
         LedgerNotes::Summary=>{
-            let (heading,question,claim,evidence)=if input.language=="ja" {("作成根拠の要約","問い","主張","根拠")} else {("Authoring summary","Question","Claim","Evidence")};
+            let (heading,question,claim,evidence,caution)=if input.language=="ja" {("作成根拠の要約","問い","主張","根拠","内容の正しさと PowerPoint での表示は、人が確認してください。")} else {("Authoring summary","Question","Claim","Evidence","Semantic truth and Office parity require human review.")};
             let references=citations.iter().map(|entry|format!("[{}] {} ({})",entry.id,entry.reference,match entry.kind {EvidenceKind::Source=>"source",EvidenceKind::Assumption=>"assumption",EvidenceKind::Unknown=>"unknown"})).collect::<Vec<_>>().join("\n");
-            let summary=format!("{heading}\n{question}: {}\n{claim}: {}\n{evidence}:\n{references}\nSemantic truth and Office parity require human review.",slide.question,slide.headline);
+            let summary=format!("{heading}\n{question}: {}\n{claim}: {}\n{evidence}:\n{references}\n{caution}",slide.question,slide.headline);
             match slide.speaker_notes.as_deref().filter(|notes|!notes.is_empty()) {Some(notes)=>format!("{notes}\n\n---\n{summary}"),None=>summary}
         }
         LedgerNotes::None=>slide.speaker_notes.clone().unwrap_or_default(),
@@ -744,6 +783,9 @@ fn build(input:&GuidedInput,id:&str,diagnostics:&mut Vec<Diagnostic>,warnings:&m
                 element=serde_json::from_value(encoded)?;
             }
             if let Some(settings)=&authoring {author_body(&mut element,settings,1.0,body_height,&fixed);}
+            if matches!(spec.data,crate::parts::PartData::Diagram{..}|crate::parts::PartData::Swimlane{..}|crate::parts::PartData::Architecture{..}) {
+                crate::graphs::restore_scaled_padding(&mut element,&design.theme)?;
+            }
             // Edge labels and badges keep the size the diagram draws them, so the body floor does not raise them: say which fall below it.
             if let Some(settings)=&authoring {
                 for annotation in crate::parts::managed_annotations(&element_id,spec)? {
@@ -787,6 +829,9 @@ fn build(input:&GuidedInput,id:&str,diagnostics:&mut Vec<Diagnostic>,warnings:&m
         let mut page=serde_json::from_value(json!({"id":slide.id,"title":slide.headline,"background":"@lt1","layout_id":LAYOUT_ID,"inherit_background":true,"elements":elements,"notes":notes}))?;
         describe_visuals(&mut page,slide.part.as_ref())?;
         crate::parts::state::declare_decoration(&mut page.review,&decorative);
+        if let (Some(spec),Some(part_element))=(slide.part.as_ref(),page.elements.get(4)) {
+            crate::parts::state::declare_table_headers(&mut page.review,spec,part_element);
+        }
         Ok(Built{page,part,locations,warnings:notices})
     };
     for (index,slide) in input.slides.iter().enumerate() {
@@ -801,7 +846,10 @@ fn build(input:&GuidedInput,id:&str,diagnostics:&mut Vec<Diagnostic>,warnings:&m
     let measured_deck=if authoring.is_some() {
         crate::model::validate_deck(&deck)?;
         let mut measurement=deck.clone();
-        for slide in &mut measurement.slides {for element in &mut slide.elements {measurement_cells(element)?;}}
+        for slide in &mut measurement.slides {
+            slide.review=None;
+            for element in &mut slide.elements {measurement_cells(element)?;}
+        }
         std::borrow::Cow::Owned(measurement)
     } else {std::borrow::Cow::Borrowed(&deck)};
     let measured=crate::layout::measure_layout(&measured_deck)?;

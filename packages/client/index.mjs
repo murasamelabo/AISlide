@@ -155,6 +155,7 @@ export class DocumentSession {
   #graphDiagnostics = null;
   #renderWarnings = null;
   #removedElements = null;
+  #droppedReview = null;
   #referencePublication = null;
   #profile;
   #historyBoundary = null;
@@ -198,6 +199,7 @@ export class DocumentSession {
   get graphDiagnostics() { return structuredClone(this.#graphDiagnostics); }
   get renderWarnings() { return structuredClone(this.#renderWarnings); }
   get removedElements() { return structuredClone(this.#removedElements); }
+  get droppedReview() { return structuredClone(this.#droppedReview); }
   get referencePublication() { return structuredClone(this.#referencePublication); }
 
   getSummary({ offset = 0, limit = 16, slideId } = {}) {
@@ -283,6 +285,7 @@ export class DocumentSession {
     this.#graphDiagnostics = graphDiagnosticsSnapshot(result, this.#document);
     this.#renderWarnings = renderWarningsSnapshot(result, this.#document);
     this.#removedElements = removedElementsSnapshot(result, this.#document);
+    this.#droppedReview = droppedReviewSnapshot(result, this.#document);
     const publication = result.publication;
     this.#referencePublication = publication && [publication.supplied, publication.published, publication.excluded].every(value => Number.isInteger(value) && value >= 0 && value <= 64)
       && publication.supplied === publication.published + publication.excluded
@@ -486,6 +489,7 @@ export class DocumentSession {
       this.#graphDiagnostics = null;
       this.#renderWarnings = null;
       this.#removedElements = null;
+      this.#droppedReview = null;
       return this.document;
     }, options);
   }
@@ -560,6 +564,36 @@ function removedElementsSnapshot(result, document) {
     return { ...binding, status: 'complete', removed };
   } catch {
     return { ...binding, status: 'unavailable', removed: [] };
+  }
+}
+
+function droppedReviewSnapshot(result, document) {
+  const binding = { revision: document.revision, hash: document.hash };
+  try {
+    const data = (value, key) => {
+      if (!value || typeof value !== 'object') throw new Error('Dropped review object');
+      const property = Object.getOwnPropertyDescriptor(value, key);
+      if (!property) return undefined;
+      if (!Object.hasOwn(property, 'value')) throw new Error('Dropped review accessor');
+      return property.value;
+    };
+    const text = (value, limit) => {
+      if (typeof value !== 'string' || value.length > limit) throw new Error('Dropped review text limit');
+      return value;
+    };
+    const source = data(result, 'dropped_review');
+    if (source === undefined) return null;
+    if (!Array.isArray(source) || source.length > 256) throw new Error('Dropped review array limit');
+    const dropped = [];
+    for (let index = 0; index < source.length; index += 1) {
+      const item = data(source, String(index));
+      const kind = text(data(item, 'kind'), 32);
+      if (kind !== 'table_headers' && kind !== 'accessibility') throw new Error('Dropped review kind');
+      dropped.push({ slide_id: text(data(item, 'slide_id'), 80), part_id: text(data(item, 'part_id'), 80), element_id: text(data(item, 'element_id'), 80), kind, reason: text(data(item, 'reason'), 256) });
+    }
+    return { ...binding, status: 'complete', dropped };
+  } catch {
+    return { ...binding, status: 'unavailable', dropped: [] };
   }
 }
 

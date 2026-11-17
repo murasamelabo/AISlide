@@ -133,7 +133,7 @@ fn briefing_example(kind: &str) -> PartData {
         ]}),
         "icon_rows" => json!({"kind":"icon_rows","rows":[
             {"label":"Faster discovery","detail":"Exposure is mapped continuously and prioritized by impact."},
-            {"label":"Machine-speed response","detail":"Routine containment runs within approved policy boundaries."},
+            {"label":"Machine-speed response","detail":"Routine containment runs within approved policy boundaries.","detail_emphasis":["approved policy boundaries"]},
             {"label":"Wider scope for small teams","detail":"Specialists supervise many parallel investigations."}
         ]}),
         "shift_rows" => json!({"kind":"shift_rows","from_label":"Today","to_label":"Next","rows":[

@@ -435,11 +435,11 @@ pub(crate) fn create_located(id: &str, spec: &PartSpec, theme: &crate::design::T
     if let PartData::Interactive { spec: interactive } = &spec.data {
         return crate::interactive::create(id,spec,interactive,&interactive.initial_state,theme).map(|element| (element, TextLocations::new())).map_err(PartFailure::from);
     }
-    if let Some(graph) = process::graph(spec, theme)? { return graph_part(id, spec, &graph, theme).map(|element| (element, TextLocations::new())).map_err(PartFailure::from); }
+    if let Some(graph) = process::graph(spec, theme)? { return graph_part(id, spec, &graph, theme, false); }
     if briefing::kind(&spec.data).is_some() { return briefing::create(id, spec, theme); }
     if let PartData::Diagram { graph } = &spec.data {
         if category != "diagram" { return Err(Error::Invalid("graph data requires diagram/custom".into()).into()); }
-        return graph_part(id, spec, graph, theme).map(|element| (element, TextLocations::new())).map_err(PartFailure::from);
+        return graph_part(id, spec, graph, theme, true);
     }
     let identity = crate::canonical::bytes(spec)?;
     use sha2::{Digest, Sha256};
@@ -474,10 +474,13 @@ pub(crate) fn create_located(id: &str, spec: &PartSpec, theme: &crate::design::T
             if let Element::Group { children, .. } = &mut result { drop(children.drain(..2)); }
         }
         let content_top = if layout.show_title { 0.0 } else if category == "venn" && variant == 1 { 80.0 } else { 88.0 };
-        adopt_layout(&mut result, layout, content_top, 512.0 - content_top, theme, &BTreeSet::new()).map_err(|error| match error {
+        adopt_layout(&mut result, layout, content_top, 512.0 - content_top, theme, &BTreeSet::new(), &locations).map_err(|error| match error {
             Error::Invalid(message) if message.starts_with("part body crosses the removed title band") => Error::Invalid(format!("{} ({})", message, spec.preset)),
             other => fit_error(other),
         })?;
+    } else {
+        let overflows = layout_overflows(&result, theme)?;
+        if !overflows.is_empty() { return Err(PartFailure::Overflow(part_overflow_details(&spec.preset, overflows, &locations))); }
     }
     let mut shrunk = Vec::new();
     for element in crate::model::element_list(std::slice::from_ref(&result)) {
@@ -494,25 +497,55 @@ pub(crate) fn create_located(id: &str, spec: &PartSpec, theme: &crate::design::T
     Ok((result, locations))
 }
 
-fn graph_part(id: &str, spec: &PartSpec, graph: &crate::graphs::GraphSpec, theme: &crate::design::Theme) -> Result<Element> {
-    let Some(layout) = &spec.layout else { return crate::graphs::create(id, graph, theme); };
+fn graph_part(id: &str, spec: &PartSpec, graph: &crate::graphs::GraphSpec, theme: &crate::design::Theme, diagram_pointers: bool) -> std::result::Result<(Element, TextLocations), PartFailure> {
+    let Some(layout) = &spec.layout else { return crate::graphs::create_detailed(id, graph, theme, diagram_pointers); };
     let (graph_id, rendered_graph, content_height) = graph_context(id, spec, graph)?;
-    let fitted = (|| -> Result<Element> {
-        let mut result = crate::graphs::create_with_label_boxes(&graph_id, &rendered_graph, theme)?;
-        if let Element::Group { id: root_id, .. } = &mut result { *root_id = id.into(); }
-        adopt_layout(&mut result, layout, 0.0, content_height, theme, &crate::graphs::small_annotation_ids(&graph_id, &rendered_graph)?)?;
-        if let Element::Group { children, .. } = &mut result {
-            crate::graphs::fit_node_labels(&graph_id, &rendered_graph, children, theme)?;
-            crate::graphs::cap_detail_fonts(&graph_id, &rendered_graph, children)?;
-            crate::graphs::fit_detail_widows(&graph_id, &rendered_graph, children, theme)?;
-            crate::graphs::validate_label_overlaps(&graph_id, &rendered_graph, children)?;
+    let small_annotations = crate::graphs::small_annotation_ids(&graph_id, &rendered_graph)?;
+    let locations = if diagram_pointers { crate::graphs::node_locations(&graph_id, &rendered_graph)? } else { TextLocations::new() };
+    let (raw_h, raw_v) = (layout.width / 1152.0, layout.height / content_height);
+    let (scale_x, scale_y) = if layout.fit == PartFit::Contain { let scale = raw_h.min(raw_v); (scale, scale) } else { (raw_h, raw_v) };
+    let enlarged = scale_x > 1.0 + 1e-6 || scale_y > 1.0 + 1e-6;
+    let vertical_compressed = scale_y + 1e-6 < 1.0;
+    let mut result = if enlarged {
+        crate::graphs::create_with_label_boxes_unfitted(&graph_id, &rendered_graph, theme)
+            .map_err(|error| PartFailure::Error(crate::graphs::public_label_error(&graph_id, &rendered_graph, error)))?
+    } else {
+        crate::graphs::create_with_label_boxes_fitted(&graph_id, &rendered_graph, theme, diagram_pointers)?
+    };
+    if let Element::Group { id: root_id, .. } = &mut result { *root_id = id.into(); }
+    adopt_layout_geometry(&mut result, layout, 0.0, content_height)
+        .map_err(|error| PartFailure::Error(crate::graphs::public_label_error(&graph_id, &rendered_graph, error)))?;
+    if let Element::Group { children, .. } = &mut result {
+        if enlarged && !vertical_compressed {
+            crate::graphs::finish_fitted_graph(&graph_id, &rendered_graph, children, theme, diagram_pointers)?;
+        } else {
+            if enlarged {
+                crate::graphs::prepare_widened_compressed_nodes(&graph_id, &rendered_graph, children, theme, diagram_pointers, scale_y)?;
+            }
+            let skip = crate::graphs::reflow_post_layout_nodes(&graph_id, &rendered_graph, children, theme, diagram_pointers, scale_y)?;
+            crate::layout::fit_part_text_except(children, theme, &small_annotations, &skip)
+                .map_err(|error| PartFailure::Error(crate::graphs::public_label_error(&graph_id, &rendered_graph, error)))?;
+            crate::graphs::fit_node_labels(&graph_id, &rendered_graph, children, theme)
+                .map_err(|error| PartFailure::Error(crate::graphs::public_label_error(&graph_id, &rendered_graph, error)))?;
+            crate::graphs::cap_detail_fonts(&graph_id, &rendered_graph, children)
+                .map_err(|error| PartFailure::Error(crate::graphs::public_label_error(&graph_id, &rendered_graph, error)))?;
+            crate::graphs::fit_detail_widows(&graph_id, &rendered_graph, children, theme)
+                .map_err(|error| PartFailure::Error(crate::graphs::public_label_error(&graph_id, &rendered_graph, error)))?;
+            crate::graphs::validate_label_overlaps(&graph_id, &rendered_graph, children)
+                .map_err(|error| PartFailure::Error(crate::graphs::public_label_error(&graph_id, &rendered_graph, error)))?;
         }
-        Ok(result)
-    })();
-    let mut result = fitted.map_err(|error| crate::graphs::public_label_error(&graph_id, &rendered_graph, error))?;
-    if let Element::Group { children, .. } = &mut result { crate::graphs::embed_text(&graph_id, &rendered_graph, children, theme)?; }
+        check_minimum_layout_text(children, &small_annotations)
+            .map_err(|error| PartFailure::Error(crate::graphs::public_label_error(&graph_id, &rendered_graph, error)))?;
+    }
+    if let Some(overflow) = layout_overflow(&result, theme)? {
+        return Err(PartFailure::Error(Error::Invalid(frame_clipping_message(&overflow, &locations))));
+    }
+    if let Element::Group { children, .. } = &mut result {
+        crate::graphs::embed_text(&graph_id, &rendered_graph, children, theme)
+            .map_err(|error| PartFailure::Error(crate::graphs::public_label_error(&graph_id, &rendered_graph, error)))?;
+    }
     validate_elements(std::slice::from_ref(&result), (1280.0, 720.0), 0, &mut BTreeSet::new(), &mut 0, &mut 0)?;
-    Ok(result)
+    Ok((result, locations))
 }
 
 /// What a part element is, for an error message: its quoted text when it has some, otherwise its kind.
@@ -579,7 +612,7 @@ fn minimum_layout_text(text: &str, size: f64, format: &TextFormat, minimum: f64)
     Ok(())
 }
 
-fn adopt_layout(element: &mut Element, layout: &PartLayout, content_top: f64, content_height: f64, theme: &crate::design::Theme, small_annotations: &BTreeSet<String>) -> Result<()> {
+fn adopt_layout_geometry(element: &mut Element, layout: &PartLayout, content_top: f64, content_height: f64) -> Result<()> {
     layout.validate()?;
     let Element::Group { x, y, width, height, view_width, view_height, children, .. } = element else {
         return Err(Error::Invalid("part layout requires a group".into()));
@@ -597,7 +630,10 @@ fn adopt_layout(element: &mut Element, layout: &PartLayout, content_top: f64, co
     }
     *x = layout.x; *y = layout.y; *width = layout.width; *height = layout.height;
     *view_width = layout.width; *view_height = layout.height;
-    crate::layout::fit_part_text_with_small_annotations(children, theme, small_annotations)?;
+    Ok(())
+}
+
+fn check_minimum_layout_text(children: &[Element], small_annotations: &BTreeSet<String>) -> Result<()> {
     for child in crate::model::element_list(children) {
         match child {
             Element::Text { id, text, font_size, format, .. } | Element::Shape { id, text, font_size, format, .. } => minimum_layout_text(text, *font_size, format, if small_annotations.contains(id) { 8.0 } else { 12.0 })?,
@@ -609,8 +645,23 @@ fn adopt_layout(element: &mut Element, layout: &PartLayout, content_top: f64, co
             _ => {}
         }
     }
-    if layout_overflow(element, theme)?.is_some() {
-        return Err(Error::Invalid("part content does not fit the requested frame without clipping".into()));
+    Ok(())
+}
+
+fn frame_clipping_message(overflow: &LayoutOverflow, locations: &TextLocations) -> String {
+    let place = locations.get(&overflow.element_id).map_or(overflow.element_id.as_str(), |location| location.place.as_str());
+    let detail = overflow.deficit_detail(place);
+    format!("part content does not fit the requested frame without clipping: \"{}\" ({detail})", overflow.text)
+}
+
+fn adopt_layout(element: &mut Element, layout: &PartLayout, content_top: f64, content_height: f64, theme: &crate::design::Theme, small_annotations: &BTreeSet<String>, locations: &TextLocations) -> Result<()> {
+    adopt_layout_geometry(element, layout, content_top, content_height)?;
+    if let Element::Group { children, .. } = element {
+        crate::layout::fit_part_text_with_small_annotations(children, theme, small_annotations)?;
+        check_minimum_layout_text(children, small_annotations)?;
+    }
+    if let Some(overflow) = layout_overflow(element, theme)? {
+        return Err(Error::Invalid(frame_clipping_message(&overflow, locations)));
     }
     Ok(())
 }
@@ -640,6 +691,31 @@ pub(crate) struct LayoutOverflow {
     pub missing_glyphs: bool,
     pub measured_height: u32,
     pub available_height: f64,
+    pub measured_width: u32,
+    pub available_width: f64,
+}
+
+impl LayoutOverflow {
+    pub(crate) fn primary_bounds(&self) -> (u32, u32, &'static str) {
+        let available_height = self.available_height.floor().max(0.0) as u32;
+        let available_width = self.available_width.floor().max(0.0) as u32;
+        if self.measured_height > available_height {
+            (self.measured_height, available_height, "")
+        } else if self.measured_width > available_width {
+            (self.measured_width, available_width, "width ")
+        } else {
+            (self.measured_height, available_height, "")
+        }
+    }
+
+    pub(crate) fn deficit_detail(&self, place: &str) -> String {
+        let (measured, available, axis) = self.primary_bounds();
+        if measured > available {
+            format!("{place}: {axis}measured {measured}px > available {available}px, over by {}px", measured - available)
+        } else {
+            format!("{place}: measured {measured}px in {available}px frame")
+        }
+    }
 }
 
 /// A fixed-size text of a part that does not fit (or lacks glyphs): the `create_part` message for it and where the preset says it is.
@@ -704,15 +780,22 @@ impl PartFailure {
     }
 }
 
-/// Every text of the part that overflows its frame or lacks glyphs, in drawing order.
+/// Every text of the part (including table cells) that overflows its frame or lacks glyphs, in drawing order.
 pub(crate) fn layout_overflows(element: &Element, theme: &crate::design::Theme) -> Result<Vec<LayoutOverflow>> {
     let measured = crate::layout::measure_layout(&measurement_deck(element, theme))?;
     let elements = crate::model::element_list(std::slice::from_ref(element));
     Ok(measured.measurements.iter().filter(|measurement| measurement.overflow || measurement.missing_glyphs > 0).map(|measurement| {
+        let cell = measurement.element_id.strip_suffix(']').and_then(|rest| rest.rsplit_once('[')).and_then(|(table, coords)| {
+            let (row, column) = coords.split_once(',')?;
+            Some((table, row.parse::<usize>().ok()?.checked_sub(1)?, column.parse::<usize>().ok()?.checked_sub(1)?))
+        });
         let text = elements.iter().find_map(|candidate| match candidate {
             Element::Text { id, text, .. } | Element::Shape { id, text, .. } if *id == measurement.element_id => {
                 Some(text.replace('\n', " ").chars().take(40).collect::<String>())
             }
+            Element::Table { id, rows, .. } => cell.filter(|(table, ..)| *table == id.as_str())
+                .and_then(|(_, row, column)| rows.get(row)?.get(column))
+                .map(|cell_text| cell_text.replace('\n', " ").chars().take(40).collect::<String>()),
             _ => None,
         }).unwrap_or_else(|| measurement.element_id.clone());
         LayoutOverflow {
@@ -721,8 +804,30 @@ pub(crate) fn layout_overflows(element: &Element, theme: &crate::design::Theme) 
             missing_glyphs: !measurement.overflow,
             measured_height: measurement.measured_height.ceil() as u32,
             available_height: measurement.height,
+            measured_width: measurement.measured_width.ceil() as u32,
+            available_width: measurement.width,
         }
     }).collect())
+}
+
+pub(crate) fn part_overflow_details(preset: &str, overflows: Vec<LayoutOverflow>, locations: &TextLocations) -> Vec<PartOverflow> {
+    overflows.into_iter().map(|overflow| {
+        let place = locations.get(&overflow.element_id).map_or(overflow.element_id.as_str(), |location| location.place.as_str());
+        let (measured, available, _) = overflow.primary_bounds();
+        let detail = overflow.deficit_detail(place);
+        let text = &overflow.text;
+        PartOverflow {
+            pointer: locations.get(&overflow.element_id).map(|location| location.pointer.clone()),
+            message: if overflow.missing_glyphs {
+                format!("{preset} text \"{text}\" uses glyphs missing from the selected font; choose an installed font that covers it")
+            } else {
+                format!("{preset} text \"{text}\" does not fit without clipping ({detail}); shorten the text, enlarge the part frame or split the slide")
+            },
+            missing_glyphs: overflow.missing_glyphs,
+            measured: Some(measured),
+            available: Some(available),
+        }
+    }).collect()
 }
 
 pub(crate) fn layout_overflow(element: &Element, theme: &crate::design::Theme) -> Result<Option<LayoutOverflow>> {
@@ -750,7 +855,9 @@ impl Drawing {
     }
     /// Name the spec field the NEXT element stands for, so an error can say `panels[0].label` instead of an element ID, and where
     /// that field is in the part spec as a JSON Pointer (`/data/rows/0/from`).
-    pub fn name_next_at(&mut self, place: String, pointer: String) { let id = self.id(); self.places.insert(id.clone(), place); self.pointers.insert(id, pointer); }
+    pub fn name_next_at(&mut self, place: String, pointer: String) { let id = self.id(); self.name_at(id, place, pointer); }
+    /// Name a specific measured sub-element ID (such as a table cell `{table}[row,col]`).
+    pub fn name_at(&mut self, id: String, place: String, pointer: String) { self.places.insert(id.clone(), place); self.pointers.insert(id, pointer); }
     pub fn place_of(&self, id: &str) -> Option<&str> { self.places.get(id).map(String::as_str) }
     pub fn pointer_of(&self, id: &str) -> Option<&str> { self.pointers.get(id).map(String::as_str) }
     /// Every text named so far, by element ID.
@@ -866,7 +973,7 @@ mod tests {
         let mut element: Element = serde_json::from_value(json!({"type":"group","id":"root","x":64,"y":144,"width":1152,"height":512,"view_width":1152,"view_height":512,"children":[nested]})).unwrap();
         let original = serde_json::to_value(&element).unwrap();
         let layout = PartLayout { x: 20.0, y: 30.0, width: 576.0, height: 512.0, show_title: true, fit: PartFit::Stretch };
-        adopt_layout(&mut element, &layout, 0.0, 512.0, &crate::design::Theme::default(), &BTreeSet::new()).unwrap();
+        adopt_layout(&mut element, &layout, 0.0, 512.0, &crate::design::Theme::default(), &BTreeSet::new(), &TextLocations::new()).unwrap();
         let result = serde_json::to_value(element).unwrap();
         let nested = &result["children"][0];
         assert_eq!(nested["x"], 50.0);
@@ -906,7 +1013,7 @@ mod tests {
         ] {
             let mut element: Element = serde_json::from_value(json!({"type":"group","id":"root","x":64,"y":144,"width":1152,"height":512,"view_width":1152,"view_height":512,"children":[child]})).unwrap();
             let layout = PartLayout { x: 0.0, y: 0.0, width: 1152.0, height: 424.0, show_title: false, fit: PartFit::Stretch };
-            assert!(adopt_layout(&mut element, &layout, 88.0, 424.0, &crate::design::Theme::default(), &BTreeSet::new()).is_err(), "{child}");
+            assert!(adopt_layout(&mut element, &layout, 88.0, 424.0, &crate::design::Theme::default(), &BTreeSet::new(), &TextLocations::new()).is_err(), "{child}");
         }
     }
 }
